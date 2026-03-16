@@ -1,0 +1,16 @@
+PODS:
+  - MobileVLCKit (3.7.3)
+
+DEPENDENCIES:
+  - MobileVLCKit
+
+SPEC REPOS:
+  trunk:
+    - MobileVLCKit
+
+SPEC CHECKSUMS:
+  MobileVLCKit: 73d7ddb52238b6885b70b0f281cae75a0a6e3ac0
+
+PODFILE CHECKSUM: dbb547f97463c50deed027f078813edffb628931
+
+COCOAPODS: 1.16.2

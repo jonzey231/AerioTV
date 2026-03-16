@@ -1,0 +1,936 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0823BE6E3373A83D3FEBC32F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
+		1083DB8B620ABAC3ECAB3823 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 875B0901B53C33B024AF597F /* Models.swift */; };
+		10D8764EE31D09E18D0C2CFB /* AddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F00 /* AddServerView.swift */; };
+		11120119C5A64353490041AC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5806A5B948B604B451A5F5C7 /* Assets.xcassets */; };
+		134BBEA37092BE9ED06DE967 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */; };
+		1868ADFE12C568F8FC5FED53 /* XtreamAndDispatcharrAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* XtreamAndDispatcharrAPI.swift */; };
+		19AE345D39FB441F217ABCE7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
+		1D11DF914E50BF1810089A1E /* XtreamSeriesAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */; };
+		1EB4A645E88DDFE6F211ADA4 /* Pods-Dispatcharr_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Dispatcharr_iOS-acknowledgements.markdown */; };
+		1FF8FD4B1DD11EAE3F154767 /* MoviesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */; };
+		20FAAE7F6DB7B9506F08F8E7 /* Pods-Dispatcharr_iOS-dummy.m in Sources */ = {isa = PBXBuildFile; fileRef = 46BC9C3B09ACE5A89FC5C0E9 /* Pods-Dispatcharr_iOS-dummy.m */; };
+		2527936283FB11BD5201E1DA /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
+		294AE2B45D4A82E38B1D09C4 /* Dispatcharr.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Dispatcharr.xcworkspace */; };
+		2DD98124C6F98D06EFED419A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C5D08BD1430E78C26390734 /* SettingsView.swift */; };
+		30FA1CA916C8DDE2001C592F /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 875B0901B53C33B024AF597F /* Models.swift */; };
+		315EA1921B10CD36DE7A8A1F /* Pods-Dispatcharr_iOS-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8EEF8CE5358378E2CF3F4012 /* Pods-Dispatcharr_iOS-Info.plist */; };
+		3349C24B50E8CC1C902B358F /* XtreamSeriesAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */; };
+		349A1C11393E9A07EDE93974 /* ServerConnectionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */; };
+		353CD0D32CB0D6B2998B1AD4 /* VODDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20C769771A1085A303FFC0F0 /* VODDetailView.swift */; };
+		36B1927A52630A63A061D530 /* Pods-Dispatcharr_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Dispatcharr_iOS-acknowledgements.plist */; };
+		3A0127A4F1183E202C5A461C /* MobileVLCKit.xcframework in Resources */ = {isa = PBXBuildFile; fileRef = 828A599894F381F7A78BFDF8 /* MobileVLCKit.xcframework */; };
+		3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
+		5585996EF79BB170CAD2D6F3 /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */; };
+		58753215820D219D87D24402 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
+		5DC1FF775CB2D3D2917F5D4A /* MediaServerAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */; };
+		61F895DEB15DE1F7C3EACD17 /* PlaylistModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA33B18A62A3411B6425B661 /* PlaylistModels.swift */; };
+		622B003E0D0A155E9FE7D9B7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
+		62AD11B70BF6B745FD727C8B /* DispatcharrSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* DispatcharrSplash.mp4 */; };
+		65A50DB238B2354D5B81DE09 /* Dispatcharr.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Dispatcharr.xcworkspace */; };
+		6AFEBD1C481F02C363B48866 /* Manifest.lock in Resources */ = {isa = PBXBuildFile; fileRef = C8918F8C279C6028AA7BC86D /* Manifest.lock */; };
+		6B91E10A20F4B86799998C43 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */; };
+		6BA60E4727C61B8943535F4E /* Typography.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11C8C5B56FBF497EF66CA96 /* Typography.swift */; };
+		7134A5E98E9415DF4789626B /* ChannelListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94C2469FCAE37105952DCC28 /* ChannelListView.swift */; };
+		737FB562438624E3BF547904 /* Colors.swift in Sources */ = {isa = PBXBuildFile; fileRef = C384E19782307C7D03F8F60B /* Colors.swift */; };
+		73FE0EA560BD116D4301EB8D /* Colors.swift in Sources */ = {isa = PBXBuildFile; fileRef = C384E19782307C7D03F8F60B /* Colors.swift */; };
+		76842216BD4822B7380FDF05 /* TVShowsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */; };
+		788D987295F9672EFA03E102 /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
+		7983682ABB41C2B946CD5F27 /* COPYING.txt in Resources */ = {isa = PBXBuildFile; fileRef = 8087BB36936B80A3234428C4 /* COPYING.txt */; };
+		7CFFD573C287B60F267445BD /* PlaylistImportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */; };
+		7D775CD7B45EE60B92377A6F /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
+		7FFA84A20B070280B502C433 /* MobileVLCKit-xcframeworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = 337C9ADFE967736F023EB4CD /* MobileVLCKit-xcframeworks.sh */; };
+		8021E4CA54981EDD0F04AE72 /* SplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5044B9CD69C05A6836588548 /* SplashView.swift */; };
+		81A5CE2643A02F7A26B2B5CF /* AddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F00 /* AddServerView.swift */; };
+		84D478A2A84F9A8A2FEE8EA4 /* PlaylistModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA33B18A62A3411B6425B661 /* PlaylistModels.swift */; };
+		85F0D65172F55DFA1D3DA20B /* Pods-Dispatcharr_iOS-frameworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = CF54ACE468E89E4259601D31 /* Pods-Dispatcharr_iOS-frameworks.sh */; };
+		867C07594A685FB5BDCA5BB3 /* SplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5044B9CD69C05A6836588548 /* SplashView.swift */; };
+		87062C2D2515CB8999B9C4E6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5806A5B948B604B451A5F5C7 /* Assets.xcassets */; };
+		8AC25DFB7121C1AEBCE36729 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */; };
+		8CF1E8A8912F0A98110ABF07 /* Pods-Dispatcharr_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Dispatcharr_iOS-acknowledgements.plist */; };
+		8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
+		97309F3B0C6B3769882EF361 /* VODDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20C769771A1085A303FFC0F0 /* VODDetailView.swift */; };
+		9789CC2E48304B212BC4E756 /* COPYING.txt in Resources */ = {isa = PBXBuildFile; fileRef = 8087BB36936B80A3234428C4 /* COPYING.txt */; };
+		98B0C60D6099DEF55810D175 /* XtreamAndDispatcharrAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* XtreamAndDispatcharrAPI.swift */; };
+		9D874ED59E97CB1D868F596D /* VODModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */; };
+		9F9A37C29E5E186E323737C0 /* ChannelListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94C2469FCAE37105952DCC28 /* ChannelListView.swift */; };
+		A4A40B2ADBF625F5928EF0C1 /* Pods-Dispatcharr_iOS-dummy.m in Sources */ = {isa = PBXBuildFile; fileRef = 46BC9C3B09ACE5A89FC5C0E9 /* Pods-Dispatcharr_iOS-dummy.m */; };
+		A8B232D41A5E761F2A0C3B1E /* MobileVLCKit-xcframeworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = 337C9ADFE967736F023EB4CD /* MobileVLCKit-xcframeworks.sh */; };
+		A8E322C238A7CE0B55BA3D4D /* DispatcharrApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* DispatcharrApp.swift */; };
+		ACAEB60B5118B283BF99CF16 /* PlaylistImportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */; };
+		AD422FFDD689840F76B8A238 /* MediaServerAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */; };
+		B0B4EE0F74D4863E74833446 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */; };
+		B0C3B7E4FC02D61295E8FEA5 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */; };
+		B47C87DF4A1719ACA2FF1E70 /* MobileVLCKit.xcframework in Resources */ = {isa = PBXBuildFile; fileRef = 828A599894F381F7A78BFDF8 /* MobileVLCKit.xcframework */; };
+		B5AE22380A5D13659655A5CD /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F4EE98C1564A7E3A5DD86B /* SearchView.swift */; };
+		B743C668A35FABC8A1BECB16 /* VODModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */; };
+		B747D3E4B7695FAF8CD9C557 /* Pods-Dispatcharr_iOS-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8EEF8CE5358378E2CF3F4012 /* Pods-Dispatcharr_iOS-Info.plist */; };
+		B76CD4D353AB0D45EEF9F480 /* Typography.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11C8C5B56FBF497EF66CA96 /* Typography.swift */; };
+		BA33A33C572E086E61AA73AB /* VODService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C548BC428D32F3966A46C27 /* VODService.swift */; };
+		BC00C290CFD296C79CD18EB6 /* Pods-Dispatcharr_iOS-frameworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = CF54ACE468E89E4259601D31 /* Pods-Dispatcharr_iOS-frameworks.sh */; };
+		C02E4BB60A5E960696E8839B /* Pods-Dispatcharr_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Dispatcharr_iOS-acknowledgements.markdown */; };
+		C9B3A9A8801BC79552C8D496 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */; };
+		C9E28AF097D00D2A282673A5 /* DispatcharrSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* DispatcharrSplash.mp4 */; };
+		CF38B25676730E71C9AD497A /* DispatcharrApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* DispatcharrApp.swift */; };
+		D0C107746AE8D043B81554D2 /* ServerConnectionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */; };
+		D16EA2BDF03281E9B3558D9C /* Pods_Dispatcharr_iOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1AF7E21A7FB443A7364DF5F /* Pods_Dispatcharr_iOS.framework */; };
+		D707545F75A250B3657868F5 /* VODService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C548BC428D32F3966A46C27 /* VODService.swift */; };
+		D9B2C4CC2563512B2741AF83 /* TVShowsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */; };
+		DA8D78550B95A889171982BC /* MoviesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */; };
+		DB7474780DADD2D4B35AE071 /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F4EE98C1564A7E3A5DD86B /* SearchView.swift */; };
+		DBFAE2F87043F12BE1728B6D /* Manifest.lock in Resources */ = {isa = PBXBuildFile; fileRef = C8918F8C279C6028AA7BC86D /* Manifest.lock */; };
+		E7C08D85CEAB0B3D8E268FBA /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */; };
+		EFE8847CEB70D953DD4D2BFB /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */; };
+		F00D3696D62D7C9EF6E05244 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */; };
+		FD1AC2C2B4E0577B5456999F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
+		FD65778E5A378FA718D5D0E2 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C5D08BD1430E78C26390734 /* SettingsView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		00F4EE98C1564A7E3A5DD86B /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
+		03AB1BA15FC7FAB4754ECE75 /* Pods-Dispatcharr_iOS-frameworks-Debug-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Dispatcharr_iOS-frameworks-Debug-output-files.xcfilelist"; sourceTree = "<group>"; };
+		08B4D4146C07D85405524861 /* DispatcharrApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrApp.swift; sourceTree = "<group>"; };
+		1603AF9E4D31DB8BDC708C06 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		20C769771A1085A303FFC0F0 /* VODDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODDetailView.swift; sourceTree = "<group>"; };
+		270AC009FD8847D0E2E239BF /* Pods-Dispatcharr_iOS.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = "Pods-Dispatcharr_iOS.modulemap"; sourceTree = "<group>"; };
+		2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */ = {isa = PBXFileReference; lastKnownFileType = "wrapper.pb-project"; path = Pods.xcodeproj; sourceTree = "<group>"; };
+		2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODModels.swift; sourceTree = "<group>"; };
+		2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceSettingsView.swift; sourceTree = "<group>"; };
+		337C9ADFE967736F023EB4CD /* MobileVLCKit-xcframeworks.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "MobileVLCKit-xcframeworks.sh"; sourceTree = "<group>"; };
+		345AFFC1DACD873D07B6B7F1 /* Pods-Dispatcharr_iOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Dispatcharr_iOS.release.xcconfig"; path = "Target Support Files/Pods-Dispatcharr_iOS/Pods-Dispatcharr_iOS.release.xcconfig"; sourceTree = "<group>"; };
+		34855884259C4F1B016CF465 /* Pods-Dispatcharr_iOS.debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Pods-Dispatcharr_iOS.debug.xcconfig"; sourceTree = "<group>"; };
+		46BC9C3B09ACE5A89FC5C0E9 /* Pods-Dispatcharr_iOS-dummy.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = "Pods-Dispatcharr_iOS-dummy.m"; sourceTree = "<group>"; };
+		4C548BC428D32F3966A46C27 /* VODService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODService.swift; sourceTree = "<group>"; };
+		4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
+		5044B9CD69C05A6836588548 /* SplashView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashView.swift; sourceTree = "<group>"; };
+		57682A46B5DF82B13C9A906D /* Pods-Dispatcharr_iOS-umbrella.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Pods-Dispatcharr_iOS-umbrella.h"; sourceTree = "<group>"; };
+		57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistParsers.swift; sourceTree = "<group>"; };
+		5806A5B948B604B451A5F5C7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		5813F2DEADFF09175AADA42D /* Pods-Dispatcharr_iOS-acknowledgements.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Pods-Dispatcharr_iOS-acknowledgements.plist"; sourceTree = "<group>"; };
+		5957CC8A6CC0000B14ED47C5 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		693A71F4A4429F56337992E6 /* XtreamAndDispatcharrAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XtreamAndDispatcharrAPI.swift; sourceTree = "<group>"; };
+		6C96AEA17257AA77D4EBE291 /* Pods-Dispatcharr_iOS-frameworks-Release-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Dispatcharr_iOS-frameworks-Release-output-files.xcfilelist"; sourceTree = "<group>"; };
+		6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
+		6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XtreamSeriesAPI.swift; sourceTree = "<group>"; };
+		7CE1F656E39A506614FF4497 /* MobileVLCKit.debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = MobileVLCKit.debug.xcconfig; sourceTree = "<group>"; };
+		7D1DD47CBF4B1FE912B0AF08 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		8087BB36936B80A3234428C4 /* COPYING.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = COPYING.txt; sourceTree = "<group>"; };
+		828A599894F381F7A78BFDF8 /* MobileVLCKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = MobileVLCKit.xcframework; sourceTree = "<group>"; };
+		875B0901B53C33B024AF597F /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		880CEF808ABBA8AD9BC13BEC /* DispatcharrSplash.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = DispatcharrSplash.mp4; sourceTree = "<group>"; };
+		8EEF8CE5358378E2CF3F4012 /* Pods-Dispatcharr_iOS-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Pods-Dispatcharr_iOS-Info.plist"; sourceTree = "<group>"; };
+		8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Dispatcharr_iOS-acknowledgements.markdown */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "Pods-Dispatcharr_iOS-acknowledgements.markdown"; sourceTree = "<group>"; };
+		93EBE84BDC6A8A492E3AB851 /* MobileVLCKit-xcframeworks-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "MobileVLCKit-xcframeworks-input-files.xcfilelist"; sourceTree = "<group>"; };
+		941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidGlass.swift; sourceTree = "<group>"; };
+		94C2469FCAE37105952DCC28 /* ChannelListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelListView.swift; sourceTree = "<group>"; };
+		9C5D08BD1430E78C26390734 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaServerAPIs.swift; sourceTree = "<group>"; };
+		9F04B5935392FB0CFA0E58A0 /* MobileVLCKit.release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = MobileVLCKit.release.xcconfig; sourceTree = "<group>"; };
+		A06F3C638088282A3C63BDA9 /* Pods-Dispatcharr_iOS.release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Pods-Dispatcharr_iOS.release.xcconfig"; sourceTree = "<group>"; };
+		A1AB8E6203108C63D4696924 /* Dispatcharr.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Dispatcharr.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1AF7E21A7FB443A7364DF5F /* Pods_Dispatcharr_iOS.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Dispatcharr_iOS.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2FD31E5C3E95D9CF2F53F4E /* Dispatcharr.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Dispatcharr.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistImportViews.swift; sourceTree = "<group>"; };
+		BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoviesView.swift; sourceTree = "<group>"; };
+		C384E19782307C7D03F8F60B /* Colors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Colors.swift; sourceTree = "<group>"; };
+		C41DDA8474CA1A75D88D9E3C /* MobileVLCKit-xcframeworks-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "MobileVLCKit-xcframeworks-output-files.xcfilelist"; sourceTree = "<group>"; };
+		C8918F8C279C6028AA7BC86D /* Manifest.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Manifest.lock; sourceTree = "<group>"; };
+		CC1061A736638618318B7F00 /* AddServerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddServerView.swift; sourceTree = "<group>"; };
+		CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
+		CF54ACE468E89E4259601D31 /* Pods-Dispatcharr_iOS-frameworks.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "Pods-Dispatcharr_iOS-frameworks.sh"; sourceTree = "<group>"; };
+		D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVShowsView.swift; sourceTree = "<group>"; };
+		DFE1C126F93E5CECF7EFF80B /* Pods-Dispatcharr_iOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Dispatcharr_iOS.debug.xcconfig"; path = "Target Support Files/Pods-Dispatcharr_iOS/Pods-Dispatcharr_iOS.debug.xcconfig"; sourceTree = "<group>"; };
+		E11C8C5B56FBF497EF66CA96 /* Typography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Typography.swift; sourceTree = "<group>"; };
+		E71FA151241E7264059B0E3A /* Pods-Dispatcharr_iOS-frameworks-Debug-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Dispatcharr_iOS-frameworks-Debug-input-files.xcfilelist"; sourceTree = "<group>"; };
+		EA33B18A62A3411B6425B661 /* PlaylistModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistModels.swift; sourceTree = "<group>"; };
+		F249D5C39D90BC11107F3420 /* Pods-Dispatcharr_iOS-frameworks-Release-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Dispatcharr_iOS-frameworks-Release-input-files.xcfilelist"; sourceTree = "<group>"; };
+		F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConnectionViewModel.swift; sourceTree = "<group>"; };
+		"TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Dispatcharr.xcworkspace */ = {isa = PBXFileReference; lastKnownFileType = wrapper.workspace; path = Dispatcharr.xcworkspace; sourceTree = "<group>"; };
+		"TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		F6FC8EF44BA77AB5758D95F1 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D16EA2BDF03281E9B3558D9C /* Pods_Dispatcharr_iOS.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		2E9487FE5F10365DAD5FCB23 /* LiveTV */ = {
+			isa = PBXGroup;
+			children = (
+				94C2469FCAE37105952DCC28 /* ChannelListView.swift */,
+			);
+			path = LiveTV;
+			sourceTree = "<group>";
+		};
+		3B7A0F9489A406AEC4BB302B /* Networking */ = {
+			isa = PBXGroup;
+			children = (
+				9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */,
+				57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */,
+				4C548BC428D32F3966A46C27 /* VODService.swift */,
+				693A71F4A4429F56337992E6 /* XtreamAndDispatcharrAPI.swift */,
+				6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */,
+			);
+			path = Networking;
+			sourceTree = "<group>";
+		};
+		4432D1DEAD99D32286CFADCA /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				D790E242FC19FAB9A2C4F61C /* Home */,
+				2E9487FE5F10365DAD5FCB23 /* LiveTV */,
+				57D7DAFC5BB3E2B9267A64B6 /* Onboarding */,
+				9F48CE336638568BB86DBFEA /* Search */,
+				C649153244EE1ED5FDBD86C0 /* Settings */,
+				C7AB555D4575EAB521484607 /* VOD */,
+			);
+			path = Features;
+			sourceTree = "<group>";
+		};
+		4D5B125286008EFD60915C8C = {
+			isa = PBXGroup;
+			children = (
+				EBE4735039B8168FF0CF3C56 /* App */,
+				61108F185BCC5513CF9CA164 /* Design */,
+				4432D1DEAD99D32286CFADCA /* Features */,
+				8F51395EA21012A33DC70238 /* Models */,
+				3B7A0F9489A406AEC4BB302B /* Networking */,
+				66DFFF6DB517C88633B97992 /* Pods */,
+				FF2BFAF9459BFB3B8F20DCC8 /* Shared */,
+				CEF9D73F9EB0F0D4192A7CEB /* SupportingFiles */,
+				D35434453E2FAF35DC5DD5BE /* Products */,
+				6EDC76ED96C2A9C1F65C68BF /* Frameworks */,
+				BD5262EA2F6792080036371D /* Recovered References */,
+			);
+			sourceTree = "<group>";
+		};
+		57D7DAFC5BB3E2B9267A64B6 /* Onboarding */ = {
+			isa = PBXGroup;
+			children = (
+				CC1061A736638618318B7F00 /* AddServerView.swift */,
+				B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */,
+				4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */,
+			);
+			path = Onboarding;
+			sourceTree = "<group>";
+		};
+		61108F185BCC5513CF9CA164 /* Design */ = {
+			isa = PBXGroup;
+			children = (
+				C384E19782307C7D03F8F60B /* Colors.swift */,
+				941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */,
+				6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */,
+				E11C8C5B56FBF497EF66CA96 /* Typography.swift */,
+				AB79E18D174F276F5183F063 /* Components */,
+			);
+			path = Design;
+			sourceTree = "<group>";
+		};
+		66DFFF6DB517C88633B97992 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				C8918F8C279C6028AA7BC86D /* Manifest.lock */,
+				2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */,
+				CB1BBB07B37F0658C83DB709 /* Headers */,
+				C79313608AD62EA61EBB298A /* Local Podspecs */,
+				6EC677A78FCBBE0DB3E4D425 /* MobileVLCKit */,
+				BDAE6827A50D95C7A27E2721 /* Target Support Files */,
+				DFE1C126F93E5CECF7EFF80B /* Pods-Dispatcharr_iOS.debug.xcconfig */,
+				345AFFC1DACD873D07B6B7F1 /* Pods-Dispatcharr_iOS.release.xcconfig */,
+			);
+			path = Pods;
+			sourceTree = "<group>";
+		};
+		68C828711A3654526E9E9D04 /* ViewModels */ = {
+			isa = PBXGroup;
+			children = (
+				F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */,
+			);
+			path = ViewModels;
+			sourceTree = "<group>";
+		};
+		6EC677A78FCBBE0DB3E4D425 /* MobileVLCKit */ = {
+			isa = PBXGroup;
+			children = (
+				8087BB36936B80A3234428C4 /* COPYING.txt */,
+				828A599894F381F7A78BFDF8 /* MobileVLCKit.xcframework */,
+			);
+			path = MobileVLCKit;
+			sourceTree = "<group>";
+		};
+		6EDC76ED96C2A9C1F65C68BF /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				A1AF7E21A7FB443A7364DF5F /* Pods_Dispatcharr_iOS.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		74C4CF9C6BF2027D79310B64 /* MobileVLCKit */ = {
+			isa = PBXGroup;
+			children = (
+				93EBE84BDC6A8A492E3AB851 /* MobileVLCKit-xcframeworks-input-files.xcfilelist */,
+				C41DDA8474CA1A75D88D9E3C /* MobileVLCKit-xcframeworks-output-files.xcfilelist */,
+				337C9ADFE967736F023EB4CD /* MobileVLCKit-xcframeworks.sh */,
+				7CE1F656E39A506614FF4497 /* MobileVLCKit.debug.xcconfig */,
+				9F04B5935392FB0CFA0E58A0 /* MobileVLCKit.release.xcconfig */,
+			);
+			path = MobileVLCKit;
+			sourceTree = "<group>";
+		};
+		8903B1A0B6C8347812B763A3 /* Pods-Dispatcharr_iOS */ = {
+			isa = PBXGroup;
+			children = (
+				8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Dispatcharr_iOS-acknowledgements.markdown */,
+				5813F2DEADFF09175AADA42D /* Pods-Dispatcharr_iOS-acknowledgements.plist */,
+				46BC9C3B09ACE5A89FC5C0E9 /* Pods-Dispatcharr_iOS-dummy.m */,
+				E71FA151241E7264059B0E3A /* Pods-Dispatcharr_iOS-frameworks-Debug-input-files.xcfilelist */,
+				03AB1BA15FC7FAB4754ECE75 /* Pods-Dispatcharr_iOS-frameworks-Debug-output-files.xcfilelist */,
+				F249D5C39D90BC11107F3420 /* Pods-Dispatcharr_iOS-frameworks-Release-input-files.xcfilelist */,
+				6C96AEA17257AA77D4EBE291 /* Pods-Dispatcharr_iOS-frameworks-Release-output-files.xcfilelist */,
+				CF54ACE468E89E4259601D31 /* Pods-Dispatcharr_iOS-frameworks.sh */,
+				8EEF8CE5358378E2CF3F4012 /* Pods-Dispatcharr_iOS-Info.plist */,
+				57682A46B5DF82B13C9A906D /* Pods-Dispatcharr_iOS-umbrella.h */,
+				34855884259C4F1B016CF465 /* Pods-Dispatcharr_iOS.debug.xcconfig */,
+				270AC009FD8847D0E2E239BF /* Pods-Dispatcharr_iOS.modulemap */,
+				A06F3C638088282A3C63BDA9 /* Pods-Dispatcharr_iOS.release.xcconfig */,
+			);
+			path = "Pods-Dispatcharr_iOS";
+			sourceTree = "<group>";
+		};
+		8F51395EA21012A33DC70238 /* Models */ = {
+			isa = PBXGroup;
+			children = (
+				875B0901B53C33B024AF597F /* Models.swift */,
+				EA33B18A62A3411B6425B661 /* PlaylistModels.swift */,
+				2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */,
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		9F48CE336638568BB86DBFEA /* Search */ = {
+			isa = PBXGroup;
+			children = (
+				00F4EE98C1564A7E3A5DD86B /* SearchView.swift */,
+			);
+			path = Search;
+			sourceTree = "<group>";
+		};
+		AB79E18D174F276F5183F063 /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				7D1DD47CBF4B1FE912B0AF08 /* Components.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
+		BD5262EA2F6792080036371D /* Recovered References */ = {
+			isa = PBXGroup;
+			children = (
+				"TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Dispatcharr.xcworkspace */,
+				"TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */,
+			);
+			name = "Recovered References";
+			sourceTree = "<group>";
+		};
+		BD5262EB2F6792080036371D /* Products */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		BDAE6827A50D95C7A27E2721 /* Target Support Files */ = {
+			isa = PBXGroup;
+			children = (
+				74C4CF9C6BF2027D79310B64 /* MobileVLCKit */,
+				8903B1A0B6C8347812B763A3 /* Pods-Dispatcharr_iOS */,
+			);
+			path = "Target Support Files";
+			sourceTree = "<group>";
+		};
+		C649153244EE1ED5FDBD86C0 /* Settings */ = {
+			isa = PBXGroup;
+			children = (
+				2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */,
+				9C5D08BD1430E78C26390734 /* SettingsView.swift */,
+			);
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		C79313608AD62EA61EBB298A /* Local Podspecs */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = "Local Podspecs";
+			sourceTree = "<group>";
+		};
+		C7AB555D4575EAB521484607 /* VOD */ = {
+			isa = PBXGroup;
+			children = (
+				BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */,
+				D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */,
+				20C769771A1085A303FFC0F0 /* VODDetailView.swift */,
+			);
+			path = VOD;
+			sourceTree = "<group>";
+		};
+		CB1BBB07B37F0658C83DB709 /* Headers */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Headers;
+			sourceTree = "<group>";
+		};
+		CEF9D73F9EB0F0D4192A7CEB /* SupportingFiles */ = {
+			isa = PBXGroup;
+			children = (
+				5806A5B948B604B451A5F5C7 /* Assets.xcassets */,
+				1603AF9E4D31DB8BDC708C06 /* Info.plist */,
+			);
+			path = SupportingFiles;
+			sourceTree = "<group>";
+		};
+		D35434453E2FAF35DC5DD5BE /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A2FD31E5C3E95D9CF2F53F4E /* Dispatcharr.app */,
+				A1AB8E6203108C63D4696924 /* Dispatcharr.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		D790E242FC19FAB9A2C4F61C /* Home */ = {
+			isa = PBXGroup;
+			children = (
+				5957CC8A6CC0000B14ED47C5 /* HomeView.swift */,
+			);
+			path = Home;
+			sourceTree = "<group>";
+		};
+		EBE4735039B8168FF0CF3C56 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				08B4D4146C07D85405524861 /* DispatcharrApp.swift */,
+				880CEF808ABBA8AD9BC13BEC /* DispatcharrSplash.mp4 */,
+				CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */,
+				5044B9CD69C05A6836588548 /* SplashView.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		FF2BFAF9459BFB3B8F20DCC8 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				68C828711A3654526E9E9D04 /* ViewModels */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		353CF1DD804CE1FDC2F4E294 /* Dispatcharr_iOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 53EE43EF2A156AB0859B4923 /* Build configuration list for PBXNativeTarget "Dispatcharr_iOS" */;
+			buildPhases = (
+				FF6BCBE911B41520293DF366 /* [CP] Check Pods Manifest.lock */,
+				97A79060C6920CBAAF74938C /* Sources */,
+				AE6E191FB75EA241ACC75ACB /* Resources */,
+				F6FC8EF44BA77AB5758D95F1 /* Frameworks */,
+				D5EEE6716B5991328038F906 /* [CP] Embed Pods Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Dispatcharr_iOS;
+			productName = Dispatcharr_iOS;
+			productReference = A2FD31E5C3E95D9CF2F53F4E /* Dispatcharr.app */;
+			productType = "com.apple.product-type.application";
+		};
+		3D7E0C99AD2471A7F6A5FF48 /* Dispatcharr_tvOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 880EE68A9BBB3CA4912BB19D /* Build configuration list for PBXNativeTarget "Dispatcharr_tvOS" */;
+			buildPhases = (
+				3A1C44D789D61CA0731351C2 /* Sources */,
+				4CF6C7E91A8276F8960F3C7D /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Dispatcharr_tvOS;
+			productName = Dispatcharr_tvOS;
+			productReference = A1AB8E6203108C63D4696924 /* Dispatcharr.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		FF7071163D6291891DEC5B95 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					3D7E0C99AD2471A7F6A5FF48 = {
+						DevelopmentTeam = "";
+					};
+				};
+			};
+			buildConfigurationList = E14095500FDB469BC6E1027E /* Build configuration list for PBXProject "Dispatcharr" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 4D5B125286008EFD60915C8C;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = D35434453E2FAF35DC5DD5BE /* Products */;
+			projectDirPath = "";
+			projectReferences = (
+				{
+					ProductGroup = BD5262EB2F6792080036371D /* Products */;
+					ProjectRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */;
+				},
+			);
+			projectRoot = "";
+			targets = (
+				353CF1DD804CE1FDC2F4E294 /* Dispatcharr_iOS */,
+				3D7E0C99AD2471A7F6A5FF48 /* Dispatcharr_tvOS */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		4CF6C7E91A8276F8960F3C7D /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				87062C2D2515CB8999B9C4E6 /* Assets.xcassets in Resources */,
+				7983682ABB41C2B946CD5F27 /* COPYING.txt in Resources */,
+				294AE2B45D4A82E38B1D09C4 /* Dispatcharr.xcworkspace in Resources */,
+				62AD11B70BF6B745FD727C8B /* DispatcharrSplash.mp4 in Resources */,
+				6AFEBD1C481F02C363B48866 /* Manifest.lock in Resources */,
+				A8B232D41A5E761F2A0C3B1E /* MobileVLCKit-xcframeworks.sh in Resources */,
+				B47C87DF4A1719ACA2FF1E70 /* MobileVLCKit.xcframework in Resources */,
+				EFE8847CEB70D953DD4D2BFB /* Podfile.lock in Resources */,
+				315EA1921B10CD36DE7A8A1F /* Pods-Dispatcharr_iOS-Info.plist in Resources */,
+				1EB4A645E88DDFE6F211ADA4 /* Pods-Dispatcharr_iOS-acknowledgements.markdown in Resources */,
+				36B1927A52630A63A061D530 /* Pods-Dispatcharr_iOS-acknowledgements.plist in Resources */,
+				BC00C290CFD296C79CD18EB6 /* Pods-Dispatcharr_iOS-frameworks.sh in Resources */,
+				788D987295F9672EFA03E102 /* Pods.xcodeproj in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AE6E191FB75EA241ACC75ACB /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				11120119C5A64353490041AC /* Assets.xcassets in Resources */,
+				9789CC2E48304B212BC4E756 /* COPYING.txt in Resources */,
+				65A50DB238B2354D5B81DE09 /* Dispatcharr.xcworkspace in Resources */,
+				C9E28AF097D00D2A282673A5 /* DispatcharrSplash.mp4 in Resources */,
+				DBFAE2F87043F12BE1728B6D /* Manifest.lock in Resources */,
+				7FFA84A20B070280B502C433 /* MobileVLCKit-xcframeworks.sh in Resources */,
+				3A0127A4F1183E202C5A461C /* MobileVLCKit.xcframework in Resources */,
+				5585996EF79BB170CAD2D6F3 /* Podfile.lock in Resources */,
+				B747D3E4B7695FAF8CD9C557 /* Pods-Dispatcharr_iOS-Info.plist in Resources */,
+				C02E4BB60A5E960696E8839B /* Pods-Dispatcharr_iOS-acknowledgements.markdown in Resources */,
+				8CF1E8A8912F0A98110ABF07 /* Pods-Dispatcharr_iOS-acknowledgements.plist in Resources */,
+				85F0D65172F55DFA1D3DA20B /* Pods-Dispatcharr_iOS-frameworks.sh in Resources */,
+				2527936283FB11BD5201E1DA /* Pods.xcodeproj in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		D5EEE6716B5991328038F906 /* [CP] Embed Pods Frameworks */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-Dispatcharr_iOS/Pods-Dispatcharr_iOS-frameworks-${CONFIGURATION}-input-files.xcfilelist",
+			);
+			inputPaths = (
+			);
+			name = "[CP] Embed Pods Frameworks";
+			outputFileListPaths = (
+				"${PODS_ROOT}/Target Support Files/Pods-Dispatcharr_iOS/Pods-Dispatcharr_iOS-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Dispatcharr_iOS/Pods-Dispatcharr_iOS-frameworks.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+		FF6BCBE911B41520293DF366 /* [CP] Check Pods Manifest.lock */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
+				"${PODS_ROOT}/Manifest.lock",
+			);
+			name = "[CP] Check Pods Manifest.lock";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(DERIVED_FILE_DIR)/Pods-Dispatcharr_iOS-checkManifestLockResult.txt",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		3A1C44D789D61CA0731351C2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				81A5CE2643A02F7A26B2B5CF /* AddServerView.swift in Sources */,
+				6B91E10A20F4B86799998C43 /* AppearanceSettingsView.swift in Sources */,
+				7134A5E98E9415DF4789626B /* ChannelListView.swift in Sources */,
+				73FE0EA560BD116D4301EB8D /* Colors.swift in Sources */,
+				FD1AC2C2B4E0577B5456999F /* Components.swift in Sources */,
+				A8E322C238A7CE0B55BA3D4D /* DispatcharrApp.swift in Sources */,
+				7D775CD7B45EE60B92377A6F /* HomeView.swift in Sources */,
+				C9B3A9A8801BC79552C8D496 /* LiquidGlass.swift in Sources */,
+				5DC1FF775CB2D3D2917F5D4A /* MediaServerAPIs.swift in Sources */,
+				1083DB8B620ABAC3ECAB3823 /* Models.swift in Sources */,
+				1FF8FD4B1DD11EAE3F154767 /* MoviesView.swift in Sources */,
+				134BBEA37092BE9ED06DE967 /* PlayerView.swift in Sources */,
+				ACAEB60B5118B283BF99CF16 /* PlaylistImportViews.swift in Sources */,
+				61F895DEB15DE1F7C3EACD17 /* PlaylistModels.swift in Sources */,
+				19AE345D39FB441F217ABCE7 /* PlaylistParsers.swift in Sources */,
+				A4A40B2ADBF625F5928EF0C1 /* Pods-Dispatcharr_iOS-dummy.m in Sources */,
+				DB7474780DADD2D4B35AE071 /* SearchView.swift in Sources */,
+				D0C107746AE8D043B81554D2 /* ServerConnectionViewModel.swift in Sources */,
+				FD65778E5A378FA718D5D0E2 /* SettingsView.swift in Sources */,
+				8021E4CA54981EDD0F04AE72 /* SplashView.swift in Sources */,
+				D9B2C4CC2563512B2741AF83 /* TVShowsView.swift in Sources */,
+				E7C08D85CEAB0B3D8E268FBA /* ThemeManager.swift in Sources */,
+				B76CD4D353AB0D45EEF9F480 /* Typography.swift in Sources */,
+				353CD0D32CB0D6B2998B1AD4 /* VODDetailView.swift in Sources */,
+				9D874ED59E97CB1D868F596D /* VODModels.swift in Sources */,
+				BA33A33C572E086E61AA73AB /* VODService.swift in Sources */,
+				8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */,
+				1868ADFE12C568F8FC5FED53 /* XtreamAndDispatcharrAPI.swift in Sources */,
+				1D11DF914E50BF1810089A1E /* XtreamSeriesAPI.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		97A79060C6920CBAAF74938C /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				10D8764EE31D09E18D0C2CFB /* AddServerView.swift in Sources */,
+				B0C3B7E4FC02D61295E8FEA5 /* AppearanceSettingsView.swift in Sources */,
+				9F9A37C29E5E186E323737C0 /* ChannelListView.swift in Sources */,
+				737FB562438624E3BF547904 /* Colors.swift in Sources */,
+				0823BE6E3373A83D3FEBC32F /* Components.swift in Sources */,
+				CF38B25676730E71C9AD497A /* DispatcharrApp.swift in Sources */,
+				3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */,
+				B0B4EE0F74D4863E74833446 /* LiquidGlass.swift in Sources */,
+				AD422FFDD689840F76B8A238 /* MediaServerAPIs.swift in Sources */,
+				30FA1CA916C8DDE2001C592F /* Models.swift in Sources */,
+				DA8D78550B95A889171982BC /* MoviesView.swift in Sources */,
+				F00D3696D62D7C9EF6E05244 /* PlayerView.swift in Sources */,
+				7CFFD573C287B60F267445BD /* PlaylistImportViews.swift in Sources */,
+				84D478A2A84F9A8A2FEE8EA4 /* PlaylistModels.swift in Sources */,
+				622B003E0D0A155E9FE7D9B7 /* PlaylistParsers.swift in Sources */,
+				20FAAE7F6DB7B9506F08F8E7 /* Pods-Dispatcharr_iOS-dummy.m in Sources */,
+				B5AE22380A5D13659655A5CD /* SearchView.swift in Sources */,
+				349A1C11393E9A07EDE93974 /* ServerConnectionViewModel.swift in Sources */,
+				2DD98124C6F98D06EFED419A /* SettingsView.swift in Sources */,
+				867C07594A685FB5BDCA5BB3 /* SplashView.swift in Sources */,
+				76842216BD4822B7380FDF05 /* TVShowsView.swift in Sources */,
+				8AC25DFB7121C1AEBCE36729 /* ThemeManager.swift in Sources */,
+				6BA60E4727C61B8943535F4E /* Typography.swift in Sources */,
+				97309F3B0C6B3769882EF361 /* VODDetailView.swift in Sources */,
+				B743C668A35FABC8A1BECB16 /* VODModels.swift in Sources */,
+				D707545F75A250B3657868F5 /* VODService.swift in Sources */,
+				58753215820D219D87D24402 /* WelcomeView.swift in Sources */,
+				98B0C60D6099DEF55810D175 /* XtreamAndDispatcharrAPI.swift in Sources */,
+				3349C24B50E8CC1C902B358F /* XtreamSeriesAPI.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		0666C45943E3AC3A9A7BEE8B /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
+				INFOPLIST_FILE = SupportingFiles/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.Dispatcharr;
+				PRODUCT_NAME = Dispatcharr;
+				SDKROOT = appletvos;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 18.0;
+			};
+			name = Release;
+		};
+		0FEC2E21180118A37C2B6E86 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = DFE1C126F93E5CECF7EFF80B /* Pods-Dispatcharr_iOS.debug.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 47DTJ3Q67T;
+				INFOPLIST_FILE = SupportingFiles/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.Dispatcharr;
+				PRODUCT_NAME = Dispatcharr;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		58770CA2B53D8AA283368438 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_BITCODE = NO;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+				TVOS_DEPLOYMENT_TARGET = 18.0;
+			};
+			name = Release;
+		};
+		591F6D6387ED7CB4ED5CF6EA /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 345AFFC1DACD873D07B6B7F1 /* Pods-Dispatcharr_iOS.release.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = 47DTJ3Q67T;
+				INFOPLIST_FILE = SupportingFiles/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.Dispatcharr;
+				PRODUCT_NAME = Dispatcharr;
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SUPPORTS_MACCATALYST = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		748263AE0CAA260641A4DC36 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_BITCODE = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTS_MACCATALYST = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+				TVOS_DEPLOYMENT_TARGET = 18.0;
+			};
+			name = Debug;
+		};
+		D64CEFE7FC072A7357E6D379 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
+				INFOPLIST_FILE = SupportingFiles/Info.plist;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.Dispatcharr;
+				PRODUCT_NAME = Dispatcharr;
+				SDKROOT = appletvos;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 18.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		53EE43EF2A156AB0859B4923 /* Build configuration list for PBXNativeTarget "Dispatcharr_iOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0FEC2E21180118A37C2B6E86 /* Debug */,
+				591F6D6387ED7CB4ED5CF6EA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		880EE68A9BBB3CA4912BB19D /* Build configuration list for PBXNativeTarget "Dispatcharr_tvOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D64CEFE7FC072A7357E6D379 /* Debug */,
+				0666C45943E3AC3A9A7BEE8B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E14095500FDB469BC6E1027E /* Build configuration list for PBXProject "Dispatcharr" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				748263AE0CAA260641A4DC36 /* Debug */,
+				58770CA2B53D8AA283368438 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = FF7071163D6291891DEC5B95 /* Project object */;
+}
