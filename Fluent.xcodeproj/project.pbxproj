@@ -12,7 +12,7 @@
 		10D8764EE31D09E18D0C2CFB /* AddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F00 /* AddServerView.swift */; };
 		11120119C5A64353490041AC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5806A5B948B604B451A5F5C7 /* Assets.xcassets */; };
 		134BBEA37092BE9ED06DE967 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */; };
-		1868ADFE12C568F8FC5FED53 /* XtreamAndDispatcharrAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* XtreamAndDispatcharrAPI.swift */; };
+		1868ADFE12C568F8FC5FED53 /* StreamingAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* StreamingAPIs.swift */; };
 		19AE345D39FB441F217ABCE7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
 		1D11DF914E50BF1810089A1E /* XtreamSeriesAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */; };
 		1EB4A645E88DDFE6F211ADA4 /* Pods-Dispatcharr_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Dispatcharr_iOS-acknowledgements.markdown */; };
@@ -34,7 +34,7 @@
 		5DC1FF775CB2D3D2917F5D4A /* MediaServerAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */; };
 		61F895DEB15DE1F7C3EACD17 /* PlaylistModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA33B18A62A3411B6425B661 /* PlaylistModels.swift */; };
 		622B003E0D0A155E9FE7D9B7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
-		62AD11B70BF6B745FD727C8B /* DispatcharrSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* DispatcharrSplash.mp4 */; };
+		62AD11B70BF6B745FD727C8B /* FluentSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* FluentSplash.mp4 */; };
 		65A50DB238B2354D5B81DE09 /* Dispatcharr.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Dispatcharr.xcworkspace */; };
 		6AFEBD1C481F02C363B48866 /* Manifest.lock in Resources */ = {isa = PBXBuildFile; fileRef = C8918F8C279C6028AA7BC86D /* Manifest.lock */; };
 		6B91E10A20F4B86799998C43 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */; };
@@ -59,12 +59,12 @@
 		8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
 		97309F3B0C6B3769882EF361 /* VODDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20C769771A1085A303FFC0F0 /* VODDetailView.swift */; };
 		9789CC2E48304B212BC4E756 /* COPYING.txt in Resources */ = {isa = PBXBuildFile; fileRef = 8087BB36936B80A3234428C4 /* COPYING.txt */; };
-		98B0C60D6099DEF55810D175 /* XtreamAndDispatcharrAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* XtreamAndDispatcharrAPI.swift */; };
+		98B0C60D6099DEF55810D175 /* StreamingAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* StreamingAPIs.swift */; };
 		9D874ED59E97CB1D868F596D /* VODModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */; };
 		9F9A37C29E5E186E323737C0 /* ChannelListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94C2469FCAE37105952DCC28 /* ChannelListView.swift */; };
 		A4A40B2ADBF625F5928EF0C1 /* Pods-Dispatcharr_iOS-dummy.m in Sources */ = {isa = PBXBuildFile; fileRef = 46BC9C3B09ACE5A89FC5C0E9 /* Pods-Dispatcharr_iOS-dummy.m */; };
 		A8B232D41A5E761F2A0C3B1E /* MobileVLCKit-xcframeworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = 337C9ADFE967736F023EB4CD /* MobileVLCKit-xcframeworks.sh */; };
-		A8E322C238A7CE0B55BA3D4D /* DispatcharrApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* DispatcharrApp.swift */; };
+		A8E322C238A7CE0B55BA3D4D /* FluentApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* FluentApp.swift */; };
 		ACAEB60B5118B283BF99CF16 /* PlaylistImportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */; };
 		AD422FFDD689840F76B8A238 /* MediaServerAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */; };
 		B0B4EE0F74D4863E74833446 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */; };
@@ -78,8 +78,8 @@
 		BC00C290CFD296C79CD18EB6 /* Pods-Dispatcharr_iOS-frameworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = CF54ACE468E89E4259601D31 /* Pods-Dispatcharr_iOS-frameworks.sh */; };
 		C02E4BB60A5E960696E8839B /* Pods-Dispatcharr_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Dispatcharr_iOS-acknowledgements.markdown */; };
 		C9B3A9A8801BC79552C8D496 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */; };
-		C9E28AF097D00D2A282673A5 /* DispatcharrSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* DispatcharrSplash.mp4 */; };
-		CF38B25676730E71C9AD497A /* DispatcharrApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* DispatcharrApp.swift */; };
+		C9E28AF097D00D2A282673A5 /* FluentSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* FluentSplash.mp4 */; };
+		CF38B25676730E71C9AD497A /* FluentApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* FluentApp.swift */; };
 		D0C107746AE8D043B81554D2 /* ServerConnectionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */; };
 		D16EA2BDF03281E9B3558D9C /* Pods_Dispatcharr_iOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1AF7E21A7FB443A7364DF5F /* Pods_Dispatcharr_iOS.framework */; };
 		D707545F75A250B3657868F5 /* VODService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C548BC428D32F3966A46C27 /* VODService.swift */; };
@@ -92,12 +92,16 @@
 		F00D3696D62D7C9EF6E05244 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */; };
 		FD1AC2C2B4E0577B5456999F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
 		FD65778E5A378FA718D5D0E2 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C5D08BD1430E78C26390734 /* SettingsView.swift */; };
+		CC1234567890ABCDEF123456 /* DebugLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1234567890ABCDEF123456 /* DebugLogger.swift */; };
+		DD1234567890ABCDEF123456 /* DebugLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1234567890ABCDEF123456 /* DebugLogger.swift */; };
+		EE1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */; };
+		FF1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		00F4EE98C1564A7E3A5DD86B /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
 		03AB1BA15FC7FAB4754ECE75 /* Pods-Dispatcharr_iOS-frameworks-Debug-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Dispatcharr_iOS-frameworks-Debug-output-files.xcfilelist"; sourceTree = "<group>"; };
-		08B4D4146C07D85405524861 /* DispatcharrApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrApp.swift; sourceTree = "<group>"; };
+		08B4D4146C07D85405524861 /* FluentApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FluentApp.swift; sourceTree = "<group>"; };
 		1603AF9E4D31DB8BDC708C06 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		20C769771A1085A303FFC0F0 /* VODDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODDetailView.swift; sourceTree = "<group>"; };
 		270AC009FD8847D0E2E239BF /* Pods-Dispatcharr_iOS.modulemap */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.module-map"; path = "Pods-Dispatcharr_iOS.modulemap"; sourceTree = "<group>"; };
@@ -116,7 +120,7 @@
 		5806A5B948B604B451A5F5C7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5813F2DEADFF09175AADA42D /* Pods-Dispatcharr_iOS-acknowledgements.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Pods-Dispatcharr_iOS-acknowledgements.plist"; sourceTree = "<group>"; };
 		5957CC8A6CC0000B14ED47C5 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
-		693A71F4A4429F56337992E6 /* XtreamAndDispatcharrAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XtreamAndDispatcharrAPI.swift; sourceTree = "<group>"; };
+		693A71F4A4429F56337992E6 /* StreamingAPIs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingAPIs.swift; sourceTree = "<group>"; };
 		6C96AEA17257AA77D4EBE291 /* Pods-Dispatcharr_iOS-frameworks-Release-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Dispatcharr_iOS-frameworks-Release-output-files.xcfilelist"; sourceTree = "<group>"; };
 		6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
 		6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XtreamSeriesAPI.swift; sourceTree = "<group>"; };
@@ -125,7 +129,7 @@
 		8087BB36936B80A3234428C4 /* COPYING.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = COPYING.txt; sourceTree = "<group>"; };
 		828A599894F381F7A78BFDF8 /* MobileVLCKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = MobileVLCKit.xcframework; sourceTree = "<group>"; };
 		875B0901B53C33B024AF597F /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
-		880CEF808ABBA8AD9BC13BEC /* DispatcharrSplash.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = DispatcharrSplash.mp4; sourceTree = "<group>"; };
+		880CEF808ABBA8AD9BC13BEC /* FluentSplash.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = FluentSplash.mp4; sourceTree = "<group>"; };
 		8EEF8CE5358378E2CF3F4012 /* Pods-Dispatcharr_iOS-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Pods-Dispatcharr_iOS-Info.plist"; sourceTree = "<group>"; };
 		8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Dispatcharr_iOS-acknowledgements.markdown */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "Pods-Dispatcharr_iOS-acknowledgements.markdown"; sourceTree = "<group>"; };
 		93EBE84BDC6A8A492E3AB851 /* MobileVLCKit-xcframeworks-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "MobileVLCKit-xcframeworks-input-files.xcfilelist"; sourceTree = "<group>"; };
@@ -155,6 +159,8 @@
 		F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConnectionViewModel.swift; sourceTree = "<group>"; };
 		"TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Dispatcharr.xcworkspace */ = {isa = PBXFileReference; lastKnownFileType = wrapper.workspace; path = Dispatcharr.xcworkspace; sourceTree = "<group>"; };
 		"TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
+		AA1234567890ABCDEF123456 /* DebugLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogger.swift; sourceTree = "<group>"; };
+		BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeveloperSettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -183,7 +189,7 @@
 				9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */,
 				57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */,
 				4C548BC428D32F3966A46C27 /* VODService.swift */,
-				693A71F4A4429F56337992E6 /* XtreamAndDispatcharrAPI.swift */,
+				693A71F4A4429F56337992E6 /* StreamingAPIs.swift */,
 				6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */,
 			);
 			path = Networking;
@@ -368,6 +374,7 @@
 			isa = PBXGroup;
 			children = (
 				2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */,
+				BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */,
 				9C5D08BD1430E78C26390734 /* SettingsView.swift */,
 			);
 			path = Settings;
@@ -426,8 +433,9 @@
 		EBE4735039B8168FF0CF3C56 /* App */ = {
 			isa = PBXGroup;
 			children = (
-				08B4D4146C07D85405524861 /* DispatcharrApp.swift */,
-				880CEF808ABBA8AD9BC13BEC /* DispatcharrSplash.mp4 */,
+				AA1234567890ABCDEF123456 /* DebugLogger.swift */,
+				08B4D4146C07D85405524861 /* FluentApp.swift */,
+				880CEF808ABBA8AD9BC13BEC /* FluentSplash.mp4 */,
 				CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */,
 				5044B9CD69C05A6836588548 /* SplashView.swift */,
 			);
@@ -488,11 +496,6 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1600;
-				TargetAttributes = {
-					3D7E0C99AD2471A7F6A5FF48 = {
-						DevelopmentTeam = "";
-					};
-				};
 			};
 			buildConfigurationList = E14095500FDB469BC6E1027E /* Build configuration list for PBXProject "Dispatcharr" */;
 			developmentRegion = en;
@@ -528,7 +531,7 @@
 				87062C2D2515CB8999B9C4E6 /* Assets.xcassets in Resources */,
 				7983682ABB41C2B946CD5F27 /* COPYING.txt in Resources */,
 				294AE2B45D4A82E38B1D09C4 /* Dispatcharr.xcworkspace in Resources */,
-				62AD11B70BF6B745FD727C8B /* DispatcharrSplash.mp4 in Resources */,
+				62AD11B70BF6B745FD727C8B /* FluentSplash.mp4 in Resources */,
 				6AFEBD1C481F02C363B48866 /* Manifest.lock in Resources */,
 				A8B232D41A5E761F2A0C3B1E /* MobileVLCKit-xcframeworks.sh in Resources */,
 				B47C87DF4A1719ACA2FF1E70 /* MobileVLCKit.xcframework in Resources */,
@@ -548,7 +551,7 @@
 				11120119C5A64353490041AC /* Assets.xcassets in Resources */,
 				9789CC2E48304B212BC4E756 /* COPYING.txt in Resources */,
 				65A50DB238B2354D5B81DE09 /* Dispatcharr.xcworkspace in Resources */,
-				C9E28AF097D00D2A282673A5 /* DispatcharrSplash.mp4 in Resources */,
+				C9E28AF097D00D2A282673A5 /* FluentSplash.mp4 in Resources */,
 				DBFAE2F87043F12BE1728B6D /* Manifest.lock in Resources */,
 				7FFA84A20B070280B502C433 /* MobileVLCKit-xcframeworks.sh in Resources */,
 				3A0127A4F1183E202C5A461C /* MobileVLCKit.xcframework in Resources */,
@@ -619,7 +622,9 @@
 				7134A5E98E9415DF4789626B /* ChannelListView.swift in Sources */,
 				73FE0EA560BD116D4301EB8D /* Colors.swift in Sources */,
 				FD1AC2C2B4E0577B5456999F /* Components.swift in Sources */,
-				A8E322C238A7CE0B55BA3D4D /* DispatcharrApp.swift in Sources */,
+				CC1234567890ABCDEF123456 /* DebugLogger.swift in Sources */,
+				EE1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
+				A8E322C238A7CE0B55BA3D4D /* FluentApp.swift in Sources */,
 				7D775CD7B45EE60B92377A6F /* HomeView.swift in Sources */,
 				C9B3A9A8801BC79552C8D496 /* LiquidGlass.swift in Sources */,
 				5DC1FF775CB2D3D2917F5D4A /* MediaServerAPIs.swift in Sources */,
@@ -641,7 +646,7 @@
 				9D874ED59E97CB1D868F596D /* VODModels.swift in Sources */,
 				BA33A33C572E086E61AA73AB /* VODService.swift in Sources */,
 				8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */,
-				1868ADFE12C568F8FC5FED53 /* XtreamAndDispatcharrAPI.swift in Sources */,
+				1868ADFE12C568F8FC5FED53 /* StreamingAPIs.swift in Sources */,
 				1D11DF914E50BF1810089A1E /* XtreamSeriesAPI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -655,7 +660,9 @@
 				9F9A37C29E5E186E323737C0 /* ChannelListView.swift in Sources */,
 				737FB562438624E3BF547904 /* Colors.swift in Sources */,
 				0823BE6E3373A83D3FEBC32F /* Components.swift in Sources */,
-				CF38B25676730E71C9AD497A /* DispatcharrApp.swift in Sources */,
+				DD1234567890ABCDEF123456 /* DebugLogger.swift in Sources */,
+				FF1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
+				CF38B25676730E71C9AD497A /* FluentApp.swift in Sources */,
 				3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */,
 				B0B4EE0F74D4863E74833446 /* LiquidGlass.swift in Sources */,
 				AD422FFDD689840F76B8A238 /* MediaServerAPIs.swift in Sources */,
@@ -677,7 +684,7 @@
 				B743C668A35FABC8A1BECB16 /* VODModels.swift in Sources */,
 				D707545F75A250B3657868F5 /* VODService.swift in Sources */,
 				58753215820D219D87D24402 /* WelcomeView.swift in Sources */,
-				98B0C60D6099DEF55810D175 /* XtreamAndDispatcharrAPI.swift in Sources */,
+				98B0C60D6099DEF55810D175 /* StreamingAPIs.swift in Sources */,
 				3349C24B50E8CC1C902B358F /* XtreamSeriesAPI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -690,13 +697,14 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
 				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
+				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.Dispatcharr;
+				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.fluent;
 				PRODUCT_NAME = Dispatcharr;
 				SDKROOT = appletvos;
 				TARGETED_DEVICE_FAMILY = 3;
@@ -712,13 +720,14 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Fluent;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.Dispatcharr;
+				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.fluent;
 				PRODUCT_NAME = Dispatcharr;
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -797,13 +806,14 @@
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Fluent;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.Dispatcharr;
+				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.fluent;
 				PRODUCT_NAME = Dispatcharr;
 				SDKROOT = iphoneos;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -886,13 +896,14 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
 				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
+				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.Dispatcharr;
+				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.fluent;
 				PRODUCT_NAME = Dispatcharr;
 				SDKROOT = appletvos;
 				TARGETED_DEVICE_FAMILY = 3;
