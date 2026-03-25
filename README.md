@@ -10,9 +10,9 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
 Stream live channels with VLC-powered playback. Browse channels in a scrollable list or a full EPG guide view with program titles, descriptions, and time slots. Minimize playback to a picture-in-picture style mini player while browsing other content.
 
 **Electronic Program Guide**
-A grid-style guide similar to Emby and other media center applications. Program data is cached locally and configurable from 6 hours to the full available window. The guide shares its cache with the channel list so expanding a channel card shows upcoming programs instantly.
+tvOS supports grid and list views while iOS supports list view for viewing channels and programs. Program data is cached locally and configurable from 6 hours to the full available window.
 
-**Movies and Series**
+**Movies andy Series**
 Browse and filter on-demand content by category. Categories are pulled from the server's VOD library and can be toggled on or off through the filter menu.
 
 **iCloud Sync**
