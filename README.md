@@ -1,6 +1,6 @@
 # AerioTV
 
-AerioTV is a native IPTV streaming application for iOS and Apple TV (tvOS). It connects to Dispatcharr, Xtream Codes, and M3U playlist servers to deliver live TV, movies, and series with a full electronic program guide.
+AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS (via iPad app). It connects to Dispatcharr, Xtream Codes, and M3U playlist servers to deliver live TV, movies, and series with a full electronic program guide.
 
 [Download on the App Store](https://apps.apple.com/us/app/aeriotv/id6760727974)
 
@@ -29,7 +29,7 @@ Full support for the Siri Remote with directional navigation, focus management, 
 
 ## Requirements
 
-Xcode 15 or later, iOS 17.0+, tvOS 17.0+. The project uses CocoaPods for dependency management.
+Xcode 15 or later, iOS/iPadOS 18.0+, tvOS 18.0+, macOS 15.0+ (Designed for iPad). The project uses CocoaPods for dependency management.
 
 ## Getting Started
 
