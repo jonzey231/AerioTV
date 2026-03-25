@@ -447,9 +447,13 @@ struct ChannelListView: View {
                         channelIDs: tvgID.isEmpty ? (channelID.map { [$0] }) : nil
                     )
                     debugLog("📺 EPG result: \(identifier) → \(programs.count) upcoming programs")
-                    let entries = programs.map { EPGEntry(title: $0.title,
-                                                         startTime: $0.startTime?.toDate(),
-                                                         endTime:   $0.endTime?.toDate()) }
+                    let entries = programs.map {
+                        let desc = $0.description.isEmpty ? $0.subTitle : $0.description
+                        return EPGEntry(title: $0.title,
+                                        description: desc,
+                                        startTime: $0.startTime?.toDate(),
+                                        endTime:   $0.endTime?.toDate())
+                    }
                     await EPGCache.shared.set(entries, for: cacheKey)
                     return entries
                 } catch {
@@ -476,7 +480,7 @@ struct ChannelListView: View {
                     let end   = XtreamDateParser.parse(listing.end)
                     if let e = end, now >= e { return nil }
                     if let s = start, let e = end, now >= s && now < e { return nil }
-                    return EPGEntry(title: listing.title, startTime: start, endTime: end)
+                    return EPGEntry(title: listing.title, description: listing.description, startTime: start, endTime: end)
                 }
                 await EPGCache.shared.set(entries, for: cacheKey)
                 return entries
@@ -499,7 +503,7 @@ struct ChannelListView: View {
                     let upcoming = progs
                         .filter { $0.endTime > now }
                         .sorted { $0.startTime < $1.startTime }
-                        .map { EPGEntry(title: $0.title, startTime: $0.startTime, endTime: $0.endTime) }
+                        .map { EPGEntry(title: $0.title, description: $0.description, startTime: $0.startTime, endTime: $0.endTime) }
                     if !upcoming.isEmpty {
                         await EPGCache.shared.set(upcoming, for: "m3u_\(channelID)")
                     }
@@ -522,6 +526,7 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     let streamURLs: [URL]
     var tvgID: String? = nil
     var currentProgram: String? = nil
+    var currentProgramDescription: String? = nil
     var currentProgramStart: Date? = nil
     var currentProgramEnd: Date? = nil
 }
@@ -530,8 +535,16 @@ struct ChannelDisplayItem: Identifiable, Equatable {
 struct EPGEntry: Identifiable, Equatable {
     var id: String { "\(title)-\(startTime?.timeIntervalSinceReferenceDate ?? 0)" }
     let title: String
+    let description: String
     let startTime: Date?
     let endTime: Date?
+
+    init(title: String, description: String = "", startTime: Date?, endTime: Date?) {
+        self.title = title
+        self.description = description
+        self.startTime = startTime
+        self.endTime = endTime
+    }
 }
 
 // MARK: - Channel Row
@@ -657,24 +670,24 @@ struct ChannelRow: View {
                 debugLog("🎮 Channel tap: \(item.name) (id=\(item.id))")
                 onTap()
             } label: {
-                HStack(spacing: 18) {
+                HStack(spacing: 14) {
                     Text(item.number)
                         .font(.body.monospaced())
                         .lineLimit(1)
                         .foregroundColor(.textTertiary)
-                        .frame(width: 40, alignment: .trailing)
+                        .frame(width: 34, alignment: .trailing)
 
                     AsyncImage(url: item.logoURL) { phase in
                         switch phase {
                         case .success(let image):
                             image.resizable()
                                 .aspectRatio(contentMode: .fit)
-                                .frame(width: 56, height: 38)
+                                .frame(width: 48, height: 34)
                         default:
                             ZStack {
                                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                                     .fill(Color.accentPrimary.opacity(0.12))
-                                    .frame(width: 56, height: 38)
+                                    .frame(width: 48, height: 34)
                                 NoPosterPlaceholder(compact: true)
                             }
                         }
@@ -695,6 +708,12 @@ struct ChannelRow: View {
                                 if let end = item.currentProgramEnd {
                                     nowPlayingTimeRemaining(end: end)
                                 }
+                            }
+                            if let desc = item.currentProgramDescription, !desc.isEmpty {
+                                Text(desc)
+                                    .font(.system(size: 18))
+                                    .foregroundColor(.textSecondary)
+                                    .lineLimit(2)
                             }
                         } else {
                             Text(item.group)
@@ -766,24 +785,24 @@ struct ChannelRow: View {
     @ViewBuilder
     private var iOSRow: some View {
         Button(action: onTap) {
-            HStack(spacing: isWide ? 18 : 14) {
+            HStack(spacing: isWide ? 14 : 10) {
                 Text(item.number)
                     .font(isWide ? .body.monospaced() : .monoSmall)
                     .lineLimit(1)
                     .foregroundColor(.textTertiary)
-                    .frame(width: isWide ? 40 : 32, alignment: .trailing)
+                    .frame(width: isWide ? 36 : 26, alignment: .trailing)
 
                 AsyncImage(url: item.logoURL) { phase in
                     switch phase {
                     case .success(let image):
                         image.resizable()
                             .aspectRatio(contentMode: .fit)
-                            .frame(width: isWide ? 56 : 44, height: isWide ? 38 : 30)
+                            .frame(width: isWide ? 50 : 38, height: isWide ? 34 : 26)
                     default:
                         ZStack {
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .fill(Color.accentPrimary.opacity(0.12))
-                                .frame(width: isWide ? 56 : 44, height: isWide ? 38 : 30)
+                                .frame(width: isWide ? 50 : 38, height: isWide ? 34 : 26)
                             NoPosterPlaceholder(compact: true)
                         }
                     }
@@ -804,6 +823,12 @@ struct ChannelRow: View {
                             if let end = item.currentProgramEnd {
                                 nowPlayingTimeRemaining(end: end)
                             }
+                        }
+                        if let desc = item.currentProgramDescription, !desc.isEmpty {
+                            Text(desc)
+                                .font(isWide ? .caption : .system(size: 10))
+                                .foregroundColor(.textSecondary)
+                                .lineLimit(2)
                         }
                     } else {
                         Text(item.group)
@@ -1033,13 +1058,31 @@ struct ChannelRow: View {
             HStack(spacing: 12) {
                 Rectangle()
                     .fill(Color.borderSubtle)
-                    .frame(width: 2, height: 34)
+                    #if os(tvOS)
+                    .frame(width: 3)
+                    #else
+                    .frame(width: 2)
+                    #endif
                     .cornerRadius(1)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(entry.title)
+                        #if os(tvOS)
+                        .font(.system(size: 24, weight: .semibold))
+                        #else
                         .font(.bodySmall)
+                        #endif
                         .foregroundColor(.textPrimary)
                         .lineLimit(1)
+                    if !entry.description.isEmpty {
+                        Text(entry.description)
+                            #if os(tvOS)
+                            .font(.system(size: 18))
+                            #else
+                            .font(.labelSmall)
+                            #endif
+                            .foregroundColor(.textSecondary)
+                            .lineLimit(2)
+                    }
                     if let start = entry.startTime {
                         HStack(spacing: 4) {
                             Text(start, style: .time)
@@ -1048,14 +1091,24 @@ struct ChannelRow: View {
                                 Text(end, style: .time)
                             }
                         }
+                        #if os(tvOS)
+                        .font(.system(size: 17))
+                        .foregroundColor(.textTertiary)
+                        #else
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
+                        #endif
                     }
                 }
                 Spacer()
             }
+            #if os(tvOS)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 10)
+            #else
             .padding(.horizontal, 14)
             .padding(.vertical, 6)
+            #endif
 
             if !isLast {
                 Divider()

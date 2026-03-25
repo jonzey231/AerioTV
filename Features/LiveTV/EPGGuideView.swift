@@ -502,7 +502,7 @@ final class GuideStore: ObservableObject {
             let entries = progs
                 .filter { $0.end > now }
                 .sorted { $0.start < $1.start }
-                .map { EPGEntry(title: $0.title, startTime: $0.start, endTime: $0.end) }
+                .map { EPGEntry(title: $0.title, description: $0.description, startTime: $0.start, endTime: $0.end) }
             guard !entries.isEmpty else { continue }
             Task {
                 await EPGCache.shared.set(entries, for: cacheKey)

@@ -1594,10 +1594,25 @@ struct NetworkSettingsView: View {
                     }
 
                     if ssidEntries.count < 5 {
+                        if let currentSSID = networkMonitor.currentSSID,
+                           !ssidEntries.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == currentSSID }) {
+                            Button {
+                                if let emptyIndex = ssidEntries.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                                    ssidEntries[emptyIndex] = currentSSID
+                                } else {
+                                    ssidEntries.append(currentSSID)
+                                }
+                            } label: {
+                                Label("Add \"\(currentSSID)\"", systemImage: "wifi.circle.fill")
+                                    .foregroundColor(.statusOnline)
+                            }
+                            .listRowBackground(Color.cardBackground)
+                        }
+
                         Button {
                             ssidEntries.append("")
                         } label: {
-                            Label("Add Network", systemImage: "plus.circle.fill")
+                            Label("Add Network Manually", systemImage: "plus.circle.fill")
                                 .foregroundColor(.accentPrimary)
                         }
                         .listRowBackground(Color.cardBackground)

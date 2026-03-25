@@ -556,8 +556,8 @@ final class ChannelStore: ObservableObject {
             let batch = Array(snapshot[batchStart..<batchEnd])
 
             // Fetch EPG for this batch concurrently.
-            let results: [(String, String, Date?, Date?)] = await withTaskGroup(
-                of: (String, String, Date?, Date?)?.self
+            let results: [(String, String, String, Date?, Date?)] = await withTaskGroup(
+                of: (String, String, String, Date?, Date?)?.self
             ) { group in
                 for item in batch {
                     group.addTask {
@@ -569,13 +569,13 @@ final class ChannelStore: ObservableObject {
                             let end   = ChannelStore.parseXtreamDate(listing.end)
                             guard let s = start, let e = end else { continue }
                             if s <= now && e > now {
-                                return (item.id, listing.title, s, e)
+                                return (item.id, listing.title, listing.description, s, e)
                             }
                         }
                         return nil
                     }
                 }
-                var collected: [(String, String, Date?, Date?)] = []
+                var collected: [(String, String, String, Date?, Date?)] = []
                 for await result in group {
                     if let r = result { collected.append(r) }
                 }
@@ -585,11 +585,12 @@ final class ChannelStore: ObservableObject {
             // Apply results to the live channels array.
             guard !Task.isCancelled, !results.isEmpty else { continue }
             var updated = channels
-            for (id, title, start, end) in results {
+            for (id, title, desc, start, end) in results {
                 if let idx = updated.firstIndex(where: { $0.id == id }) {
-                    updated[idx].currentProgram      = title
-                    updated[idx].currentProgramStart = start
-                    updated[idx].currentProgramEnd   = end
+                    updated[idx].currentProgram             = title
+                    updated[idx].currentProgramDescription  = desc
+                    updated[idx].currentProgramStart        = start
+                    updated[idx].currentProgramEnd          = end
                 }
             }
             channels = updated
@@ -696,7 +697,7 @@ final class ChannelStore: ObservableObject {
                 let upcoming = byChannel[tvgID]!
                     .filter { $0.endTime > now }
                     .sorted { $0.startTime < $1.startTime }
-                    .map { EPGEntry(title: $0.title, startTime: $0.startTime, endTime: $0.endTime) }
+                    .map { EPGEntry(title: $0.title, description: $0.description, startTime: $0.startTime, endTime: $0.endTime) }
                 if !upcoming.isEmpty {
                     await EPGCache.shared.set(upcoming, for: "m3u_\(tvgID)")
                 }
@@ -706,9 +707,10 @@ final class ChannelStore: ObservableObject {
                 guard let tvgID = items[idx].tvgID,
                       let progs = byChannel[tvgID] else { continue }
                 if let current = progs.first(where: { $0.startTime <= now && $0.endTime > now }) {
-                    items[idx].currentProgram      = current.title
-                    items[idx].currentProgramStart = current.startTime
-                    items[idx].currentProgramEnd   = current.endTime
+                    items[idx].currentProgram             = current.title
+                    items[idx].currentProgramDescription  = current.description
+                    items[idx].currentProgramStart        = current.startTime
+                    items[idx].currentProgramEnd          = current.endTime
                 }
             }
         }
@@ -831,18 +833,20 @@ final class ChannelStore: ObservableObject {
 
         // Apply EPG data.
         if let programs, !programs.isEmpty {
-            var epgByTvgID: [String: (title: String, start: Date?, end: Date?)] = [:]
+            var epgByTvgID: [String: (title: String, description: String, start: Date?, end: Date?)] = [:]
             for prog in programs {
                 guard let tvgID = prog.tvgID, !tvgID.isEmpty, !prog.title.isEmpty else { continue }
-                epgByTvgID[tvgID] = (prog.title, prog.startTime?.toDate(), prog.endTime?.toDate())
+                let desc = prog.description.isEmpty ? prog.subTitle : prog.description
+                epgByTvgID[tvgID] = (prog.title, desc, prog.startTime?.toDate(), prog.endTime?.toDate())
             }
             items = items.map { item in
                 guard let tvgID = item.tvgID, !tvgID.isEmpty,
                       let info = epgByTvgID[tvgID] else { return item }
                 var updated = item
-                updated.currentProgram      = info.title
-                updated.currentProgramStart = info.start
-                updated.currentProgramEnd   = info.end
+                updated.currentProgram             = info.title
+                updated.currentProgramDescription  = info.description
+                updated.currentProgramStart        = info.start
+                updated.currentProgramEnd          = info.end
                 return updated
             }
         }
@@ -1557,8 +1561,10 @@ struct InitialEPGLoadingView: View {
             }
         }
         .onAppear {
-            timer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { _ in
-                dots = dots.count >= 3 ? "" : dots + "."
+            timer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [self] _ in
+                Task { @MainActor in
+                    dots = dots.count >= 3 ? "" : dots + "."
+                }
             }
         }
         .onDisappear {

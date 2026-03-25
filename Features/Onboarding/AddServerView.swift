@@ -409,14 +409,33 @@ struct AddServerView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
 
-            // Add network button
+            // Add network buttons
             if ssidEntries.count < 5 {
+                if let currentSSID = networkMonitor.currentSSID,
+                   !ssidEntries.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == currentSSID }) {
+                    Button {
+                        if let emptyIndex = ssidEntries.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                            ssidEntries[emptyIndex] = currentSSID
+                        } else {
+                            ssidEntries.append(currentSSID)
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "wifi.circle.fill")
+                            Text("Add \"\(currentSSID)\"")
+                        }
+                        .font(.labelMedium)
+                        .foregroundColor(.statusOnline)
+                    }
+                    .buttonStyle(.plain)
+                }
+
                 Button {
                     ssidEntries.append("")
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "plus.circle.fill")
-                        Text("Add Network")
+                        Text("Add Network Manually")
                     }
                     .font(.labelMedium)
                     .foregroundColor(.accentPrimary)
