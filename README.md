@@ -20,7 +20,7 @@ Browse and filter on-demand content by category. Categories are pulled from the 
 
 **iCloud Sync**
 
-Server configurations and preferences sync across devices using iCloud Key-Value Storage. Set up once on your iPhone and your Apple TV will pick up the same servers automatically.
+Server configurations and preferences sync across devices using iCloud Key-Value Storage. Set up once on one Apple device and your subsequent Apple devices will pick up the same servers automatically if you select to import during the onboarding process.
 
 **Apple TV Optimized**
 
