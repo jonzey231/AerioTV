@@ -12,7 +12,7 @@ Stream live channels with VLC-powered playback. Browse channels in a scrollable 
 **Electronic Program Guide**
 tvOS supports grid and list views while iOS supports list view for viewing channels and programs. Program data is cached locally and configurable from 6 hours to the full available window.
 
-**Movies andy Series**
+**Movies and Series**
 Browse and filter on-demand content by category. Categories are pulled from the server's VOD library and can be toggled on or off through the filter menu.
 
 **iCloud Sync**
