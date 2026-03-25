@@ -85,6 +85,10 @@ On first launch the app presents an onboarding flow where you add your server. Y
 
 EPG data is downloaded once and cached locally. The default window is 36 hours ahead. This can be changed in Settings under Network. On a fresh install the app will show a loading screen until the initial EPG download completes.
 
+## Sideloading
+
+Pre-built .ipa files for iOS and tvOS are available on the [Releases](https://github.com/jonzey231/AerioTV/releases) page. Download the .ipa for your platform and install using your preferred sideloading method (AltStore, Sideloadly, etc.).
+
 ## Building for Release
 
 Select the appropriate scheme (`Aerio_iOS` or `Aerio_tvOS`), set the destination to "Any iOS Device" or "Any tvOS Device", then go to Product and Archive. The archive can be uploaded to App Store Connect or exported as an IPA for sideloading.
