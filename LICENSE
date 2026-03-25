@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 Dispatcharr iOS Contributors
+Copyright (c) 2026 Logan Jones
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,18 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Third-Party Dependencies
-------------------------
-
-MobileVLCKit — GNU Lesser General Public License v2.1 or later
-https://github.com/videolan/vlckit
-
-OpenCastSwift (optional) — MIT License
-https://github.com/mhmiles/OpenCastSwift
-
-In compliance with the LGPL, the MobileVLCKit source code is available at
-https://code.videolan.org/videolan/VLCKit and you may replace the library
-by recompiling it from source and relinking.

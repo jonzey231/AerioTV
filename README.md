@@ -1,6 +1,6 @@
 # AerioTV
 
-AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS (via iPad app). It connects to Dispatcharr, Xtream Codes, and M3U playlist servers to deliver live TV, movies, and series with a full electronic program guide.
+AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS (using the iPad app). It connects to Dispatcharr, Xtream Codes, and M3U playlist servers to deliver live TV, movies, and series with a full electronic program guide.
 
 [Download on the App Store](https://apps.apple.com/us/app/aeriotv/id6760727974)
 
@@ -23,13 +23,13 @@ Full support for the Siri Remote with directional navigation, focus management, 
 
 ## Supported Server Types
 
-1. **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** (native API with API key authentication)
+1. **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** (native API with API key authentication). See the [Dispatcharr GitHub repository](https://github.com/Dispatcharr/Dispatcharr) for more information about the API integration.
 2. **Xtream Codes** (username/password authentication)
 3. **M3U Playlist** (direct URL with optional XMLTV EPG source)
 
 ## Requirements
 
-Xcode 15 or later, iOS/iPadOS 18.0+, tvOS 18.0+, macOS 15.0+ (Designed for iPad). The project uses CocoaPods for dependency management.
+Xcode 15 or later. iOS 18.0+, iPadOS 18.0+, tvOS 18.0+, macOS 15.0+ (using the iPad app). The project uses CocoaPods for dependency management.
 
 ## Getting Started
 
@@ -95,7 +95,7 @@ Select the appropriate scheme (`Aerio_iOS` or `Aerio_tvOS`), set the destination
 
 ## License
 
-This project is provided as-is for personal use. See the repository for any additional licensing information.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
 
 ## Support
 
