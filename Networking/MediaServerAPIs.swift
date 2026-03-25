@@ -6,14 +6,15 @@ struct EmbyAPI {
     let apiKey: String
     let userID: String?
 
-    private var session: URLSession {
+    private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
         return URLSession(configuration: config)
-    }
+    }()
+    private var session: URLSession { Self.session }
 
     private var authHeader: String {
-        "MediaBrowser Client=\"Dispatcharr\", Device=\"iPhone\", DeviceId=\"dispatcharr-ios\", Version=\"1.0\", Token=\"\(apiKey)\""
+        "MediaBrowser Client=\"Aerio\", Device=\"iPhone\", DeviceId=\"aerio-ios\", Version=\"1.0\", Token=\"\(apiKey)\""
     }
 
     // MARK: - Verify / System Info
@@ -120,14 +121,15 @@ struct JellyfinAPI {
     let apiKey: String
     let userID: String?
 
-    private var session: URLSession {
+    private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
         return URLSession(configuration: config)
-    }
+    }()
+    private var session: URLSession { Self.session }
 
     private var authHeader: String {
-        "MediaBrowser Client=\"Dispatcharr\", Device=\"iPhone\", DeviceId=\"dispatcharr-ios\", Version=\"1.0\", Token=\"\(apiKey)\""
+        "MediaBrowser Client=\"Aerio\", Device=\"iPhone\", DeviceId=\"aerio-ios\", Version=\"1.0\", Token=\"\(apiKey)\""
     }
 
     func verifyConnection() async throws -> MediaServerInfo {
@@ -201,11 +203,12 @@ struct PlexAPI {
     let baseURL: String
     let plexToken: String
 
-    private var session: URLSession {
+    private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
         return URLSession(configuration: config)
-    }
+    }()
+    private var session: URLSession { Self.session }
 
     func verifyConnection() async throws -> MediaServerInfo {
         let url = try buildURL(path: "/")

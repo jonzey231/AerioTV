@@ -1,1 +1,28 @@
+# Dependencies
+Pods/
 Carthage/
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# CocoaPods artifacts (Podfile.lock is kept so builds are reproducible)
+
+# Archives & IPAs
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Secrets (never commit)
+.env
+*.p12
+*.mobileprovision

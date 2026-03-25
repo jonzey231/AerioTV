@@ -1,13 +1,51 @@
 import Foundation
 
+// MARK: - Server Snapshot
+// Thread-safe value-type snapshot of ServerConnection properties.
+// SwiftData models must only be accessed on the main actor; this struct
+// captures everything needed so network calls can run freely on background
+// threads without touching the model.
+
+struct ServerSnapshot: Sendable {
+    let id: UUID
+    let type: ServerType
+    let baseURL: String
+    let username: String
+    let password: String
+    let apiKey: String
+}
+
+extension ServerConnection {
+    /// Snapshot server properties on the MainActor for safe cross-isolation use.
+    @MainActor var snapshot: ServerSnapshot {
+        ServerSnapshot(
+            id: id,
+            type: type,
+            baseURL: effectiveBaseURL,
+            username: username,
+            password: effectivePassword,
+            apiKey: effectiveApiKey
+        )
+    }
+}
+
 // MARK: - VOD Service
 // Unified interface to fetch VOD content from XC or Dispatcharr sources.
 
 final class VODService {
 
+    private static func resolveURL(_ raw: String, base: String) -> URL? {
+        guard !raw.isEmpty else { return nil }
+        if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
+            return URL(string: raw)
+        }
+        let separator = raw.hasPrefix("/") ? "" : "/"
+        return URL(string: base + separator + raw)
+    }
+
     // MARK: - Movies
 
-    static func fetchMovies(from server: ServerConnection) async throws -> ([VODMovie], [VODCategory]) {
+    static func fetchMovies(from server: ServerSnapshot) async throws -> ([VODMovie], [VODCategory]) {
         switch server.type {
         case .xtreamCodes:    return try await xcMovies(server: server)
         case .dispatcharrAPI: return try await dispatcharrMovies(server: server)
@@ -17,7 +55,7 @@ final class VODService {
 
     // MARK: - Series
 
-    static func fetchSeries(from server: ServerConnection) async throws -> ([VODSeries], [VODCategory]) {
+    static func fetchSeries(from server: ServerSnapshot) async throws -> ([VODSeries], [VODCategory]) {
         switch server.type {
         case .xtreamCodes:    return try await xcSeries(server: server)
         case .dispatcharrAPI: return try await dispatcharrSeries(server: server)
@@ -25,7 +63,7 @@ final class VODService {
         }
     }
 
-    static func fetchSeriesDetail(seriesID: String, from server: ServerConnection) async throws -> VODSeries? {
+    static func fetchSeriesDetail(seriesID: String, from server: ServerSnapshot) async throws -> VODSeries? {
         switch server.type {
         case .xtreamCodes:    return try await xcSeriesDetail(seriesID: seriesID, server: server)
         case .dispatcharrAPI: return try await dispatcharrSeriesDetail(seriesID: seriesID, server: server)
@@ -35,8 +73,8 @@ final class VODService {
 
     // MARK: - Xtream Codes — Movies
 
-    private static func xcMovies(server: ServerConnection) async throws -> ([VODMovie], [VODCategory]) {
-        let api = XtreamCodesAPI(baseURL: server.normalizedBaseURL,
+    private static func xcMovies(server: ServerSnapshot) async throws -> ([VODMovie], [VODCategory]) {
+        let api = XtreamCodesAPI(baseURL: server.baseURL,
                                   username: server.username, password: server.password)
         async let catsTask = api.getVODCategories()
         async let streamsTask = api.getVODStreams()
@@ -50,7 +88,7 @@ final class VODService {
         let movies: [VODMovie] = streams.map { item in
             let catName = catMap[item.categoryID ?? ""] ?? "Uncategorized"
             let ext = item.containerExtension.isEmpty ? "mp4" : item.containerExtension
-            let streamURL = URL(string: "\(server.normalizedBaseURL)/movie/\(server.username)/\(server.password)/\(item.streamID).\(ext)")
+            let streamURL = URL(string: "\(server.baseURL)/movie/\(server.username)/\(server.password)/\(item.streamID).\(ext)")
             if let idx = vodCats.firstIndex(where: { $0.id == (item.categoryID ?? "") }) {
                 vodCats[idx].itemCount += 1
             }
@@ -69,8 +107,8 @@ final class VODService {
 
     // MARK: - Xtream Codes — Series
 
-    private static func xcSeries(server: ServerConnection) async throws -> ([VODSeries], [VODCategory]) {
-        let api = XtreamCodesAPI(baseURL: server.normalizedBaseURL,
+    private static func xcSeries(server: ServerSnapshot) async throws -> ([VODSeries], [VODCategory]) {
+        let api = XtreamCodesAPI(baseURL: server.baseURL,
                                   username: server.username, password: server.password)
         async let catsTask = api.getSeriesCategories()
         async let seriesTask = api.getSeries()
@@ -99,8 +137,8 @@ final class VODService {
         return (series, vodCats)
     }
 
-    private static func xcSeriesDetail(seriesID: String, server: ServerConnection) async throws -> VODSeries? {
-        let api = XtreamCodesAPI(baseURL: server.normalizedBaseURL,
+    private static func xcSeriesDetail(seriesID: String, server: ServerSnapshot) async throws -> VODSeries? {
+        let api = XtreamCodesAPI(baseURL: server.baseURL,
                                   username: server.username, password: server.password)
         let detail = try await api.getSeriesInfo(seriesID: seriesID)
 
@@ -109,7 +147,7 @@ final class VODService {
             let seasonNum = Int(seasonNumStr) ?? 0
             for ep in episodes {
                 let ext = ep.containerExtension ?? "mp4"
-                let urlStr = "\(server.normalizedBaseURL)/series/\(server.username)/\(server.password)/\(ep.id).\(ext)"
+                let urlStr = "\(server.baseURL)/series/\(server.username)/\(server.password)/\(ep.id).\(ext)"
                 let vodEp = VODEpisode(
                     id: String(ep.id), seriesID: seriesID,
                     title: ep.title ?? "Episode \(ep.episodeNum ?? 0)",
@@ -143,51 +181,66 @@ final class VODService {
 
     // MARK: - Dispatcharr — Movies
 
-    private static func dispatcharrMovies(server: ServerConnection) async throws -> ([VODMovie], [VODCategory]) {
-        let api = DispatcharrAPI(baseURL: server.normalizedBaseURL, auth: .apiKey(server.apiKey))
+    private static func dispatcharrMovies(server: ServerSnapshot) async throws -> ([VODMovie], [VODCategory]) {
+        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey))
         let raw = try await api.getVODMovies()
-        let base = server.normalizedBaseURL
+        let base = server.baseURL
 
+        var genreCounts: [String: Int] = [:]
         let movies: [VODMovie] = raw.map { m in
             let streamURL = URL(string: "\(base)/proxy/vod/movie/\(m.uuid)/")
+            let genre = m.genre ?? ""
+            let catName = genre.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? ""
+            let primaryCat = catName.isEmpty ? "Uncategorized" : catName
+            // Count all genres for category list
+            let allGenres = genre.isEmpty ? ["Uncategorized"] : genre.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            for g in allGenres { genreCounts[g, default: 0] += 1 }
             return VODMovie(
                 id: String(m.id), name: m.title,
-                posterURL: m.posterURL.flatMap { URL(string: $0) }, backdropURL: nil,
+                posterURL: m.posterURL.flatMap { resolveURL($0, base: base) }, backdropURL: nil,
                 rating: m.rating ?? "", plot: m.plot ?? "",
-                genre: m.genre ?? "", releaseDate: "", duration: "",
+                genre: genre, releaseDate: "", duration: "",
                 cast: "", director: "", imdbID: "",
-                categoryID: "", categoryName: "Movies",
+                categoryID: primaryCat, categoryName: primaryCat,
                 streamURL: streamURL, containerExtension: "mp4", serverID: server.id
             )
         }
-        return (movies, [VODCategory(id: "movies", name: "Movies", itemCount: raw.count)])
+        let cats = genreCounts.sorted { $0.key < $1.key }.map { VODCategory(id: $0.key, name: $0.key, itemCount: $0.value) }
+        return (movies, cats.isEmpty ? [VODCategory(id: "movies", name: "Movies", itemCount: raw.count)] : cats)
     }
 
     // MARK: - Dispatcharr — Series
 
-    private static func dispatcharrSeries(server: ServerConnection) async throws -> ([VODSeries], [VODCategory]) {
-        let api = DispatcharrAPI(baseURL: server.normalizedBaseURL, auth: .apiKey(server.apiKey))
+    private static func dispatcharrSeries(server: ServerSnapshot) async throws -> ([VODSeries], [VODCategory]) {
+        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey))
         let raw = try await api.getVODSeries()
+        let base = server.baseURL
 
+        var genreCounts: [String: Int] = [:]
         let series: [VODSeries] = raw.map { s in
-            VODSeries(
+            let genre = s.genre ?? ""
+            let catName = genre.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? ""
+            let primaryCat = catName.isEmpty ? "Uncategorized" : catName
+            let allGenres = genre.isEmpty ? ["Uncategorized"] : genre.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            for g in allGenres { genreCounts[g, default: 0] += 1 }
+            return VODSeries(
                 id: String(s.id), name: s.name,
-                posterURL: s.posterURL.flatMap { URL(string: $0) }, backdropURL: nil,
+                posterURL: s.posterURL.flatMap { resolveURL($0, base: base) }, backdropURL: nil,
                 rating: s.rating ?? "", plot: s.plot ?? "",
-                genre: s.genre ?? "", releaseDate: "",
+                genre: genre, releaseDate: "",
                 cast: "", director: "",
-                categoryID: "", categoryName: "TV Shows",
+                categoryID: primaryCat, categoryName: primaryCat,
                 serverID: server.id, seasons: [], episodeCount: 0
             )
         }
-        return (series, [VODCategory(id: "shows", name: "TV Shows", itemCount: raw.count)])
+        let cats = genreCounts.sorted { $0.key < $1.key }.map { VODCategory(id: $0.key, name: $0.key, itemCount: $0.value) }
+        return (series, cats.isEmpty ? [VODCategory(id: "shows", name: "TV Shows", itemCount: raw.count)] : cats)
     }
 
-    private static func dispatcharrSeriesDetail(seriesID: String, server: ServerConnection) async throws -> VODSeries? {
-        let api = DispatcharrAPI(baseURL: server.normalizedBaseURL, auth: .apiKey(server.apiKey))
+    private static func dispatcharrSeriesDetail(seriesID: String, server: ServerSnapshot) async throws -> VODSeries? {
+        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey))
         guard let sid = Int(seriesID) else { return nil }
         let episodes = try await api.getVODSeriesEpisodes(seriesID: sid)
-        let base = server.normalizedBaseURL
 
         var seasonMap: [Int: [VODEpisode]] = [:]
         for ep in episodes {
@@ -197,7 +250,8 @@ final class VODService {
                 title: ep.title,
                 seasonNumber: season, episodeNumber: ep.episodeNumber ?? 0,
                 plot: ep.plot ?? "", duration: "", posterURL: nil,
-                streamURL: URL(string: "\(base)/proxy/vod/episode/\(ep.uuid)/"),
+                streamURL: api.proxyEpisodeURL(uuid: ep.uuid,
+                                                  preferredStreamID: ep.streams?.first?.streamID),
                 containerExtension: "mp4", serverID: server.id
             )
             seasonMap[season, default: []].append(vodEp)

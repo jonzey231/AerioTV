@@ -2,36 +2,42 @@ import SwiftUI
 import SwiftData
 
 struct SettingsView: View {
+    #if os(tvOS)
+    @Binding var selectedTab: AppTab
+    #endif
     @Query private var servers: [ServerConnection]
-    @Query private var playlists: [M3UPlaylist]
-    @Query private var epgSources: [EPGSource]
     @Environment(\.modelContext) private var modelContext
     @State private var showAddServer = false
-    @State private var showAddPlaylist = false
-    @State private var showAddEPG = false
     @State private var serverToDelete: ServerConnection? = nil
     @State private var serverToEdit: ServerConnection? = nil
     @State private var showDeleteAlert = false
-    @State private var playlistToEdit: M3UPlaylist? = nil
-    @State private var playlistToDelete: M3UPlaylist? = nil
-    @State private var showPlaylistDeleteAlert = false
+    // Tracks whether the one-time swipe-hint peek has been shown.
+    @State private var copiedAbout = false
+    @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
+    @AppStorage("syncLastDate") private var syncLastDate: Double = 0
 
     var body: some View {
         NavigationStack {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
 
+                #if os(tvOS)
+                tvOSContent
+                // Note: .onExitCommand removed — it intercepted Menu button presses
+                // in sub-menus (Network, Appearance), preventing navigation back.
+                // tvOS TabView handles Menu→exit from the root settings page natively.
+                #else
                 List {
-                    // MARK: - Servers Section
+                    // MARK: - Playlists Section
                     Section {
                         if servers.isEmpty {
                             HStack {
                                 Spacer()
                                 VStack(spacing: 8) {
-                                    Image(systemName: "server.rack")
+                                    Image(systemName: "list.and.film")
                                         .font(.system(size: 28))
                                         .foregroundColor(.textTertiary)
-                                    Text("No servers added")
+                                    Text("No playlists added")
                                         .font(.bodyMedium)
                                         .foregroundColor(.textTertiary)
                                 }
@@ -42,18 +48,17 @@ struct SettingsView: View {
                         } else {
                             ForEach(servers) { server in
                                 NavigationLink(destination: ServerDetailView(server: server)) {
-                                    ServerListRow(server: server)
+                                    ServerListRow(server: server,
+                                                  onSetActive: { setActiveServer(server) })
                                 }
+                                #if os(iOS)
+                                .buttonStyle(PressableButtonStyle())
+                                #endif
                                 .listRowBackground(Color.cardBackground)
-                                .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                                    Button {
-                                        serverToEdit = server
-                                    } label: {
+                                .contextMenu {
+                                    Button { serverToEdit = server } label: {
                                         Label("Edit", systemImage: "pencil")
                                     }
-                                    .tint(.accentPrimary)
-                                }
-                                .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                     Button(role: .destructive) {
                                         serverToDelete = server
                                         showDeleteAlert = true
@@ -71,175 +76,184 @@ struct SettingsView: View {
                                 Image(systemName: "plus.circle.fill")
                                     .font(.system(size: 20))
                                     .foregroundStyle(LinearGradient.accentGradient)
-                                Text("Add Server")
+                                Text("Add Playlist")
                                     .font(.bodyMedium)
                                     .foregroundColor(.accentPrimary)
                             }
                         }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
                         .listRowBackground(Color.cardBackground)
 
                     } header: {
-                        Text("Servers")
+                        Text("Playlists")
                             .sectionHeaderStyle()
-                    }
-                    .listSectionSeparator(.hidden)
-
-                    // MARK: - Playlists Section
-                    Section {
-                        if playlists.isEmpty {
-                            HStack {
-                                Spacer()
-                                Text("No playlists added")
-                                    .font(.bodySmall)
+                    } footer: {
+                        if !servers.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Label("Tap ○ to set the active playlist", systemImage: "checkmark.circle")
+                                    #if os(tvOS)
+                                    .font(.system(size: 20, weight: .regular))
+                                    .foregroundColor(.textSecondary)
+                                    #else
+                                    .font(.labelSmall)
                                     .foregroundColor(.textTertiary)
-                                    .padding(.vertical, 12)
-                                Spacer()
-                            }
-                            .listRowBackground(Color.cardBackground)
-                        } else {
-                            ForEach(playlists) { playlist in
-                                PlaylistListRow(playlist: playlist)
-                                    .listRowBackground(Color.cardBackground)
-                                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                                        Button {
-                                            playlistToEdit = playlist
-                                        } label: {
-                                            Label("Edit", systemImage: "pencil")
-                                        }
-                                        .tint(.accentPrimary)
-                                    }
-                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                        Button(role: .destructive) {
-                                            playlistToDelete = playlist
-                                            showPlaylistDeleteAlert = true
-                                        } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                    }
-                            }
-                        }
-                        Button {
-                            showAddPlaylist = true
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 20))
-                                    .foregroundColor(.accentPrimary)
-                                Text("Import M3U Playlist")
-                                    .font(.bodyMedium)
-                                    .foregroundColor(.accentPrimary)
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    } header: {
-                        Text("M3U Playlists")
-                            .sectionHeaderStyle()
-                    }
-                    .listSectionSeparator(.hidden)
-
-                    // MARK: - EPG Sources Section
-                    Section {
-                        if epgSources.isEmpty {
-                            HStack {
-                                Spacer()
-                                Text("No EPG sources added")
-                                    .font(.bodySmall)
+                                    #endif
+                                Label("Long press to edit or delete", systemImage: "hand.tap")
+                                    #if os(tvOS)
+                                    .font(.system(size: 20, weight: .regular))
+                                    .foregroundColor(.textSecondary)
+                                    #else
+                                    .font(.labelSmall)
                                     .foregroundColor(.textTertiary)
-                                    .padding(.vertical, 12)
-                                Spacer()
+                                    #endif
                             }
-                            .listRowBackground(Color.cardBackground)
-                        } else {
-                            ForEach(epgSources) { source in
-                                EPGSourceListRow(source: source)
-                                    .listRowBackground(Color.cardBackground)
-                                    .swipeActions(edge: .trailing) {
-                                        Button(role: .destructive) {
-                                            modelContext.delete(source)
-                                            try? modelContext.save()
-                                        } label: {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                    }
-                            }
+                            .padding(.top, 4)
                         }
-                        Button {
-                            showAddEPG = true
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 20))
-                                    .foregroundColor(.accentSecondary)
-                                Text("Import EPG Guide")
-                                    .font(.bodyMedium)
-                                    .foregroundColor(.accentSecondary)
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    } header: {
-                        Text("EPG Guides")
-                            .sectionHeaderStyle()
                     }
+                    #if os(iOS)
                     .listSectionSeparator(.hidden)
+                    #endif
+
                     Section {
                         NavigationLink(destination: AppearanceSettingsView()) {
                             SettingsRow(icon: "paintbrush.fill", iconColor: .accentPrimary,
                                         title: "Appearance", subtitle: "Theme & display options")
                         }
-                        NavigationLink(destination: NotificationSettingsView()) {
-                            SettingsRow(icon: "bell.fill", iconColor: .statusLive,
-                                        title: "Notifications", subtitle: "Show reminders")
-                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
                         NavigationLink(destination: NetworkSettingsView()) {
                             SettingsRow(icon: "network", iconColor: .accentSecondary,
-                                        title: "Network", subtitle: "Timeout & retry settings")
+                                        title: "Network", subtitle: "Timeout, buffer, home WiFi & refresh")
                         }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
                     } header: {
                         Text("App Settings")
                             .sectionHeaderStyle()
                     }
                     .listRowBackground(Color.cardBackground)
+
+                    // MARK: - iCloud Sync
+                    Section {
+                        Toggle(isOn: $iCloudSyncEnabled) {
+                            SettingsRow(icon: "icloud.fill", iconColor: .accentPrimary,
+                                        title: "Sync Playlists via iCloud",
+                                        subtitle: "Share playlists across your Apple devices")
+                        }
+                        .tint(ThemeManager.shared.accent)
+                        .onChange(of: iCloudSyncEnabled) { _, enabled in
+                            SyncManager.shared.syncSettingChanged(enabled: enabled)
+                        }
+
+                        if iCloudSyncEnabled {
+                            Button {
+                                debugLog("🔵 Sync Now tapped")
+                                SyncManager.shared.pushServers(servers, immediate: true)
+                                SyncManager.shared.pushPreferencesImmediate()
+                            } label: {
+                                SettingsRow(icon: "arrow.triangle.2.circlepath.icloud",
+                                            iconColor: .accentPrimary,
+                                            title: "Sync Now",
+                                            subtitle: syncLastDate > 0
+                                                ? "Last synced \(lastSyncedString)"
+                                                : "Push playlists & preferences to iCloud now")
+                            }
+                            #if os(iOS)
+                            .buttonStyle(PressableButtonStyle())
+                            #else
+                            .buttonStyle(.plain)
+                            #endif
+                        }
+                    } header: {
+                        Text("Sync").sectionHeaderStyle()
+                    } footer: {
+                        Text("Your playlist configurations sync across all devices signed into the same Apple ID. Credentials are stored securely in iCloud Keychain.")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                    #if os(iOS)
                     .listSectionSeparator(.hidden)
+                    #endif
+
+                    // MARK: - Developer Section
+                    Section {
+                        NavigationLink(destination: DeveloperSettingsView()) {
+                            SettingsRow(icon: "ladybug.fill", iconColor: .accentSecondary,
+                                        title: "Developer",
+                                        subtitle: "Debug logging & diagnostics")
+                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
+                        .listRowBackground(Color.cardBackground)
+                    } header: {
+                        Text("Developer")
+                            .sectionHeaderStyle()
+                    }
+                    #if os(iOS)
+                    .listSectionSeparator(.hidden)
+                    #endif
 
                     // MARK: - About Section
                     Section {
-                        HStack {
-                            Text("Version")
-                                .font(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Spacer()
-                            Text("1.0.0")
-                                .font(.monoSmall)
-                                .foregroundColor(.textTertiary)
-                        }
-                        .listRowBackground(Color.cardBackground)
+                        infoRow("Device",          value: aboutDevice)
+                            .listRowBackground(Color.cardBackground)
+                        infoRow("System",          value: aboutSystem)
+                            .listRowBackground(Color.cardBackground)
+                        infoRow("App Version",     value: aboutVersion)
+                            .listRowBackground(Color.cardBackground)
+                        infoRow("First Installed", value: aboutInstallDate)
+                            .listRowBackground(Color.cardBackground)
+                        infoRow("Last Updated",    value: aboutUpdateDate)
+                            .listRowBackground(Color.cardBackground)
 
-                        Link(destination: URL(string: "https://github.com/Dispatcharr/Dispatcharr")!) {
-                            SettingsRow(icon: "arrow.up.right.square.fill", iconColor: .textSecondary,
-                                        title: "GitHub Repository", subtitle: "View source on GitHub")
+                        Button {
+                            #if os(iOS)
+                            UIPasteboard.general.string = aboutCopyText
+                            #endif
+                            copiedAbout = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                copiedAbout = false
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: copiedAbout ? "checkmark.circle.fill" : "doc.on.doc")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
+                                Text(copiedAbout ? "Copied!" : "Copy to Clipboard")
+                                    .font(.bodyMedium)
+                                    .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
+                                Spacer()
+                            }
                         }
-                        .listRowBackground(Color.cardBackground)
-
-                        Link(destination: URL(string: "https://discord.gg/Sp45V5BcxU")!) {
-                            SettingsRow(icon: "bubble.left.and.bubble.right.fill", iconColor: .accentPrimary,
-                                        title: "Discord Community", subtitle: "Get help & share feedback")
-                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
                         .listRowBackground(Color.cardBackground)
 
                     } header: {
                         Text("About")
                             .sectionHeaderStyle()
                     }
+                    #if os(iOS)
                     .listSectionSeparator(.hidden)
+                    #endif
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
+                #endif
             }
+            #if os(iOS)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.large)
+            #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
             .sheet(isPresented: $showAddServer) {
-                NavigationStack { AddServerView() }
+                NavigationStack { AddServerView(onSave: { _ in }) }
                     .overlay(alignment: .top) {
                         Capsule()
                             .fill(.ultraThinMaterial)
@@ -250,66 +264,455 @@ struct SettingsView: View {
                             .allowsHitTesting(false)
                     }
             }
-            .sheet(isPresented: $showAddPlaylist) {
-                M3UImportView()
-            }
-            .sheet(isPresented: $showAddEPG) {
-                EPGImportView()
-            }
-            .alert("Delete Server?", isPresented: $showDeleteAlert) {
+            .alert("Delete Playlist?", isPresented: $showDeleteAlert) {
                 Button("Delete", role: .destructive) {
                     if let server = serverToDelete {
+                        server.deleteCredentialsFromKeychain()
                         modelContext.delete(server)
                         try? modelContext.save()
+                        // Push updated list to iCloud (server removed)
+                        SyncManager.shared.pushServers(servers.filter { $0.id != server.id })
                     }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This will remove \"\(serverToDelete?.name ?? "this server")\" from the app. Your server data will not be affected.")
-            }
-            .alert("Delete Playlist?", isPresented: $showPlaylistDeleteAlert) {
-                Button("Delete", role: .destructive) {
-                    if let playlist = playlistToDelete {
-                        modelContext.delete(playlist)
-                        try? modelContext.save()
-                    }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Remove \"\(playlistToDelete?.name ?? "this playlist")\"? This cannot be undone.")
-            }
-            .sheet(item: $playlistToEdit) { playlist in
-                EditPlaylistSheet(playlist: playlist)
+                Text("This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
             }
             .sheet(item: $serverToEdit) { server in
                 EditServerSheet(server: server)
             }
         }
     }
+
+    // MARK: - Sync computed properties
+
+    /// Human-readable "X minutes ago" string for the last sync timestamp.
+    private var lastSyncedString: String {
+        guard syncLastDate > 0 else { return "" }
+        let interval = Date().timeIntervalSince1970 - syncLastDate
+        switch interval {
+        case ..<60:      return "just now"
+        case ..<3600:    return "\(Int(interval / 60))m ago"
+        case ..<86400:   return "\(Int(interval / 3600))h ago"
+        default:         return "\(Int(interval / 86400))d ago"
+        }
+    }
+
+    // MARK: - About computed properties
+
+    private var aboutDevice: String {
+#if canImport(UIKit)
+        return UIDevice.current.model
+#else
+        return "Mac"
+#endif
+    }
+
+    private var aboutSystem: String {
+#if canImport(UIKit)
+        return "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
+#else
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        return "macOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
+#endif
+    }
+
+    private var aboutVersion: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+        let build   = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+        return "\(version) (\(build))"
+    }
+
+    private var aboutInstallDate: String {
+        guard let docs  = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: docs.deletingLastPathComponent().path),
+              let date  = attrs[.creationDate] as? Date else { return "—" }
+        return date.formatted(date: .long, time: .omitted)
+    }
+
+    private var aboutUpdateDate: String {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: Bundle.main.bundlePath),
+              let date  = attrs[.modificationDate] as? Date else { return "—" }
+        return date.formatted(date: .long, time: .omitted)
+    }
+
+    private var aboutCopyText: String {
+        [
+            "Aerio \(aboutVersion)",
+            "Device: \(aboutDevice)",
+            "System: \(aboutSystem)",
+            "First Installed: \(aboutInstallDate)",
+            "Last Updated: \(aboutUpdateDate)"
+        ].joined(separator: "\n")
+    }
+
+    private func infoRow(_ label: String, value: String, isMonospaced: Bool = false) -> some View {
+        HStack {
+            Text(label)
+                .font(.bodyMedium)
+                .foregroundColor(.textSecondary)
+            Spacer()
+            Text(value)
+                .font(isMonospaced ? .monoSmall : .bodyMedium)
+                .foregroundColor(.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    // MARK: - Active Server
+
+    private func setActiveServer(_ server: ServerConnection) {
+        for s in servers { s.isActive = false }
+        server.isActive = true
+        try? modelContext.save()
+        SyncManager.shared.pushServers(servers)
+    }
+
+    // MARK: - tvOS Settings Layout
+
+    #if os(tvOS)
+    private var tvOSContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+
+                // MARK: Playlists
+                tvSettingsHeader("Playlists")
+                VStack(spacing: 8) {
+                    if servers.isEmpty {
+                        HStack {
+                            Spacer()
+                            VStack(spacing: 12) {
+                                Image(systemName: "list.and.film")
+                                    .font(.system(size: 36))
+                                    .foregroundColor(.textSecondary)
+                                Text("No playlists added")
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textSecondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(.vertical, 28)
+                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.cardBackground))
+                    } else {
+                        ForEach(servers) { server in
+                            TVSettingsNavRow(destination: ServerDetailView(server: server)) {
+                                ServerListRow(server: server,
+                                              onSetActive: { setActiveServer(server) })
+                            }
+                            .contextMenu {
+                                Button { serverToEdit = server } label: {
+                                    Label("Edit", systemImage: "pencil")
+                                }
+                                Button(role: .destructive) {
+                                    serverToDelete = server
+                                    showDeleteAlert = true
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                            }
+                        }
+                    }
+                    TVSettingsActionRow(icon: "plus.circle.fill",
+                                        label: "Add Playlist",
+                                        isAccent: true) {
+                        showAddServer = true
+                    }
+                }
+                if !servers.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Tap ○ to set the active playlist", systemImage: "checkmark.circle")
+                            .font(.system(size: 24, weight: .medium))
+                            .foregroundColor(.textPrimary.opacity(0.7))
+                        Label("Long press to edit or delete", systemImage: "hand.tap")
+                            .font(.system(size: 24, weight: .medium))
+                            .foregroundColor(.textPrimary.opacity(0.7))
+                    }
+                    .padding(.top, 12)
+                    .padding(.bottom, 6)
+                }
+
+                // MARK: App Settings
+                tvSettingsHeader("App Settings").padding(.top, 36)
+                VStack(spacing: 8) {
+                    TVSettingsNavRow(destination: AppearanceSettingsView()) {
+                        SettingsRow(icon: "paintbrush.fill", iconColor: .accentPrimary,
+                                    title: "Appearance", subtitle: "Theme & display options")
+                    }
+                    TVSettingsNavRow(destination: NetworkSettingsView()) {
+                        SettingsRow(icon: "network", iconColor: .accentSecondary,
+                                    title: "Network", subtitle: "Timeout, buffer, home WiFi & refresh")
+                    }
+                }
+
+                // MARK: Sync
+                tvSettingsHeader("Sync").padding(.top, 36)
+                VStack(spacing: 8) {
+                    TVSettingsToggleRow(
+                        icon: "icloud.fill",
+                        iconColor: .accentPrimary,
+                        title: "Sync Playlists via iCloud",
+                        subtitle: "Share playlists across your Apple devices",
+                        isOn: $iCloudSyncEnabled
+                    ) { enabled in
+                        SyncManager.shared.syncSettingChanged(enabled: enabled)
+                    }
+
+                    if iCloudSyncEnabled {
+                        TVSettingsActionRow(
+                            icon: "arrow.triangle.2.circlepath.icloud",
+                            label: syncLastDate > 0
+                                ? "Sync Now  ·  Last synced \(lastSyncedString)"
+                                : "Sync Now"
+                        ) {
+                            SyncManager.shared.pushServers(servers, immediate: true)
+                            SyncManager.shared.pushPreferencesImmediate()
+                        }
+                    }
+                }
+
+                // MARK: Developer
+                tvSettingsHeader("Developer").padding(.top, 36)
+                TVSettingsNavRow(destination: DeveloperSettingsView()) {
+                    SettingsRow(icon: "ladybug.fill", iconColor: .accentSecondary,
+                                title: "Developer", subtitle: "Debug logging & diagnostics")
+                }
+
+                // MARK: About
+                tvSettingsHeader("About").padding(.top, 36)
+                VStack(spacing: 0) {
+                    tvAboutRow("Device",          value: aboutDevice)
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutRow("System",          value: aboutSystem)
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutRow("App Version",     value: aboutVersion)
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutRow("First Installed", value: aboutInstallDate)
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutRow("Last Updated",    value: aboutUpdateDate)
+                }
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.cardBackground))
+                .padding(.bottom, 8)
+
+            }
+            .padding(.horizontal, 80)
+            .padding(.vertical, 40)
+        }
+    }
+
+    private func tvSettingsHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 30, weight: .semibold))
+            .foregroundColor(.textPrimary)
+            .padding(.bottom, 12)
+    }
+
+    private func tvAboutRow(_ label: String, value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 26, weight: .medium))
+                .foregroundColor(.textSecondary)
+            Spacer()
+            Text(value)
+                .font(.system(size: 26))
+                .foregroundColor(.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+    }
+    #endif
 }
+
+// MARK: - tvOS Settings Row Components
+
+#if os(tvOS)
+/// NavigationLink wrapper that shows the teal-tinted card highlight on focus
+/// instead of the system white row highlight.
+/// NavigationLink row with teal card highlight on focus.
+/// Uses .plain buttonStyle so the tvOS focus engine registers the link as focusable.
+private struct TVSettingsNavRow<Destination: View, Content: View>: View {
+    let destination: Destination
+    let content: Content
+    @FocusState private var isFocused: Bool
+
+    init(destination: Destination, @ViewBuilder content: () -> Content) {
+        self.destination = destination
+        self.content = content()
+    }
+
+    var body: some View {
+        NavigationLink(destination: destination) {
+            content
+                .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+                .background(tvSettingsCardBG(isFocused))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Plain action row (Add Playlist, Copy to Clipboard, etc.)
+/// with the same teal card highlight on focus.
+private struct TVSettingsActionRow: View {
+    let icon: String
+    let label: String
+    var isAccent: Bool = false
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                Image(systemName: icon)
+                    .font(.system(size: 26))
+                    .foregroundColor(isAccent ? .accentPrimary : .textSecondary)
+                Text(label)
+                    .font(.system(size: 26, weight: .medium))
+                    .foregroundColor(isAccent ? .accentPrimary : .textPrimary)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 6)
+            .background(tvSettingsCardBG(isFocused))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Toggle row for tvOS — renders as a Button that flips a Bool on select,
+/// showing an "On / Off" indicator. Consistent with TVGroupToggleRow in ManageGroupsSheet.
+private struct TVSettingsToggleRow: View {
+    let icon: String
+    let iconColor: Color
+    let title: String
+    let subtitle: String
+    @Binding var isOn: Bool
+    let onChange: (Bool) -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+            onChange(isOn)
+        } label: {
+            HStack(spacing: 0) {
+                SettingsRow(icon: icon, iconColor: iconColor, title: title, subtitle: subtitle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                // On/Off indicator — mirrors TVGroupToggleRow style
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(isOn ? iconColor : Color.textTertiary)
+                        .frame(width: 10, height: 10)
+                    Text(isOn ? "On" : "Off")
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundColor(isOn
+                            ? (isFocused ? .white : iconColor)
+                            : (isFocused ? .white : .textTertiary))
+                }
+                .padding(.leading, 16)
+            }
+            .frame(minHeight: 80)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 6)
+            .background(tvSettingsCardBG(isFocused))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Teal-tinted card background shared by all tvOS settings row components.
+private func tvSettingsCardBG(_ focused: Bool) -> some View {
+    RoundedRectangle(cornerRadius: 12, style: .continuous)
+        .fill(focused ? Color.accentPrimary.opacity(0.18) : Color.cardBackground)
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.accentPrimary.opacity(focused ? 0.65 : 0.10),
+                        lineWidth: focused ? 2.5 : 1)
+        }
+}
+#endif
 
 // MARK: - Server List Row
 struct ServerListRow: View {
     let server: ServerConnection
+    var onSetActive: (() -> Void)? = nil
+    #if os(iOS)
+    @ObservedObject private var networkMonitor = NetworkMonitor.shared
+    #endif
+
+    private var hasLANConfigured: Bool {
+        server.type != .m3uPlaylist && !server.localURL.isEmpty && !server.homeSSIDs.isEmpty
+    }
+
+    private var isOnLAN: Bool {
+        hasLANConfigured && server.effectiveBaseURL != server.normalizedBaseURL
+    }
+
+    #if os(tvOS)
+    private let checkmarkSize: CGFloat = 28
+    private let iconBoxSize: CGFloat = 48
+    private let iconFontSize: CGFloat = 22
+    private let statusDotSize: CGFloat = 12
+    #else
+    private let checkmarkSize: CGFloat = 22
+    private let iconBoxSize: CGFloat = 36
+    private let iconFontSize: CGFloat = 16
+    private let statusDotSize: CGFloat = 8
+    #endif
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
+            // Active server indicator — tapping sets this server as the active one
+            if let onSetActive {
+                Button(action: onSetActive) {
+                    Image(systemName: server.isActive ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: checkmarkSize))
+                        .foregroundColor(server.isActive ? .accentPrimary : .textTertiary)
+                }
+                #if os(tvOS)
+                .buttonStyle(TVNoHighlightButtonStyle())
+                #else
+                .buttonStyle(.plain)
+                #endif
+            }
+
             ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .fill(server.type.color.opacity(0.2))
-                    .frame(width: 36, height: 36)
+                    .frame(width: iconBoxSize, height: iconBoxSize)
                 Image(systemName: server.type.systemIcon)
-                    .font(.system(size: 16, weight: .medium))
+                    .font(.system(size: iconFontSize, weight: .medium))
                     .foregroundColor(server.type.color)
             }
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(server.name)
                     .font(.bodyMedium)
                     .foregroundColor(.textPrimary)
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     ServerTypeBadge(type: server.type)
-                    Text(server.normalizedBaseURL)
+                    if hasLANConfigured {
+                        LANWANBadge(isLAN: isOnLAN)
+                    }
+                    Text(server.effectiveBaseURL)
                         .font(.monoSmall)
                         .foregroundColor(.textTertiary)
                         .lineLimit(1)
@@ -321,9 +724,46 @@ struct ServerListRow: View {
 
             Circle()
                 .fill(server.isVerified ? Color.statusOnline : Color.textTertiary)
-                .frame(width: 8, height: 8)
+                .frame(width: statusDotSize, height: statusDotSize)
         }
+        #if os(tvOS)
+        .padding(.vertical, 16)
+        #else
         .padding(.vertical, 4)
+        #endif
+    }
+}
+
+// MARK: - LAN / WAN Badge
+struct LANWANBadge: View {
+    let isLAN: Bool
+
+    #if os(tvOS)
+    private let iconSize: CGFloat = 14
+    private let textSize: CGFloat = 16
+    private let hPad: CGFloat = 8
+    private let vPad: CGFloat = 4
+    #else
+    private let iconSize: CGFloat = 8
+    private let textSize: CGFloat = 9
+    private let hPad: CGFloat = 5
+    private let vPad: CGFloat = 2
+    #endif
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: isLAN ? "wifi" : "globe")
+                .font(.system(size: iconSize, weight: .semibold))
+            Text(isLAN ? "LAN" : "WAN")
+                .font(.system(size: textSize, weight: .bold))
+        }
+        .foregroundColor(isLAN ? .statusOnline : .accentSecondary)
+        .padding(.horizontal, hPad)
+        .padding(.vertical, vPad)
+        .background(
+            Capsule()
+                .fill(isLAN ? Color.statusOnline.opacity(0.15) : Color.accentSecondary.opacity(0.15))
+        )
     }
 }
 
@@ -334,18 +774,28 @@ struct SettingsRow: View {
     let title: String
     var subtitle: String? = nil
 
+    #if os(tvOS)
+    private let iconBoxSize: CGFloat = 48
+    private let iconFontSize: CGFloat = 22
+    private let cornerRadius: CGFloat = 10
+    #else
+    private let iconBoxSize: CGFloat = 32
+    private let iconFontSize: CGFloat = 14
+    private let cornerRadius: CGFloat = 7
+    #endif
+
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 14) {
             ZStack {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(iconColor.opacity(0.2))
-                    .frame(width: 32, height: 32)
+                    .frame(width: iconBoxSize, height: iconBoxSize)
                 Image(systemName: icon)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.system(size: iconFontSize, weight: .semibold))
                     .foregroundColor(iconColor)
             }
 
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.bodyMedium)
                     .foregroundColor(.textPrimary)
@@ -356,7 +806,11 @@ struct SettingsRow: View {
                 }
             }
         }
+        #if os(tvOS)
+        .padding(.vertical, 14)
+        #else
         .padding(.vertical, 2)
+        #endif
     }
 }
 
@@ -366,6 +820,18 @@ struct ServerDetailView: View {
     @State private var isTestingConnection = false
     @State private var connectionResult: String? = nil
     @State private var connectionSuccess = false
+    #if os(iOS)
+    @ObservedObject private var networkMonitor = NetworkMonitor.shared
+    @State private var ssidRefreshed = false
+    #endif
+
+    private var hasLANConfigured: Bool {
+        server.type != .m3uPlaylist && !server.localURL.isEmpty && !server.homeSSIDs.isEmpty
+    }
+
+    private var isOnLAN: Bool {
+        hasLANConfigured && server.effectiveBaseURL != server.normalizedBaseURL
+    }
 
     var body: some View {
         ZStack {
@@ -373,7 +839,7 @@ struct ServerDetailView: View {
             List {
                 Section {
                     infoRow("Type", value: server.type.displayName)
-                    infoRow("URL", value: server.normalizedBaseURL, isMonospaced: true)
+                    infoRow("Remote URL", value: server.normalizedBaseURL, isMonospaced: true)
                     if !server.username.isEmpty {
                         infoRow("Username", value: server.username)
                     }
@@ -385,6 +851,117 @@ struct ServerDetailView: View {
                     Text("Connection Details").sectionHeaderStyle()
                 }
                 .listRowBackground(Color.cardBackground)
+
+                if hasLANConfigured {
+                    Section {
+                        HStack {
+                            Text("Mode")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textSecondary)
+                            Spacer()
+                            LANWANBadge(isLAN: isOnLAN)
+                            Text(isOnLAN ? "Local (LAN)" : "Remote (WAN)")
+                                .font(.bodyMedium)
+                                .foregroundColor(isOnLAN ? .statusOnline : .accentSecondary)
+                        }
+                        .listRowBackground(Color.cardBackground)
+
+                        infoRow("Active URL", value: server.effectiveBaseURL, isMonospaced: true)
+
+                        // Detected SSID diagnostic row
+                        #if os(iOS)
+                        HStack {
+                            Text("Detected SSID")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textSecondary)
+                            Spacer()
+                            if let ssid = networkMonitor.currentSSID {
+                                Text(ssid)
+                                    .font(.monoSmall)
+                                    .foregroundColor(.textPrimary)
+                            } else {
+                                Text("Not detected")
+                                    .font(.labelSmall)
+                                    .foregroundColor(.statusWarning)
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                        #endif
+
+                        // Show all configured SSIDs, highlighting the matched one
+                        ForEach(server.homeSSIDs, id: \.self) { ssid in
+                            HStack {
+                                Text(ssid)
+                                    .font(.monoSmall)
+                                    .foregroundColor(.textPrimary)
+                                Spacer()
+                                if server.activeHomeSSID == ssid {
+                                    Label("Connected", systemImage: "checkmark.circle.fill")
+                                        .font(.labelSmall)
+                                        .foregroundColor(.statusOnline)
+                                } else {
+                                    Text("Not connected")
+                                        .font(.labelSmall)
+                                        .foregroundColor(.textTertiary)
+                                }
+                            }
+                            .listRowBackground(Color.cardBackground)
+                        }
+
+                        // Manual SSID refresh
+                        #if os(iOS)
+                        Button {
+                            ssidRefreshed = false
+                            NetworkMonitor.shared.refresh(force: true)
+                        } label: {
+                            HStack(spacing: 8) {
+                                if networkMonitor.isRefreshing {
+                                    ProgressView().tint(.accentPrimary).scaleEffect(0.8)
+                                } else {
+                                    Image(systemName: ssidRefreshed ? "checkmark.circle.fill" : "wifi.circle")
+                                        .foregroundColor(ssidRefreshed ? .statusOnline : .accentPrimary)
+                                }
+                                Text(networkMonitor.isRefreshing ? "Detecting…"
+                                     : ssidRefreshed ? "Up to date"
+                                     : "Refresh SSID Detection")
+                                    .foregroundColor(networkMonitor.isRefreshing ? .textSecondary
+                                                     : ssidRefreshed ? .statusOnline : .accentPrimary)
+                            }
+                        }
+                        .disabled(networkMonitor.isRefreshing)
+                        .listRowBackground(Color.cardBackground)
+                        .onChange(of: networkMonitor.isRefreshing) { _, nowRefreshing in
+                            if !nowRefreshing {
+                                ssidRefreshed = true
+                                Task {
+                                    try? await Task.sleep(for: .seconds(2))
+                                    ssidRefreshed = false
+                                }
+                            }
+                        }
+                        #endif
+                    } header: {
+                        Text("Active Connection").sectionHeaderStyle()
+                    } footer: {
+                        #if os(iOS)
+                        if networkMonitor.currentSSID == nil && networkMonitor.isOnWifi {
+                            // On WiFi but SSID is nil — entitlement is almost certainly missing.
+                            Text("⚠️ Wi-Fi detected but SSID is unknown. Add the \"Access WiFi Information\" capability in Xcode → Signing & Capabilities, and set the entitlements file in Build Settings → Code Signing Entitlements.")
+                                .font(.labelSmall)
+                                .foregroundColor(.statusWarning)
+                        } else if let matched = server.activeHomeSSID {
+                            Text("Connected to \"\(matched)\" — using local URL.")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                        } else {
+                            Text("Not on a configured home WiFi network — using remote URL.")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                        }
+                        #endif
+                    }
+                    .listRowBackground(Color.cardBackground)
+                }
 
                 Section {
                     Button {
@@ -417,12 +994,68 @@ struct ServerDetailView: View {
                     Text("Actions").sectionHeaderStyle()
                 }
             }
+            #if os(iOS)
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            #else
+            .listStyle(.plain)
+            #endif
         }
         .navigationTitle(server.name)
+        #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
+    }
+
+    // MARK: - About computed properties
+
+    private var aboutDevice: String {
+#if canImport(UIKit)
+        return UIDevice.current.model
+#else
+        return "Mac"
+#endif
+    }
+
+    private var aboutSystem: String {
+#if canImport(UIKit)
+        return "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
+#else
+        let v = ProcessInfo.processInfo.operatingSystemVersion
+        return "macOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
+#endif
+    }
+
+    private var aboutVersion: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
+        let build   = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+        return "\(version) (\(build))"
+    }
+
+    private var aboutInstallDate: String {
+        // The app sandbox container's creation date is set when the app is first installed.
+        guard let docs  = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              let attrs = try? FileManager.default.attributesOfItem(atPath: docs.deletingLastPathComponent().path),
+              let date  = attrs[.creationDate] as? Date else { return "—" }
+        return date.formatted(date: .long, time: .omitted)
+    }
+
+    private var aboutUpdateDate: String {
+        // The app bundle's modification date changes when the app is updated.
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: Bundle.main.bundlePath),
+              let date  = attrs[.modificationDate] as? Date else { return "—" }
+        return date.formatted(date: .long, time: .omitted)
+    }
+
+    private var aboutCopyText: String {
+        [
+            "Aerio \(aboutVersion)",
+            "Device: \(aboutDevice)",
+            "System: \(aboutSystem)",
+            "First Installed: \(aboutInstallDate)",
+            "Last Updated: \(aboutUpdateDate)"
+        ].joined(separator: "\n")
     }
 
     private func infoRow(_ label: String, value: String, isMonospaced: Bool = false) -> some View {
@@ -445,10 +1078,10 @@ struct ServerDetailView: View {
         do {
             switch server.type {
             case .xtreamCodes:
-                let api = XtreamCodesAPI(baseURL: server.normalizedBaseURL, username: server.username, password: server.password)
+                let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL, username: server.username, password: server.effectivePassword)
                 _ = try await api.verifyConnection()
             case .dispatcharrAPI:
-                let api = DispatcharrAPI(baseURL: server.normalizedBaseURL, auth: .apiKey(server.apiKey))
+                let api = DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(server.effectiveApiKey))
                 _ = try await api.verifyConnection()
             case .m3uPlaylist:
                 guard let url = URL(string: server.baseURL) else { throw APIError.invalidURL }
@@ -513,44 +1146,6 @@ struct PlaylistListRow: View {
     }
 }
 
-// MARK: - EPG Source List Row
-struct EPGSourceListRow: View {
-    let source: EPGSource
-
-    var body: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.accentSecondary.opacity(0.18))
-                    .frame(width: 36, height: 36)
-                Image(systemName: source.sourceType == .url ? "calendar.badge.clock" : "doc.text.fill")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.accentSecondary)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(source.name)
-                    .font(.bodyMedium)
-                    .foregroundColor(.textPrimary)
-                HStack(spacing: 6) {
-                    Text("\(source.programCount) programmes")
-                        .font(.labelSmall)
-                        .foregroundColor(.textSecondary)
-                    if let refreshed = source.lastRefreshed {
-                        Text("·")
-                            .foregroundColor(.textTertiary)
-                        Text(refreshed, style: .relative)
-                            .font(.labelSmall)
-                            .foregroundColor(.textTertiary)
-                    }
-                }
-            }
-
-            Spacer()
-        }
-        .padding(.vertical, 4)
-    }
-}
 // AppearanceSettingsView is defined in AppearanceSettingsView.swift
 
 // MARK: - Edit Playlist Sheet
@@ -586,10 +1181,14 @@ struct EditPlaylistSheet: View {
                         Text("Playlist Details").sectionHeaderStyle()
                     }
                 }
+                #if os(iOS)
                 .scrollContentBackground(.hidden)
+                #endif
             }
             .navigationTitle("Edit Playlist")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -617,6 +1216,7 @@ struct EditServerSheet: View {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
                 Form {
+                    // MARK: Connection
                     Section {
                         TextField("Name", text: $server.name)
                             .listRowBackground(Color.cardBackground)
@@ -626,9 +1226,10 @@ struct EditServerSheet: View {
                             .textInputAutocapitalization(.never)
                             .listRowBackground(Color.cardBackground)
                     } header: {
-                        Text("Server Details").sectionHeaderStyle()
+                        Text("Connection").sectionHeaderStyle()
                     }
 
+                    // MARK: Credentials (type-specific)
                     if server.type == .xtreamCodes {
                         Section {
                             TextField("Username", text: $server.username)
@@ -661,6 +1262,24 @@ struct EditServerSheet: View {
                         }
                     }
 
+                    // MARK: LAN / WAN (for network server types)
+                    if server.type != .m3uPlaylist {
+                        Section {
+                            TextField("Local URL", text: $server.localURL)
+                                .keyboardType(.URL)
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                                .listRowBackground(Color.cardBackground)
+                        } header: {
+                            Text("Local Network").sectionHeaderStyle()
+                        } footer: {
+                            Text("Used when connected to a home WiFi network. Add your home network SSIDs in Settings → Network → Home WiFi. Leave blank to always use the main URL.")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                        }
+                    }
+
+                    // MARK: Info
                     Section {
                         HStack {
                             Text("Type")
@@ -674,10 +1293,14 @@ struct EditServerSheet: View {
                         Text("Info").sectionHeaderStyle()
                     }
                 }
+                #if os(iOS)
                 .scrollContentBackground(.hidden)
+                #endif
             }
-            .navigationTitle("Edit Server")
+            .navigationTitle("Edit Playlist")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -685,70 +1308,75 @@ struct EditServerSheet: View {
                         .foregroundColor(.accentPrimary)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Save") { dismiss() }
-                        .foregroundColor(.accentPrimary)
-                        .fontWeight(.semibold)
-                        .disabled(server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
-                                  server.baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button("Save") {
+                        SyncManager.shared.saveCredentialsSynced(for: server)
+                        dismiss()
+                    }
+                    .foregroundColor(.accentPrimary)
+                    .fontWeight(.semibold)
+                    .disabled(server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
+                              server.baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
         }
     }
 }
 
-struct NotificationSettingsView: View {
-    @AppStorage("notificationsEnabled") private var notificationsEnabled = false
-    @AppStorage("programReminders") private var programReminders = false
-    @AppStorage("reminderMinutes") private var reminderMinutes = 15
-    
-    var body: some View {
-        ZStack {
-            Color.appBackground.ignoresSafeArea()
-            List {
-                Section {
-                    Toggle("Enable Notifications", isOn: $notificationsEnabled)
-                        .listRowBackground(Color.cardBackground)
-                    
-                    if notificationsEnabled {
-                        Toggle("Program Reminders", isOn: $programReminders)
-                            .listRowBackground(Color.cardBackground)
-                        
-                        if programReminders {
-                            Picker("Remind Me", selection: $reminderMinutes) {
-                                Text("5 minutes before").tag(5)
-                                Text("15 minutes before").tag(15)
-                                Text("30 minutes before").tag(30)
-                                Text("1 hour before").tag(60)
-                            }
-                            .listRowBackground(Color.cardBackground)
-                        }
-                    }
-                } header: {
-                    Text("Notifications").sectionHeaderStyle()
-                } footer: {
-                    Text("Get notified when your favorite programs are about to start")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                }
-            }
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-        }
-        .navigationTitle("Notifications")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
-    }
+
+// MARK: - Buffer size options
+private struct BufferOption: Identifiable {
+    let id: String
+    let label: String
+    let detail: String  // human-readable size
+    let cachingMs: Int  // VLC :network-caching value in milliseconds
 }
+private let bufferOptions: [BufferOption] = [
+    BufferOption(id: "small",   label: "Small",       detail: "300 ms — fast, stable networks",   cachingMs: 300),
+    BufferOption(id: "default", label: "Default",     detail: "1 second — recommended",           cachingMs: 1_000),
+    BufferOption(id: "large",   label: "Large",       detail: "3 seconds — unstable connections", cachingMs: 3_000),
+    BufferOption(id: "xlarge",  label: "Extra Large", detail: "8 seconds — very poor networks",   cachingMs: 8_000),
+]
+
 
 struct NetworkSettingsView: View {
-    @AppStorage("networkTimeout") private var networkTimeout = 15.0
-    @AppStorage("maxRetries") private var maxRetries = 3
-    @AppStorage("streamBufferSize") private var streamBufferSize = "default"
-    
+    @ObservedObject private var theme = ThemeManager.shared
+    #if os(iOS)
+    @ObservedObject private var networkMonitor = NetworkMonitor.shared
+    @State private var ssidEntries: [String] = []
+    @State private var ssidRefreshed = false
+    #endif
+    @AppStorage("networkTimeout")          private var networkTimeout      = 15.0
+    @AppStorage("maxRetries")              private var maxRetries          = 3
+    @AppStorage("streamBufferSize")        private var streamBufferSize    = "default"
+    @AppStorage("epgWindowHours")           private var epgWindowHours      = 36          // default 36 hours
+    @AppStorage("bgRefreshEnabled")        private var bgRefreshEnabled    = false
+    @AppStorage("bgRefreshType")           private var bgRefreshType       = "interval"  // "interval" or "time"
+    @AppStorage("bgRefreshIntervalMins")   private var bgRefreshInterval   = 1440        // 24 hours
+    @AppStorage("bgRefreshHour")           private var bgRefreshHour       = 8
+    @AppStorage("bgRefreshMinute")         private var bgRefreshMinute     = 0
+
+    // Converts stored hour/minute back to a Date for DatePicker binding
+    private var refreshTimeDateBinding: Binding<Date> {
+        Binding(
+            get: {
+                var comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+                comps.hour   = bgRefreshHour
+                comps.minute = bgRefreshMinute
+                return Calendar.current.date(from: comps) ?? Date()
+            },
+            set: { date in
+                let comps      = Calendar.current.dateComponents([.hour, .minute], from: date)
+                bgRefreshHour   = comps.hour   ?? 8
+                bgRefreshMinute = comps.minute ?? 0
+            }
+        )
+    }
+
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
             List {
+                // MARK: Connection
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -758,44 +1386,325 @@ struct NetworkSettingsView: View {
                             Spacer()
                             Text("\(Int(networkTimeout))s")
                                 .font(.monoSmall)
-                                .foregroundColor(.accentPrimary)
+                                .foregroundColor(theme.accent)
                         }
+                        #if os(iOS)
                         Slider(value: $networkTimeout, in: 5...60, step: 5)
-                            .tint(.accentPrimary)
+                            .tint(theme.accent)
+                        #endif
                     }
                     .listRowBackground(Color.cardBackground)
-                    
+
+                    #if os(iOS)
                     Stepper("Max Retries: \(maxRetries)", value: $maxRetries, in: 0...10)
                         .listRowBackground(Color.cardBackground)
+                    #endif
                 } header: {
                     Text("Connection").sectionHeaderStyle()
                 } footer: {
-                    Text("Adjust timeouts if you have a slow connection")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                    Text("Adjust timeouts if you have a slow connection.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
                 }
-                
+
+                // MARK: Buffer Size
                 Section {
-                    Picker("Buffer Size", selection: $streamBufferSize) {
-                        Text("Small").tag("small")
-                        Text("Default").tag("default")
-                        Text("Large").tag("large")
+                    ForEach(bufferOptions) { opt in
+                        Button {
+                            streamBufferSize = opt.id
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(opt.label)
+                                        .font(.bodyMedium)
+                                        .foregroundColor(.textPrimary)
+                                    Text(opt.detail)
+                                        .font(.labelSmall)
+                                        .foregroundColor(.textSecondary)
+                                }
+                                Spacer()
+                                if streamBufferSize == opt.id {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(theme.accent)
+                                }
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
+                } header: {
+                    Text("Buffer Size").sectionHeaderStyle()
+                } footer: {
+                    Text("Controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+
+                // MARK: EPG Window
+                Section {
+                    let options: [(label: String, hours: Int)] = [
+                        ("6 hours",  6),
+                        ("12 hours", 12),
+                        ("24 hours", 24),
+                        ("36 hours", 36),
+                        ("48 hours", 48),
+                        ("72 hours", 72),
+                        ("All available", 0),
+                    ]
+                    ForEach(options, id: \.hours) { opt in
+                        Button {
+                            epgWindowHours = opt.hours
+                        } label: {
+                            HStack {
+                                Text(opt.label)
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Spacer()
+                                if epgWindowHours == opt.hours {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(theme.accent)
+                                }
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
+                } header: {
+                    Text("EPG Window").sectionHeaderStyle()
+                } footer: {
+                    Text("How far ahead to download program guide data. Larger windows take longer to download but show more upcoming programs.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+
+                // MARK: Home WiFi (LAN Switching)
+                #if os(iOS)
+                Section {
+                    // Detected network status
+                    HStack {
+                        Text("Detected Network")
+                            .font(.bodyMedium)
+                            .foregroundColor(.textSecondary)
+                        Spacer()
+                        if networkMonitor.isRefreshing {
+                            ProgressView().tint(.accentPrimary).scaleEffect(0.8)
+                        } else if let ssid = networkMonitor.currentSSID {
+                            Label(ssid, systemImage: "wifi")
+                                .font(.monoSmall)
+                                .foregroundColor(.statusOnline)
+                        } else if networkMonitor.isOnWifi {
+                            Label("Unknown", systemImage: "wifi.exclamationmark")
+                                .font(.labelSmall)
+                                .foregroundColor(.statusWarning)
+                        } else {
+                            Text("Not on WiFi")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                        }
                     }
                     .listRowBackground(Color.cardBackground)
+
+                    // Refresh button
+                    Button {
+                        ssidRefreshed = false
+                        NetworkMonitor.shared.refresh(force: true)
+                    } label: {
+                        HStack(spacing: 8) {
+                            if networkMonitor.isRefreshing {
+                                ProgressView().tint(.accentPrimary).scaleEffect(0.8)
+                            } else {
+                                Image(systemName: ssidRefreshed ? "checkmark.circle.fill" : "wifi.circle")
+                                    .foregroundColor(ssidRefreshed ? .statusOnline : .accentPrimary)
+                            }
+                            Text(networkMonitor.isRefreshing ? "Detecting…"
+                                 : ssidRefreshed ? "Up to date"
+                                 : "Refresh Detection")
+                                .foregroundColor(networkMonitor.isRefreshing ? .textSecondary
+                                                 : ssidRefreshed ? .statusOnline : .accentPrimary)
+                        }
+                    }
+                    .disabled(networkMonitor.isRefreshing)
+                    .listRowBackground(Color.cardBackground)
+                    .onChange(of: networkMonitor.isRefreshing) { _, nowRefreshing in
+                        if !nowRefreshing {
+                            ssidRefreshed = true
+                            Task {
+                                try? await Task.sleep(for: .seconds(2))
+                                ssidRefreshed = false
+                            }
+                        }
+                    }
+
+                    // SSID list
+                    ForEach(ssidEntries.indices, id: \.self) { index in
+                        HStack(spacing: 10) {
+                            Image(systemName: !ssidEntries[index].isEmpty && networkMonitor.currentSSID == ssidEntries[index]
+                                  ? "checkmark.circle.fill" : "wifi")
+                                .foregroundColor(!ssidEntries[index].isEmpty && networkMonitor.currentSSID == ssidEntries[index]
+                                                 ? .statusOnline : .textTertiary)
+                                .font(.system(size: 16))
+                            TextField("Home WiFi SSID \(index + 1)", text: $ssidEntries[index])
+                                .autocorrectionDisabled()
+                                .textInputAutocapitalization(.never)
+                            if ssidEntries.count > 1 {
+                                Button {
+                                    ssidEntries.remove(at: index)
+                                } label: {
+                                    Image(systemName: "minus.circle.fill")
+                                        .foregroundColor(.red)
+                                        .font(.system(size: 20))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
+
+                    if ssidEntries.count < 5 {
+                        Button {
+                            ssidEntries.append("")
+                        } label: {
+                            Label("Add Network", systemImage: "plus.circle.fill")
+                                .foregroundColor(.accentPrimary)
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
                 } header: {
-                    Text("Streaming").sectionHeaderStyle()
+                    Text("Home WiFi (LAN Switching)").sectionHeaderStyle()
                 } footer: {
-                    Text("Larger buffers may improve playback on unstable connections")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
+                    if networkMonitor.isOnWifi && networkMonitor.currentSSID == nil {
+                        Text("⚠️ Wi-Fi detected but network name unavailable. Verify the \"Access WiFi Information\" capability is enabled in Xcode → Signing & Capabilities.")
+                            .font(.labelSmall).foregroundColor(.statusWarning)
+                    } else {
+                        Text("When connected to any of these networks, Aerio uses each server's local URL instead of its remote URL. Set each server's local URL in Settings → Playlists → [server] → Edit.")
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                    }
+                }
+                .onChange(of: ssidEntries) { _, new in
+                    UserDefaults.standard.set(
+                        new.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                           .filter { !$0.isEmpty }
+                           .joined(separator: ","),
+                        forKey: "globalHomeSSIDs"
+                    )
+                }
+                #endif
+
+                // MARK: Background Refresh
+                Section {
+                    Toggle(isOn: $bgRefreshEnabled) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "arrow.clockwise.circle.fill")
+                                .foregroundColor(theme.accent)
+                                .font(.system(size: 18))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Background Refresh")
+                                    .font(.bodyMedium).foregroundColor(.textPrimary)
+                                Text("Update EPG & playlists automatically")
+                                    .font(.labelSmall).foregroundColor(.textSecondary)
+                            }
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+
+                    if bgRefreshEnabled {
+                        // Refresh type picker
+                        Picker("Refresh by", selection: $bgRefreshType) {
+                            Text("Every…").tag("interval")
+                            Text("At time").tag("time")
+                        }
+                        .pickerStyle(.segmented)
+                        .listRowBackground(Color.cardBackground)
+
+                        if bgRefreshType == "interval" {
+                            // Interval picker
+                            let intervals: [(label: String, mins: Int)] = [
+                                ("15 minutes", 15), ("30 minutes", 30),
+                                ("1 hour", 60),     ("2 hours", 120),
+                                ("4 hours", 240),   ("8 hours", 480),
+                                ("12 hours", 720),  ("24 hours", 1440),
+                            ]
+                            ForEach(intervals, id: \.mins) { item in
+                                Button {
+                                    bgRefreshInterval = item.mins
+                                } label: {
+                                    HStack {
+                                        Text(item.label)
+                                            .font(.bodyMedium).foregroundColor(.textPrimary)
+                                        Spacer()
+                                        if bgRefreshInterval == item.mins {
+                                            Image(systemName: "checkmark")
+                                                .foregroundColor(theme.accent)
+                                                .font(.system(size: 14, weight: .semibold))
+                                        }
+                                    }
+                                }
+                                .listRowBackground(Color.cardBackground)
+                            }
+                        } else {
+                            // Specific time picker (12-hour format with AM/PM)
+                            #if os(iOS)
+                            DatePicker(
+                                "Refresh at",
+                                selection: refreshTimeDateBinding,
+                                displayedComponents: .hourAndMinute
+                            )
+                            .datePickerStyle(.graphical)
+                            .environment(\.locale, Locale(identifier: "en_US"))
+                            .tint(theme.accent)
+                            .foregroundColor(.textPrimary)
+                            .listRowBackground(Color.cardBackground)
+                            #endif
+                        }
+                    }
+                } header: {
+                    Text("Background Refresh").sectionHeaderStyle()
+                } footer: {
+                    if bgRefreshEnabled {
+                        let desc = bgRefreshType == "interval"
+                            ? "Refresh every \(intervalLabel(bgRefreshInterval))."
+                            : "Refresh daily at \(timeLabel(hour: bgRefreshHour, minute: bgRefreshMinute))."
+                        Text("\(desc) iOS may delay or skip background refreshes to preserve battery.")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    } else {
+                        Text("Automatically refresh channel lists and guide data while the app is in the background.")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
                 }
             }
+            #if os(iOS)
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            #else
+            .listStyle(.plain)
+            #endif
         }
         .navigationTitle("Network")
+        #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
+        #if os(iOS)
+        .task {
+            NetworkMonitor.shared.refresh(force: true)
+            let stored = UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? ""
+            let parsed = stored.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            ssidEntries = parsed.isEmpty ? [""] : parsed
+        }
+        #endif
+    }
+
+    private func intervalLabel(_ mins: Int) -> String {
+        if mins < 60 { return "\(mins) minutes" }
+        let h = mins / 60
+        return h == 1 ? "1 hour" : "\(h) hours"
+    }
+
+    private func timeLabel(hour: Int, minute: Int) -> String {
+        let h12 = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour)
+        let ampm = hour < 12 ? "AM" : "PM"
+        return String(format: "%d:%02d %@", h12, minute, ampm)
     }
 }
 

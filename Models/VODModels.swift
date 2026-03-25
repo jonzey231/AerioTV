@@ -30,7 +30,7 @@ struct VODMovie: Identifiable, Hashable {
 
     // Computed
     var displayRating: String {
-        guard !rating.isEmpty, let r = Double(rating) else { return "" }
+        guard !rating.isEmpty, let r = Double(rating), r > 0 else { return "" }
         return String(format: "%.1f", r)
     }
 
@@ -59,7 +59,7 @@ struct VODSeries: Identifiable, Hashable {
     let episodeCount: Int
 
     var displayRating: String {
-        guard !rating.isEmpty, let r = Double(rating) else { return "" }
+        guard !rating.isEmpty, let r = Double(rating), r > 0 else { return "" }
         return String(format: "%.1f", r)
     }
 

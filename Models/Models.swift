@@ -25,8 +25,8 @@ enum ServerType: String, Codable, CaseIterable {
 
     var color: Color {
         switch self {
-        case .m3uPlaylist: return .accentPrimary
-        case .xtreamCodes: return .xtreamColor
+        case .m3uPlaylist:    return .accentPrimary
+        case .xtreamCodes:    return .accentSecondary
         case .dispatcharrAPI: return .accentPrimary
         }
     }
@@ -65,6 +65,13 @@ final class ServerConnection {
     var createdAt: Date
     var lastConnected: Date?
     var isVerified: Bool
+    /// Local LAN URL used when connected to a home WiFi SSID (e.g. http://192.168.1.10:9191)
+    var localURL: String = ""
+    /// Local EPG/XMLTV URL used when connected to a home WiFi SSID (M3U only).
+    var localEPGURL: String = ""
+    /// Comma-separated list of home WiFi SSIDs (up to 5).
+    /// When connected to any of them, localURL is used instead of baseURL.
+    var homeSSID: String = ""
 
     init(
         name: String,
@@ -74,7 +81,10 @@ final class ServerConnection {
         password: String = "",
         apiKey: String = "",
         epgURL: String = "",
-        isActive: Bool = true
+        isActive: Bool = true,
+        localURL: String = "",
+        localEPGURL: String = "",
+        homeSSID: String = ""
     ) {
         self.id = UUID()
         self.name = name
@@ -85,6 +95,9 @@ final class ServerConnection {
         self.apiKey = apiKey
         self.epgURL = epgURL
         self.isActive = isActive
+        self.localURL = localURL
+        self.localEPGURL = localEPGURL
+        self.homeSSID = homeSSID
         self.sortOrder = 0
         self.createdAt = Date()
         self.isVerified = false
@@ -92,10 +105,106 @@ final class ServerConnection {
 
     var supportsVOD: Bool { type.supportsVOD }
 
+    // MARK: - Keychain-backed credentials
+
+    /// The effective password: reads from local Keychain first, then iCloud
+    /// Keychain (synchronizable), then falls back to the SwiftData field.
+    var effectivePassword: String {
+        let key = "password_\(id.uuidString)"
+        return KeychainHelper.load(key: key)
+            ?? KeychainHelper.load(key: key, synchronizable: true)
+            ?? password
+    }
+
+    /// The effective API key: reads from local Keychain first, then iCloud
+    /// Keychain (synchronizable), then falls back to the SwiftData field.
+    var effectiveApiKey: String {
+        let key = "apiKey_\(id.uuidString)"
+        return KeychainHelper.load(key: key)
+            ?? KeychainHelper.load(key: key, synchronizable: true)
+            ?? apiKey
+    }
+
+    /// Persists `password` and `apiKey` to the Keychain, then clears the plaintext
+    /// values from the SwiftData store.  Call this after inserting or editing a server.
+    func saveCredentialsToKeychain() {
+        let pw  = password
+        let key = apiKey
+        if !pw.isEmpty {
+            KeychainHelper.save(pw, for: "password_\(id.uuidString)")
+            password = ""
+        }
+        if !key.isEmpty {
+            KeychainHelper.save(key, for: "apiKey_\(id.uuidString)")
+            apiKey = ""
+        }
+    }
+
+    /// Removes this server's credentials from both local and iCloud Keychain.
+    /// Call when deleting a server so keys don't linger.
+    func deleteCredentialsFromKeychain() {
+        KeychainHelper.delete("password_\(id.uuidString)")
+        KeychainHelper.delete("apiKey_\(id.uuidString)")
+        KeychainHelper.delete("password_\(id.uuidString)", synchronizable: true)
+        KeychainHelper.delete("apiKey_\(id.uuidString)", synchronizable: true)
+    }
+
+    /// Auth headers for API requests. Dispatcharr servers include ApiKey + X-API-Key;
+    /// all other types just include Accept. Centralised here to avoid duplication.
+    var authHeaders: [String: String] {
+        switch type {
+        case .dispatcharrAPI:
+            let key = effectiveApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ["Authorization": "ApiKey \(key)", "X-API-Key": key, "Accept": "*/*"]
+        default:
+            return ["Accept": "*/*"]
+        }
+    }
+
     var normalizedBaseURL: String {
         var url = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if url.hasSuffix("/") { url = String(url.dropLast()) }
         return url
+    }
+
+    /// Global home WiFi SSIDs configured in Settings → Network.
+    /// Shared across all servers — stored in UserDefaults under "globalHomeSSIDs".
+    var homeSSIDs: [String] {
+        (UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? "")
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Returns localURL (normalized) when connected to any configured home WiFi SSID,
+    /// otherwise returns normalizedBaseURL.
+    /// Uses the SSID cached in UserDefaults by NetworkMonitor — no async needed.
+    var effectiveBaseURL: String {
+        guard !localURL.isEmpty else { return normalizedBaseURL }
+        let ssids = homeSSIDs
+        guard !ssids.isEmpty else { return normalizedBaseURL }
+        let currentSSID = UserDefaults.standard.string(forKey: "cachedCurrentSSID") ?? ""
+        guard !currentSSID.isEmpty, ssids.contains(currentSSID) else { return normalizedBaseURL }
+        var url = localURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if url.hasSuffix("/") { url = String(url.dropLast()) }
+        if !url.hasPrefix("http://") && !url.hasPrefix("https://") { url = "http://" + url }
+        return url
+    }
+
+    /// Returns localEPGURL when on a home WiFi SSID, otherwise returns epgURL.
+    var effectiveEPGURL: String {
+        guard !localEPGURL.isEmpty else { return epgURL }
+        let ssids = homeSSIDs
+        guard !ssids.isEmpty else { return epgURL }
+        let currentSSID = UserDefaults.standard.string(forKey: "cachedCurrentSSID") ?? ""
+        guard !currentSSID.isEmpty, ssids.contains(currentSSID) else { return epgURL }
+        return localEPGURL
+    }
+
+    /// The matched home SSID currently in use, if on LAN.
+    var activeHomeSSID: String? {
+        let current = UserDefaults.standard.string(forKey: "cachedCurrentSSID") ?? ""
+        return homeSSIDs.first(where: { $0 == current })
     }
 
     var isHTTPS: Bool {
@@ -176,9 +285,14 @@ final class EPGProgram {
     var endTime: Date
     var category: String
     var posterURL: String
+    /// Identifies which server this EPG data belongs to (scopes cache per server).
+    var serverID: String
+    /// When this entry was fetched from the network (for staleness checks).
+    var fetchedAt: Date
 
     init(channelID: String, title: String, description: String = "",
-         startTime: Date, endTime: Date, category: String = "", posterURL: String = "") {
+         startTime: Date, endTime: Date, category: String = "", posterURL: String = "",
+         serverID: String = "", fetchedAt: Date = Date()) {
         self.id = UUID()
         self.channelID = channelID
         self.title = title
@@ -187,6 +301,8 @@ final class EPGProgram {
         self.endTime = endTime
         self.category = category
         self.posterURL = posterURL
+        self.serverID = serverID
+        self.fetchedAt = fetchedAt
     }
 
     var isLive: Bool {

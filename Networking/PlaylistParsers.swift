@@ -57,6 +57,9 @@ struct M3UParser {
         return channels
     }
 
+    // Compiled once — reused for every #EXTINF line (thousands of times for large playlists).
+    private static let attrRegex = try! NSRegularExpression(pattern: #"([\w-]+)="([^"]*)""#)
+
     static func parseExtINF(_ line: String) -> [String: String] {
         var result: [String: String] = [:]
 
@@ -66,25 +69,25 @@ struct M3UParser {
             result["name"] = name
         }
 
-        let attrPattern = #"([\w-]+)="([^"]*)""#
-        if let regex = try? NSRegularExpression(pattern: attrPattern) {
-            let nsLine = line as NSString
-            let matches = regex.matches(in: line, range: NSRange(line.startIndex..., in: line))
-            for match in matches {
-                if match.numberOfRanges == 3 {
-                    let key = nsLine.substring(with: match.range(at: 1)).lowercased()
-                    let value = nsLine.substring(with: match.range(at: 2))
-                    result[key] = value
-                }
+        let nsLine = line as NSString
+        let matches = attrRegex.matches(in: line, range: NSRange(line.startIndex..., in: line))
+        for match in matches {
+            if match.numberOfRanges == 3 {
+                let key = nsLine.substring(with: match.range(at: 1)).lowercased()
+                let value = nsLine.substring(with: match.range(at: 2))
+                result[key] = value
             }
         }
         return result
     }
 
-    static func fetchAndParse(url: URL) async throws -> [M3UChannel] {
+    private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
-        let session = URLSession(configuration: config)
+        return URLSession(configuration: config)
+    }()
+
+    static func fetchAndParse(url: URL) async throws -> [M3UChannel] {
         let (data, response) = try await session.data(from: url)
         guard let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode) else {
@@ -196,14 +199,23 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
         }
     }
 
+    private static let xmltvFmtTZ: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMddHHmmss Z"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+    private static let xmltvFmtUTC: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMddHHmmss"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(abbreviation: "UTC")
+        return f
+    }()
+
     private func parseXMLTVDate(_ str: String) -> Date? {
         let s = str.trimmingCharacters(in: .whitespaces)
-        let f1 = DateFormatter()
-        f1.dateFormat = "yyyyMMddHHmmss Z"
-        if let d = f1.date(from: s) { return d }
-        let f2 = DateFormatter()
-        f2.dateFormat = "yyyyMMddHHmmss"
-        f2.timeZone = TimeZone(abbreviation: "UTC")
-        return f2.date(from: s)
+        if let d = Self.xmltvFmtTZ.date(from: s) { return d }
+        return Self.xmltvFmtUTC.date(from: s)
     }
 }

@@ -14,6 +14,13 @@ enum SearchResult: Identifiable {
     case vod(VODDisplayItem)
     case epg(EPGProgram)
 
+    private static let shortTimeFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
     var id: String {
         switch self {
         case .vod(let item): return "vod-\(item.id)"
@@ -37,10 +44,7 @@ enum SearchResult: Identifiable {
             case .episode: return "Episode"
             }
         case .epg(let prog):
-            let fmt = DateFormatter()
-            fmt.dateStyle = .none
-            fmt.timeStyle = .short
-            let time = fmt.string(from: prog.startTime)
+            let time = Self.shortTimeFmt.string(from: prog.startTime)
             return prog.isLive ? "LIVE · \(time)" : time
         }
     }
@@ -103,7 +107,9 @@ struct SearchView: View {
                 }
             }
             .navigationTitle("Search")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -111,7 +117,11 @@ struct SearchView: View {
                         .foregroundColor(theme.accent)
                 }
             }
+            #if os(iOS)
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search movies, shows, programs...")
+            #else
+            .searchable(text: $query, prompt: "Search movies, shows, programs...")
+            #endif
             .onChange(of: query) { _, newValue in
                 scheduleSearch(newValue)
             }
@@ -144,7 +154,11 @@ struct SearchView: View {
                                     : AnyView(Capsule().fill(Color.elevatedBackground))
                             )
                     }
+                    #if os(tvOS)
+                    .buttonStyle(TVNoHighlightButtonStyle())
+                    #else
                     .buttonStyle(.plain)
+                    #endif
                 }
             }
             .padding(.horizontal, 16)
@@ -157,11 +171,15 @@ struct SearchView: View {
             resultRow(result)
                 .listRowBackground(Color.cardBackground)
                 .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                #if os(iOS)
                 .listRowSeparator(.hidden)
+                #endif
         }
         .listStyle(.plain)
         .background(Color.appBackground)
+        #if os(iOS)
         .scrollContentBackground(.hidden)
+        #endif
     }
 
     private func resultRow(_ result: SearchResult) -> some View {
@@ -210,7 +228,11 @@ struct SearchView: View {
             .background(Color.cardBackground)
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
+        #if os(tvOS)
+        .buttonStyle(TVNoHighlightButtonStyle())
+        #else
         .buttonStyle(.plain)
+        #endif
     }
 
     // MARK: - Placeholder Views
@@ -306,12 +328,12 @@ struct SearchView: View {
         let vodServers = servers.filter({ $0.supportsVOD })
         for server in vodServers {
             if vodCache[server.id] == nil {
-                nonisolated(unsafe) let serverRef = server
+                let snap = server.snapshot
                 var items: [VODDisplayItem] = []
-                if let (movies, _) = try? await VODService.fetchMovies(from: serverRef) {
+                if let (movies, _) = try? await VODService.fetchMovies(from: snap) {
                     items += movies.map { VODDisplayItem(movie: $0) }
                 }
-                if let (series, _) = try? await VODService.fetchSeries(from: serverRef) {
+                if let (series, _) = try? await VODService.fetchSeries(from: snap) {
                     items += series.map { VODDisplayItem(series: $0) }
                 }
                 vodCache[server.id] = items

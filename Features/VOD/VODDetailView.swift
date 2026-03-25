@@ -10,10 +10,11 @@ struct VODDetailView: View {
     @State private var fullMovie: VODMovie?
     @State private var fullSeries: VODSeries?
     @State private var selectedSeason: Int = 0
-    @State private var playingURL: URL?
+    @State private var playingURL: IdentifiableURL?
     @State private var playingTitle = ""
     @State private var playingHeaders: [String: String] = [:]
     @State private var isLoadingDetail = false
+    @State private var isResolvingURL = false
     @Binding var isPlaying: Bool
 
     private var server: ServerConnection? {
@@ -33,14 +34,18 @@ struct VODDetailView: View {
                 }
             }
         }
+        #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         .task { await loadDetail() }
-        .fullScreenCover(item: $playingURL) { url in
+        .fullScreenCover(item: $playingURL) { wrapper in
             PlayerView(
-                urls: [url],
+                urls: [wrapper.url],
                 title: playingTitle,
-                headers: playingHeaders
+                headers: playingHeaders,
+                isLive: false,
+                artworkURL: item.posterURL
             )
             .onDisappear { isPlaying = false }
         }
@@ -50,32 +55,20 @@ struct VODDetailView: View {
     private var heroSection: some View {
         ZStack(alignment: .bottomLeading) {
             // Backdrop or poster as hero
-            AsyncImage(url: (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL) { phase in
-                switch phase {
-                case .success(let img):
-                    img.resizable().aspectRatio(contentMode: .fill)
-                default:
-                    Rectangle().fill(Color.cardBackground)
-                }
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 280)
-            .clipped()
-            .overlay(LinearGradient.heroOverlay)
+            let heroURL = (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL
+            AuthPosterImage(url: heroURL, headers: serverHeaders())
+                .aspectRatio(contentMode: .fill)
+                .frame(maxWidth: .infinity)
+                .frame(height: 280)
+                .clipped()
+                .overlay(LinearGradient.heroOverlay)
 
             HStack(alignment: .bottom, spacing: 14) {
                 // Small poster thumbnail
-                AsyncImage(url: item.posterURL) { phase in
-                    if case .success(let img) = phase {
-                        img.resizable().aspectRatio(contentMode: .fill)
-                            .frame(width: 80, height: 120)
-                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    } else {
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Color.cardBackground)
-                            .frame(width: 80, height: 120)
-                    }
-                }
+                AuthPosterImage(url: item.posterURL, headers: serverHeaders())
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 80, height: 120)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text(item.name)
@@ -167,7 +160,11 @@ struct VODDetailView: View {
                                                 : AnyView(Capsule().fill(Color.elevatedBackground))
                                         )
                                 }
+                                #if os(tvOS)
+                                .buttonStyle(TVNoHighlightButtonStyle())
+                                #else
                                 .buttonStyle(.plain)
+                                #endif
                             }
                         }
                         .padding(.horizontal, 16)
@@ -187,85 +184,49 @@ struct VODDetailView: View {
     }
 
     private func episodeRow(_ ep: VODEpisode) -> some View {
-        Button {
+        TVEpisodeRowButton(ep: ep, headers: serverHeaders()) {
             if let url = ep.streamURL {
                 playEpisode(url: url, title: ep.title)
             }
-        } label: {
-            HStack(spacing: 14) {
-                // Thumbnail
-                AsyncImage(url: ep.posterURL) { phase in
-                    if case .success(let img) = phase {
-                        img.resizable().aspectRatio(contentMode: .fill)
-                            .frame(width: 96, height: 54)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    } else {
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(Color.cardBackground)
-                            .frame(width: 96, height: 54)
-                            .overlay(Image(systemName: "play.tv.fill").foregroundColor(.textTertiary))
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("E\(ep.episodeNumber) · \(ep.title)")
-                        .font(.bodyMedium).foregroundColor(.textPrimary)
-                        .lineLimit(1)
-                    if !ep.plot.isEmpty {
-                        Text(ep.plot)
-                            .font(.labelSmall).foregroundColor(.textSecondary)
-                            .lineLimit(2)
-                    }
-                }
-
-                Spacer()
-
-                Image(systemName: "play.circle.fill")
-                    .font(.system(size: 22))
-                    .foregroundColor(.accentPrimary.opacity(0.7))
-            }
-            .padding(.horizontal, 16).padding(.vertical, 10)
         }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Helpers
 
     private func playButton(url: URL?, title: String) -> some View {
-        Button {
-            guard let url else { return }
-            playingURL = url
-            playingTitle = title
-            playingHeaders = serverHeaders()
-            isPlaying = true
-        } label: {
-            HStack(spacing: 6) {
-                Image(systemName: "play.fill")
-                Text("Play")
-            }
-            .font(.headlineSmall)
-            .foregroundColor(.white)
-            .padding(.horizontal, 20).padding(.vertical, 8)
-            .background(LinearGradient.accentGradient)
-            .clipShape(Capsule())
+        TVPlayButton(isResolvingURL: isResolvingURL) {
+            guard let url, !isResolvingURL else { return }
+            Task { await resolveAndLaunch(url: url, title: title) }
         }
-        .buttonStyle(.plain)
     }
 
     private func playEpisode(url: URL, title: String) {
-        playingURL = url
+        Task { await resolveAndLaunch(url: url, title: title) }
+    }
+
+    /// Resolves any redirects in the proxy URL with auth headers before handing off to VLC.
+    /// Dispatcharr's /proxy/vod/* endpoints often redirect to a session-based or provider URL.
+    /// VLC follows redirects but can drop custom headers; resolving first avoids that.
+    @MainActor
+    private func resolveAndLaunch(url: URL, title: String) async {
         playingTitle = title
         playingHeaders = serverHeaders()
+
+        var resolvedURL = url
+        if let server, server.type == .dispatcharrAPI {
+            isResolvingURL = true
+            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(server.effectiveApiKey))
+            resolvedURL = (try? await api.resolveFinalURLForPlayback(url)) ?? url
+            isResolvingURL = false
+        }
+
+        playingURL = IdentifiableURL(url: resolvedURL)
         isPlaying = true
     }
 
     private func serverHeaders() -> [String: String] {
         guard let server else { return [:] }
-        if server.type == .dispatcharrAPI {
-            let key = server.apiKey
-            return ["Authorization": "ApiKey \(key)", "X-API-Key": key, "Accept": "*/*"]
-        }
-        return ["Accept": "*/*"]
+        return server.authHeaders
     }
 
     private func metaRow(label: String, value: String) -> some View {
@@ -289,8 +250,8 @@ struct VODDetailView: View {
             guard fullSeries == nil else { return }
             isLoadingDetail = true
             defer { isLoadingDetail = false }
-            nonisolated(unsafe) let serverRef = server
-            fullSeries = try? await VODService.fetchSeriesDetail(seriesID: item.id, from: serverRef)
+            let snap = server.snapshot
+            fullSeries = try? await VODService.fetchSeriesDetail(seriesID: item.id, from: snap)
             if let idx = fullSeries?.seasons.indices.first {
                 selectedSeason = idx
             }
@@ -300,7 +261,114 @@ struct VODDetailView: View {
     }
 }
 
-// MARK: - URL Identifiable wrapper
-extension URL: @retroactive Identifiable {
-    public var id: String { absoluteString }
+// MARK: - Episode Row with tvOS Focus
+
+/// Extracted into its own view so it can own a @FocusState for per-row focus highlighting.
+private struct TVEpisodeRowButton: View {
+    let ep: VODEpisode
+    let headers: [String: String]
+    let action: () -> Void
+
+    #if os(tvOS)
+    @FocusState private var isFocused: Bool
+    #endif
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                AuthPosterImage(url: ep.posterURL, headers: headers)
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 96, height: 54)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("E\(ep.episodeNumber) · \(ep.title)")
+                        .font(.bodyMedium).foregroundColor(.textPrimary)
+                        .lineLimit(1)
+                    if !ep.plot.isEmpty {
+                        Text(ep.plot)
+                            .font(.labelSmall).foregroundColor(.textSecondary)
+                            .lineLimit(2)
+                    }
+                }
+
+                Spacer()
+
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 22))
+                    .foregroundColor(.accentPrimary.opacity(0.7))
+            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            #if os(tvOS)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isFocused ? Color.elevatedBackground : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(isFocused ? Color.accentPrimary : .clear, lineWidth: 2)
+            )
+            .scaleEffect(isFocused ? 1.02 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+            #endif
+        }
+        #if os(tvOS)
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        #else
+        .buttonStyle(.plain)
+        #endif
+    }
+}
+
+// MARK: - Play Button with tvOS Focus
+
+/// Extracted so it can own a @FocusState for clear focus highlighting on the Play CTA.
+private struct TVPlayButton: View {
+    let isResolvingURL: Bool
+    let action: () -> Void
+
+    #if os(tvOS)
+    @FocusState private var isFocused: Bool
+    #endif
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if isResolvingURL {
+                    ProgressView().tint(.white).scaleEffect(0.8)
+                } else {
+                    Image(systemName: "play.fill")
+                }
+                Text(isResolvingURL ? "Loading…" : "Play")
+            }
+            .font(.headlineSmall)
+            .foregroundColor(.white)
+            .padding(.horizontal, 20).padding(.vertical, 8)
+            .background(LinearGradient.accentGradient)
+            .clipShape(Capsule())
+            #if os(tvOS)
+            .overlay(
+                Capsule()
+                    .stroke(isFocused ? Color.white : .clear, lineWidth: 2.5)
+            )
+            .shadow(color: isFocused ? Color.accentPrimary.opacity(0.6) : .clear, radius: 10, y: 4)
+            .scaleEffect(isFocused ? 1.08 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+            #endif
+        }
+        #if os(tvOS)
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        #else
+        .buttonStyle(.plain)
+        #endif
+        .disabled(isResolvingURL)
+    }
+}
+
+// MARK: - Identifiable URL wrapper (avoids global retroactive conformance on URL)
+struct IdentifiableURL: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
 }

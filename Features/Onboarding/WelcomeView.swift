@@ -2,6 +2,8 @@ import SwiftUI
 
 struct WelcomeView: View {
     @Binding var hasCompletedOnboarding: Bool
+    @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
+    @ObservedObject private var syncManager = SyncManager.shared
 
     var body: some View {
         ZStack {
@@ -23,140 +25,533 @@ struct WelcomeView: View {
             }
             .ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                Spacer()
-
-                // Logo / Icon
-                ZStack {
-                    Circle()
-                        .fill(LinearGradient.accentGradient)
+            #if os(tvOS)
+            // tvOS: single centred column, max width so it breathes on a large display
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    // Branding
+                    Image("AerioLogo")
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
                         .frame(width: 90, height: 90)
-                    Image(systemName: "antenna.radiowaves.left.and.right")
-                        .font(.system(size: 38, weight: .semibold))
-                        .foregroundColor(.white)
-                }
-                .shadow(color: Color.accentPrimary.opacity(0.4), radius: 20, y: 8)
-                .padding(.bottom, 32)
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        .shadow(color: Color(hex: "1AC4D8").opacity(0.5), radius: 28, y: 8)
+                        .padding(.bottom, 24)
+                        .padding(.top, 60)
 
-                // Title
-                VStack(spacing: 6) {
-                    Text("Dispatcharr")
-                        .font(.displayLarge)
+                    Text("Aerio")
+                        .font(.system(size: 60, weight: .bold))
                         .foregroundColor(.textPrimary)
                     Text("Your IPTV & Media Hub")
-                        .font(.bodyLarge)
+                        .font(.system(size: 28, weight: .medium))
                         .foregroundColor(.textSecondary)
-                    Text("iPhone, iPad, Apple TV, & Mac")
-                        .font(.bodySmall)
+                        .padding(.bottom, 6)
+                    Text("iPhone · iPad · Apple TV · Mac")
+                        .font(.system(size: 20))
                         .foregroundColor(.textTertiary)
-                }
-                .padding(.bottom, 48)
+                        .padding(.bottom, 40)
 
-                // Feature Pills
-                VStack(spacing: 12) {
-                    FeaturePill(icon: "key.fill",
-                                title: "Dispatcharr API",
-                                detail: "Dispatcharr native API — connect with a personal API key")
-                    FeaturePill(icon: "tv.and.hifispeaker.fill",
-                                title: "Xtream Codes",
-                                detail: "Live TV + VOD with any Xtream provider")
-                    FeaturePill(icon: "doc.text.fill",
-                                title: "M3U + EPG",
-                                detail: "Any M3U playlist URL or file")
-                }
-                .padding(.horizontal, 32)
-                .padding(.bottom, 56)
-
-                Spacer()
-
-                // CTA
-                VStack(spacing: 12) {
-                    NavigationLink(destination: AddServerView()) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "server.rack")
-                                .font(.system(size: 16, weight: .semibold))
-                            Text("Connect a Server")
-                                .font(.headlineMedium)
-                        }
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 54)
-                        .background(LinearGradient.accentGradient)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    // Feature rows
+                    VStack(spacing: 10) {
+                        TVFeatureRow(icon: "key.fill",
+                                     title: "Dispatcharr API",
+                                     detail: "URL + API key")
+                        TVFeatureRow(icon: "tv.and.hifispeaker.fill",
+                                     title: "Xtream Codes",
+                                     detail: "URL + user + password")
+                        TVFeatureRow(icon: "doc.text.fill",
+                                     title: "M3U & EPG",
+                                     detail: "M3U & EPG URLs")
                     }
-                    .buttonStyle(.plain)
+                    .padding(.bottom, 32)
 
-                    NavigationLink(destination: M3UImportView()) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "list.bullet.rectangle.fill")
-                                .font(.system(size: 16, weight: .semibold))
-                            Text("Import M3U Playlist")
-                                .font(.headlineMedium)
+                    // iCloud Sync / Import
+                    TVOnboardingImportButton(
+                        isEnabled: iCloudSyncEnabled,
+                        isImporting: syncManager.isImporting,
+                        onTap: {
+                            iCloudSyncEnabled.toggle()
+                            SyncManager.shared.syncSettingChanged(enabled: iCloudSyncEnabled)
                         }
-                        .foregroundColor(.textPrimary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 54)
-                        .background(Color.elevatedBackground)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .stroke(Color.borderMedium, lineWidth: 1)
-                        )
-                    }
-                    .buttonStyle(.plain)
+                    )
+                    .padding(.bottom, 28)
 
-                    Button("Skip for now") {
+                    // Action buttons
+                    TVOnboardingNavButton(
+                        destination: AddServerView(),
+                        icon: "server.rack",
+                        label: "Connect a Server",
+                        isPrimary: true
+                    )
+                    .padding(.bottom, 10)
+
+                    TVOnboardingNavButton(
+                        destination: M3UImportView(),
+                        icon: "list.bullet.rectangle.fill",
+                        label: "Import M3U Playlist",
+                        isPrimary: false
+                    )
+                    .padding(.bottom, 16)
+
+                    TVOnboardingSkipButton {
                         hasCompletedOnboarding = true
                     }
-                    .font(.bodyMedium)
-                    .foregroundColor(.textTertiary)
+                    .padding(.bottom, 60)
                 }
-                .padding(.horizontal, 32)
-                .padding(.bottom, 48)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 700)
+                .frame(maxWidth: .infinity)
             }
+            #else
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    // Logo / Icon
+                    Image("AerioLogo")
+                        .resizable()
+                        .interpolation(.high)
+                        .scaledToFit()
+                        .frame(width: 80, height: 80)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .shadow(color: Color(hex: "1AC4D8").opacity(0.45), radius: 20, y: 8)
+                        .padding(.top, 16)
+                        .padding(.bottom, 20)
+
+                    // Title
+                    VStack(spacing: 4) {
+                        Text("Aerio")
+                            .font(.displayLarge)
+                            .foregroundColor(.textPrimary)
+                        Text("Your IPTV & Media Hub")
+                            .font(.bodyLarge)
+                            .foregroundColor(.textSecondary)
+                        Text("iPhone, iPad, Apple TV, & Mac")
+                            .font(.bodySmall)
+                            .foregroundColor(.textTertiary)
+                    }
+                    .padding(.bottom, 24)
+
+                    // Feature Pills
+                    VStack(spacing: 8) {
+                        FeaturePill(icon: "key.fill",
+                                    title: "Dispatcharr API",
+                                    detail: "URL + API key")
+                        FeaturePill(icon: "tv.and.hifispeaker.fill",
+                                    title: "Xtream Codes",
+                                    detail: "URL + User + Password")
+                        FeaturePill(icon: "doc.text.fill",
+                                    title: "M3U & EPG",
+                                    detail: "M3U & EPG URLs")
+                    }
+                    .padding(.horizontal, 32)
+                    .padding(.bottom, 20)
+
+                    // iCloud Sync opt-in
+                    iCloudSyncToggle
+                        .padding(.horizontal, 32)
+                        .padding(.bottom, 20)
+
+                    // CTA
+                    VStack(spacing: 10) {
+                        NavigationLink(destination: AddServerView()) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "server.rack")
+                                    .font(.system(size: 15, weight: .semibold))
+                                Text("Connect a Server")
+                                    .font(.headlineMedium)
+                            }
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 48)
+                            .background(LinearGradient.accentGradient)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        NavigationLink(destination: M3UImportView()) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "list.bullet.rectangle.fill")
+                                    .font(.system(size: 15, weight: .semibold))
+                                Text("Import M3U Playlist")
+                                    .font(.headlineMedium)
+                            }
+                            .foregroundColor(.textPrimary)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 48)
+                            .background(Color.elevatedBackground)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(Color.borderMedium, lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+
+                        Button("Skip for now") {
+                            hasCompletedOnboarding = true
+                        }
+                        .font(.bodyMedium)
+                        .foregroundColor(.textTertiary)
+                    }
+                    .padding(.horizontal, 32)
+                    .padding(.bottom, 32)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            #endif
         }
         .navigationBarHidden(true)
     }
+
+    // MARK: - Default Live TV View Picker
+
+    // MARK: - iCloud Import Button
+
+    private var iCloudSyncToggle: some View {
+        Button {
+            guard !syncManager.isImporting else { return }
+            iCloudSyncEnabled.toggle()
+            SyncManager.shared.syncSettingChanged(enabled: iCloudSyncEnabled)
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.accentPrimary.opacity(0.15))
+                        .frame(width: 36, height: 36)
+                    if syncManager.isImporting {
+                        ProgressView()
+                            .tint(.accentPrimary)
+                    } else {
+                        Image(systemName: iCloudSyncEnabled ? "checkmark.icloud.fill" : "icloud.fill")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.accentPrimary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(syncManager.isImporting ? "Importing from iCloud…"
+                         : iCloudSyncEnabled ? "iCloud Sync Enabled"
+                         : "Sync via iCloud")
+                        .font(.headlineSmall)
+                        .foregroundColor(.textPrimary)
+                    Text(syncManager.isImporting ? "Looking for an existing configuration…"
+                         : iCloudSyncEnabled
+                         ? "Settings synced across all your devices"
+                         : "Use if you've enabled Aerio iCloud sync on another device")
+                        .font(.bodySmall)
+                        .foregroundColor(.textSecondary)
+                        .lineLimit(2)
+                }
+
+                Spacer()
+
+                if syncManager.isImporting {
+                    ProgressView()
+                        .tint(.accentPrimary)
+                } else {
+                    Image(systemName: iCloudSyncEnabled ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 20))
+                        .foregroundColor(iCloudSyncEnabled ? .accentPrimary : .textTertiary)
+                }
+            }
+            .padding(12)
+            .background(Color.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(iCloudSyncEnabled ? Color.accentPrimary.opacity(0.4) : Color.borderSubtle, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(syncManager.isImporting)
+    }
 }
 
-// MARK: - Feature Pill
-private struct FeaturePill: View {
+// MARK: - tvOS Onboarding Components
+#if os(tvOS)
+
+/// Shared teal-tinted card background — matches the Settings pattern.
+private func tvOnboardingCardBG(_ focused: Bool) -> some View {
+    RoundedRectangle(cornerRadius: 14, style: .continuous)
+        .fill(focused ? Color.accentPrimary.opacity(0.18) : Color.cardBackground)
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.accentPrimary.opacity(focused ? 0.65 : 0.10),
+                        lineWidth: focused ? 2.5 : 1)
+        }
+}
+
+/// Non-interactive feature row — no card background, border, or checkmark
+/// so it reads as informational text, not a focusable button.
+private struct TVFeatureRow: View {
     let icon: String
     let title: String
     let detail: String
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(LinearGradient.accentGradient)
+                .frame(width: 28)
+
+            Text(title)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundColor(.textPrimary)
+
+            Text("·")
+                .font(.system(size: 24))
+                .foregroundColor(.textTertiary)
+
+            Text(detail)
+                .font(.system(size: 20))
+                .foregroundColor(.textTertiary)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6)
+        .padding(.horizontal, 12)
+    }
+}
+
+/// iCloud import/sync button for onboarding — toggles on/off with importing state.
+private struct TVOnboardingImportButton: View {
+    let isEnabled: Bool
+    var isImporting: Bool = false
+    let onTap: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button {
+            guard !isImporting else { return }
+            onTap()
+        } label: {
+            HStack(spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.accentPrimary.opacity(0.15))
+                        .frame(width: 44, height: 44)
+                    if isImporting {
+                        ProgressView()
+                            .tint(.accentPrimary)
+                    } else {
+                        Image(systemName: isEnabled ? "checkmark.icloud.fill" : "icloud.fill")
+                            .font(.system(size: 20, weight: .medium))
+                            .foregroundColor(.accentPrimary)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(isImporting ? "Importing from iCloud…"
+                         : isEnabled ? "iCloud Sync Enabled"
+                         : "Sync via iCloud")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundColor(.textPrimary)
+                    Text(isImporting ? "Looking for an existing configuration…"
+                         : isEnabled
+                         ? "Settings will stay in sync across all your devices"
+                         : "Import an existing Aerio configuration from iCloud and keep settings in sync across all devices using the same Apple ID")
+                        .font(.system(size: 18))
+                        .foregroundColor(.textSecondary)
+                        .lineLimit(nil)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer()
+                if isImporting {
+                    ProgressView()
+                        .tint(.accentPrimary)
+                } else {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(isEnabled ? Color.accentPrimary : Color.textTertiary)
+                            .frame(width: 10, height: 10)
+                        Text(isEnabled ? "On" : "Off")
+                            .font(.system(size: 24, weight: .semibold))
+                            .foregroundColor(isEnabled
+                                ? (isFocused ? .white : .accentPrimary)
+                                : (isFocused ? .white : .textTertiary))
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .disabled(isImporting)
+        .background(tvOnboardingCardBG(isFocused))
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Segmented picker row — each option is a separate focusable button.
+private struct TVOnboardingPickerRow: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let options: [(value: String, label: String)]
+    @Binding var selection: String
+
+    var body: some View {
+        HStack(spacing: 16) {
             ZStack {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(LinearGradient.accentGradient.opacity(0.2))
-                    .frame(width: 42, height: 42)
+                    .fill(Color.accentPrimary.opacity(0.15))
+                    .frame(width: 44, height: 44)
                 Image(systemName: icon)
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(LinearGradient.accentGradient)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundColor(.accentPrimary)
             }
-
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.headlineSmall)
+                    .font(.system(size: 24, weight: .semibold))
                     .foregroundColor(.textPrimary)
-                Text(detail)
-                    .font(.bodySmall)
+                Text(subtitle)
+                    .font(.system(size: 18))
                     .foregroundColor(.textSecondary)
             }
-
             Spacer()
-
-            Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 18))
-                .foregroundColor(.accentSecondary)
+            HStack(spacing: 8) {
+                ForEach(options, id: \.value) { option in
+                    TVOnboardingPickerOption(
+                        label: option.label,
+                        isSelected: selection == option.value,
+                        onSelect: { selection = option.value }
+                    )
+                }
+            }
         }
-        .padding(14)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
         .background(Color.cardBackground)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Color.borderSubtle, lineWidth: 1)
         )
+    }
+}
+
+private struct TVOnboardingPickerOption: View {
+    let label: String
+    let isSelected: Bool
+    let onSelect: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: onSelect) {
+            Text(label)
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundColor(isSelected ? .white : (isFocused ? .white : .textSecondary))
+                .frame(width: 100, height: 44)
+                .background(
+                    isSelected
+                        ? AnyView(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(LinearGradient.accentGradient))
+                        : AnyView(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(isFocused ? Color.accentPrimary.opacity(0.25) : Color.elevatedBackground))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.accentPrimary.opacity(isFocused ? 0.65 : 0.15), lineWidth: isFocused ? 2 : 1)
+                )
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.05 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Primary or secondary navigation button with teal focus card.
+private struct TVOnboardingNavButton<Destination: View>: View {
+    let destination: Destination
+    let icon: String
+    let label: String
+    let isPrimary: Bool
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        NavigationLink(destination: destination) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 22, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 26, weight: .semibold))
+            }
+            .foregroundColor(isPrimary ? .white : .textPrimary)
+            .frame(maxWidth: .infinity)
+            .frame(height: 66)
+            .background(
+                isPrimary
+                    ? AnyView(LinearGradient.accentGradient)
+                    : AnyView(Color.elevatedBackground)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(
+                        isFocused ? Color.accentPrimary : (isPrimary ? Color.clear : Color.borderMedium),
+                        lineWidth: isFocused ? 2.5 : 1
+                    )
+            )
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// "Skip for now" text button with subtle focus highlight.
+private struct TVOnboardingSkipButton: View {
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button("Skip for now", action: action)
+            .font(.system(size: 22))
+            .foregroundColor(isFocused ? .accentPrimary : .textTertiary)
+            .buttonStyle(TVNoHighlightButtonStyle())
+            .focused($isFocused)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+#endif
+
+// MARK: - Feature Bullet
+/// Non-interactive feature row — intentionally styled without card backgrounds,
+/// borders, or trailing chevrons/checkmarks so it reads as informational text,
+/// not a tappable button.
+private struct FeaturePill: View {
+    let icon: String
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(LinearGradient.accentGradient)
+                .frame(width: 24)
+
+            Text(title)
+                .font(.headlineSmall)
+                .foregroundColor(.textPrimary)
+
+            Text("·")
+                .foregroundColor(.textTertiary)
+
+            Text(detail)
+                .font(.bodySmall)
+                .foregroundColor(.textTertiary)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
     }
 }

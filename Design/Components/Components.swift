@@ -1,5 +1,67 @@
 import SwiftUI
 
+// MARK: - Shared tvOS Button Style
+
+/// Suppresses the default tvOS system focus highlight (white glow) and
+/// provides a subtle universal focus indication (scale + brightness).
+/// Elements that need stronger focus feedback should use TVCardButtonStyle
+/// or implement their own @FocusState + custom visuals.
+#if os(tvOS)
+struct TVNoHighlightButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(isFocused ? 1.05 : 1.0)
+            .brightness(isFocused ? 0.15 : 0)
+            .shadow(color: isFocused ? Color.accentPrimary.opacity(0.4) : .clear, radius: 8, y: 2)
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Legacy alias — prefer TVNoHighlightButtonStyle for new code.
+typealias TVNoRingButtonStyle = TVNoHighlightButtonStyle
+
+/// Focus style for tvOS poster/card grids — scales up and adds a glow on focus.
+/// The accent border is applied by VODPosterCard directly on the poster image
+/// (not the whole card including text), so this style only handles scale + shadow.
+struct TVCardButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(8) // Breathing room so scaled card doesn't overlap neighbours
+            .scaleEffect(isFocused ? 1.08 : 1.0)
+            .shadow(color: isFocused ? Color.accentPrimary.opacity(0.5) : .clear, radius: 12, y: 6)
+            .opacity(configuration.isPressed ? 0.8 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
+
+// MARK: - iOS Pressable Button Style
+
+/// Provides subtle scale + opacity feedback on press for iOS cards/rows.
+/// Use on NavigationLinks and Buttons that otherwise appear static.
+#if os(iOS)
+struct PressableButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .brightness(configuration.isPressed ? 0.15 : 0)
+            .opacity(configuration.isPressed ? 0.85 : 1.0)
+            .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
+            .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+#endif
+
+// tvOS / macOS shim — UIKeyboardType isn't available outside iOS,
+// so we mirror the values the app references to keep call sites clean.
+#if !os(iOS)
+enum UIKeyboardType: Int { case `default` = 0, URL = 3 }
+#endif
+
 // MARK: - App Card
 struct AppCard<Content: View>: View {
     let content: Content
@@ -65,7 +127,11 @@ struct PrimaryButton: View {
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .disabled(isDisabled || isLoading)
+        #if os(tvOS)
+        .buttonStyle(TVNoHighlightButtonStyle())
+        #else
         .buttonStyle(.plain)
+        #endif
     }
 }
 
@@ -101,7 +167,11 @@ struct SecondaryButton: View {
                     .stroke(Color.borderMedium, lineWidth: 1)
             )
         }
+        #if os(tvOS)
+        .buttonStyle(TVNoHighlightButtonStyle())
+        #else
         .buttonStyle(.plain)
+        #endif
     }
 }
 
@@ -115,6 +185,8 @@ struct AppTextField: View {
     var isSecure: Bool = false
     var autocapitalization: TextInputAutocapitalization = .never
     var autocorrection: Bool = false
+
+    @FocusState private var isFocused: Bool
 
     init(_ title: String,
          placeholder: String,
@@ -144,8 +216,9 @@ struct AppTextField: View {
                 if let icon {
                     Image(systemName: icon)
                         .font(.system(size: 16))
-                        .foregroundColor(.textTertiary)
+                        .foregroundColor(isFocused ? .accentPrimary : .textTertiary)
                         .frame(width: 20)
+                        .animation(.easeInOut(duration: 0.15), value: isFocused)
                 }
 
                 Group {
@@ -153,13 +226,16 @@ struct AppTextField: View {
                         SecureField(placeholder, text: $text)
                     } else {
                         TextField(placeholder, text: $text)
+                            #if os(iOS)
                             .keyboardType(keyboardType)
+                            #endif
                     }
                 }
                 .font(.bodyMedium)
                 .foregroundColor(.textPrimary)
                 .textInputAutocapitalization(autocapitalization)
                 .autocorrectionDisabled(!autocorrection)
+                .focused($isFocused)
             }
             .padding(.horizontal, 16)
             .frame(height: 52)
@@ -167,8 +243,14 @@ struct AppTextField: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(text.isEmpty ? Color.borderSubtle : Color.accentPrimary.opacity(0.4), lineWidth: 1)
+                    .stroke(isFocused ? Color.accentPrimary.opacity(0.6) : (text.isEmpty ? Color.borderSubtle : Color.accentPrimary.opacity(0.4)), lineWidth: isFocused ? 1.5 : 1)
+                    .animation(.easeInOut(duration: 0.15), value: isFocused)
             )
+            // Tapping anywhere in the field — including the icon area — focuses the input
+            .contentShape(Rectangle())
+            #if os(iOS)
+            .onTapGesture { isFocused = true }
+            #endif
         }
     }
 }
@@ -177,16 +259,26 @@ struct AppTextField: View {
 struct ServerTypeBadge: View {
     let type: ServerType
 
+    #if os(tvOS)
+    private let iconSize: CGFloat = 16
+    private let hPad: CGFloat = 12
+    private let vPad: CGFloat = 6
+    #else
+    private let iconSize: CGFloat = 10
+    private let hPad: CGFloat = 8
+    private let vPad: CGFloat = 4
+    #endif
+
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: type.systemIcon)
-                .font(.system(size: 10, weight: .semibold))
+                .font(.system(size: iconSize, weight: .semibold))
             Text(type.displayName)
                 .font(.labelSmall)
         }
         .foregroundColor(type.color)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, hPad)
+        .padding(.vertical, vPad)
         .background(type.color.opacity(0.15))
         .clipShape(Capsule())
     }
@@ -227,7 +319,11 @@ struct SectionHeader: View {
                         .font(.labelMedium)
                         .foregroundColor(.accentPrimary)
                 }
+                #if os(tvOS)
+                .buttonStyle(TVNoHighlightButtonStyle())
+                #else
                 .buttonStyle(.plain)
+                #endif
             }
         }
     }
@@ -285,7 +381,11 @@ struct EmptyStateView: View {
                         .background(LinearGradient.accentGradient)
                         .clipShape(Capsule())
                 }
+                #if os(tvOS)
+                .buttonStyle(TVNoHighlightButtonStyle())
+                #else
                 .buttonStyle(.plain)
+                #endif
                 .padding(.top, 4)
             }
         }
@@ -293,3 +393,57 @@ struct EmptyStateView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
+
+// MARK: - No-Poster Placeholder
+/// Shown when no artwork is available for a movie, series, or channel.
+struct NoPosterPlaceholder: View {
+    /// When true, shows only the logo without text (for small contexts like channel logos).
+    var compact: Bool = false
+
+    var body: some View {
+        VStack(spacing: compact ? 4 : 8) {
+            Image("AerioLogo")
+                .resizable()
+                .scaledToFit()
+                .frame(width: compact ? 20 : 40, height: compact ? 20 : 40)
+                .opacity(0.6)
+            if !compact {
+                Text("No artwork provided")
+                    .font(.labelSmall)
+                    .foregroundColor(.textTertiary)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+            }
+        }
+    }
+}
+
+// MARK: - tvOS Category Pill (shared)
+#if os(tvOS)
+struct TVCategoryPill: View {
+    let label: String
+    let isSelected: Bool
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 22, weight: .medium))
+                .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
+                .padding(.horizontal, 26)
+                .padding(.vertical, 13)
+                .background(
+                    Capsule()
+                        .fill(isSelected ? Color.accentPrimary
+                              : (isFocused ? Color.accentPrimary.opacity(0.25) : Color.elevatedBackground))
+                )
+                .scaleEffect(isFocused ? 1.08 : 1.0)
+                .shadow(color: Color.accentPrimary.opacity(isFocused ? 0.55 : 0), radius: 14)
+                .animation(.easeInOut(duration: 0.15), value: isFocused)
+        }
+        .buttonStyle(TVNoRingButtonStyle())
+        .focused($isFocused)
+    }
+}
+#endif

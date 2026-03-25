@@ -3,7 +3,7 @@ import Combine
 
 // MARK: - App Theme Preset
 enum AppTheme: String, CaseIterable, Codable {
-    case dispatcharr = "dispatcharr"   // Default teal brand theme
+    case fluent = "dispatcharr"   // Default teal brand theme
     case midnight    = "midnight"      // Blue-grey
     case sunset      = "sunset"        // Warm orange/red
     case forest      = "forest"        // Earthy green
@@ -12,7 +12,7 @@ enum AppTheme: String, CaseIterable, Codable {
 
     var displayName: String {
         switch self {
-        case .dispatcharr: return "Dispatcharr"
+        case .fluent: return "Aerio"
         case .midnight:    return "Midnight"
         case .sunset:      return "Sunset"
         case .forest:      return "Forest"
@@ -23,7 +23,7 @@ enum AppTheme: String, CaseIterable, Codable {
 
     var accentPrimary: Color {
         switch self {
-        case .dispatcharr: return Color(hex: "2DD4BF")
+        case .fluent: return Color(hex: "1AC4D8")   // Fluent Ocean cyan
         case .midnight:    return Color(hex: "60A5FA")
         case .sunset:      return Color(hex: "FB923C")
         case .forest:      return Color(hex: "4ADE80")
@@ -34,7 +34,7 @@ enum AppTheme: String, CaseIterable, Codable {
 
     var accentSecondary: Color {
         switch self {
-        case .dispatcharr: return Color(hex: "1DB89F")
+        case .fluent: return Color(hex: "1A8FA8")   // Fluent Ocean deep teal
         case .midnight:    return Color(hex: "3B82F6")
         case .sunset:      return Color(hex: "F97316")
         case .forest:      return Color(hex: "22C55E")
@@ -45,7 +45,7 @@ enum AppTheme: String, CaseIterable, Codable {
 
     var appBackground: Color {
         switch self {
-        case .dispatcharr: return Color(hex: "0A0F0D")
+        case .fluent: return Color(hex: "0A1628")   // Fluent Ocean navy
         case .midnight:    return Color(hex: "0A0F1A")
         case .sunset:      return Color(hex: "0F0A07")
         case .forest:      return Color(hex: "080F0A")
@@ -56,7 +56,7 @@ enum AppTheme: String, CaseIterable, Codable {
 
     var cardBackground: Color {
         switch self {
-        case .dispatcharr: return Color(hex: "111916")
+        case .fluent: return Color(hex: "0D1E35")   // Slightly lighter navy
         case .midnight:    return Color(hex: "111827")
         case .sunset:      return Color(hex: "1A1108")
         case .forest:      return Color(hex: "0E1A10")
@@ -87,24 +87,52 @@ enum LiquidGlassStyle: String, CaseIterable, Codable {
 final class ThemeManager: ObservableObject, @unchecked Sendable {
     static let shared = ThemeManager()
 
-    // Use distinct names to avoid collision with @Published's synthesized `_selectedTheme` / `_liquidGlassStyle` backing storage
-    @AppStorage("selectedTheme")    private var storedTheme      = AppTheme.dispatcharr.rawValue
+    // Use distinct names to avoid collision with @Published's synthesized backing storage
+    @AppStorage("selectedTheme")    private var storedTheme      = AppTheme.fluent.rawValue
     @AppStorage("liquidGlassStyle") private var storedGlassStyle = LiquidGlassStyle.tinted.rawValue
-    @AppStorage("useCustomAccent")  var useCustomAccent = false
-    @AppStorage("customAccentHex")  var customAccentHex = "2DD4BF"
     @AppStorage("defaultTab")       var defaultTab = "livetv"
 
-    @Published var selectedTheme: AppTheme = .dispatcharr
+    @Published var selectedTheme: AppTheme = .fluent
     @Published var liquidGlassStyle: LiquidGlassStyle = .tinted
 
+    // @Published (not @AppStorage) so objectWillChange fires when these change,
+    // ensuring all observers re-render and pick up the new accent immediately.
+    @Published var useCustomAccent: Bool = false {
+        didSet { UserDefaults.standard.set(useCustomAccent, forKey: "useCustomAccent") }
+    }
+    @Published var customAccentHex: String = "1AC4D8" {
+        didSet { UserDefaults.standard.set(customAccentHex, forKey: "customAccentHex") }
+    }
+
     private init() {
-        selectedTheme    = AppTheme(rawValue: storedTheme) ?? .dispatcharr
+        selectedTheme    = AppTheme(rawValue: storedTheme) ?? .fluent
         liquidGlassStyle = LiquidGlassStyle(rawValue: storedGlassStyle) ?? .tinted
+        useCustomAccent  = UserDefaults.standard.bool(forKey: "useCustomAccent")
+        customAccentHex  = UserDefaults.standard.string(forKey: "customAccentHex") ?? "1AC4D8"
+
+        // Re-apply in-memory state whenever iCloud sync pushes new preferences.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(reloadFromStorage),
+            name: .syncManagerDidApplyPreferences,
+            object: nil
+        )
+    }
+
+    /// Re-reads all theme state from UserDefaults.
+    /// Called after iCloud sync applies remote preferences so @Published properties
+    /// reflect the updated values without requiring an app restart.
+    @objc func reloadFromStorage() {
+        selectedTheme    = AppTheme(rawValue: storedTheme) ?? .fluent
+        liquidGlassStyle = LiquidGlassStyle(rawValue: storedGlassStyle) ?? .tinted
+        useCustomAccent  = UserDefaults.standard.bool(forKey: "useCustomAccent")
+        customAccentHex  = UserDefaults.standard.string(forKey: "customAccentHex") ?? "1AC4D8"
     }
 
     func setTheme(_ theme: AppTheme) {
-        selectedTheme = theme
-        storedTheme   = theme.rawValue
+        useCustomAccent = false   // Preset selection always overrides a custom accent
+        selectedTheme   = theme
+        storedTheme     = theme.rawValue
     }
 
     func setLiquidGlassStyle(_ style: LiquidGlassStyle) {

@@ -61,7 +61,9 @@ struct M3UImportView: View {
                 }
             }
             .navigationTitle("Import M3U Playlist")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }
@@ -69,6 +71,7 @@ struct M3UImportView: View {
                 }
             }
             .toolbarBackground(Color.appBackground, for: .navigationBar)
+            #if os(iOS)
             .fileImporter(
                 isPresented: $showFilePicker,
                 allowedContentTypes: [.m3uType, .plainText, .data],
@@ -76,6 +79,7 @@ struct M3UImportView: View {
             ) { result in
                 handleFileImport(result)
             }
+            #endif
         }
     }
 
@@ -102,7 +106,11 @@ struct M3UImportView: View {
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
+                #if os(tvOS)
+                .buttonStyle(TVNoHighlightButtonStyle())
+                #else
                 .buttonStyle(.plain)
+                #endif
             }
         }
         .padding(4)
@@ -164,7 +172,11 @@ struct M3UImportView: View {
                         .stroke(importedFileURL != nil ? Color.accentPrimary.opacity(0.4) : Color.borderSubtle, lineWidth: 1)
                 )
             }
+            #if os(tvOS)
+            .buttonStyle(TVNoHighlightButtonStyle())
+            #else
             .buttonStyle(.plain)
+            #endif
         }
     }
 
@@ -310,9 +322,17 @@ struct M3UImportView: View {
         playlist.channelCount = previewChannels.count
         playlist.lastRefreshed = Date()
         modelContext.insert(playlist)
-        try? modelContext.save()
+        // Save twice to ensure SwiftData flushes to persistent store before
+        // onboarding auto-dismiss tears down the navigation stack.
+        do {
+            try modelContext.save()
+        } catch {
+            debugLog("M3U save error: \(error)")
+        }
         importSuccess = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { dismiss() }
+        // Longer delay to give SwiftData time to fully persist before
+        // RootView's onChange(of: hasAnySource) closes onboarding.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { dismiss() }
     }
 }
 
@@ -420,7 +440,9 @@ struct EPGImportView: View {
                 }
             }
             .navigationTitle("Import EPG Guide")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") { dismiss() }
@@ -428,6 +450,7 @@ struct EPGImportView: View {
                 }
             }
             .toolbarBackground(Color.appBackground, for: .navigationBar)
+            #if os(iOS)
             .fileImporter(
                 isPresented: $showFilePicker,
                 allowedContentTypes: [UTType.xml, .plainText, .data],
@@ -444,6 +467,7 @@ struct EPGImportView: View {
                     errorMessage = error.localizedDescription
                 }
             }
+            #endif
         }
     }
 
@@ -469,7 +493,11 @@ struct EPGImportView: View {
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
+                #if os(tvOS)
+                .buttonStyle(TVNoHighlightButtonStyle())
+                #else
                 .buttonStyle(.plain)
+                #endif
             }
         }
         .padding(4)
@@ -510,7 +538,11 @@ struct EPGImportView: View {
                     .stroke(importedFileURL != nil ? Color.accentSecondary.opacity(0.4) : Color.borderSubtle, lineWidth: 1)
             )
         }
+        #if os(tvOS)
+        .buttonStyle(TVNoHighlightButtonStyle())
+        #else
         .buttonStyle(.plain)
+        #endif
     }
 
     private var canValidate: Bool {

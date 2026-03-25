@@ -1,0 +1,94 @@
+name: Dispatcharr
+options:
+  bundleIdPrefix: app.molinete
+  deploymentTarget:
+    iOS: "18.0"
+    tvOS: "18.0"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: true
+  createIntermediateGroups: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    ENABLE_BITCODE: "NO"
+    SUPPORTS_MACCATALYST: "YES"
+    MARKETING_VERSION: "1.2.2"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+    DEVELOPMENT_TEAM: ""   # Fill in your Team ID from Xcode Signing settings
+
+targets:
+  Dispatcharr:
+    type: application
+    platform: [iOS, tvOS]
+    deploymentTarget:
+      iOS: "18.0"
+      tvOS: "18.0"
+    sources:
+      - path: .
+        excludes:
+          - "**/*.xcodeproj/**"
+          - "**/build/**"
+          - "**/DerivedData/**"
+          - "project.yml"
+          - "BUILD.md"
+          - "TopShelfExtension/**"
+    resources:
+      - path: App/DispatcharrSplash.mp4
+      - path: SupportingFiles/Assets.xcassets
+    info:
+      path: SupportingFiles/Info.plist
+      properties:
+        CFBundleDisplayName: Dispatcharr
+        CFBundleIdentifier: app.molinete.Dispatcharr
+        CFBundleShortVersionString: "1.2.2"
+        CFBundleVersion: "1"
+        UILaunchScreen:
+          UIColorName: ""
+        UIBackgroundModes:
+          - audio
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+          NSAllowsLocalNetworking: true
+        UISupportsDocumentBrowser: false
+        LSSupportsOpeningDocumentsInPlace: false
+    entitlements:
+      path: Aerio_tvOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.app.molinete.Dispatcharr
+    dependencies:
+      - target: AerioTopShelf
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.molinete.Dispatcharr
+        INFOPLIST_FILE: SupportingFiles/Info.plist
+
+  AerioTopShelf:
+    type: tv-top-shelf-extension
+    platform: tvOS
+    deploymentTarget:
+      tvOS: "18.0"
+    sources:
+      - path: TopShelfExtension
+    entitlements:
+      path: TopShelfExtension/AerioTopShelf.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.app.molinete.Dispatcharr
+    info:
+      properties:
+        CFBundleDisplayName: AerioTopShelf
+        CFBundleIdentifier: app.molinete.Dispatcharr.TopShelf
+        CFBundleShortVersionString: "1.2.2"
+        CFBundleVersion: "1"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.tv-top-shelf
+          NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).ContentProvider"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.molinete.Dispatcharr.TopShelf
+        SWIFT_VERSION: "6.0"
+    frameworks:
+      - sdk: TVServices.framework
