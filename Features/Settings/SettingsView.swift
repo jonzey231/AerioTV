@@ -235,6 +235,38 @@ struct SettingsView: View {
                         #endif
                         .listRowBackground(Color.cardBackground)
 
+                        Link(destination: URL(string: "https://github.com/jonzey231/AerioTV")!) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "link")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(.textSecondary)
+                                Text("Developer Website")
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textSecondary)
+                                Spacer()
+                                Image(systemName: "arrow.up.right.square")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.textTertiary)
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+
+                        Link(destination: URL(string: "https://github.com/jonzey231/AerioTV/issues")!) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.bubble")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(.textSecondary)
+                                Text("Report an Issue")
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textSecondary)
+                                Spacer()
+                                Image(systemName: "arrow.up.right.square")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.textTertiary)
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+
                     } header: {
                         Text("About")
                             .sectionHeaderStyle()
@@ -491,6 +523,10 @@ struct SettingsView: View {
                     tvAboutRow("First Installed", value: aboutInstallDate)
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
                     tvAboutRow("Last Updated",    value: aboutUpdateDate)
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutRow("Developer Website", value: "github.com/jonzey231/AerioTV")
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutRow("Report an Issue",   value: "github.com/jonzey231/AerioTV/issues")
                 }
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Color.cardBackground))
