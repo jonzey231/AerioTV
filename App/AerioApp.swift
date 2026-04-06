@@ -43,7 +43,7 @@ private final class MainThreadWatchdog: @unchecked Sendable {
             consecutiveSlowPings += 1
             print("[WATCHDOG] 🚨🚨🚨 MAIN THREAD FROZEN >5s! ping#\(n) — UI is completely unresponsive")
             logMainThreadBacktrace()
-        } else if elapsed > 0.5 {
+        } else if elapsed > 0.2 {
             consecutiveSlowPings += 1
             print("[WATCHDOG] 🔴 HANG: ping#\(n) took \(String(format: "%.1f", elapsed * 1000))ms — UI visibly stuck")
             logMainThreadBacktrace()
@@ -143,7 +143,7 @@ struct AerioApp: App {
             case .background:
                 DebugLogger.shared.logLifecycle("Scene → background")
                 #if os(tvOS)
-                // Stop VLC playback so audio doesn't continue in the background.
+                // Stop playback so audio doesn't continue in the background.
                 // tvOS has no PiP or background audio entitlement for IPTV streams.
                 NotificationCenter.default.post(name: .stopPlaybackForBackground, object: nil)
                 #endif

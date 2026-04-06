@@ -44,7 +44,7 @@ struct DeveloperSettingsView: View {
                                 .font(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(debugLoggingEnabled
-                                 ? "Active — writing to fluent_debug_logs.txt"
+                                 ? "Active — writing to aerio_debug_logs.txt"
                                  : "Off — no data is collected")
                                 .font(.labelSmall)
                                 .foregroundColor(debugLoggingEnabled ? .accentPrimary : .textTertiary)
@@ -178,7 +178,7 @@ struct DeveloperSettingsView: View {
                 // MARK: - What's Logged
                 Section {
                     logCategoryRow(icon: "network",                title: "Network",     detail: "All API requests — URL, method, status code, duration, payload size")
-                    logCategoryRow(icon: "play.rectangle.fill",    title: "Playback",    detail: "Stream URLs loaded, VLC state transitions, DVR mode, failover attempts")
+                    logCategoryRow(icon: "play.rectangle.fill",    title: "Playback",    detail: "Stream URLs loaded, player state transitions, DVR mode, failover attempts")
                     logCategoryRow(icon: "calendar",               title: "EPG",         detail: "Current program fetches, upcoming program loads, decode errors")
                     logCategoryRow(icon: "antenna.radiowaves.left.and.right", title: "Channels", detail: "Channel list loads, server type, item counts, timing")
                     logCategoryRow(icon: "app.badge",              title: "Lifecycle",   detail: "App foreground/background, launch, scene transitions")
@@ -188,7 +188,7 @@ struct DeveloperSettingsView: View {
                     Text("What's Captured")
                         .sectionHeaderStyle()
                 } footer: {
-                    Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as fluent_debug_logs_archive.txt.")
+                    Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.top, 4)
@@ -243,7 +243,7 @@ struct DeveloperSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This permanently deletes the current fluent_debug_logs.txt. This cannot be undone.")
+            Text("This permanently deletes the current aerio_debug_logs.txt. This cannot be undone.")
         }
     }
 

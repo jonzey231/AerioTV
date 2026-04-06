@@ -204,9 +204,9 @@ struct VODDetailView: View {
         Task { await resolveAndLaunch(url: url, title: title) }
     }
 
-    /// Resolves any redirects in the proxy URL with auth headers before handing off to VLC.
+    /// Resolves any redirects in the proxy URL with auth headers before handing off to the player.
     /// Dispatcharr's /proxy/vod/* endpoints often redirect to a session-based or provider URL.
-    /// VLC follows redirects but can drop custom headers; resolving first avoids that.
+    /// The player follows redirects but can drop custom headers; resolving first avoids that.
     @MainActor
     private func resolveAndLaunch(url: URL, title: String) async {
         playingTitle = title

@@ -6,17 +6,9 @@ import MediaPlayer
 import UIKit
 #endif
 
-// VLC-based playback – reliable for MPEG-TS over HTTP.
-// MobileVLCKit for iOS, TVVLCKit for tvOS – same API surface.
-#if canImport(MobileVLCKit)
-@preconcurrency import MobileVLCKit
-#elseif canImport(TVVLCKit)
-@preconcurrency import TVVLCKit
-#endif
-
 // MARK: - Attempt Log Store
 // @unchecked Sendable: all mutations are dispatched to the main queue manually.
-// Uses a non-published backing array to avoid SwiftUI re-renders on every VLC state change.
+// Uses a non-published backing array to avoid SwiftUI re-renders on every state change.
 // Only publishes when explicitly requested (e.g., on error display).
 final class AttemptLogStore: ObservableObject, @unchecked Sendable {
     @Published var lines: [String] = []
@@ -56,12 +48,18 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     @Published var currentMs: Int32 = 0
     /// Total stream duration in ms (0 for live streams without a static file).
     @Published var durationMs: Int32 = 0
-    /// True when VLC is paused.
+    /// True when player is paused.
     @Published var isPaused: Bool = false
+    /// Current playback speed (1.0 = normal).
+    @Published var speed: Double = 1.0
     /// Closure set by the Coordinator; call with a target position in ms to seek.
     var seekAction: ((Int32) -> Void)?
     /// Closure set by the Coordinator; toggles play/pause.
     var togglePauseAction: (() -> Void)?
+    /// Closure set by the Coordinator; sets playback speed.
+    var setSpeedAction: ((Double) -> Void)?
+
+    static let speedOptions: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 }
 
 // MARK: - Shared Error UI
@@ -162,7 +160,7 @@ private struct StreamErrorView: View {
     }
 }
 
-// MARK: - PlayerView (VLC)
+// MARK: - PlayerView (player)
 
 struct PlayerView: View {
     let urls: [URL]
@@ -199,7 +197,7 @@ struct PlayerView: View {
     @State private var isAudioOnly = false
 
     var body: some View {
-        VLCPlayerRootView(
+        PlayerRootView(
             urls: urls, title: title, headers: headers,
             isLive: isLive,
             subtitle: subtitle, subtitleStart: subtitleStart, subtitleEnd: subtitleEnd,
@@ -215,8 +213,8 @@ struct PlayerView: View {
 }
 
 
-// MARK: - VLC Root View
-private struct VLCPlayerRootView: View {
+// MARK: - Player Root View
+private struct PlayerRootView: View {
     let urls: [URL]
     let title: String
     let headers: [String: String]
@@ -244,7 +242,30 @@ private struct VLCPlayerRootView: View {
     @State private var isDragging = false
     @State private var dragFraction: CGFloat = 0
 
+    #if os(tvOS)
+    @FocusState private var isPlayerFocused: Bool
+    #endif
+
     enum PlayState { case loading, playing, error }
+
+    @ViewBuilder
+    private var playerView: some View {
+        #if canImport(Libmpv)
+        MPVPlayerViewRepresentable(
+            urls: urls, headers: headers,
+            isLive: isLive,
+            nowPlayingTitle: title,
+            nowPlayingSubtitle: subtitle,
+            nowPlayingArtworkURL: artworkURL,
+            progressStore: progressStore,
+            logStore: logStore,
+            onFatalError: { err in lastError = err; state = .error }
+        )
+        #else
+        Text("MPV engine not available on this platform")
+            .foregroundColor(.red)
+        #endif
+    }
 
     var body: some View {
         ZStack {
@@ -256,19 +277,10 @@ private struct VLCPlayerRootView: View {
 
             case .playing:
                 ZStack {
-                    // VLC stays in the hierarchy at all times — removing it tears down the
+                    // Player stays in the hierarchy at all times — removing it tears down the
                     // coordinator and forces a full restart when toggling back from audio-only.
-                    VLCPlayerViewRepresentable(
-                        urls: urls, headers: headers,
-                        isLive: isLive,
-                        nowPlayingTitle: title,
-                        nowPlayingSubtitle: subtitle,
-                        nowPlayingArtworkURL: artworkURL,
-                        progressStore: progressStore,
-                        logStore: logStore,
-                        onFatalError: { err in lastError = err; state = .error }
-                    )
-                    .ignoresSafeArea()
+                    playerView
+                        .ignoresSafeArea()
 
                     #if os(iOS)
                     if isAudioOnly {
@@ -356,7 +368,8 @@ private struct VLCPlayerRootView: View {
         #if os(tvOS)
         // Make the player view focusable so tvOS delivers remote events
         .focusable()
-        // Siri Remote: Play/Pause button toggles VLC playback and shows controls
+        .focused($isPlayerFocused)
+        // Siri Remote: Play/Pause button toggles player playback and shows controls
         .onPlayPauseCommand {
             print("[REMOTE] Play/Pause pressed — isPaused=\(progressStore.isPaused), hasAction=\(progressStore.togglePauseAction != nil)")
             progressStore.togglePauseAction?()
@@ -387,7 +400,17 @@ private struct VLCPlayerRootView: View {
             scheduleControlsHide()
         })
         #endif
-        .onAppear { scheduleControlsHide() }
+        .onAppear {
+            scheduleControlsHide()
+            #if os(tvOS)
+            // Grab focus from the guide/channel list behind the player ZStack overlay.
+            // Without this, the guide retains focus and d-pad scrolls channels instead
+            // of showing media controls.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                isPlayerFocused = true
+            }
+            #endif
+        }
         .onChange(of: progressStore.isPaused) { _, isPaused in
             if isPaused {
                 controlsHideTask?.cancel()
@@ -471,7 +494,7 @@ private struct VLCPlayerRootView: View {
 
     // MARK: - Timeline helpers
 
-    /// For VOD: once VLC reports a non-zero duration.
+    /// For VOD: once player reports a non-zero duration.
     private var canSeekBackward: Bool {
         progressStore.durationMs > 0 && progressStore.currentMs > 2_000
     }
@@ -766,6 +789,11 @@ private struct VLCPlayerRootView: View {
                     Spacer()
 
                     HStack(spacing: 10) {
+                        // Playback speed (VOD only — live streams always 1x)
+                        if !isLive {
+                            speedButton
+                        }
+
                         #if os(iOS)
                         // Audio-only toggle (iOS only)
                         liquidButton(
@@ -813,6 +841,33 @@ private struct VLCPlayerRootView: View {
     }
 
     // Frosted-glass circular button used in the player controls.
+    /// Cycles through playback speed options (0.5x → 0.75x → 1x → 1.25x → 1.5x → 2x).
+    private var speedButton: some View {
+        Button {
+            let speeds = PlayerProgressStore.speedOptions
+            let currentIdx = speeds.firstIndex(of: progressStore.speed) ?? 2
+            let nextIdx = (currentIdx + 1) % speeds.count
+            progressStore.setSpeedAction?(speeds[nextIdx])
+        } label: {
+            let label = progressStore.speed == 1.0 ? "1x" : String(format: "%gx", progressStore.speed)
+            Text(label)
+                #if os(tvOS)
+                .font(.system(size: 22, weight: .bold, design: .rounded))
+                .frame(width: 64, height: 64)
+                #else
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .frame(width: 52, height: 52)
+                #endif
+                .foregroundColor(progressStore.speed == 1.0 ? .white : Color.accentPrimary)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+        }
+        #if os(tvOS)
+        .buttonStyle(TVNoRingButtonStyle())
+        #endif
+    }
+
     private func liquidButton(
         systemName: String,
         tint: Color = .white,
@@ -840,7 +895,7 @@ private struct VLCPlayerRootView: View {
 
     private func startPlayback() async {
         logStore.reset()
-        logStore.append("ℹ️ Player: MobileVLCKit (VLC)")
+        logStore.append("ℹ️ Player: MPV (libmpv)")
         state = .playing
         scheduleControlsHide()
     }
@@ -889,499 +944,6 @@ private struct VLCPlayerRootView: View {
     // formatOffset removed — DVR/resume prompt removed.
 }
 
-// MARK: - VLC Representable
-private struct VLCPlayerViewRepresentable: UIViewRepresentable {
-    let urls: [URL]
-    let headers: [String: String]
-    let isLive: Bool
-    let nowPlayingTitle: String
-    let nowPlayingSubtitle: String?
-    let nowPlayingArtworkURL: URL?
-    @ObservedObject var progressStore: PlayerProgressStore
-    @ObservedObject var logStore: AttemptLogStore
-    let onFatalError: @MainActor @Sendable (String) -> Void
-
-    func makeCoordinator() -> Coordinator {
-        let c = Coordinator(urls: urls, headers: headers, isLive: isLive,
-                    progressStore: progressStore, logStore: logStore,
-                    onFatalError: onFatalError)
-        c.nowPlayingTitle = nowPlayingTitle
-        c.nowPlayingSubtitle = nowPlayingSubtitle
-        c.nowPlayingArtworkURL = nowPlayingArtworkURL
-        return c
-    }
-
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
-        view.backgroundColor = .black
-        // VLC only needs the view as a render target — it doesn't need touch events.
-        // Disabling interaction lets SwiftUI gesture recognizers on parent views fire correctly.
-        view.isUserInteractionEnabled = false
-
-        do {
-            #if os(iOS)
-            try AVAudioSession.sharedInstance().setCategory(
-                .playback, mode: .moviePlayback,
-                options: [.allowAirPlay, .allowBluetoothA2DP]
-            )
-            #else
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-            #endif
-            try AVAudioSession.sharedInstance().setActive(true)
-        } catch {
-            logStore.append("⚠️ AudioSession: \(error)")
-        }
-
-        context.coordinator.attach(to: view)
-        context.coordinator.start()
-        return view
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        context.coordinator.updateDrawable(uiView)
-    }
-
-    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
-        coordinator.stop()
-    }
-
-    final class Coordinator: NSObject, VLCMediaPlayerDelegate, @unchecked Sendable {
-        private var urls: [URL]
-        private let headers: [String: String]
-        private let isLive: Bool
-        private let progressStore: PlayerProgressStore
-        private let logStore: AttemptLogStore
-        private let onFatalError: @MainActor @Sendable (String) -> Void
-
-        // Now Playing metadata — set by VLCPlayerViewRepresentable
-        var nowPlayingTitle: String = ""
-        var nowPlayingSubtitle: String?
-        var nowPlayingArtworkURL: URL?
-        private var nowPlayingConfigured = false
-
-        // Primary live/VOD player.
-        private let mediaPlayer = VLCMediaPlayer()
-        private weak var drawableView: UIView?
-        private var currentIndex = 0
-        private var hasStarted = false
-        private var anyAttemptStarted = false   // true if any URL reached .playing
-        private var hasPerformedWarmupRetry = false
-        private var lastState: VLCMediaPlayerState = .stopped
-        /// Tracks when the current URL started playing (first frame) so we can
-        /// detect premature "ended" reports from VLC on live HLS streams.
-        private var playbackStartTime: Date?
-        /// Number of times we've retried the same URL due to premature "ended".
-        private var sameURLRetryCount = 0
-        private let maxSameURLRetries = 3
-
-        // DVR removed — live streams play at the live edge only.
-
-        init(urls: [URL], headers: [String: String], isLive: Bool,
-             progressStore: PlayerProgressStore,
-             logStore: AttemptLogStore,
-             onFatalError: @escaping @MainActor @Sendable (String) -> Void) {
-            self.urls = urls
-            self.headers = headers
-            self.isLive = isLive
-            self.progressStore = progressStore
-            self.logStore = logStore
-            self.onFatalError = onFatalError
-            super.init()
-            mediaPlayer.delegate = self
-
-            // Toggle play/pause.
-            progressStore.togglePauseAction = { [weak self] in
-                guard let self else { return }
-                if self.progressStore.isPaused {
-                    self.mediaPlayer.play()
-                } else {
-                    self.mediaPlayer.pause()
-                }
-            }
-
-            // Seek closure — VOD only (live streams have no DVR).
-            progressStore.seekAction = { [weak self] targetMs in
-                guard let self, !self.isLive else { return }
-                self.mediaPlayer.time = VLCTime(int: targetMs)
-            }
-        }
-
-        func attach(to view: UIView) {
-            drawableView = view
-            // VLC's drawable must be set on the main thread to avoid
-            // "Modifying properties of a view's layer off the main thread" warnings.
-            if Thread.isMainThread {
-                mediaPlayer.drawable = view
-            } else {
-                DispatchQueue.main.async { [weak self] in
-                    self?.mediaPlayer.drawable = view
-                }
-            }
-        }
-
-        func updateDrawable(_ view: UIView) {
-            drawableView = view
-            if mediaPlayer.drawable as AnyObject? !== view {
-                if Thread.isMainThread {
-                    mediaPlayer.drawable = view
-                } else {
-                    DispatchQueue.main.async { [weak self] in
-                        self?.mediaPlayer.drawable = view
-                    }
-                }
-            }
-        }
-
-        func start() {
-            guard !urls.isEmpty else {
-                let callback = onFatalError
-                Task { await callback("No URL provided") }
-                return
-            }
-            currentIndex = 0
-            anyAttemptStarted = false
-            hasPerformedWarmupRetry = false
-            sameURLRetryCount = 0
-            play(url: urls[currentIndex])
-        }
-
-        func stop() {
-            DebugLogger.shared.logPlayback(event: "Stop",
-                                           url: urls[safe: currentIndex]?.absoluteString)
-            mediaPlayer.delegate = nil
-            mediaPlayer.stop()
-            mediaPlayer.media = nil
-            Task { @MainActor in NowPlayingBridge.shared.teardown() }
-            // Clear drawable on the main thread to avoid layer-modification warnings.
-            if Thread.isMainThread {
-                mediaPlayer.drawable = nil
-            } else {
-                DispatchQueue.main.async { [weak self] in
-                    self?.mediaPlayer.drawable = nil
-                }
-            }
-        }
-
-        private func play(url: URL) {
-            // Fully stop and release previous media before starting new playback.
-            // Without this, VLC's internal threads (decoder, demuxer, audio output)
-            // from the previous URL may still be running, causing resource conflicts
-            // and "Failed to set properties" errors on subsequent attempts.
-            if mediaPlayer.isPlaying || mediaPlayer.state != .stopped {
-                mediaPlayer.stop()
-            }
-            mediaPlayer.media = nil
-
-            hasStarted = false
-            playbackStartTime = nil
-            logStore.append("▶️ VLC attempt \(currentIndex + 1)/\(urls.count)")
-            logStore.append("  \(url.absoluteString)")
-            DebugLogger.shared.logPlayback(event: "Play attempt \(currentIndex + 1)/\(urls.count)",
-                                           url: url.absoluteString)
-
-            let media = VLCMedia(url: url)
-            // Read the user's buffer size preference and convert to VLC ms values.
-            // Live streams get a higher minimum (3000ms) to avoid premature "ended"
-            // reports from VLC on HLS streams served by proxies like Dispatcharr.
-            let cachingMs: Int = {
-                let userPref: Int = {
-                    switch UserDefaults.standard.string(forKey: "streamBufferSize") ?? "default" {
-                    case "small":  return 300
-                    case "large":  return 3_000
-                    case "xlarge": return 8_000
-                    default:       return 1_500   // "default" = 1.5 s
-                    }
-                }()
-                // For live proxy streams, enforce a minimum buffer to avoid
-                // premature "ended" reports from VLC.
-                if isLive { return max(userPref, 1_500) }
-                return userPref
-            }()
-
-            // VLC options for smooth playback.
-            var options: [String] = [
-                ":network-caching=\(cachingMs)",
-                ":live-caching=\(cachingMs)",
-                ":file-caching=\(cachingMs)",
-                ":drop-late-frames",
-                ":skip-frames",
-                // Decode optimization: skip loop filter & IDCT for non-reference frames.
-                // Value 4 = skip for non-ref frames only (safe quality tradeoff).
-                ":avcodec-skiploopfilter=4",
-                ":avcodec-skip-idct=4"
-                // Note: TVVLCKit enables VideoToolbox hardware decoding by default.
-                // Explicit :codec/:videotoolbox options can interfere — don't add them.
-            ]
-            // Only disable clock sync for VOD — live MPEG-TS streams need clock
-            // recovery via PCR timestamps; disabling it causes VLC to report
-            // premature "ended" on proxy streams.
-            if !isLive {
-                options.append(":clock-jitter=0")
-                options.append(":clock-synchro=0")
-            }
-            for o in options { media.addOption(o) }
-
-            #if DEBUG
-            print("[VLC-DIAG] ── Starting playback ──")
-            print("[VLC-DIAG] URL: \(url.absoluteString)")
-            print("[VLC-DIAG] network-caching=\(cachingMs)ms, live-caching=\(cachingMs)ms")
-            print("[VLC-DIAG] isLive=\(isLive), attempt=\(currentIndex + 1)/\(urls.count)")
-            #endif
-
-            if let ua = headers["User-Agent"], !ua.isEmpty { media.addOption(":http-user-agent=\(ua)") }
-            for (k, v) in headers where k.caseInsensitiveCompare("User-Agent") != .orderedSame {
-                media.addOption(":http-header=\(k): \(v)")
-            }
-            mediaPlayer.media = media
-            mediaPlayer.play()
-        }
-
-        private func failoverOrError(_ reason: String) {
-            logStore.append("✗ VLC: \(reason)")
-            if currentIndex + 1 < urls.count {
-                currentIndex += 1
-                // Pause lets VLC's internal threads (decoder, demuxer, audio)
-                // fully release before we start a new stream. TVVLCKit has strict
-                // dispatch queue assertions that crash if old threads are still active.
-                let nextURL = urls[currentIndex]
-                let idx = currentIndex
-                print("[VLC-DIAG] Failover: waiting 300ms before attempt \(idx + 1)/\(urls.count)")
-                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                    guard let self else { return }
-                    print("[VLC-DIAG] Failover: starting attempt \(idx + 1)")
-                    self.play(url: nextURL)
-                }
-            } else if isLive && anyAttemptStarted && !hasPerformedWarmupRetry {
-                // Live streams only: Dispatcharr proxy cold-start — the FFmpeg session wasn't
-                // ready on the first connection but is now. Retry once after a brief wait.
-                hasPerformedWarmupRetry = true
-                logStore.append("⏳ VLC: proxy warming up — retrying in 2s…")
-                print("[VLC-DIAG] Warmup retry: waiting 2s before retry")
-                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                    guard let self else { return }
-                    self.currentIndex = 0
-                    self.anyAttemptStarted = false
-                    self.logStore.append("🔄 VLC: warm-up retry")
-                    print("[VLC-DIAG] Warmup retry: starting")
-                    self.play(url: self.urls[0])
-                }
-            } else {
-                let callback = onFatalError
-                Task { await callback(reason) }
-            }
-        }
-
-        private var lastBufferPrint: Date = .distantPast
-
-        func mediaPlayerStateChanged(_ aNotification: Notification) {
-            let s = mediaPlayer.state
-            if s == lastState { return }
-            lastState = s
-
-            #if DEBUG
-            let ts = String(format: "%.3f", Date().timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1000))
-            print("[VLC-DIAG] [\(ts)] State: \(s.rawValue) (\(stateLabel(s)))")
-            #endif
-
-            switch s {
-            case .opening:
-                logStore.append("ℹ️ VLC state: opening")
-                DebugLogger.shared.logVLCState("opening")
-            case .buffering:
-                logStore.append("ℹ️ VLC state: buffering")
-                DebugLogger.shared.logVLCState("buffering")
-                #if DEBUG
-                print("[VLC-DIAG]   ↳ Buffering detected — possible stutter cause")
-                #endif
-            case .playing:
-                if !hasStarted {
-                    hasStarted = true
-                    anyAttemptStarted = true
-                    playbackStartTime = Date()
-                    logStore.append("✓ VLC started")
-                    DebugLogger.shared.logVLCState("playing — first frame")
-                    #if DEBUG
-                    print("[VLC-DIAG]   ↳ First frame rendered")
-                    #endif
-                }
-                let ps = progressStore
-                DispatchQueue.main.async { ps.isPaused = false }
-
-                // Configure Now Playing after playback stabilizes.
-                // Wait 2s then check if still playing — instant-end URLs (0ms)
-                // will have already failed over, so configure only fires once
-                // playback is genuinely stable. This prevents artwork downloads
-                // from racing with VLC failover on tvOS.
-                if !nowPlayingConfigured {
-                    let title = nowPlayingTitle
-                    let sub = nowPlayingSubtitle
-                    let art = nowPlayingArtworkURL
-                    let live = isLive
-                    let dur: Double? = live ? nil : (mediaPlayer.media?.length.intValue).map { Double($0) / 1000.0 }
-                    let mp = mediaPlayer
-                    let ps2 = progressStore
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                        guard let self,
-                              !self.nowPlayingConfigured,
-                              self.mediaPlayer.isPlaying else { return }
-                        self.nowPlayingConfigured = true
-                        Task { @MainActor in
-                            NowPlayingBridge.shared.configure(
-                                title: title,
-                                subtitle: sub,
-                                artworkURL: art,
-                                duration: dur,
-                                isLive: live,
-                                onPlay:  { ps2.togglePauseAction?() },
-                                onPause: { ps2.togglePauseAction?() },
-                                onSeek: live ? nil : { time in
-                                    DispatchQueue.global(qos: .userInitiated).async {
-                                        mp.time = VLCTime(int: Int32(time * 1000))
-                                    }
-                                }
-                            )
-                        }
-                    }
-                }
-            case .paused:
-                logStore.append("ℹ️ VLC state: paused")
-                DebugLogger.shared.logVLCState("paused")
-                let ps = progressStore
-                let timeSec = Double(mediaPlayer.time.intValue) / 1000.0
-                DispatchQueue.main.async { ps.isPaused = true }
-                Task { @MainActor in NowPlayingBridge.shared.updateElapsed(timeSec, rate: 0.0) }
-            case .stopped:
-                DebugLogger.shared.logVLCState("stopped", url: urls[safe: currentIndex]?.absoluteString)
-                // Defer failover out of VLC's delegate callback to avoid
-                // _dispatch_assert_queue_fail inside TVVLCKit's internal threading.
-                if !hasStarted {
-                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                        self?.failoverOrError("Stopped before playback")
-                    }
-                }
-            case .ended:
-                // For live streams, VLC sometimes prematurely reports "ended".
-                // Two distinct cases:
-                //  1. Instant-end (<0.5s): server returned a tiny/empty response.
-                //     Retrying the same URL is pointless — fail over immediately.
-                //  2. Short-end (0.5s–5s): transient issue (proxy hiccup, brief
-                //     buffer underrun). Retry the same URL up to 3 times.
-                //
-                // IMPORTANT: All failover calls are deferred off VLC's delegate thread
-                // to prevent _dispatch_assert_queue_fail crashes in TVVLCKit.
-                if isLive, let startTime = playbackStartTime {
-                    let elapsed = Date().timeIntervalSince(startTime)
-                    if elapsed < 0.5 {
-                        // Instant-end — server can't deliver this URL, skip to next.
-                        logStore.append("⚠️ VLC: instant end (<0.5s) — skipping to next URL")
-                        print("[VLC-DIAG] Instant end (\(String(format: "%.0f", elapsed * 1000))ms) — failing over")
-                        sameURLRetryCount = 0
-                        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                            self?.failoverOrError("Stream ended instantly")
-                        }
-                    } else if elapsed < 5.0, sameURLRetryCount < maxSameURLRetries {
-                        sameURLRetryCount += 1
-                        let retryNum = sameURLRetryCount
-                        logStore.append("⚠️ VLC: premature end (<5s) — retrying same URL (\(retryNum)/\(maxSameURLRetries))")
-                        DebugLogger.shared.logVLCState("ended prematurely — retrying same URL (\(retryNum)/\(maxSameURLRetries))")
-                        print("[VLC-DIAG] Premature end (\(String(format: "%.1f", elapsed))s) — retrying same URL (\(retryNum)/\(maxSameURLRetries))")
-                        let retryURL = urls[currentIndex]
-                        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                            self?.play(url: retryURL)
-                        }
-                    } else {
-                        DebugLogger.shared.logVLCState("ended — triggering failover")
-                        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                            self?.failoverOrError("Stream ended")
-                        }
-                    }
-                } else {
-                    DebugLogger.shared.logVLCState("ended — triggering failover")
-                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                        self?.failoverOrError("Stream ended")
-                    }
-                }
-            case .error:
-                DebugLogger.shared.logVLCState("error — triggering failover",
-                                               url: urls[safe: currentIndex]?.absoluteString)
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    self?.failoverOrError("Playback error")
-                }
-            default:
-                logStore.append("ℹ️ VLC state: \(s.rawValue)")
-                DebugLogger.shared.logVLCState("\(s.rawValue)")
-            }
-        }
-
-        private func stateLabel(_ s: VLCMediaPlayerState) -> String {
-            switch s {
-            case .opening: return "opening"
-            case .buffering: return "buffering"
-            case .playing: return "playing"
-            case .paused: return "paused"
-            case .stopped: return "stopped"
-            case .ended: return "ended"
-            case .error: return "error"
-            case .esAdded: return "esAdded"
-            @unknown default: return "unknown(\(s.rawValue))"
-            }
-        }
-
-        private var timeChangeCount: Int = 0
-        private var lastTimePrint: Date = .distantPast
-        private var lastProgressUpdate: Date = .distantPast
-
-        func mediaPlayerTimeChanged(_ aNotification: Notification) {
-            let ms  = mediaPlayer.time.intValue
-            let dur = mediaPlayer.media?.length.intValue ?? 0
-
-            // Throttle UI updates to max once per second to reduce main thread load.
-            // For live streams, skip entirely — no scrubber is shown and these
-            // @Published updates trigger expensive SwiftUI re-renders that cause stutter.
-            let now = Date()
-            if !isLive, now.timeIntervalSince(lastProgressUpdate) >= 1.0 {
-                lastProgressUpdate = now
-                let ps = progressStore
-                DispatchQueue.main.async {
-                    ps.currentMs  = ms
-                    ps.durationMs = dur
-                }
-            }
-
-            // Periodic diagnostic print + Now Playing update.
-            // Live streams: update every 15s (system interpolates via playbackRate).
-            // VOD: update every 5s for scrubber accuracy.
-            timeChangeCount += 1
-            let diagNow = Date()
-            let npInterval: TimeInterval = isLive ? 15.0 : 5.0
-            if diagNow.timeIntervalSince(lastTimePrint) >= npInterval {
-                let state = mediaPlayer.state.rawValue
-                let isPlaying = mediaPlayer.isPlaying
-                #if DEBUG
-                print("[VLC-DIAG] time=\(ms)ms dur=\(dur)ms isPlaying=\(isPlaying) state=\(state) callbacks/\(Int(npInterval))s=\(timeChangeCount)")
-                #endif
-                timeChangeCount = 0
-                lastTimePrint = diagNow
-
-                // Update Now Playing elapsed time (capture values on VLC thread)
-                let timeSec = Double(ms) / 1000.0
-                let rate: Float = isPlaying ? 1.0 : 0.0
-                Task { @MainActor in
-                    NowPlayingBridge.shared.updateElapsed(timeSec, rate: rate)
-                }
-            }
-
-            // First-start detection (drives the "connecting" → "playing" state transition).
-            guard !hasStarted else { return }
-            if ms > 0 {
-                hasStarted = true
-                anyAttemptStarted = true
-                logStore.append("✓ VLC time advanced: \(ms)ms")
-                print("[VLC-DIAG] First time change: \(ms)ms — playback started")
-            }
-        }
-    }
-}
 
 // MARK: - AirPlay Route Picker Button
 #if os(iOS)

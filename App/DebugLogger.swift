@@ -204,15 +204,6 @@ final class DebugLogger: @unchecked Sendable {
         queue.async { [weak self] in self?.appendToFile(entry) }
     }
 
-    /// Log a VLC state transition.
-    func logVLCState(_ state: String, url: String? = nil) {
-        guard isEnabled else { return }
-        var msg = "VLC → \(state)"
-        if let u = url { msg += " | \(u)" }
-        let entry = formatEntry(level: .info, category: "VLC", message: msg)
-        queue.async { [weak self] in self?.appendToFile(entry) }
-    }
-
     /// Log an EPG operation.
     func logEPG(event: String,
                 channelID: String? = nil,

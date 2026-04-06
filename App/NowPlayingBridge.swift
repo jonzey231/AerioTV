@@ -22,10 +22,6 @@ final class NowPlayingBridge {
     private var onSeek: ((TimeInterval) -> Void)?
     private var artworkTask: Task<Void, Never>?
 
-    /// Dedicated serial queue for writing to MPNowPlayingInfoCenter.
-    /// Keeps these writes off the main/render thread to prevent frame drops.
-    private let npQueue = DispatchQueue(label: "com.aerio.nowplaying", qos: .utility)
-
     /// Our shadow copy of nowPlayingInfo — always written in full, never read
     /// back from MPNowPlayingInfoCenter.
     private var infoDict: [String: Any] = [:]
@@ -85,12 +81,7 @@ final class NowPlayingBridge {
         artworkTask?.cancel()
         artworkTask = nil
         infoDict = [:]
-        npQueue.async {
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
-            #if os(iOS)
-            MPNowPlayingInfoCenter.default().playbackState = .stopped
-            #endif
-        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         let cc = MPRemoteCommandCenter.shared()
         cc.playCommand.removeTarget(nil)
         cc.pauseCommand.removeTarget(nil)
@@ -106,17 +97,11 @@ final class NowPlayingBridge {
 
     /// Write our shadow dict to the system center — always a full write,
     /// never a read-modify-write.
-    /// Uses a dedicated serial queue to avoid blocking the main/render thread,
-    /// which was causing periodic video stuttering on tvOS.
+    /// Called on @MainActor (guaranteed by class isolation).
+    /// MPNowPlayingInfoCenter has internal queue assertions that crash when called
+    /// from arbitrary dispatch queues (iOS _dispatch_assert_queue_fail).
     private func publishInfo() {
-        nonisolated(unsafe) let snapshot = infoDict
-        npQueue.async {
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = snapshot
-            #if os(iOS)
-            let rate = snapshot[MPNowPlayingInfoPropertyPlaybackRate] as? Double ?? 1.0
-            MPNowPlayingInfoCenter.default().playbackState = rate > 0 ? .playing : .paused
-            #endif
-        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = infoDict
     }
 
     private func registerCommands(isLive: Bool) {
@@ -165,8 +150,8 @@ final class NowPlayingBridge {
         // whenever setNowPlayingInfo: is called with a dict containing
         // MPMediaItemPropertyArtwork. This is a confirmed Apple framework bug —
         // every approach (single write, shadow dict, delayed, pre-decoded
-        // CGImage, MPNowPlayingSession) crashes identically. Skip on tvOS.
-        #if os(tvOS)
+        // CGImage, MPNowPlayingSession) crashes identically. Skip on tvOS & iOS.
+        #if os(tvOS) || os(iOS)
         return
         #else
         artworkTask?.cancel()

@@ -85,6 +85,8 @@ final class VODStore: ObservableObject {
         movieSearchTask = Task {
             let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
             var results: [VODDisplayItem] = []
+            var lastPublishTime = Date.distantPast
+            let publishInterval: TimeInterval = 0.5
             do {
                 for try await batch in api.searchVODMoviesStream(query: query) {
                     guard !Task.isCancelled else { break }
@@ -104,10 +106,17 @@ final class VODStore: ObservableObject {
                         return VODDisplayItem(movie: movie)
                     }
                     results += items
-                    movieSearchResults = results
+                    let now = Date()
+                    if now.timeIntervalSince(lastPublishTime) >= publishInterval {
+                        movieSearchResults = results
+                        lastPublishTime = now
+                    }
                 }
             } catch {}
-            if !Task.isCancelled { isSearchingMovies = false }
+            if !Task.isCancelled {
+                movieSearchResults = results
+                isSearchingMovies = false
+            }
         }
     }
 
@@ -127,6 +136,8 @@ final class VODStore: ObservableObject {
         seriesSearchTask = Task {
             let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
             var results: [VODDisplayItem] = []
+            var lastPublishTime = Date.distantPast
+            let publishInterval: TimeInterval = 0.5
             do {
                 for try await batch in api.searchVODSeriesStream(query: query) {
                     guard !Task.isCancelled else { break }
@@ -144,10 +155,17 @@ final class VODStore: ObservableObject {
                         return VODDisplayItem(series: show)
                     }
                     results += items
-                    seriesSearchResults = results
+                    let now = Date()
+                    if now.timeIntervalSince(lastPublishTime) >= publishInterval {
+                        seriesSearchResults = results
+                        lastPublishTime = now
+                    }
                 }
             } catch {}
-            if !Task.isCancelled { isSearchingSeries = false }
+            if !Task.isCancelled {
+                seriesSearchResults = results
+                isSearchingSeries = false
+            }
         }
     }
 
@@ -206,6 +224,8 @@ final class VODStore: ObservableObject {
             }
 
             var accumulated: [VODDisplayItem] = []
+            var lastPublishTime = Date.distantPast
+            let publishInterval: TimeInterval = 0.5
             do {
                 debugLog("🎬 VODStore.loadMovies: starting stream fetch")
                 for try await batch in api.getVODMoviesStream() {
@@ -227,7 +247,13 @@ final class VODStore: ObservableObject {
                         return VODDisplayItem(movie: movie)
                     }
                     accumulated += newItems
-                    movies = accumulated
+                    // Throttle publishing to max 2x/second to reduce SwiftUI redraws.
+                    // Always publish on first batch (to hide spinner).
+                    let now = Date()
+                    if isLoadingMovies || now.timeIntervalSince(lastPublishTime) >= publishInterval {
+                        movies = accumulated
+                        lastPublishTime = now
+                    }
                     // If no API categories were fetched, build from genre data
                     if movieCatNames.isEmpty {
                         movieCategories = Self.buildCategories(from: accumulated, using: \.movie?.categoryName)
@@ -236,6 +262,8 @@ final class VODStore: ObservableObject {
                     // while remaining pages continue loading in the background.
                     if isLoadingMovies { isLoadingMovies = false }
                 }
+                // Final publish to ensure all items visible
+                movies = accumulated
             } catch let err as APIError {
                 guard !Task.isCancelled else { isLoadingMovies = false; return }
                 if accumulated.isEmpty { moviesError = err.errorDescription }
@@ -316,6 +344,8 @@ final class VODStore: ObservableObject {
             }
 
             var accumulated: [VODDisplayItem] = []
+            var lastPublishTime = Date.distantPast
+            let publishInterval: TimeInterval = 0.5
             do {
                 for try await batch in api.getVODSeriesStream() {
                     guard !Task.isCancelled else { isLoadingSeries = false; return }
@@ -334,13 +364,20 @@ final class VODStore: ObservableObject {
                         return VODDisplayItem(series: show)
                     }
                     accumulated += newItems
-                    series = accumulated
+                    // Throttle publishing to max 2x/second to reduce SwiftUI redraws.
+                    let now = Date()
+                    if isLoadingSeries || now.timeIntervalSince(lastPublishTime) >= publishInterval {
+                        series = accumulated
+                        lastPublishTime = now
+                    }
                     // If no API categories were fetched, build from genre data
                     if seriesCatNames.isEmpty {
                         seriesCategories = Self.buildCategories(from: accumulated, using: \.series?.categoryName)
                     }
                     if isLoadingSeries { isLoadingSeries = false }
                 }
+                // Final publish to ensure all items visible
+                series = accumulated
             } catch let err as APIError {
                 guard !Task.isCancelled else { isLoadingSeries = false; return }
                 if accumulated.isEmpty { seriesError = err.errorDescription }
@@ -549,6 +586,9 @@ final class ChannelStore: ObservableObject {
         let batchSize = 8
         let now = Date()
 
+        // Accumulate all enrichment results, publish channels once at end.
+        var allResults: [(String, String, String, Date?, Date?)] = []
+
         // Process in batches to limit concurrency.
         for batchStart in stride(from: 0, to: snapshot.count, by: batchSize) {
             guard !Task.isCancelled else { return }
@@ -582,19 +622,21 @@ final class ChannelStore: ObservableObject {
                 return collected
             }
 
-            // Apply results to the live channels array.
-            guard !Task.isCancelled, !results.isEmpty else { continue }
-            var updated = channels
-            for (id, title, desc, start, end) in results {
-                if let idx = updated.firstIndex(where: { $0.id == id }) {
-                    updated[idx].currentProgram             = title
-                    updated[idx].currentProgramDescription  = desc
-                    updated[idx].currentProgramStart        = start
-                    updated[idx].currentProgramEnd          = end
-                }
-            }
-            channels = updated
+            allResults.append(contentsOf: results)
         }
+
+        // Single publish with all accumulated results.
+        guard !Task.isCancelled, !allResults.isEmpty else { return }
+        var updated = channels
+        for (id, title, desc, start, end) in allResults {
+            if let idx = updated.firstIndex(where: { $0.id == id }) {
+                updated[idx].currentProgram             = title
+                updated[idx].currentProgramDescription  = desc
+                updated[idx].currentProgramStart        = start
+                updated[idx].currentProgramEnd          = end
+            }
+        }
+        channels = updated
     }
 
     // MARK: - Channel Sorting Helpers
@@ -1004,7 +1046,7 @@ struct MainTabView: View {
     /// Includes all servers (not just VOD-capable) so switching to/from M3U also fires the task.
     private var vodServerKey: String {
         allServers
-            .map { "\($0.id.uuidString)|\($0.baseURL)|\($0.apiKey)|\($0.username)|\($0.password)|\($0.isActive ? "1" : "0")" }
+            .map { "\($0.id.uuidString)|\($0.baseURL)|\($0.isActive ? "1" : "0")" }
             .sorted()
             .joined(separator: ",")
     }
@@ -1055,7 +1097,7 @@ struct MainTabView: View {
 
             // Single PlayerView kept in hierarchy for uninterrupted playback.
             // Transitions between full-screen and mini use size/position
-            // modifiers — the VLC player instance is never destroyed.
+            // modifiers — the player instance is never destroyed.
             if nowPlaying.isActive, let item = nowPlaying.playingItem {
                 #if os(iOS)
                 GeometryReader { geo in
@@ -1083,7 +1125,7 @@ struct MainTabView: View {
                 .ignoresSafeArea()
                 #elseif os(tvOS)
                 // Single PlayerView instance — survives minimize/expand without
-                // recreating the VLC player (avoids 1s+ hang and stream restart).
+                // recreating the player (avoids 1s+ hang and stream restart).
                 GeometryReader { geo in
                     let minimized = nowPlaying.isMinimized
                     let miniW: CGFloat = 400
@@ -1135,6 +1177,10 @@ struct MainTabView: View {
                 }
                 .ignoresSafeArea()
                 .zIndex(2)
+                // Create an isolated focus section so the guide underneath can't steal
+                // focus when the player is full-screen. Without this, the ZStack overlay
+                // lets d-pad events fall through to the channel list behind the player.
+                .focusSection()
                 #endif
             }
         }

@@ -8,7 +8,7 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
 
 **Live TV**
 
-Stream live channels with VLC-powered playback. Browse channels in a scrollable list or a full EPG guide view with program titles, descriptions, and time slots. Minimize playback to a picture-in-picture style mini player while browsing other content.
+Stream live channels with MPV-powered playback. Browse channels in a scrollable list or a full EPG guide view with program titles, descriptions, and time slots. Minimize playback to a picture-in-picture style mini player while browsing other content.
 
 **Electronic Program Guide**
 
@@ -56,14 +56,7 @@ Select either the `Aerio_iOS` or `Aerio_tvOS` scheme and build to a simulator or
 
 ## Dependencies
 
-The project uses CocoaPods with the following libraries:
-
-| Library | Platform | Purpose |
-|---------|----------|---------|
-| MobileVLCKit | iOS | VLC media playback engine |
-| TVVLCKit | tvOS | VLC media playback engine |
-
-Run `pod install` after cloning to download these dependencies. The `Pods/` directory is excluded from version control.
+The project uses Swift Package Manager for dependency management. The `Pods/` directory (if present from legacy builds) is excluded from version control.
 
 ## Project Structure
 

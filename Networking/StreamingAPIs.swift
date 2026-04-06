@@ -245,7 +245,7 @@ struct XtreamCodesAPI {
 
     /// Build ordered stream URL attempts for a channel.
     /// Xtream standard: /live/user/pass/stream_id.ext
-    /// tvOS: .m3u8 first (AVPlayer needs HLS). iOS: .ts first (VLC handles it natively).
+    /// tvOS: .m3u8 first (AVPlayer needs HLS). iOS: .ts first (MPV handles it natively).
     /// Note: requires Dispatcharr stream profile set to "Redirect" to work correctly.
     func streamURLs(for stream: XtreamStream) -> [URL] {
         var urls: [URL] = []
@@ -259,7 +259,7 @@ struct XtreamCodesAPI {
             urls.append(url)
         }
         #else
-        // MPEG-TS first — VLC (primary engine on iOS) handles .ts natively
+        // MPEG-TS first — MPV (primary engine on iOS) handles .ts natively
         if let url = URL(string: "\(base)/live/\(username)/\(password)/\(stream.streamID).ts") {
             urls.append(url)
         }
@@ -1061,12 +1061,12 @@ struct DispatcharrAPI {
     }
 
     /// Build ordered live-stream URL attempts for a Dispatcharr channel.
-    /// Both iOS and tvOS now use VLC, so TS first (native, reliable) with HLS as fallback.
+    /// Both iOS and tvOS now use MPV, so TS first (native, reliable) with HLS as fallback.
     /// Channel container URL is preferred so Dispatcharr can apply server-side failover.
     func liveProxyURLAttempts(for channel: DispatcharrChannel) -> [URL] {
         guard let uuid = channel.uuid, !uuid.isEmpty else { return [] }
         var out: [URL] = []
-        // VLC handles TS natively — channel container first for server-side failover
+        // MPV handles TS natively — channel container first for server-side failover
         if let u = proxyTSChannelURL(channelUUID: uuid) { out.append(u) }
         if let u = proxyTSStreamURL(uuid: uuid), !out.contains(u) { out.append(u) }
         if let u = URL(string: baseURL + "/proxy/hls/stream/\(uuid).m3u8") { out.append(u) }

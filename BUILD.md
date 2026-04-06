@@ -17,7 +17,7 @@
 Dispatcharr/
 ├── App/
 │   ├── DispatcharrApp.swift        # App entry point + ThemeManager injection
-│   ├── PlayerView.swift            # VLC player (MobileVLCKit) + AirPlay + audio-only
+│   ├── PlayerView.swift            # MPV player + AirPlay + audio-only
 │   └── SplashView.swift
 ├── Design/
 │   ├── Colors.swift                # Color tokens (appBackground, cardBackground, etc.)
@@ -39,7 +39,7 @@ Dispatcharr/
 │   ├── Home/
 │   │   └── HomeView.swift          # AppTab enum + MainTabView (4 tabs)
 │   ├── LiveTV/
-│   │   └── ChannelListView.swift   # Channel grid, group filters, VLC playback
+│   │   └── ChannelListView.swift   # Channel grid, group filters, playback
 │   ├── VOD/
 │   │   ├── MoviesView.swift        # Movie poster grid
 │   │   ├── TVShowsView.swift       # TV series poster grid
@@ -63,7 +63,7 @@ Dispatcharr/
 | Dispatcharr API key login | ✅ |
 | Multiple accounts (XC + Dispatcharr) | ✅ |
 | Live TV channel list + group filters | ✅ |
-| VLC playback (MobileVLCKit, LGPL 2.1) | ✅ |
+| MPV playback | ✅ |
 | HLS/TS fallback chain | ✅ |
 | Audio-only mode (music streams) | ✅ |
 | AirPlay route picker | ✅ |
@@ -75,7 +75,7 @@ Dispatcharr/
 | 6 color themes + custom hex accent | ✅ |
 | Liquid Glass (iOS 26 native + fallbacks) | ✅ |
 | Google Cast (OpenCastSwift) | 🔧 stub — see below |
-| tvOS VLC playback (TVVLCKit) | 🔧 stub |
+| tvOS MPV playback | 🔧 stub |
 | Source merge mode (multi-server) | 🔧 partial |
 
 ---
@@ -102,7 +102,7 @@ xcodegen generate
 pod install
 ```
 
-This installs **MobileVLCKit** (the VLC video player). After this step, always open `Dispatcharr.xcworkspace` — **not** `Dispatcharr.xcodeproj`.
+After this step, always open `Dispatcharr.xcworkspace` — **not** `Dispatcharr.xcodeproj`.
 
 ### 4. Open the workspace
 
@@ -140,7 +140,7 @@ If you prefer not to use XcodeGen:
    - `Shared/`
 3. Delete any auto-generated `ContentView.swift` or `Item.swift`
 
-### Step 3 — Add MobileVLCKit via CocoaPods
+### Step 3 — Install CocoaPods dependencies
 
 ```bash
 cd ~/path/to/Dispatcharr
@@ -203,7 +203,7 @@ After first wired deploy: **Window → Devices and Simulators** → check **"Con
 2. On Apple TV: **Settings → Remotes and Devices → Remote App and Devices** → pair
 3. Select Apple TV in Xcode → press **⌘R**
 
-> **Note:** The tvOS scheme uses a stub player (VLC not available). To enable VLC on tvOS, add `TVVLCKit` to the Podfile and add `#if os(tvOS)` conditional code in `PlayerView.swift`.
+> **Note:** The tvOS scheme uses a stub player. To enable playback on tvOS, add the MPV dependency and add `#if os(tvOS)` conditional code in `PlayerView.swift`.
 
 ---
 
@@ -238,7 +238,7 @@ struct VideoPlayerView: View {
 | SwiftData migration error | Delete app from device, reinstall |
 | 7-day expiry (free account) | Re-run **⌘R** from Xcode while connected |
 | Liquid Glass not showing | Requires iOS 26+; earlier iOS uses tinted material fallback |
-| VLC not found at build time | Check `Pods/` exists; re-run `pod install` if missing |
+| Player library not found at build time | Check dependencies are resolved; re-run `pod install` if missing |
 
 ---
 
