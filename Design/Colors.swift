@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - Fluent Brand Colors
+// MARK: - Aerio Brand Colors
 // Key surface and accent colors are DYNAMIC — they read from ThemeManager.shared so
 // every view automatically reflects the user's chosen theme without needing to
 // observe ThemeManager directly.  Text/border/status colors remain static.

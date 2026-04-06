@@ -52,7 +52,6 @@ struct AuthPosterImage: View {
 struct MoviesView: View {
     @ObservedObject var vodStore: VODStore
     @Query private var servers: [ServerConnection]
-    @ObservedObject private var theme = ThemeManager.shared
     @Binding var isPlaying: Bool
     @Binding var isDetailPushed: Bool
     @Binding var popRequested: Bool

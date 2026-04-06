@@ -32,6 +32,21 @@ final class GuideStore: ObservableObject {
     @Published var programs: [String: [GuideProgram]] = [:]  // channelID → programs
     @Published var isLoading = false
 
+    // Batch mode: accumulate merges into a backing dict, publish once at end.
+    private var _pendingPrograms: [String: [GuideProgram]] = [:]
+    private var _isBatching = false
+
+    private func beginBatch() {
+        _isBatching = true
+        _pendingPrograms = programs
+    }
+
+    private func endBatch() {
+        _isBatching = false
+        programs = _pendingPrograms
+        _pendingPrograms = [:]
+    }
+
     /// Phase 0 — load persisted EPG from SwiftData. Returns true if cache was fresh enough.
     func loadFromCache(modelContext: ModelContext, channels: [ChannelDisplayItem]) -> Bool {
         let now = Date()
@@ -196,6 +211,8 @@ final class GuideStore: ObservableObject {
     // MARK: - Dispatcharr
     private func fetchDispatcharr(server: ServerConnection, channels: [ChannelDisplayItem],
                                    windowStart: Date, windowEnd: Date) async {
+        beginBatch()
+        defer { endBatch() }
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                   auth: .apiKey(server.effectiveApiKey))
 
@@ -305,6 +322,8 @@ final class GuideStore: ObservableObject {
     // MARK: - Xtream Codes
     private func fetchXtream(server: ServerConnection, channels: [ChannelDisplayItem],
                               windowStart: Date, windowEnd: Date) async {
+        beginBatch()
+        defer { endBatch() }
         let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL,
                                   username: server.username,
                                   password: server.effectivePassword)
@@ -359,6 +378,8 @@ final class GuideStore: ObservableObject {
         let epgURLStr = server.effectiveEPGURL
         guard !epgURLStr.isEmpty, let epgURL = URL(string: epgURLStr) else { return }
         guard let parsed = try? await XMLTVParser.fetchAndParse(url: epgURL) else { return }
+        beginBatch()
+        defer { endBatch() }
 
         let tvgIDToChannelID: [String: String] = Dictionary(
             channels.compactMap { ch in
@@ -458,7 +479,8 @@ final class GuideStore: ObservableObject {
     // MARK: - Merge Helper
     /// Adds a program to the store, avoiding duplicates, and keeps sorted by start time.
     private func mergeProgram(_ prog: GuideProgram, for channelID: String) {
-        var list = programs[channelID] ?? []
+        let target = _isBatching ? _pendingPrograms : programs
+        var list = target[channelID] ?? []
         let dominated = list.contains(where: { existing in
             // Original check: same title and start within 60s
             if existing.title == prog.title && abs(existing.start.timeIntervalSince(prog.start)) < 60 {
@@ -476,7 +498,11 @@ final class GuideStore: ObservableObject {
         if dominated { return }
         list.append(prog)
         list.sort { $0.start < $1.start }
-        programs[channelID] = list
+        if _isBatching {
+            _pendingPrograms[channelID] = list
+        } else {
+            programs[channelID] = list
+        }
     }
 
     // MARK: - Seed EPGCache for List-View Cards
@@ -524,7 +550,6 @@ struct EPGGuideView: View {
     let onSelectChannel: (ChannelDisplayItem) -> Void
 
     @StateObject private var guideStore = GuideStore()
-    @ObservedObject private var theme = ThemeManager.shared
     @EnvironmentObject private var channelStore: ChannelStore
     @Environment(\.modelContext) private var modelContext
     @State private var _epgCacheIsFresh = false
@@ -555,7 +580,7 @@ struct EPGGuideView: View {
 
     private var totalGridWidth: CGFloat { pixelsPerHour * CGFloat(hoursBack + hoursForward) }
 
-    @State private var timelineTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+    // Timer removed — time indicator uses TimelineView instead (avoids full view invalidation)
 
     private let timeFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -604,9 +629,7 @@ struct EPGGuideView: View {
             guideStore.seedEPGCache(channels: channels, server: activeServer)
             channelStore.isEPGLoading = false
         }
-        .onReceive(timelineTimer) { _ in
-            // Force redraw for time indicator movement
-        }
+        // Timer removed — time indicator redraws via TimelineView
     }
 
     // MARK: - Horizontal Scroll State
@@ -663,8 +686,10 @@ struct EPGGuideView: View {
                     }
                 }
                 .overlay(alignment: .topLeading) {
-                    timeIndicatorLine(screenWidth: geo.size.width)
-                        .allowsHitTesting(false)
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        timeIndicatorLine(screenWidth: geo.size.width, now: context.date)
+                            .allowsHitTesting(false)
+                    }
                 }
             }
             .clipped()
@@ -780,7 +805,19 @@ struct EPGGuideView: View {
                         .frame(width: totalGridWidth, height: rowHeight, alignment: .center)
                 }
             } else {
-                let sortedProgs = progs.sorted { $0.start < $1.start }
+                // Viewport clipping: only render programs overlapping the visible time window
+                // plus 30-min padding on each side for smooth scrolling.
+                let visibleFraction = -horizontalOffset / totalGridWidth
+                let visibleWidthFraction = visibleProgramWidth / totalGridWidth
+                let visibleTimeStart = windowStart.addingTimeInterval(Double(visibleFraction) * totalDuration)
+                let visibleTimeEnd = visibleTimeStart.addingTimeInterval(Double(visibleWidthFraction) * totalDuration)
+                let pad: TimeInterval = 1800 // 30 minutes
+                let filterStart = visibleTimeStart.addingTimeInterval(-pad)
+                let filterEnd = visibleTimeEnd.addingTimeInterval(pad)
+
+                let sortedProgs = progs
+                    .filter { $0.end > filterStart && $0.start < filterEnd }
+                    .sorted { $0.start < $1.start }
                 ForEach(Array(sortedProgs.enumerated()), id: \.element.id) { index, prog in
                     let nextStart: Date? = index + 1 < sortedProgs.count ? sortedProgs[index + 1].start : nil
                     programCell(prog, channelItem: channel, nextProgramStart: nextStart)
@@ -825,8 +862,7 @@ struct EPGGuideView: View {
     }
 
     // MARK: - Time Indicator Line
-    private func timeIndicatorLine(screenWidth: CGFloat) -> some View {
-        let now = Date()
+    private func timeIndicatorLine(screenWidth: CGFloat, now: Date = Date()) -> some View {
         let x = xOffset(for: now)
         let screenX = channelColumnWidth + horizontalOffset + x
         // Only show if it's within the visible program area
@@ -972,7 +1008,9 @@ private struct GuideProgramButton: View {
     let leadingClip: CGFloat
     let shortTimeFormatter: DateFormatter
     let onSelect: (ChannelDisplayItem) -> Void
-    @ObservedObject private var reminderManager = ReminderManager.shared
+    // Access ReminderManager directly — @ObservedObject on a singleton
+    // would invalidate every program cell whenever any reminder changes.
+    private var reminderManager: ReminderManager { .shared }
     #if os(tvOS)
     @FocusState private var isFocused: Bool
     #endif

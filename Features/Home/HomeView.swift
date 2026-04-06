@@ -569,6 +569,60 @@ final class ChannelStore: ObservableObject {
         isLoading = false
     }
 
+    // MARK: - Bulk EPG Loading
+
+    /// Loads ALL EPG data upfront so browsing/playback never triggers network requests.
+    /// Called immediately after channels load. Sets isEPGLoading during the process.
+    func loadAllEPG() async {
+        guard let server = activeServer else { return }
+        let baseURL  = server.effectiveBaseURL
+        let type     = server.type
+        let username = server.username
+        let password = server.effectivePassword
+        let apiKey   = server.effectiveApiKey
+
+        isEPGLoading = true
+        defer { isEPGLoading = false }
+
+        let now = Date()
+
+        switch type {
+        case .dispatcharrAPI:
+            // Dispatcharr: one bulk call via /api/epg/grid/ — all channels, -1h to +24h
+            do {
+                let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+                let programs = try await dAPI.getEPGGrid()
+                // Group by tvgID and populate EPGCache
+                var byTvgID: [String: [EPGEntry]] = [:]
+                for p in programs {
+                    guard let start = p.startTime?.toDate(), let end = p.endTime?.toDate(),
+                          end > now else { continue }
+                    let key = p.tvgID ?? (p.channel.map { "ch_\($0)" } ?? "")
+                    guard !key.isEmpty else { continue }
+                    let entry = EPGEntry(title: p.title, description: p.description, startTime: start, endTime: end)
+                    byTvgID[key, default: []].append(entry)
+                }
+                // Sort each channel's programs by start time and cache them
+                for (tvgID, entries) in byTvgID {
+                    let sorted = entries.sorted { ($0.startTime ?? .distantPast) < ($1.startTime ?? .distantPast) }
+                    await EPGCache.shared.set(sorted, for: "d_\(baseURL)_\(tvgID)")
+                }
+                debugLog("📺 Bulk EPG loaded: \(programs.count) programs across \(byTvgID.count) channels")
+            } catch {
+                debugLog("📺 Bulk EPG failed: \(error.localizedDescription) — falling back to lazy loading")
+            }
+
+        case .xtreamCodes:
+            // Xtream: batch per-stream EPG (reuses enrichXtreamEPG)
+            await enrichXtreamEPG(baseURL: baseURL, username: username, password: password)
+
+        case .m3uPlaylist:
+            // M3U: XMLTV is already fully parsed during channel load — EPGCache is populated.
+            // Nothing additional needed.
+            debugLog("📺 M3U EPG: already loaded from XMLTV during channel fetch")
+        }
+    }
+
     // MARK: - Xtream EPG Enrichment
 
     /// Progressively fetches short EPG for Xtream channels and updates `channels`
@@ -1265,8 +1319,8 @@ struct MainTabView: View {
                 selectedTab = AppTab(rawValue: defaultTabRaw) ?? .liveTV
             }
             configureTabBarAppearance()
-            // Show initial EPG loading screen on first install
-            if !hasCompletedInitialEPG && !allServers.isEmpty {
+            // Show EPG loading screen on every launch while channels + EPG are loading
+            if !allServers.isEmpty {
                 showInitialEPGLoading = true
             }
             debugLog("🔶 MainTabView.onAppear: done")
@@ -1274,26 +1328,10 @@ struct MainTabView: View {
         // Dismiss EPG loading screen once EPG finishes downloading
         .onChange(of: channelStore.isEPGLoading) { _, loading in
             if !loading && showInitialEPGLoading && !channelStore.channels.isEmpty {
-                hasCompletedInitialEPG = true
                 withAnimation(.easeOut(duration: 0.4)) {
                     showInitialEPGLoading = false
                 }
-                debugLog("🔶 Initial EPG download complete — dismissing loading screen")
-            }
-        }
-        // Also dismiss if channels load and cache was fresh (EPG never set isEPGLoading)
-        .onChange(of: channelStore.channels.count) { _, count in
-            if count > 0 && showInitialEPGLoading && !channelStore.isEPGLoading {
-                // Give the guide view a moment to trigger its .task and check cache
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    if !channelStore.isEPGLoading && showInitialEPGLoading {
-                        hasCompletedInitialEPG = true
-                        withAnimation(.easeOut(duration: 0.4)) {
-                            showInitialEPGLoading = false
-                        }
-                        debugLog("🔶 EPG cache was fresh — dismissing loading screen")
-                    }
-                }
+                debugLog("🔶 EPG download complete — dismissing loading screen")
             }
         }
         .fullScreenCover(isPresented: $showInitialEPGLoading) {
@@ -1318,6 +1356,13 @@ struct MainTabView: View {
             debugLog("🔶 MainTabView.task(channelServerKey): firing, servers=\(allServers.count)")
             channelStore.refresh(servers: allServers)
             debugLog("🔶 MainTabView.task(channelServerKey): refresh called")
+            // Wait for channels to finish loading, then load ALL EPG upfront
+            while channelStore.isLoading {
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            if !channelStore.channels.isEmpty {
+                await channelStore.loadAllEPG()
+            }
         }
         // Global search — hidden during active playback
         .toolbar {
@@ -1579,11 +1624,11 @@ struct InitialEPGLoadingView: View {
                     .font(.system(size: 64))
                     .foregroundColor(theme.accent)
 
-                Text("Setting Up Your Guide")
+                Text("Loading Guide")
                     .font(.system(size: 28, weight: .bold))
                     .foregroundColor(.textPrimary)
 
-                Text("Downloading program guide data\(dots)")
+                Text("Downloading program guide\(dots)")
                     .font(.system(size: 18))
                     .foregroundColor(.textSecondary)
                     .frame(width: 350, alignment: .center)
@@ -1595,12 +1640,6 @@ struct InitialEPGLoadingView: View {
                     #endif
                     .tint(theme.accent)
                     .padding(.top, 8)
-
-                Text("This only happens once and may take a minute.")
-                    .font(.system(size: 14))
-                    .foregroundColor(.textTertiary)
-                    .multilineTextAlignment(.center)
-                    .padding(.top, 4)
 
                 Spacer()
                 Spacer()

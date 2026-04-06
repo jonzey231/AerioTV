@@ -231,7 +231,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         @MainActor
         func setupRenderer(glkView: GLKView) {
             self.glkView = glkView
-            self.eaglContext = glkView.context as EAGLContext
+            self.eaglContext = glkView.context
             mpvQueue.async { [weak self] in
                 self?.start()
             }

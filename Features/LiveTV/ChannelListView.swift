@@ -8,7 +8,7 @@ actor EPGCache {
     static let shared = EPGCache()
     private struct Entry { let programs: [EPGEntry]; let fetchedAt: Date }
     private var cache: [String: Entry] = [:]
-    private let ttl: TimeInterval = 300
+    private let ttl: TimeInterval = 1800  // 30 minutes — EPG loaded upfront on launch
 
     func get(_ key: String) -> [EPGEntry]? {
         guard let e = cache[key], Date().timeIntervalSince(e.fetchedAt) < ttl else { return nil }
@@ -28,7 +28,6 @@ struct ChannelListView: View {
     @EnvironmentObject private var nowPlaying: NowPlayingManager
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @EnvironmentObject private var channelStore: ChannelStore
-    @ObservedObject private var theme = ThemeManager.shared
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     @Query private var servers: [ServerConnection]
@@ -553,9 +552,7 @@ struct ChannelRow: View {
     let onTap: () -> Void
     var fetchUpcoming: (() async -> [EPGEntry])? = nil
     @EnvironmentObject private var favoritesStore: FavoritesStore
-    @ObservedObject private var theme = ThemeManager.shared
     @Environment(\.horizontalSizeClass) private var sizeClass
-    @ObservedObject private var reminderManager = ReminderManager.shared
     @State private var isExpanded = false
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
@@ -703,7 +700,8 @@ struct ChannelRow: View {
                             HStack(spacing: 8) {
                                 MarqueeText(text: program,
                                             font: .system(size: 22),
-                                            color: .accentPrimary.opacity(0.85))
+                                            color: .accentPrimary.opacity(0.85),
+                                            isActive: isCardFocused)
                                     .frame(height: 28)
                                 if let end = item.currentProgramEnd {
                                     nowPlayingTimeRemaining(end: end)
@@ -1033,15 +1031,15 @@ struct ChannelRow: View {
     private func reminderMenu(for entry: EPGEntry) -> some View {
         if let start = entry.startTime, start > Date() {
             let key = ReminderManager.programKey(channelName: item.name, title: entry.title, start: start)
-            if reminderManager.hasReminder(forKey: key) {
+            if ReminderManager.shared.hasReminder(forKey: key) {
                 Button(role: .destructive) {
-                    reminderManager.cancelReminder(forKey: key)
+                    ReminderManager.shared.cancelReminder(forKey: key)
                 } label: {
                     Label("Cancel Reminder", systemImage: "bell.slash")
                 }
             } else {
                 Button {
-                    reminderManager.scheduleReminder(
+                    ReminderManager.shared.scheduleReminder(
                         programTitle: entry.title,
                         channelName: item.name,
                         startTime: start
@@ -1173,7 +1171,6 @@ struct FavoritesView: View {
     @EnvironmentObject private var nowPlaying: NowPlayingManager
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @EnvironmentObject private var channelStore: ChannelStore
-    @ObservedObject private var theme = ThemeManager.shared
     @Query private var servers: [ServerConnection]
 
     var body: some View {
@@ -1229,6 +1226,8 @@ struct MarqueeText: View {
     let text: String
     let font: Font
     let color: Color
+    /// When false, text is static (truncated). Saves CPU/GPU during scroll.
+    var isActive: Bool = true
 
     @State private var offset: CGFloat = 0
     @State private var textWidth: CGFloat = 0
@@ -1253,7 +1252,13 @@ struct MarqueeText: View {
         }
         .clipped()
         .onChange(of: text) { _, _ in offset = 0; textWidth = 0 }
-        .task(id: textWidth) { await runMarquee() }
+        .onChange(of: isActive) { _, active in
+            if !active { withAnimation(.easeInOut(duration: 0.2)) { offset = 0 } }
+        }
+        .task(id: isActive ? textWidth : -1) {
+            guard isActive else { return }
+            await runMarquee()
+        }
     }
 
     @MainActor
