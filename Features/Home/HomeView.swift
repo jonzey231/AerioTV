@@ -1306,8 +1306,15 @@ struct MainTabView: View {
                 selectedTab = AppTab(rawValue: defaultTabRaw) ?? .liveTV
             }
             configureTabBarAppearance()
-            // Show EPG loading screen on every launch while channels + EPG are loading
-            if !allServers.isEmpty {
+            // Show EPG loading screen only if the active server has EPG data to load.
+            // M3U without EPG URL has nothing to fetch — skip the loading screen.
+            let activeServer = allServers.first(where: { $0.isActive }) ?? allServers.first
+            let hasEPG: Bool = {
+                guard let s = activeServer else { return false }
+                if s.type == .m3uPlaylist { return !s.epgURL.isEmpty }
+                return true  // Dispatcharr and Xtream always have EPG
+            }()
+            if hasEPG {
                 showInitialEPGLoading = true
             }
             debugLog("🔶 MainTabView.onAppear: done")

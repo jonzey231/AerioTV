@@ -95,13 +95,20 @@ struct ChannelListView: View {
                 }
                 .onAppear {
                     debugLog("🔷 ChannelListView.onAppear: channels=\(channelStore.channels.count), isLoading=\(channelStore.isLoading), thread=\(Thread.current)")
+                    // Default to guide view if the active server has EPG data.
+                    // M3U without EPG → default to list view (no guide data to show).
+                    let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+                    let hasEPG: Bool = {
+                        guard let s = activeServer else { return false }
+                        if s.type == .m3uPlaylist { return !s.epgURL.isEmpty }
+                        return true
+                    }()
+
                     #if os(tvOS)
-                    // tvOS defaults to guide view
-                    showGuideView = defaultLiveTVView == "guide"
+                    showGuideView = hasEPG && defaultLiveTVView == "guide"
                     #else
-                    // iPhone always uses list; iPad respects the stored preference (defaults to guide)
                     if UIDevice.current.userInterfaceIdiom == .pad {
-                        showGuideView = defaultLiveTVView == "guide"
+                        showGuideView = hasEPG && defaultLiveTVView == "guide"
                     } else {
                         showGuideView = false
                     }
@@ -485,8 +492,10 @@ struct ChannelListView: View {
                 return entries
             }
         case .m3uPlaylist:
-            guard let tvgID = item.tvgID, !tvgID.isEmpty else { return nil }
             let epgURL   = server.effectiveEPGURL
+            // No EPG URL → no schedule data to fetch
+            guard !epgURL.isEmpty else { return nil }
+            guard let tvgID = item.tvgID, !tvgID.isEmpty else { return nil }
             let cacheKey = "m3u_\(tvgID)"
             return {
                 if let cached = await EPGCache.shared.get(cacheKey) { return cached }

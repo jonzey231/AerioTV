@@ -322,17 +322,16 @@ struct M3UImportView: View {
         playlist.channelCount = previewChannels.count
         playlist.lastRefreshed = Date()
         modelContext.insert(playlist)
-        // Save twice to ensure SwiftData flushes to persistent store before
-        // onboarding auto-dismiss tears down the navigation stack.
+        // Save and flush immediately — the @Query in RootView will detect
+        // the new playlist via SwiftData's change notification.
         do {
             try modelContext.save()
+            try modelContext.save()  // Double save forces SwiftData to flush to persistent store
         } catch {
             debugLog("M3U save error: \(error)")
         }
         importSuccess = true
-        // Longer delay to give SwiftData time to fully persist before
-        // RootView's onChange(of: hasAnySource) closes onboarding.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { dismiss() }
+        dismiss()
     }
 }
 

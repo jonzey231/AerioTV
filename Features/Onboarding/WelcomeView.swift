@@ -52,17 +52,11 @@ struct WelcomeView: View {
                         .foregroundColor(.textTertiary)
                         .padding(.bottom, 40)
 
-                    // Feature rows
+                    // Supported source types
                     VStack(spacing: 10) {
-                        TVFeatureRow(icon: "key.fill",
-                                     title: "Dispatcharr API",
-                                     detail: "URL + API key")
-                        TVFeatureRow(icon: "tv.and.hifispeaker.fill",
-                                     title: "Xtream Codes",
-                                     detail: "URL + user + password")
-                        TVFeatureRow(icon: "doc.text.fill",
-                                     title: "M3U & EPG",
-                                     detail: "M3U & EPG URLs")
+                        FeaturePill(icon: "key.fill", title: "Dispatcharr API Key")
+                        FeaturePill(icon: "tv.and.hifispeaker.fill", title: "Xtream Codes")
+                        FeaturePill(icon: "doc.text.fill", title: "M3U + EPG")
                     }
                     .padding(.bottom, 32)
 
@@ -85,14 +79,6 @@ struct WelcomeView: View {
                         isPrimary: true
                     )
                     .padding(.bottom, 10)
-
-                    TVOnboardingNavButton(
-                        destination: M3UImportView(),
-                        icon: "list.bullet.rectangle.fill",
-                        label: "Import M3U Playlist",
-                        isPrimary: false
-                    )
-                    .padding(.bottom, 16)
 
                     TVOnboardingSkipButton {
                         hasCompletedOnboarding = true
@@ -131,19 +117,12 @@ struct WelcomeView: View {
                     }
                     .padding(.bottom, 24)
 
-                    // Feature Pills
+                    // Supported source types
                     VStack(spacing: 8) {
-                        FeaturePill(icon: "key.fill",
-                                    title: "Dispatcharr API",
-                                    detail: "URL + API key")
-                        FeaturePill(icon: "tv.and.hifispeaker.fill",
-                                    title: "Xtream Codes",
-                                    detail: "URL + User + Password")
-                        FeaturePill(icon: "doc.text.fill",
-                                    title: "M3U & EPG",
-                                    detail: "M3U & EPG URLs")
+                        FeaturePill(icon: "key.fill", title: "Dispatcharr API Key")
+                        FeaturePill(icon: "tv.and.hifispeaker.fill", title: "Xtream Codes")
+                        FeaturePill(icon: "doc.text.fill", title: "M3U + EPG")
                     }
-                    .padding(.horizontal, 32)
                     .padding(.bottom, 20)
 
                     // iCloud Sync opt-in
@@ -165,25 +144,6 @@ struct WelcomeView: View {
                             .frame(height: 48)
                             .background(LinearGradient.accentGradient)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
-
-                        NavigationLink(destination: M3UImportView()) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "list.bullet.rectangle.fill")
-                                    .font(.system(size: 15, weight: .semibold))
-                                Text("Import M3U Playlist")
-                                    .font(.headlineMedium)
-                            }
-                            .foregroundColor(.textPrimary)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 48)
-                            .background(Color.elevatedBackground)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                    .stroke(Color.borderMedium, lineWidth: 1)
-                            )
                         }
                         .buttonStyle(.plain)
 
@@ -528,7 +488,6 @@ private struct TVOnboardingSkipButton: View {
 private struct FeaturePill: View {
     let icon: String
     let title: String
-    let detail: String
 
     var body: some View {
         HStack(spacing: 12) {
@@ -540,18 +499,7 @@ private struct FeaturePill: View {
             Text(title)
                 .font(.headlineSmall)
                 .foregroundColor(.textPrimary)
-
-            Text("·")
-                .foregroundColor(.textTertiary)
-
-            Text(detail)
-                .font(.bodySmall)
-                .foregroundColor(.textTertiary)
-                .lineLimit(1)
-
-            Spacer(minLength: 0)
         }
         .padding(.vertical, 4)
-        .padding(.horizontal, 8)
     }
 }

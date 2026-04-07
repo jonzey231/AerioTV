@@ -1153,10 +1153,9 @@ private struct HorizontalPanGestureView: UIViewRepresentable {
     @Binding var offset: CGFloat
     let minOffset: CGFloat
 
-    func makeUIView(context: Context) -> UIView {
-        let view = UIView()
+    func makeUIView(context: Context) -> PassthroughView {
+        let view = PassthroughView()
         view.backgroundColor = .clear
-        view.isUserInteractionEnabled = true
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan))
         pan.delegate = context.coordinator
@@ -1164,9 +1163,21 @@ private struct HorizontalPanGestureView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {
+    func updateUIView(_ uiView: PassthroughView, context: Context) {
         context.coordinator.minOffset = minOffset
     }
+
+    /// UIView that passes through all touches to views behind it,
+    /// while still allowing its gesture recognizers to fire.
+    final class PassthroughView: UIView {
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+            // Return nil so touches pass through to the ScrollView underneath.
+            // The pan gesture recognizer still fires because it's attached to this view
+            // and UIKit evaluates gesture recognizers before hitTest routing.
+            return nil
+        }
+    }
+
 
     func makeCoordinator() -> Coordinator {
         Coordinator(offset: $offset, minOffset: minOffset)

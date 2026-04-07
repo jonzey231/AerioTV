@@ -49,6 +49,7 @@ struct AddServerView: View {
             }
         }
         .navigationTitle(typeChosen ? "Configure" : "Add Playlist")
+        .navigationBarBackButtonHidden(typeChosen)
         #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
         #endif
@@ -65,7 +66,7 @@ struct AddServerView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "chevron.left")
                                 .font(.system(size: 13, weight: .semibold))
-                            Text("Type")
+                            Text("Choose Server Type")
                         }
                         .foregroundColor(.accentPrimary)
                         .frame(minHeight: 44)
