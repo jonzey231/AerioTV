@@ -175,6 +175,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DispatchQueue.main.async { self.progressStore.speed = speed }
             }
 
+            // Audio track selection (0 = auto)
+            progressStore.setAudioTrackAction = { [weak self] trackID in
+                guard let self, let mpv = self.mpv else { return }
+                mpv_set_property_string(mpv, "aid", trackID == 0 ? "auto" : "\(trackID)")
+                DispatchQueue.main.async { self.progressStore.currentAudioTrackID = trackID }
+            }
+
+            // Subtitle track selection (0 = off)
+            progressStore.setSubtitleTrackAction = { [weak self] trackID in
+                guard let self, let mpv = self.mpv else { return }
+                mpv_set_property_string(mpv, "sid", trackID == 0 ? "no" : "\(trackID)")
+                DispatchQueue.main.async { self.progressStore.currentSubtitleTrackID = trackID }
+            }
+
             // Background/foreground handling — disable video output to prevent GPU crashes
             NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
                                                    name: UIApplication.didEnterBackgroundNotification, object: nil)
@@ -645,6 +659,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         if self.isLive, let mpv = self.mpv {
                             mpv_set_property_string(mpv, "cache-pause", "no")
                         }
+                        // Populate audio/subtitle track lists for the UI
+                        self.queryTracks()
                         #if DEBUG
                         if let mpv = self.mpv {
                             var cacheDur: Double = 0
@@ -1088,6 +1104,48 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             return f
         }()
         private var logTimestamp: String { Self.logDateFormatter.string(from: Date()) }
+
+        /// Query mpv's track-list and populate progressStore with audio/subtitle tracks.
+        private func queryTracks() {
+            guard let mpv else { return }
+            var count: Int64 = 0
+            mpv_get_property(mpv, "track-list/count", MPV_FORMAT_INT64, &count)
+
+            var audio: [MediaTrack] = []
+            var subs: [MediaTrack] = []
+
+            for i in 0..<Int(count) {
+                let prefix = "track-list/\(i)"
+                let type = getMPVString(mpv, "\(prefix)/type") ?? ""
+                guard type == "audio" || type == "sub" else { continue }
+
+                var trackID: Int64 = 0
+                mpv_get_property(mpv, "\(prefix)/id", MPV_FORMAT_INT64, &trackID)
+                let lang = getMPVString(mpv, "\(prefix)/lang") ?? ""
+                let title = getMPVString(mpv, "\(prefix)/title") ?? ""
+                let codec = getMPVString(mpv, "\(prefix)/codec") ?? ""
+                var isDefault: Int = 0
+                mpv_get_property(mpv, "\(prefix)/default", MPV_FORMAT_FLAG, &isDefault)
+
+                let track = MediaTrack(id: Int(trackID), type: type, title: title,
+                                       lang: lang, codec: codec, isDefault: isDefault != 0)
+                if type == "audio" { audio.append(track) }
+                else { subs.append(track) }
+            }
+
+            var currentAID: Int64 = 0
+            mpv_get_property(mpv, "aid", MPV_FORMAT_INT64, &currentAID)
+            var currentSID: Int64 = 0
+            mpv_get_property(mpv, "sid", MPV_FORMAT_INT64, &currentSID)
+
+            let ps = progressStore
+            DispatchQueue.main.async {
+                ps.audioTracks = audio
+                ps.subtitleTracks = subs
+                ps.currentAudioTrackID = Int(currentAID)
+                ps.currentSubtitleTrackID = Int(currentSID)
+            }
+        }
 
         private func getMPVString(_ mpv: OpaquePointer, _ name: String) -> String? {
             var cstr: UnsafeMutablePointer<CChar>?

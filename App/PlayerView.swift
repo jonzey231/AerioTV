@@ -41,6 +41,23 @@ final class AttemptLogStore: ObservableObject, @unchecked Sendable {
     }
 }
 
+// MARK: - Media Track (audio/subtitle)
+
+struct MediaTrack: Identifiable, Equatable {
+    let id: Int
+    let type: String     // "audio" or "sub"
+    let title: String
+    let lang: String
+    let codec: String
+    let isDefault: Bool
+
+    var displayName: String {
+        if !title.isEmpty { return title }
+        if !lang.isEmpty { return Locale.current.localizedString(forLanguageCode: lang) ?? lang.uppercased() }
+        return "\(type == "audio" ? "Audio" : "Subtitle") \(id)"
+    }
+}
+
 // MARK: - Player Progress Store
 // @unchecked Sendable: all @Published mutations dispatched to main queue manually.
 final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
@@ -52,12 +69,21 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     @Published var isPaused: Bool = false
     /// Current playback speed (1.0 = normal).
     @Published var speed: Double = 1.0
+    /// Available audio and subtitle tracks (populated on playback-restart).
+    @Published var audioTracks: [MediaTrack] = []
+    @Published var subtitleTracks: [MediaTrack] = []
+    @Published var currentAudioTrackID: Int = 0
+    @Published var currentSubtitleTrackID: Int = 0
     /// Closure set by the Coordinator; call with a target position in ms to seek.
     var seekAction: ((Int32) -> Void)?
     /// Closure set by the Coordinator; toggles play/pause.
     var togglePauseAction: (() -> Void)?
     /// Closure set by the Coordinator; sets playback speed.
     var setSpeedAction: ((Double) -> Void)?
+    /// Closure set by the Coordinator; sets audio track (0 = auto).
+    var setAudioTrackAction: ((Int) -> Void)?
+    /// Closure set by the Coordinator; sets subtitle track (0 = off).
+    var setSubtitleTrackAction: ((Int) -> Void)?
 
     static let speedOptions: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 }
@@ -787,6 +813,16 @@ private struct PlayerRootView: View {
                     Spacer()
 
                     HStack(spacing: 10) {
+                        // Audio track selector — only when multiple tracks
+                        if progressStore.audioTracks.count > 1 {
+                            audioTrackMenu
+                        }
+
+                        // Subtitle track selector — only when subs available
+                        if !progressStore.subtitleTracks.isEmpty {
+                            subtitleTrackMenu
+                        }
+
                         // Playback speed (VOD only — live streams always 1x)
                         if !isLive {
                             speedButton
@@ -838,7 +874,68 @@ private struct PlayerRootView: View {
         // .animation removed (resume prompt removed)
     }
 
-    // Frosted-glass circular button used in the player controls.
+    // MARK: - Audio Track Menu
+
+    private var audioTrackMenu: some View {
+        Menu {
+            ForEach(progressStore.audioTracks) { track in
+                Button {
+                    progressStore.setAudioTrackAction?(track.id)
+                } label: {
+                    Label(track.displayName,
+                          systemImage: track.id == progressStore.currentAudioTrackID ? "checkmark" : "")
+                }
+            }
+        } label: {
+            Image(systemName: "waveform.circle")
+                #if os(tvOS)
+                .font(.system(size: 28, weight: .semibold))
+                .frame(width: 64, height: 64)
+                #else
+                .font(.system(size: 19, weight: .semibold))
+                .frame(width: 52, height: 52)
+                #endif
+                .foregroundColor(.white)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+        }
+    }
+
+    // MARK: - Subtitle Track Menu
+
+    private var subtitleTrackMenu: some View {
+        Menu {
+            Button {
+                progressStore.setSubtitleTrackAction?(0)
+            } label: {
+                Label("Off",
+                      systemImage: progressStore.currentSubtitleTrackID == 0 ? "checkmark" : "")
+            }
+            ForEach(progressStore.subtitleTracks) { track in
+                Button {
+                    progressStore.setSubtitleTrackAction?(track.id)
+                } label: {
+                    Label(track.displayName,
+                          systemImage: track.id == progressStore.currentSubtitleTrackID ? "checkmark" : "")
+                }
+            }
+        } label: {
+            Image(systemName: "captions.bubble")
+                #if os(tvOS)
+                .font(.system(size: 28, weight: .semibold))
+                .frame(width: 64, height: 64)
+                #else
+                .font(.system(size: 19, weight: .semibold))
+                .frame(width: 52, height: 52)
+                #endif
+                .foregroundColor(progressStore.currentSubtitleTrackID != 0 ? Color.accentPrimary : .white)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+        }
+    }
+
     /// Cycles through playback speed options (0.5x → 0.75x → 1x → 1.25x → 1.5x → 2x).
     private var speedButton: some View {
         Button {
