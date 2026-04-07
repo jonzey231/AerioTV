@@ -44,8 +44,6 @@
 		<string>audio</string>
 		<string>processing</string>
 		<string>fetch</string>
-		<string>location</string>
-		<string>bluetooth-central</string>
 	</array>
 	<key>UIFileSharingEnabled</key>
 	<false/>
