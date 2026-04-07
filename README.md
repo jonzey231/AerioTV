@@ -89,7 +89,7 @@ Pre-built .ipa files for iOS and tvOS are available on the [Releases](https://gi
 
 ## Building for Release
 
-Select the appropriate scheme (`Aerio_iOS` or `Aerio_tvOS`), set the destination to "Any iOS Device" or "Any tvOS Device", then go to Product and Archive. The archive can be uploaded to App Store Connect or exported as an IPA for sideloading.
+Import this repository into Xcode. Select the appropriate scheme (`Aerio_iOS` or `Aerio_tvOS`), set the destination to your preferred device, then build and/or run it. You can generate your own .ipa file by creating an archive in Xcode at Product > Archive.
 
 ## License
 
