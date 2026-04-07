@@ -39,6 +39,7 @@ struct ChannelListView: View {
     @State private var hiddenGroups: Set<String> = []
     @State private var showManageGroups = false
     @AppStorage("defaultLiveTVView") private var defaultLiveTVView = "guide"
+    @AppStorage("channelSortMode") private var sortModeRaw = "number"
     @State private var showGuideView = false
     #if os(tvOS)
     @State private var showSearchField = false
@@ -59,6 +60,29 @@ struct ChannelListView: View {
                 #endif
                 .toolbar {
                     #if os(iOS)
+                    // Sort menu
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Menu {
+                            Button {
+                                sortModeRaw = "number"
+                            } label: {
+                                Label("By Number", systemImage: sortModeRaw == "number" ? "checkmark" : "")
+                            }
+                            Button {
+                                sortModeRaw = "name"
+                            } label: {
+                                Label("By Name", systemImage: sortModeRaw == "name" ? "checkmark" : "")
+                            }
+                            Button {
+                                sortModeRaw = "favorites"
+                            } label: {
+                                Label("Favorites First", systemImage: sortModeRaw == "favorites" ? "checkmark" : "")
+                            }
+                        } label: {
+                            Image(systemName: "arrow.up.arrow.down")
+                                .foregroundColor(.accentPrimary)
+                        }
+                    }
                     // Guide view toggle — iPad only (iPhone always uses list)
                     if UIDevice.current.userInterfaceIdiom == .pad {
                         ToolbarItem(placement: .navigationBarTrailing) {
@@ -79,6 +103,7 @@ struct ChannelListView: View {
                 #endif
                 .onChange(of: searchText)       { _, _ in filterChannels() }
                 .onChange(of: selectedGroup)    { _, _ in filterChannels() }
+                .onChange(of: sortModeRaw)      { _, _ in filterChannels() }
                 // Sync filtered list whenever the store delivers new data.
                 .onChange(of: channelStore.channels) { _, items in
                     filterChannels()
@@ -396,6 +421,20 @@ struct ChannelListView: View {
         }
         if !searchText.isEmpty {
             result = result.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        }
+        // Apply sort
+        switch sortModeRaw {
+        case "name":
+            result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case "favorites":
+            result.sort {
+                let fav0 = favoritesStore.isFavorite($0.id)
+                let fav1 = favoritesStore.isFavorite($1.id)
+                if fav0 != fav1 { return fav0 }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+        default: // "number"
+            break // Channels arrive in number order from ChannelStore
         }
         filteredChannels = result
         prefetchEPGForVisibleChannels(result)
