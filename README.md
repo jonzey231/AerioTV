@@ -29,8 +29,8 @@ Full support for the Siri Remote with directional navigation, focus management, 
 ## Supported Server Types
 
 1. **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** (native API with API key authentication). See the [Dispatcharr GitHub repository](https://github.com/Dispatcharr/Dispatcharr) for more information about the API integration.
-2. **Xtream Codes** (username/password authentication)
-3. **M3U Playlist** (direct URL with optional XMLTV EPG source)
+2. **Xtream Codes** (Provider URL + username & password authentication)
+3. **M3U Playlist** (direct URL + optional XMLTV EPG)
 
 ## Requirements
 
