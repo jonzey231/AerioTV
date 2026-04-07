@@ -409,9 +409,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if os(iOS)
             // iOS: enqueue CMSampleBuffer to AVSampleBufferDisplayLayer (PiP-compatible)
             if let sampleBuffer = Self.makeSampleBuffer(from: pixelBuffer) {
+                nonisolated(unsafe) let sb = sampleBuffer
                 let layer = sampleBufferLayer
                 DispatchQueue.main.async {
-                    layer?.enqueue(sampleBuffer)
+                    layer?.enqueue(sb)
                 }
             }
             #else

@@ -794,6 +794,7 @@
 				CODE_SIGN_ENTITLEMENTS = SupportingFiles/Aerio.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Aerio;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
@@ -891,6 +892,7 @@
 				CODE_SIGN_ENTITLEMENTS = SupportingFiles/Aerio.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Aerio;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
