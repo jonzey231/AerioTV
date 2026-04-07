@@ -144,7 +144,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var urls: [URL]
         private let headers: [String: String]
         private let isLive: Bool
-        private let progressStore: PlayerProgressStore
+        fileprivate let progressStore: PlayerProgressStore
         private let logStore: AttemptLogStore
         private let onFatalError: @MainActor @Sendable (String) -> Void
 

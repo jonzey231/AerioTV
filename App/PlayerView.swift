@@ -241,6 +241,7 @@ struct PlayerView: View {
             isLive: isLive,
             subtitle: subtitle, subtitleStart: subtitleStart, subtitleEnd: subtitleEnd,
             artworkURL: artworkURL,
+            vodID: vodID, vodPosterURL: vodPosterURL,
             onDismiss: { if let c = onClose { c() } else { dismiss() } },
             onMinimize: onMinimize,
             logStore: logStore,
@@ -262,6 +263,8 @@ private struct PlayerRootView: View {
     let subtitleStart: Date?
     let subtitleEnd: Date?
     let artworkURL: URL?
+    let vodID: String?
+    let vodPosterURL: String?
     let onDismiss: () -> Void
     let onMinimize: (() -> Void)?
 
