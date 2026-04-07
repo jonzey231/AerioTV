@@ -88,6 +88,10 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var setAudioTrackAction: ((Int) -> Void)?
     /// Closure set by the Coordinator; sets subtitle track (0 = off).
     var setSubtitleTrackAction: ((Int) -> Void)?
+    /// Closure set by the ViewController; toggles Picture-in-Picture.
+    var togglePiPAction: (() -> Void)?
+    /// Whether PiP is currently active.
+    @Published var isPiPActive: Bool = false
 
     static let speedOptions: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 }
@@ -856,6 +860,16 @@ private struct PlayerRootView: View {
                             tint: isAudioOnly ? Color.accentPrimary : .white
                         ) {
                             withAnimation(.spring(response: 0.3)) { isAudioOnly.toggle() }
+                        }
+
+                        // Picture-in-Picture
+                        if progressStore.togglePiPAction != nil {
+                            liquidButton(
+                                systemName: progressStore.isPiPActive ? "pip.exit" : "pip.enter",
+                                tint: progressStore.isPiPActive ? Color.accentPrimary : .white
+                            ) {
+                                progressStore.togglePiPAction?()
+                            }
                         }
 
                         // AirPlay

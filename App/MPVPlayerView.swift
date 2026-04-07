@@ -1,33 +1,63 @@
 #if canImport(Libmpv)
 import SwiftUI
 import AVFoundation
+import AVKit
 import UIKit
 import Libmpv
-import CoreVideo  // For CVPixelBuffer
-import IOSurface  // For CVPixelBufferGetIOSurface display
+import CoreVideo
+import CoreMedia  // For CMSampleBuffer
 
-// MARK: - MPV Player View Controller (SW render to CVPixelBuffer → CALayer.contents)
+// MARK: - MPV Player View Controller (SW render → AVSampleBufferDisplayLayer → PiP)
 
 class MPVPlayerViewController: UIViewController {
     weak var coordinator: MPVPlayerViewRepresentable.Coordinator?
+
+    /// AVSampleBufferDisplayLayer for PiP-compatible display.
+    let sampleBufferLayer = AVSampleBufferDisplayLayer()
+
+    #if os(iOS)
+    /// PiP controller — initialized after view loads.
+    var pipController: AVPictureInPictureController?
+    #endif
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.isUserInteractionEnabled = false
         view.layer.isOpaque = true
-        view.layer.contentsGravity = .resize  // mpv handles aspect ratio internally
+
+        // Add the sample buffer display layer as a sublayer
+        sampleBufferLayer.videoGravity = .resizeAspect
+        sampleBufferLayer.frame = view.bounds
+        view.layer.addSublayer(sampleBufferLayer)
+
+        #if os(iOS)
+        // Set up PiP if supported
+        if AVPictureInPictureController.isPictureInPictureSupported() {
+            let contentSource = AVPictureInPictureController.ContentSource(
+                sampleBufferDisplayLayer: sampleBufferLayer,
+                playbackDelegate: coordinator!
+            )
+            pipController = AVPictureInPictureController(contentSource: contentSource)
+            pipController?.delegate = coordinator
+        }
+        #endif
 
         #if DEBUG
         print("[MPV-DIAG] viewDidLoad: frame=\(view.frame), inWindow=\(view.window != nil)")
         #endif
 
-        coordinator?.setupRenderer(layer: view.layer)
+        coordinator?.setupRenderer(sampleBufferLayer: sampleBufferLayer)
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let size = view.bounds.size
         guard size.width > 0 && size.height > 0 else { return }
+        // Sync sublayer frame
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        sampleBufferLayer.frame = view.bounds
+        CATransaction.commit()
         coordinator?.handleResize(size: size)
     }
 }
@@ -73,6 +103,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         let vc = MPVPlayerViewController()
         vc.coordinator = context.coordinator
+
+        // Wire up PiP toggle (iOS only)
+        #if os(iOS)
+        let coord = context.coordinator
+        coord.progressStore.togglePiPAction = { [weak vc, weak coord] in
+            guard let pip = vc?.pipController else { return }
+            if pip.isPictureInPictureActive {
+                pip.stopPictureInPicture()
+                DispatchQueue.main.async { coord?.progressStore.isPiPActive = false }
+            } else {
+                pip.startPictureInPicture()
+                DispatchQueue.main.async { coord?.progressStore.isPiPActive = true }
+            }
+        }
+        #endif
+
         return vc
     }
 
@@ -86,7 +132,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
     // MARK: - Coordinator
 
-    final class Coordinator: NSObject, @unchecked Sendable {
+    final class Coordinator: NSObject, @unchecked Sendable,
+                                AVPictureInPictureControllerDelegate,
+                                AVPictureInPictureSampleBufferPlaybackDelegate {
         private var urls: [URL]
         private let headers: [String: String]
         private let isLive: Bool
@@ -106,9 +154,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private let mpvQueue = DispatchQueue(label: "com.aerio.mpv", qos: .userInteractive)
         private var wakeupRetain: Unmanaged<Coordinator>?  // Balances passRetained in setupMPV
 
-        // SW render — background thread renders to CVPixelBuffer, main thread displays via CALayer.contents
+        // SW render — background thread renders to CVPixelBuffer, displayed via AVSampleBufferDisplayLayer
         private let renderQueue = DispatchQueue(label: "com.aerio.mpv.render", qos: .userInteractive)
-        private weak var displayLayer: CALayer?
+        private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?
         private var pixelBuffers: [CVPixelBuffer?] = [nil, nil]  // Double-buffered
         private var currentBufferIndex = 0
         private var renderWidth: Int = 0
@@ -240,24 +288,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // MARK: - Renderer Setup
 
-        /// Called from viewDidLoad. Stores layer reference. Pixel buffers deferred to handleResize
-        /// because the view frame is 0x0 at viewDidLoad time.
+        /// Called from viewDidLoad. Stores layer reference. Pixel buffers deferred to handleResize.
         @MainActor
-        func setupRenderer(layer: CALayer) {
-            self.displayLayer = layer
-            #if os(tvOS)
-            layer.contentsScale = 1.0
-            #else
-            layer.contentsScale = min(UIScreen.main.scale, 2.0)
-            #endif
+        func setupRenderer(sampleBufferLayer: AVSampleBufferDisplayLayer) {
+            self.sampleBufferLayer = sampleBufferLayer
         }
 
         private var mpvStarted = false
 
         /// Handle rotation/resize — creates or recreates double-buffered CVPixelBuffers.
         func handleResize(size: CGSize) {
-            guard let layer = displayLayer else { return }
-            let scale = layer.contentsScale
+            #if os(tvOS)
+            let scale: CGFloat = 1.0
+            #else
+            let scale = min(UIScreen.main.scale, 2.0)
+            #endif
             let w = Int(size.width * scale)
             let h = Int(size.height * scale)
             guard w > 0 && h > 0 else { return }
@@ -290,7 +335,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
-        // MARK: - Background SW Render + Display via CALayer.contents
+        // MARK: - Background SW Render + Display via AVSampleBufferDisplayLayer
 
         /// Called from mpv's update callback — schedules render on background thread.
         func scheduleRender() {
@@ -305,7 +350,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
-        /// Runs on renderQueue — renders mpv frame to CVPixelBuffer, displays via CALayer.contents.
+        /// Runs on renderQueue — renders mpv frame to CVPixelBuffer, enqueues to AVSampleBufferDisplayLayer.
         /// No OpenGL, no vsync blocking. ~3ms per frame vs 15-31ms with GL.
         private func renderAndPresent() {
             os_unfair_lock_lock(&renderLock)
@@ -349,12 +394,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Flip double buffer for next frame
             currentBufferIndex = 1 - bufIdx
 
-            // Display via IOSurface — zero-copy, no CGImage allocation, no memory growth.
-            // CVPixelBuffers are IOSurface-backed (created with kCVPixelBufferIOSurfacePropertiesKey).
-            nonisolated(unsafe) let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue()
-            let layer = displayLayer
-            DispatchQueue.main.async {
-                layer?.contents = surface
+            // Convert CVPixelBuffer → CMSampleBuffer and enqueue to AVSampleBufferDisplayLayer.
+            // This enables PiP support via AVPictureInPictureController.
+            if let sampleBuffer = Self.makeSampleBuffer(from: pixelBuffer) {
+                let layer = sampleBufferLayer
+                DispatchQueue.main.async {
+                    layer?.enqueue(sampleBuffer)
+                }
             }
 
             mpv_render_context_report_swap(mpvGL)
@@ -1140,6 +1186,34 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }()
         private var logTimestamp: String { Self.logDateFormatter.string(from: Date()) }
 
+        /// Convert CVPixelBuffer to CMSampleBuffer for AVSampleBufferDisplayLayer.
+        private static func makeSampleBuffer(from pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
+            var formatDesc: CMFormatDescription?
+            let status = CMVideoFormatDescriptionCreateForImageBuffer(
+                allocator: kCFAllocatorDefault,
+                imageBuffer: pixelBuffer,
+                formatDescriptionOut: &formatDesc
+            )
+            guard status == noErr, let desc = formatDesc else { return nil }
+
+            var timingInfo = CMSampleTimingInfo(
+                duration: CMTime(value: 1, timescale: 60),  // 60fps frame duration
+                presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+                decodeTimeStamp: .invalid
+            )
+
+            var sampleBuffer: CMSampleBuffer?
+            let createStatus = CMSampleBufferCreateReadyWithImageBuffer(
+                allocator: kCFAllocatorDefault,
+                imageBuffer: pixelBuffer,
+                formatDescription: desc,
+                sampleTiming: &timingInfo,
+                sampleBufferOut: &sampleBuffer
+            )
+            guard createStatus == noErr else { return nil }
+            return sampleBuffer
+        }
+
         /// Query mpv's track-list and populate progressStore with audio/subtitle tracks.
         private func queryTracks() {
             guard let mpv else { return }
@@ -1219,6 +1293,65 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 print("[MPV-OPT] ✓ \(name)")
             }
             #endif
+        }
+
+        // MARK: - PiP Delegate (AVPictureInPictureSampleBufferPlaybackDelegate)
+
+        func pictureInPictureController(
+            _ pictureInPictureController: AVPictureInPictureController,
+            setPlaying playing: Bool
+        ) {
+            guard let mpv else { return }
+            var flag: Int = playing ? 0 : 1
+            mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
+            DispatchQueue.main.async { self.progressStore.isPaused = !playing }
+        }
+
+        func pictureInPictureControllerTimeRangeForPlayback(
+            _ pictureInPictureController: AVPictureInPictureController
+        ) -> CMTimeRange {
+            // Live streams have no defined range
+            if isLive { return CMTimeRange(start: .negativeInfinity, end: .positiveInfinity) }
+            let duration = CMTime(value: Int64(progressStore.durationMs), timescale: 1000)
+            return CMTimeRange(start: .zero, duration: duration)
+        }
+
+        func pictureInPictureControllerIsPlaybackPaused(
+            _ pictureInPictureController: AVPictureInPictureController
+        ) -> Bool {
+            progressStore.isPaused
+        }
+
+        func pictureInPictureController(
+            _ pictureInPictureController: AVPictureInPictureController,
+            didTransitionToRenderSize newRenderSize: CMVideoDimensions
+        ) {
+            // No action needed — mpv scales internally
+        }
+
+        func pictureInPictureController(
+            _ pictureInPictureController: AVPictureInPictureController,
+            skipByInterval skipInterval: CMTime,
+            completion completionHandler: @escaping () -> Void
+        ) {
+            let skipMs = Int32(CMTimeGetSeconds(skipInterval) * 1000)
+            let newMs = progressStore.currentMs + skipMs
+            progressStore.seekAction?(max(0, min(progressStore.durationMs, newMs)))
+            completionHandler()
+        }
+
+        // MARK: - PiP Controller Delegate
+
+        func pictureInPictureControllerWillStartPictureInPicture(
+            _ pictureInPictureController: AVPictureInPictureController
+        ) {
+            debugLog("🖼️ PiP: starting")
+        }
+
+        func pictureInPictureControllerDidStopPictureInPicture(
+            _ pictureInPictureController: AVPictureInPictureController
+        ) {
+            debugLog("🖼️ PiP: stopped")
         }
     }
 }
