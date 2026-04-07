@@ -6,16 +6,18 @@ import UIKit
 import Libmpv
 import CoreVideo
 import CoreMedia  // For CMSampleBuffer
+#if os(tvOS)
+import IOSurface  // For CVPixelBufferGetIOSurface on tvOS
+#endif
 
 // MARK: - MPV Player View Controller (SW render → AVSampleBufferDisplayLayer → PiP)
 
 class MPVPlayerViewController: UIViewController {
     weak var coordinator: MPVPlayerViewRepresentable.Coordinator?
 
-    /// AVSampleBufferDisplayLayer for PiP-compatible display.
-    let sampleBufferLayer = AVSampleBufferDisplayLayer()
-
     #if os(iOS)
+    /// AVSampleBufferDisplayLayer for PiP-compatible display (iOS only).
+    let sampleBufferLayer = AVSampleBufferDisplayLayer()
     /// PiP controller — initialized after view loads.
     var pipController: AVPictureInPictureController?
     #endif
@@ -25,13 +27,12 @@ class MPVPlayerViewController: UIViewController {
         view.isUserInteractionEnabled = false
         view.layer.isOpaque = true
 
-        // Add the sample buffer display layer as a sublayer
+        #if os(iOS)
+        // iOS: AVSampleBufferDisplayLayer for PiP support
         sampleBufferLayer.videoGravity = .resizeAspect
         sampleBufferLayer.frame = view.bounds
         view.layer.addSublayer(sampleBufferLayer)
 
-        #if os(iOS)
-        // Set up PiP if supported
         if AVPictureInPictureController.isPictureInPictureSupported(),
            let coordinator {
             let contentSource = AVPictureInPictureController.ContentSource(
@@ -41,24 +42,28 @@ class MPVPlayerViewController: UIViewController {
             pipController = AVPictureInPictureController(contentSource: contentSource)
             pipController?.delegate = coordinator
         }
+        #else
+        // tvOS: plain CALayer — no PiP, simpler display path
+        view.layer.contentsGravity = .resizeAspect
         #endif
 
         #if DEBUG
         print("[MPV-DIAG] viewDidLoad: frame=\(view.frame), inWindow=\(view.window != nil)")
         #endif
 
-        coordinator?.setupRenderer(sampleBufferLayer: sampleBufferLayer)
+        coordinator?.setupRenderer(layer: view.layer)
     }
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let size = view.bounds.size
         guard size.width > 0 && size.height > 0 else { return }
-        // Sync sublayer frame
+        #if os(iOS)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         sampleBufferLayer.frame = view.bounds
         CATransaction.commit()
+        #endif
         coordinator?.handleResize(size: size)
     }
 }
@@ -155,9 +160,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private let mpvQueue = DispatchQueue(label: "com.aerio.mpv", qos: .userInteractive)
         private var wakeupRetain: Unmanaged<Coordinator>?  // Balances passRetained in setupMPV
 
-        // SW render — background thread renders to CVPixelBuffer, displayed via AVSampleBufferDisplayLayer
+        // SW render — background thread renders to CVPixelBuffer
         private let renderQueue = DispatchQueue(label: "com.aerio.mpv.render", qos: .userInteractive)
-        private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?
+        private weak var displayLayer: CALayer?  // tvOS: direct CALayer.contents
+        #if os(iOS)
+        private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?  // iOS: PiP-compatible
+        #endif
         private var pixelBuffers: [CVPixelBuffer?] = [nil, nil]  // Double-buffered
         private var currentBufferIndex = 0
         private var renderWidth: Int = 0
@@ -291,8 +299,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         /// Called from viewDidLoad. Stores layer reference. Pixel buffers deferred to handleResize.
         @MainActor
-        func setupRenderer(sampleBufferLayer: AVSampleBufferDisplayLayer) {
-            self.sampleBufferLayer = sampleBufferLayer
+        func setupRenderer(layer: CALayer) {
+            self.displayLayer = layer
+            #if os(iOS)
+            self.sampleBufferLayer = layer.sublayers?.compactMap { $0 as? AVSampleBufferDisplayLayer }.first
+            #endif
         }
 
         private var mpvStarted = false
@@ -395,14 +406,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Flip double buffer for next frame
             currentBufferIndex = 1 - bufIdx
 
-            // Convert CVPixelBuffer → CMSampleBuffer and enqueue to AVSampleBufferDisplayLayer.
-            // This enables PiP support via AVPictureInPictureController.
+            #if os(iOS)
+            // iOS: enqueue CMSampleBuffer to AVSampleBufferDisplayLayer (PiP-compatible)
             if let sampleBuffer = Self.makeSampleBuffer(from: pixelBuffer) {
                 let layer = sampleBufferLayer
                 DispatchQueue.main.async {
                     layer?.enqueue(sampleBuffer)
                 }
             }
+            #else
+            // tvOS: direct IOSurface display via CALayer.contents (simpler, proven path)
+            nonisolated(unsafe) let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue()
+            let layer = displayLayer
+            DispatchQueue.main.async {
+                layer?.contents = surface
+            }
+            #endif
 
             mpv_render_context_report_swap(mpvGL)
         }
