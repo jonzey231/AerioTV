@@ -226,6 +226,12 @@ struct MoviesView: View {
                 Spacer()
             } else {
                 ScrollView {
+                    // Continue Watching section
+                    ContinueWatchingSection(
+                        vodType: "movie",
+                        headers: dispatcharrHeaders
+                    )
+
                     LazyVGrid(columns: columns, spacing: gridRowSpacing) {
                         ForEach(filteredMovies) { item in
                             NavigationLink(value: item) {

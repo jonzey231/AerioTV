@@ -45,7 +45,9 @@ struct VODDetailView: View {
                 title: playingTitle,
                 headers: playingHeaders,
                 isLive: false,
-                artworkURL: item.posterURL
+                artworkURL: item.posterURL,
+                vodID: item.id,
+                vodPosterURL: item.posterURL?.absoluteString
             )
             .onDisappear { isPlaying = false }
         }

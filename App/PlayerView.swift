@@ -74,6 +74,10 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     @Published var subtitleTracks: [MediaTrack] = []
     @Published var currentAudioTrackID: Int = 0
     @Published var currentSubtitleTrackID: Int = 0
+    /// VOD resume tracking — set before playback starts, nil for live
+    var vodID: String?
+    var vodTitle: String?
+    var vodPosterURL: String?
     /// Closure set by the Coordinator; call with a target position in ms to seek.
     var seekAction: ((Int32) -> Void)?
     /// Closure set by the Coordinator; toggles play/pause.
@@ -197,6 +201,8 @@ struct PlayerView: View {
     let subtitleStart: Date?
     let subtitleEnd: Date?
     let artworkURL: URL?
+    let vodID: String?
+    let vodPosterURL: String?
     let onMinimize: (() -> Void)?
     let onClose: (() -> Void)?
 
@@ -204,6 +210,7 @@ struct PlayerView: View {
          isLive: Bool = true,
          subtitle: String? = nil, subtitleStart: Date? = nil, subtitleEnd: Date? = nil,
          artworkURL: URL? = nil,
+         vodID: String? = nil, vodPosterURL: String? = nil,
          onMinimize: (() -> Void)? = nil, onClose: (() -> Void)? = nil) {
         self.urls = urls
         self.title = title
@@ -213,6 +220,8 @@ struct PlayerView: View {
         self.subtitleStart = subtitleStart
         self.subtitleEnd = subtitleEnd
         self.artworkURL = artworkURL
+        self.vodID = vodID
+        self.vodPosterURL = vodPosterURL
         self.onMinimize = onMinimize
         self.onClose = onClose
     }
@@ -991,6 +1000,10 @@ private struct PlayerRootView: View {
     private func startPlayback() async {
         logStore.reset()
         logStore.append("ℹ️ Player: MPV (libmpv)")
+        // Set VOD resume info on progressStore so the coordinator can save/restore progress
+        progressStore.vodID = vodID
+        progressStore.vodTitle = title
+        progressStore.vodPosterURL = vodPosterURL
         state = .playing
         scheduleControlsHide()
     }

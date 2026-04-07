@@ -136,6 +136,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var bufferEventCount: Int = 0
         private var audioUnderrunCount: Int = 0
         private var setupStartTime: Date?
+        private var lastProgressSave: Date = .distantPast  // Debounce VOD progress saves to every 10s
+        private var hasAttemptedResume = false  // Only auto-seek once per playback session
         // renderPending: accessed from mpv callback thread + render thread — use lock
         private var renderPending = false
         private var renderLock = os_unfair_lock()
@@ -661,6 +663,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         }
                         // Populate audio/subtitle track lists for the UI
                         self.queryTracks()
+                        // Auto-resume VOD from saved position (once per session)
+                        if !self.isLive, !self.hasAttemptedResume, let mpv = self.mpv,
+                           let vodID = self.progressStore.vodID {
+                            self.hasAttemptedResume = true
+                            Task { @MainActor in
+                                if let resumeMs = WatchProgressManager.getResumePosition(vodID: vodID), resumeMs > 0 {
+                                    let secs = String(format: "%.3f", Double(resumeMs) / 1000.0)
+                                    self.mpvCommand(mpv, ["seek", secs, "absolute"])
+                                    debugLog("📼 VOD resume: seeking to \(resumeMs)ms")
+                                }
+                            }
+                        }
                         #if DEBUG
                         if let mpv = self.mpv {
                             var cacheDur: Double = 0
@@ -917,12 +931,33 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         #endif
                     }
 
-                    // Throttle UI updates (same as VLC)
+                    // Throttle UI updates
                     let now = Date()
                     if !isLive, now.timeIntervalSince(lastProgressUpdate) >= 1.0 {
                         lastProgressUpdate = now
                         let ps = progressStore
                         DispatchQueue.main.async { ps.currentMs = ms }
+                    }
+
+                    // Save VOD progress every 10 seconds (non-live only)
+                    if !isLive, now.timeIntervalSince(lastProgressSave) >= 10.0 {
+                        lastProgressSave = now
+                        let ps = progressStore
+                        let posMs = ms
+                        var durSec: Double = 0
+                        mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &durSec)
+                        let durMs = Int32(durSec * 1000)
+                        if let vodID = ps.vodID, !vodID.isEmpty, durMs > 0 {
+                            let title = ps.vodTitle ?? ""
+                            let poster = ps.vodPosterURL
+                            let finished = durMs > 0 && posMs > Int32(Double(durMs) * 0.9)
+                            Task { @MainActor in
+                                WatchProgressManager.save(
+                                    vodID: vodID, title: title, positionMs: posMs,
+                                    durationMs: durMs, posterURL: poster, isFinished: finished
+                                )
+                            }
+                        }
                     }
 
                     // Periodic diagnostics + Now Playing update

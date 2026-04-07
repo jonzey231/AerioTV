@@ -126,7 +126,8 @@ struct AerioApp: App {
             Channel.self,
             EPGProgram.self,
             M3UPlaylist.self,
-            EPGSource.self
+            EPGSource.self,
+            WatchProgress.self
         ])
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -365,6 +366,8 @@ struct RootView: View {
             }
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")
+                // Share model context with WatchProgressManager for VOD resume tracking
+                WatchProgressManager.modelContext = modelContext
                 if !hasCompletedOnboarding && !hasAnySource {
                     showOnboarding = true
                 }

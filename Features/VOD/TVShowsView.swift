@@ -176,6 +176,12 @@ struct TVShowsView: View {
                 Spacer()
             } else {
                 ScrollView {
+                    // Continue Watching section
+                    ContinueWatchingSection(
+                        vodType: "episode",
+                        headers: dispatcharrHeaders
+                    )
+
                     LazyVGrid(columns: columns, spacing: gridRowSpacing) {
                         ForEach(filteredShows) { item in
                             NavigationLink(value: item) {
