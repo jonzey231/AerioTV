@@ -1061,16 +1061,16 @@ struct DispatcharrAPI {
     }
 
     /// Build ordered live-stream URL attempts for a Dispatcharr channel.
-    /// Both iOS and tvOS now use MPV, so TS first (native, reliable) with HLS as fallback.
-    /// Channel container URL is preferred so Dispatcharr can apply server-side failover.
+    /// HLS first (adaptive bitrate, better buffering), then TS as fallback.
+    /// The /proxy/ts/channel/ endpoint doesn't exist in Dispatcharr — skip it.
     func liveProxyURLAttempts(for channel: DispatcharrChannel) -> [URL] {
         guard let uuid = channel.uuid, !uuid.isEmpty else { return [] }
         var out: [URL] = []
-        // MPV handles TS natively — channel container first for server-side failover
-        if let u = proxyTSChannelURL(channelUUID: uuid) { out.append(u) }
-        if let u = proxyTSStreamURL(uuid: uuid), !out.contains(u) { out.append(u) }
+        // HLS preferred — adaptive bitrate handles network jitter better than raw TS
         if let u = URL(string: baseURL + "/proxy/hls/stream/\(uuid).m3u8") { out.append(u) }
         if let u = URL(string: baseURL + "/proxy/hls/stream/\(uuid)") { out.append(u) }
+        // TS fallback — direct MPEG-TS stream
+        if let u = proxyTSStreamURL(uuid: uuid) { out.append(u) }
         return out
     }
 

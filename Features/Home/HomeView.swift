@@ -891,24 +891,11 @@ final class ChannelStore: ObservableObject {
         }
         func streamURLs(_ uuid: String?) -> [URL] {
             guard let uuid, !uuid.isEmpty else { return [] }
-            #if os(tvOS)
-            // tvOS: /proxy/ts/channel/ always instant-ends (0ms play→end),
-            // wasting ~1.5s on failover. Start with /proxy/ts/stream/ directly.
+            // TS stream — the only working Dispatcharr proxy endpoint.
+            // /proxy/ts/channel/ doesn't exist. HLS returns 404 on this instance.
             return [
-                "\(base)/proxy/ts/stream/\(uuid)",
-                "\(base)/proxy/ts/channel/\(uuid)",
-                "\(base)/proxy/hls/stream/\(uuid).m3u8",
-                "\(base)/proxy/hls/stream/\(uuid)"
+                "\(base)/proxy/ts/stream/\(uuid)"
             ].compactMap { URL(string: $0) }
-            #else
-            // iOS: /proxy/ts/channel/ works and enables server-side failover.
-            return [
-                "\(base)/proxy/ts/channel/\(uuid)",
-                "\(base)/proxy/ts/stream/\(uuid)",
-                "\(base)/proxy/hls/stream/\(uuid).m3u8",
-                "\(base)/proxy/hls/stream/\(uuid)"
-            ].compactMap { URL(string: $0) }
-            #endif
         }
 
         var items: [ChannelDisplayItem] = dChannels.enumerated().map { (i, ch) in

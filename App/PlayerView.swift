@@ -294,9 +294,38 @@ private struct PlayerRootView: View {
                             .transition(.opacity)
                     }
 
-                    #if !os(tvOS)
-                    // Transparent tap layer — toggles controls on tap, passes through button taps.
-                    // tvOS uses Siri Remote commands (.onTapGesture, .onMoveCommand, etc.) instead.
+                    #if os(tvOS)
+                    // tvOS: dedicated focus capture layer on top of the player.
+                    // This receives all Siri Remote events (play/pause, swipe, select, menu).
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea()
+                        .focusable()
+                        .focused($isPlayerFocused)
+                        .onPlayPauseCommand {
+                            progressStore.togglePauseAction?()
+                            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+                            if !progressStore.isPaused { scheduleControlsHide() }
+                        }
+                        .onExitCommand {
+                            if showControls {
+                                withAnimation(.easeInOut(duration: 0.2)) { showControls = false }
+                            } else if let minimize = onMinimize {
+                                minimize()
+                            } else {
+                                onDismiss()
+                            }
+                        }
+                        .onMoveCommand { _ in
+                            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+                            scheduleControlsHide()
+                        }
+                        .onLongPressGesture(minimumDuration: 0.01) {
+                            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+                            scheduleControlsHide()
+                        }
+                    #else
+                    // iOS: transparent tap layer — toggles controls on tap.
                     Color.clear
                         .contentShape(Rectangle())
                         .ignoresSafeArea()
@@ -366,39 +395,8 @@ private struct PlayerRootView: View {
         .statusBarHidden(!showControls)
         #endif
         #if os(tvOS)
-        // Make the player view focusable so tvOS delivers remote events
-        .focusable()
-        .focused($isPlayerFocused)
-        // Siri Remote: Play/Pause button toggles player playback and shows controls
-        .onPlayPauseCommand {
-            print("[REMOTE] Play/Pause pressed — isPaused=\(progressStore.isPaused), hasAction=\(progressStore.togglePauseAction != nil)")
-            progressStore.togglePauseAction?()
-            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
-            if !progressStore.isPaused { scheduleControlsHide() }
-        }
-        // Siri Remote: Menu button — hide controls first, then minimize (or dismiss)
-        .onExitCommand {
-            print("[REMOTE] Menu pressed — showControls=\(showControls), hasMinimize=\(onMinimize != nil)")
-            if showControls {
-                withAnimation(.easeInOut(duration: 0.2)) { showControls = false }
-            } else if let minimize = onMinimize {
-                minimize()
-            } else {
-                onDismiss()
-            }
-        }
-        // Siri Remote: any swipe/move direction always shows controls
-        .onMoveCommand { direction in
-            print("[REMOTE] Swipe/Move: \(direction)")
-            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
-            scheduleControlsHide()
-        }
-        // Siri Remote: Select (click) shows controls if hidden, hides if shown
-        .onLongPressGesture(minimumDuration: 0.01, perform: {
-            print("[REMOTE] Select (click) — showControls=\(showControls)")
-            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
-            scheduleControlsHide()
-        })
+        // Focus section isolates the player from tab content behind it
+        .focusSection()
         #endif
         .onAppear {
             scheduleControlsHide()

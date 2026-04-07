@@ -3,39 +3,32 @@ import SwiftUI
 import AVFoundation
 import UIKit
 import Libmpv
-import GLKit  // For GLKViewController, GLKView, EAGLContext, GL types
+import CoreVideo  // For CVPixelBuffer
+import IOSurface  // For CVPixelBufferGetIOSurface display
 
-// MARK: - MPV Player View Controller (GLKView — mpv drives rendering via OpenGL ES)
+// MARK: - MPV Player View Controller (SW render to CVPixelBuffer → CALayer.contents)
 
-/// GLKViewController that hosts mpv's OpenGL ES render API.
-/// GLKView handles framebuffer management, retina scaling, and rotation automatically.
-/// mpv signals when a new frame is ready → we call glkView.display() → drawIn callback renders.
-class MPVPlayerViewController: GLKViewController {
+class MPVPlayerViewController: UIViewController {
     weak var coordinator: MPVPlayerViewRepresentable.Coordinator?
 
     override func viewDidLoad() {
         super.viewDidLoad()
-
-        let context = EAGLContext(api: .openGLES2)!
-        EAGLContext.setCurrent(context)
-
-        let glkView = self.view as! GLKView
-        glkView.context = context
-        glkView.isUserInteractionEnabled = false
-
-        // Disable GLKViewController's automatic render loop — mpv drives via update callback
-        preferredFramesPerSecond = 0
-        isPaused = true
+        view.isUserInteractionEnabled = false
+        view.layer.isOpaque = true
+        view.layer.contentsGravity = .resize  // mpv handles aspect ratio internally
 
         #if DEBUG
         print("[MPV-DIAG] viewDidLoad: frame=\(view.frame), inWindow=\(view.window != nil)")
         #endif
 
-        coordinator?.setupRenderer(glkView: glkView)
+        coordinator?.setupRenderer(layer: view.layer)
     }
 
-    override func glkView(_ view: GLKView, drawIn rect: CGRect) {
-        coordinator?.render(in: view)
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        let size = view.bounds.size
+        guard size.width > 0 && size.height > 0 else { return }
+        coordinator?.handleResize(size: size)
     }
 }
 
@@ -109,13 +102,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // mpv handles
         private var mpv: OpaquePointer?
-        private var mpvGL: OpaquePointer?  // mpv_render_context for OpenGL ES
+        private var mpvGL: OpaquePointer?  // mpv_render_context (SW render API)
         private let mpvQueue = DispatchQueue(label: "com.aerio.mpv", qos: .userInteractive)
         private var wakeupRetain: Unmanaged<Coordinator>?  // Balances passRetained in setupMPV
 
-        // OpenGL ES — mpv renders into GLKView's framebuffer
-        weak var glkView: GLKView?
-        private var eaglContext: EAGLContext?
+        // SW render — background thread renders to CVPixelBuffer, main thread displays via CALayer.contents
+        private let renderQueue = DispatchQueue(label: "com.aerio.mpv.render", qos: .userInteractive)
+        private weak var displayLayer: CALayer?
+        private var pixelBuffers: [CVPixelBuffer?] = [nil, nil]  // Double-buffered
+        private var currentBufferIndex = 0
+        private var renderWidth: Int = 0
+        private var renderHeight: Int = 0
 
         // Failover & retry state (identical to VLC coordinator)
         private var currentIndex = 0
@@ -139,9 +136,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var bufferEventCount: Int = 0
         private var audioUnderrunCount: Int = 0
         private var setupStartTime: Date?
-        // displayPending: accessed from mpv callback thread + main thread — use lock
-        private var displayPending = false
-        private var displayLock = os_unfair_lock()
+        // renderPending: accessed from mpv callback thread + render thread — use lock
+        private var renderPending = false
+        private var renderLock = os_unfair_lock()
 
         init(urls: [URL], headers: [String: String], isLive: Bool,
              progressStore: PlayerProgressStore,
@@ -227,42 +224,124 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // MARK: - Renderer Setup
 
-        /// Called from viewDidLoad. Saves GLKView + EAGLContext references, starts mpv on background queue.
+        /// Called from viewDidLoad. Stores layer reference. Pixel buffers deferred to handleResize
+        /// because the view frame is 0x0 at viewDidLoad time.
         @MainActor
-        func setupRenderer(glkView: GLKView) {
-            self.glkView = glkView
-            self.eaglContext = glkView.context
-            mpvQueue.async { [weak self] in
-                self?.start()
+        func setupRenderer(layer: CALayer) {
+            self.displayLayer = layer
+            #if os(tvOS)
+            layer.contentsScale = 1.0
+            #else
+            layer.contentsScale = min(UIScreen.main.scale, 2.0)
+            #endif
+        }
+
+        private var mpvStarted = false
+
+        /// Handle rotation/resize — creates or recreates double-buffered CVPixelBuffers.
+        func handleResize(size: CGSize) {
+            guard let layer = displayLayer else { return }
+            let scale = layer.contentsScale
+            let w = Int(size.width * scale)
+            let h = Int(size.height * scale)
+            guard w > 0 && h > 0 else { return }
+            guard w != renderWidth || h != renderHeight else { return }
+
+            renderWidth = w
+            renderHeight = h
+
+            // Create IOSurface-backed pixel buffers for zero-copy CALayer display
+            let attrs: [CFString: Any] = [
+                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
+            ]
+            for i in 0..<2 {
+                var pb: CVPixelBuffer?
+                CVPixelBufferCreate(kCFAllocatorDefault, w, h,
+                                    kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
+                pixelBuffers[i] = pb
+            }
+
+            #if DEBUG
+            print("[MPV-DIAG] CVPixelBuffer: \(w)x\(h)")
+            #endif
+
+            // Start mpv on render thread if first time
+            if !mpvStarted {
+                mpvStarted = true
+                renderQueue.async { [weak self] in
+                    self?.start()
+                }
             }
         }
 
-        // MARK: - OpenGL ES Render
+        // MARK: - Background SW Render + Display via CALayer.contents
 
-        /// Called from GLKViewController's glkView(_:drawIn:) on the main thread.
-        /// GLKView provides the framebuffer — we query GL_FRAMEBUFFER_BINDING and GL_VIEWPORT.
-        func render(in view: GLKView) {
+        /// Called from mpv's update callback — schedules render on background thread.
+        func scheduleRender() {
+            os_unfair_lock_lock(&renderLock)
+            let pending = renderPending
+            renderPending = true
+            os_unfair_lock_unlock(&renderLock)
+            guard !pending else { return }
+
+            renderQueue.async { [weak self] in
+                self?.renderAndPresent()
+            }
+        }
+
+        /// Runs on renderQueue — renders mpv frame to CVPixelBuffer, displays via CALayer.contents.
+        /// No OpenGL, no vsync blocking. ~3ms per frame vs 15-31ms with GL.
+        private func renderAndPresent() {
+            os_unfair_lock_lock(&renderLock)
+            renderPending = false
+            os_unfair_lock_unlock(&renderLock)
+
             guard let mpvGL else { return }
+            let w = renderWidth
+            let h = renderHeight
+            let bufIdx = currentBufferIndex
+            guard w > 0, h > 0, let pixelBuffer = pixelBuffers[bufIdx] else { return }
 
-            var defaultFBO: GLint = 0
-            glGetIntegerv(GLenum(GL_FRAMEBUFFER_BINDING), &defaultFBO)
+            CVPixelBufferLockBaseAddress(pixelBuffer, [])
 
-            var dims: [GLint] = [0, 0, 0, 0]
-            glGetIntegerv(GLenum(GL_VIEWPORT), &dims)
+            guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+                CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+                return
+            }
+            var stride = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            var size: [CInt] = [CInt(w), CInt(h)]
 
-            var fbo = mpv_opengl_fbo(fbo: Int32(defaultFBO), w: dims[2], h: dims[3], internal_format: 0)
-            var flip: CInt = 1
-
-            withUnsafeMutablePointer(to: &flip) { flipPtr in
-                withUnsafeMutablePointer(to: &fbo) { fboPtr in
-                    var params = [
-                        mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_FBO, data: fboPtr),
-                        mpv_render_param(type: MPV_RENDER_PARAM_FLIP_Y, data: flipPtr),
-                        mpv_render_param()
-                    ]
-                    mpv_render_context_render(mpvGL, &params)
+            // "bgr0" = B,G,R,padding — matches kCVPixelFormatType_32BGRA on little-endian ARM.
+            // MPV_RENDER_PARAM_SW_FORMAT expects char* (data points to the string directly).
+            withUnsafeMutablePointer(to: &size[0]) { sizePtr in
+                withUnsafeMutablePointer(to: &stride) { stridePtr in
+                    "bgr0".withCString { fmtCStr in
+                        var params: [mpv_render_param] = [
+                            mpv_render_param(type: MPV_RENDER_PARAM_SW_SIZE, data: sizePtr),
+                            mpv_render_param(type: MPV_RENDER_PARAM_SW_FORMAT, data: UnsafeMutableRawPointer(mutating: fmtCStr)),
+                            mpv_render_param(type: MPV_RENDER_PARAM_SW_STRIDE, data: stridePtr),
+                            mpv_render_param(type: MPV_RENDER_PARAM_SW_POINTER, data: baseAddress),
+                            mpv_render_param()
+                        ]
+                        mpv_render_context_render(mpvGL, &params)
+                    }
                 }
             }
+
+            CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+
+            // Flip double buffer for next frame
+            currentBufferIndex = 1 - bufIdx
+
+            // Display via IOSurface — zero-copy, no CGImage allocation, no memory growth.
+            // CVPixelBuffers are IOSurface-backed (created with kCVPixelBufferIOSurfacePropertiesKey).
+            nonisolated(unsafe) let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue()
+            let layer = displayLayer
+            DispatchQueue.main.async {
+                layer?.contents = surface
+            }
+
+            mpv_render_context_report_swap(mpvGL)
         }
 
         func stop() {
@@ -333,22 +412,23 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             checkError(mpv_set_option_string(mpv, "subs-match-os-language", "yes"))
             checkError(mpv_set_option_string(mpv, "subs-fallback", "yes"))
 
-            // vo=libmpv: app drives rendering via OpenGL ES render API.
-            // GLKView handles framebuffer, retina scaling, and rotation automatically.
-            // No MoltenVK, no shader compilation delay, no rotation bugs.
+            // vo=libmpv: app drives rendering via software render API.
+            // Background thread renders to CVPixelBuffer; main thread displays via CALayer.contents.
+            // No OpenGL, no GL→Metal translation overhead, no rotation bugs.
             checkError(mpv_set_option_string(mpv, "vo", "libmpv"))
+            checkError(mpv_set_option_string(mpv, "profile", "fast"))  // Disable expensive post-processing for mobile
 
             #if targetEnvironment(simulator)
             checkError(mpv_set_option_string(mpv, "hwdec", "no"))
             #else
-            checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
+            // videotoolbox-copy: hardware decode on GPU, then copy frame to CPU memory
+            // for the SW render API. Pure "videotoolbox" outputs GPU textures which the
+            // SW renderer can't read, causing fallback to full software decoding.
+            checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox-copy"))
             checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "600"))  // Live MPEG-TS joins mid-GOP without SPS/PPS — VT errors until keyframe arrives
             #endif
 
-            // cache-pause-initial doesn't work in this MPVKit build (cache_at_start always 0.00s).
-            // For live: we set cache-pause=no in post-init so playback starts ASAP.
-            // For VOD: cache-pause defaults to yes which is fine (stalls are acceptable for VOD).
-            checkError(mpv_set_option_string(mpv, "cache-pause-wait", "1"))
+            checkError(mpv_set_option_string(mpv, "cache-pause-wait", "2"))  // Buffer 2s before starting playback
 
             #if DEBUG
             print("[MPV-DIAG] setupMPV: options set, calling mpv_initialize...")
@@ -379,36 +459,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             print("[MPV-DIAG] setupMPV: mpv_initialize succeeded ✓ (\(String(format: "%.0f", initMs))ms)")
             #endif
 
-            // ── Post-init: create OpenGL ES render context ──
-            // EAGLContext is thread-local — must be current on this queue for GL calls
-            guard let ctx = eaglContext else {
-                logStore.append("✗ MPV: no EAGLContext available")
-                mpv_terminate_destroy(mpv)
-                self.mpv = nil
-                let callback = onFatalError
-                Task { await callback("MPV: OpenGL context unavailable") }
-                return
-            }
-            EAGLContext.setCurrent(ctx)
-
-            let api = UnsafeMutableRawPointer(mutating: (MPV_RENDER_API_TYPE_OPENGL as NSString).utf8String)
-            var initParams = mpv_opengl_init_params(
-                get_proc_address: { (_, name) in
-                    let symbolName = CFStringCreateWithCString(kCFAllocatorDefault, name, CFStringBuiltInEncodings.ASCII.rawValue)
-                    let identifier = CFBundleGetBundleWithIdentifier("com.apple.opengles" as CFString)
-                    return CFBundleGetFunctionPointerForName(identifier, symbolName)
-                },
-                get_proc_address_ctx: nil
-            )
-
-            let renderCreateResult: Int32 = withUnsafeMutablePointer(to: &initParams) { initParamsPtr in
-                var params = [
-                    mpv_render_param(type: MPV_RENDER_PARAM_API_TYPE, data: api),
-                    mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, data: initParamsPtr),
-                    mpv_render_param()
-                ]
-                return mpv_render_context_create(&mpvGL, mpv, &params)
-            }
+            // ── Post-init: create software render context ──
+            let api = UnsafeMutableRawPointer(mutating: (MPV_RENDER_API_TYPE_SW as NSString).utf8String)
+            var renderParams = [
+                mpv_render_param(type: MPV_RENDER_PARAM_API_TYPE, data: api),
+                mpv_render_param()
+            ]
+            let renderCreateResult = mpv_render_context_create(&mpvGL, mpv, &renderParams)
 
             if renderCreateResult < 0 {
                 let errStr = String(cString: mpv_error_string(renderCreateResult))
@@ -424,26 +481,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             #if DEBUG
-            print("[MPV-DIAG] setupMPV: OpenGL ES render context created ✓")
+            print("[MPV-DIAG] setupMPV: SW render context created ✓")
             #endif
 
-            // When mpv has a new frame, trigger GLKView redraw on main thread.
-            // Coalesced: only one display() is ever queued at a time to prevent
-            // main thread backlog (mpv fires ~60 callbacks/sec).
+            // When mpv has a new frame, schedule render on background thread.
+            // SW render writes to CVPixelBuffer; main thread displays via CALayer.contents.
             mpv_render_context_set_update_callback(mpvGL, { ctx in
                 guard let ctx else { return }
                 let coord = Unmanaged<MPVPlayerViewRepresentable.Coordinator>.fromOpaque(ctx).takeUnretainedValue()
-                os_unfair_lock_lock(&coord.displayLock)
-                let alreadyPending = coord.displayPending
-                coord.displayPending = true
-                os_unfair_lock_unlock(&coord.displayLock)
-                guard !alreadyPending else { return }
-                DispatchQueue.main.async {
-                    os_unfair_lock_lock(&coord.displayLock)
-                    coord.displayPending = false
-                    os_unfair_lock_unlock(&coord.displayLock)
-                    coord.glkView?.display()
-                }
+                coord.scheduleRender()
             }, Unmanaged.passUnretained(self).toOpaque())
 
             // ── Post-init: property observers + wakeup callback ──
@@ -484,7 +530,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             mpv_set_property_string(mpv, "demuxer-max-bytes", "50MiB")
 
             if isLive {
-                mpv_set_property_string(mpv, "cache-pause", "no")
+                // cache-pause stays "yes" initially — switched to "no" after playback-restart
+                // so mpv builds an initial 2s buffer before starting playback.
                 mpv_set_property_string(mpv, "cache-secs", String(format: "%.1f", cachingSecs))
                 mpv_set_property_string(mpv, "demuxer-max-back-bytes", "0")
                 mpv_set_property_string(mpv, "demuxer-donate-buffer", "no")
@@ -496,7 +543,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             mpv_set_property_string(mpv, "framedrop", "decoder")
             mpv_set_property_string(mpv, "video-sync", "audio")
-            mpv_set_property_string(mpv, "audio-buffer", "1.0")
+            mpv_set_property_string(mpv, "audio-buffer", "1.5")
 
             if let ua = headers["User-Agent"], !ua.isEmpty {
                 mpv_set_property_string(mpv, "user-agent", ua)
@@ -510,7 +557,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             let cacheStr = String(format: "%.1f", cachingSecs)
             let totalSetupMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
-            print("[MPV-DIAG] ✓ mpv fully initialized: vo=libmpv (OpenGL ES), hwdec=videotoolbox (requested)")
+            print("[MPV-DIAG] ✓ mpv fully initialized: vo=libmpv (SW render), hwdec=videotoolbox-copy (requested)")
             print("[MPV-DIAG]   cache=\(cacheStr)s, readahead=\(cacheStr)s, isLive=\(isLive), setup_time=\(String(format: "%.0f", totalSetupMs))ms")
             #endif
         }
@@ -568,7 +615,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             #if DEBUG
                             let prefix = msg.pointee.prefix.map { String(cString: $0) } ?? "?"
                             let level = msg.pointee.level.map { String(cString: $0) } ?? "?"
-                            print("[MPV-LOG] [\(prefix)] \(level): \(text)", terminator: "")
+                            print("[\(self.logTimestamp)] [MPV-LOG] [\(prefix)] \(level): \(text)", terminator: "")
                             #endif
                         }
                         break
@@ -593,6 +640,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         return  // Exit event loop
 
                     case MPV_EVENT_PLAYBACK_RESTART:
+                        // Now that initial buffer is filled, disable cache-pause for live
+                        // so playback doesn't stall on brief network dips.
+                        if self.isLive, let mpv = self.mpv {
+                            mpv_set_property_string(mpv, "cache-pause", "no")
+                        }
                         #if DEBUG
                         if let mpv = self.mpv {
                             var cacheDur: Double = 0
@@ -950,11 +1002,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let hwdecCurrent = getMPVString(mpv, "hwdec-current") ?? "none"
 
             #if DEBUG
+            let ts = logTimestamp
             let ms = Int32(timeSec * 1000)
-            print("[MPV-DIAG] time=\(ms)ms isPlaying=\(isPlaying) callbacks/\(isLive ? 15 : 5)s=\(timeChangeCount)")
-            print("[MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: \(String(format: "%.1f", estimatedFPS))/\(String(format: "%.1f", displayFPS))disp, hwdec=\(hwdecCurrent)")
-            print("[MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(demuxerBytes / 1024)KB/s, paused_for_cache: \(pausedForCache != 0)")
-            print("[MPV-AUDIO] avsync: \(String(format: "%.4f", avsync))s, audio_pts: \(String(format: "%.2f", audioPts))s, underruns: \(audioUnderrunCount), buf_events: \(bufferEventCount), buf_time: \(String(format: "%.1f", totalBufferingDuration))s")
+            print("[\(ts)] [MPV-DIAG] time=\(ms)ms isPlaying=\(isPlaying) callbacks/\(isLive ? 15 : 5)s=\(timeChangeCount)")
+            print("[\(ts)] [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: \(String(format: "%.1f", estimatedFPS))/\(String(format: "%.1f", displayFPS))disp, hwdec=\(hwdecCurrent)")
+            print("[\(ts)] [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(demuxerBytes / 1024)KB/s, paused_for_cache: \(pausedForCache != 0)")
+            print("[\(ts)] [MPV-AUDIO] avsync: \(String(format: "%.4f", avsync))s, audio_pts: \(String(format: "%.2f", audioPts))s, underruns: \(audioUnderrunCount), buf_events: \(bufferEventCount), buf_time: \(String(format: "%.1f", totalBufferingDuration))s")
             #endif
 
             DebugLogger.shared.log(
@@ -972,7 +1025,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let memMB = kr == KERN_SUCCESS ? Double(taskInfo.resident_size) / (1024 * 1024) : -1
             let thermal = ProcessInfo.processInfo.thermalState.rawValue
             #if DEBUG
-            print("[MPV-PERF] memory: \(String(format: "%.1f", memMB))MB, thermal: \(thermal)")
+            print("[\(ts)] [MPV-PERF] memory: \(String(format: "%.1f", memMB))MB, thermal: \(thermal)")
             #endif
             DebugLogger.shared.log("memory=\(String(format: "%.1f", memMB))MB thermal=\(thermal)",
                                     category: "MPV-Perf", level: .perf)
@@ -1027,6 +1080,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }
 
         // MARK: - Helpers
+
+        /// HH:MM:SS timestamp for log lines.
+        private static let logDateFormatter: DateFormatter = {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm:ss"
+            return f
+        }()
+        private var logTimestamp: String { Self.logDateFormatter.string(from: Date()) }
 
         private func getMPVString(_ mpv: OpaquePointer, _ name: String) -> String? {
             var cstr: UnsafeMutablePointer<CChar>?

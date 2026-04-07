@@ -844,55 +844,60 @@ struct ChannelRow: View {
 
                 Spacer()
 
-                if item.currentProgram != nil || fetchUpcoming != nil {
+                // ── Action buttons with generous tap targets ──
+                HStack(spacing: isWide ? 8 : 4) {
+                    if item.currentProgram != nil || fetchUpcoming != nil {
+                        Button {
+                            withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
+                            if isExpanded && upcomingPrograms.isEmpty, fetchUpcoming != nil {
+                                isLoadingUpcoming = true
+                                Task {
+                                    upcomingPrograms = await fetchUpcoming?() ?? []
+                                    isLoadingUpcoming = false
+                                }
+                            }
+                        } label: {
+                            if isWide {
+                                HStack(spacing: 5) {
+                                    Image(systemName: isExpanded ? "chevron.up" : "list.bullet")
+                                        .font(.system(size: 11, weight: .medium))
+                                    Text(isExpanded ? "Hide Schedule" : "Schedule")
+                                        .font(.subheadline.weight(.medium))
+                                }
+                                .foregroundColor(.accentPrimary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Capsule().fill(Color.accentPrimary.opacity(0.12)))
+                                .contentShape(Capsule())
+                            } else {
+                                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(.textTertiary)
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if !item.streamURLs.isEmpty {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: isWide ? 26 : 22))
+                            .foregroundColor(.accentPrimary.opacity(0.7))
+                            .frame(width: 44, height: 44)
+                    }
+
                     Button {
-                        withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
-                        if isExpanded && upcomingPrograms.isEmpty, fetchUpcoming != nil {
-                            isLoadingUpcoming = true
-                            Task {
-                                upcomingPrograms = await fetchUpcoming?() ?? []
-                                isLoadingUpcoming = false
-                            }
-                        }
+                        favoritesStore.toggle(item)
                     } label: {
-                        if isWide {
-                            HStack(spacing: 5) {
-                                Image(systemName: isExpanded ? "chevron.up" : "list.bullet")
-                                    .font(.system(size: 11, weight: .medium))
-                                Text(isExpanded ? "Hide Schedule" : "Schedule")
-                                    .font(.subheadline.weight(.medium))
-                            }
-                            .foregroundColor(.accentPrimary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Capsule().fill(Color.accentPrimary.opacity(0.12)))
-                            .contentShape(Capsule())
-                        } else {
-                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.textTertiary)
-                                .frame(width: 44, height: 44)
-                                .contentShape(Rectangle())
-                        }
+                        Image(systemName: favoritesStore.isFavorite(item.id) ? "star.fill" : "star")
+                            .font(.system(size: isWide ? 18 : 16))
+                            .foregroundColor(favoritesStore.isFavorite(item.id) ? .statusWarning : .textTertiary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
-
-                if !item.streamURLs.isEmpty {
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: isWide ? 24 : 18))
-                        .foregroundColor(.accentPrimary.opacity(0.6))
-                }
-
-                Button {
-                    favoritesStore.toggle(item)
-                } label: {
-                    Image(systemName: favoritesStore.isFavorite(item.id) ? "star.fill" : "star")
-                        .font(.system(size: isWide ? 18 : 14))
-                        .foregroundColor(favoritesStore.isFavorite(item.id) ? .statusWarning : .textTertiary)
-                        .frame(width: isWide ? 44 : nil, height: isWide ? 44 : nil)
-                }
-                .buttonStyle(.plain)
             }
             .padding(.vertical, isWide ? 18 : 13)
             .padding(.horizontal, isWide ? 18 : 14)
