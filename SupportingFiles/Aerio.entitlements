@@ -8,5 +8,7 @@
 	<true/>
 	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
 	<string>$(TeamIdentifierPrefix)app.molinete.aerio</string>
+	<key>com.apple.developer.carplay-audio</key>
+	<true/>
 </dict>
 </plist>

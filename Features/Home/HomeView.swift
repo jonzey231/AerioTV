@@ -432,6 +432,7 @@ final class VODStore: ObservableObject {
 // changes — so the Live TV tab is already populated before the user taps it.
 @MainActor
 final class ChannelStore: ObservableObject {
+    static let shared = ChannelStore()
 
     // MARK: - Published State
     @Published private(set) var channels: [ChannelDisplayItem] = []
@@ -941,6 +942,7 @@ final class ChannelStore: ObservableObject {
 // MARK: - Favorites Store
 @MainActor
 final class FavoritesStore: ObservableObject {
+    static let shared = FavoritesStore()
     @Published private(set) var favoriteItems: [ChannelDisplayItem] = []
     private var favoriteIDs: Set<String>
 
@@ -996,6 +998,7 @@ final class FavoritesStore: ObservableObject {
 // MARK: - Now Playing Manager
 @MainActor
 final class NowPlayingManager: ObservableObject {
+    static let shared = NowPlayingManager()
     @Published var playingItem: ChannelDisplayItem? = nil
     @Published var playingHeaders: [String: String] = [:]
     @Published var isMinimized: Bool = false
@@ -1072,10 +1075,10 @@ struct MainTabView: View {
     #if os(tvOS)
     @State private var showExitConfirmation = false
     #endif
-    @StateObject private var nowPlaying = NowPlayingManager()
-    @StateObject private var favoritesStore = FavoritesStore()
+    @StateObject private var nowPlaying = NowPlayingManager.shared
+    @StateObject private var favoritesStore = FavoritesStore.shared
     @StateObject private var vodStore = VODStore()
-    @StateObject private var channelStore = ChannelStore()
+    @StateObject private var channelStore = ChannelStore.shared
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
 
