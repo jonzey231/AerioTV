@@ -32,10 +32,11 @@ class MPVPlayerViewController: UIViewController {
 
         #if os(iOS)
         // Set up PiP if supported
-        if AVPictureInPictureController.isPictureInPictureSupported() {
+        if AVPictureInPictureController.isPictureInPictureSupported(),
+           let coordinator {
             let contentSource = AVPictureInPictureController.ContentSource(
                 sampleBufferDisplayLayer: sampleBufferLayer,
-                playbackDelegate: coordinator!
+                playbackDelegate: coordinator
             )
             pipController = AVPictureInPictureController(contentSource: contentSource)
             pipController?.delegate = coordinator
@@ -713,12 +714,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         if !self.isLive, !self.hasAttemptedResume, let mpv = self.mpv,
                            let vodID = self.progressStore.vodID {
                             self.hasAttemptedResume = true
-                            Task { @MainActor in
-                                if let resumeMs = WatchProgressManager.getResumePosition(vodID: vodID), resumeMs > 0 {
-                                    let secs = String(format: "%.3f", Double(resumeMs) / 1000.0)
+                            // Get resume position on MainActor, then seek on mpvQueue
+                            Task { @MainActor [weak self] in
+                                guard let resumeMs = WatchProgressManager.getResumePosition(vodID: vodID),
+                                      resumeMs > 0 else { return }
+                                let secs = String(format: "%.3f", Double(resumeMs) / 1000.0)
+                                self?.mpvQueue.async {
+                                    guard let self, let mpv = self.mpv else { return }
                                     self.mpvCommand(mpv, ["seek", secs, "absolute"])
-                                    debugLog("📼 VOD resume: seeking to \(resumeMs)ms")
                                 }
+                                debugLog("📼 VOD resume: seeking to \(resumeMs)ms")
                             }
                         }
                         #if DEBUG

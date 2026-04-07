@@ -4,6 +4,7 @@ import UIKit
 
 /// CarPlay scene delegate — provides audio-only channel browsing via CarPlay templates.
 /// Channels are read from the shared `ChannelStore`; playback is triggered via `NowPlayingManager`.
+/// All shared state access dispatches to the main thread to avoid data races.
 class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
 
     private var interfaceController: CPInterfaceController?
@@ -40,14 +41,11 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     // MARK: - Favorites Tab
 
     private func buildFavoritesTemplate() -> CPListTemplate {
-        let items = MainActor.assumeIsolated {
+        let items: [ChannelDisplayItem] = DispatchQueue.main.sync {
             FavoritesStore.shared.favoriteItems
         }
 
-        let listItems = items.map { channel in
-            makeChannelItem(channel)
-        }
-
+        let listItems = items.map { makeChannelItem($0) }
         let section = CPListSection(items: listItems)
         let template = CPListTemplate(title: "Favorites", sections: [section])
         template.tabSystemItem = .favorites
@@ -59,7 +57,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     // MARK: - Groups Tab
 
     private func buildGroupsTemplate() -> CPListTemplate {
-        let (groups, channels) = MainActor.assumeIsolated {
+        let (groups, channels): ([String], [ChannelDisplayItem]) = DispatchQueue.main.sync {
             (ChannelStore.shared.orderedGroups, ChannelStore.shared.channels)
         }
 
@@ -103,8 +101,10 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         // Load channel logo asynchronously
         if let logoURL = channel.logoURL {
             Task {
+                guard !Task.isCancelled else { return }
                 if let (data, _) = try? await URLSession.shared.data(from: logoURL),
                    let image = UIImage(data: data) {
+                    guard !Task.isCancelled else { return }
                     let maxSize = CPListItem.maximumImageSize
                     let scaled = image.scaledToFit(maxSize)
                     await MainActor.run {
@@ -120,7 +120,7 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         }
 
         // Show now-playing indicator if this channel is active
-        let isPlaying = MainActor.assumeIsolated {
+        let isPlaying: Bool = DispatchQueue.main.sync {
             NowPlayingManager.shared.playingItem?.id == channel.id
         }
         if isPlaying {
@@ -135,20 +135,15 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     private func playChannel(_ channel: ChannelDisplayItem) {
         guard !channel.streamURLs.isEmpty else { return }
 
-        // Get auth headers from the active server
-        let headers = MainActor.assumeIsolated { () -> [String: String] in
-            if let server = ChannelStore.shared.activeServer {
-                return server.authHeaders
-            }
-            return ["Accept": "*/*"]
-        }
-
-        // Start audio-only playback via the shared NowPlayingManager
-        MainActor.assumeIsolated {
+        // Start playback on main thread (NowPlayingManager is @MainActor)
+        DispatchQueue.main.async {
+            let headers: [String: String] = {
+                if let server = ChannelStore.shared.activeServer {
+                    return server.authHeaders
+                }
+                return ["Accept": "*/*"]
+            }()
             NowPlayingManager.shared.startPlaying(channel, headers: headers)
-            // The player will start with video — CarPlay doesn't render video,
-            // but audio plays through the car speakers via the audio session.
-            // The NowPlayingBridge automatically publishes metadata to CarPlay.
         }
 
         // Switch to Now Playing template
@@ -172,8 +167,5 @@ private extension UIImage {
         }
     }
 }
-
-// MARK: - ChannelDisplayItem needs to be accessible
-// ChannelDisplayItem is already defined in ChannelListView.swift and is public.
 
 #endif

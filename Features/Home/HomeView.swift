@@ -1126,10 +1126,10 @@ struct MainTabView: View {
     #if os(tvOS)
     @State private var showExitConfirmation = false
     #endif
-    @StateObject private var nowPlaying = NowPlayingManager.shared
-    @StateObject private var favoritesStore = FavoritesStore.shared
+    @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    @ObservedObject private var favoritesStore = FavoritesStore.shared
     @StateObject private var vodStore = VODStore()
-    @StateObject private var channelStore = ChannelStore.shared
+    @ObservedObject private var channelStore = ChannelStore.shared
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
 

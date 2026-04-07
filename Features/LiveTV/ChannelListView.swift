@@ -59,9 +59,14 @@ struct ChannelListView: View {
                 .toolbar(.hidden, for: .navigationBar)
                 #endif
                 .toolbar {
-                    #if os(iOS)
-                    // Sort menu
-                    ToolbarItem(placement: .navigationBarTrailing) {
+                    // Sort menu (iOS + tvOS)
+                    ToolbarItem(placement: {
+                        #if os(iOS)
+                        .navigationBarTrailing
+                        #else
+                        .automatic
+                        #endif
+                    }()) {
                         Menu {
                             Button {
                                 sortModeRaw = "number"
@@ -83,6 +88,7 @@ struct ChannelListView: View {
                                 .foregroundColor(.accentPrimary)
                         }
                     }
+                    #if os(iOS)
                     // Guide view toggle — iPad only (iPhone always uses list)
                     if UIDevice.current.userInterfaceIdiom == .pad {
                         ToolbarItem(placement: .navigationBarTrailing) {
