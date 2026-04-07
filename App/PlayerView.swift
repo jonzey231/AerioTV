@@ -351,9 +351,21 @@ private struct PlayerRootView: View {
                                 onDismiss()
                             }
                         }
-                        .onMoveCommand { _ in
+                        .onMoveCommand { direction in
                             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
                             scheduleControlsHide()
+                            // Left/right dpad seeks for VOD content
+                            if !isLive, progressStore.durationMs > 0 {
+                                switch direction {
+                                case .left:
+                                    let newMs = max(0, progressStore.currentMs - 30_000)  // -30s
+                                    progressStore.seekAction?(newMs)
+                                case .right:
+                                    let newMs = min(progressStore.durationMs, progressStore.currentMs + 30_000)  // +30s
+                                    progressStore.seekAction?(newMs)
+                                default: break
+                                }
+                            }
                         }
                         .onLongPressGesture(minimumDuration: 0.01) {
                             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
