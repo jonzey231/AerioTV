@@ -313,7 +313,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if os(tvOS)
             let scale: CGFloat = 1.0
             #else
-            let scale = min(UIScreen.main.scale, 2.0)
+            let scale: CGFloat = 2.0  // Cap at 2x — sufficient for video, avoids 3x overhead
             #endif
             let w = Int(size.width * scale)
             let h = Int(size.height * scale)
@@ -412,7 +412,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 nonisolated(unsafe) let sb = sampleBuffer
                 let layer = sampleBufferLayer
                 DispatchQueue.main.async {
-                    layer?.enqueue(sb)
+                    layer?.sampleBufferRenderer.enqueue(sb)
                 }
             }
             #else
@@ -731,18 +731,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // Populate audio/subtitle track lists for the UI
                         self.queryTracks()
                         // Auto-resume VOD from saved position (once per session)
-                        if !self.isLive, !self.hasAttemptedResume, let mpv = self.mpv,
+                        if !self.isLive, !self.hasAttemptedResume, self.mpv != nil,
                            let vodID = self.progressStore.vodID {
                             self.hasAttemptedResume = true
-                            // Get resume position on MainActor, then seek on mpvQueue
-                            Task { @MainActor [weak self] in
+                            let seekAction = self.progressStore.seekAction
+                            Task { @MainActor in
                                 guard let resumeMs = WatchProgressManager.getResumePosition(vodID: vodID),
                                       resumeMs > 0 else { return }
-                                let secs = String(format: "%.3f", Double(resumeMs) / 1000.0)
-                                self?.mpvQueue.async {
-                                    guard let self, let mpv = self.mpv else { return }
-                                    self.mpvCommand(mpv, ["seek", secs, "absolute"])
-                                }
+                                seekAction?(resumeMs)
                                 debugLog("📼 VOD resume: seeking to \(resumeMs)ms")
                             }
                         }
