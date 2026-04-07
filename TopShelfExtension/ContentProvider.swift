@@ -6,9 +6,17 @@ class ContentProvider: TVTopShelfContentProvider {
 
     override func loadTopShelfContent() async -> TVTopShelfContent? {
         guard let shared = UserDefaults(suiteName: Self.appGroupID),
-              let entries = shared.array(forKey: "topShelfFavorites") as? [[String: String]],
+              let entries = shared.array(forKey: "topShelfChannels") as? [[String: String]],
               !entries.isEmpty else {
-            return nil
+            // No watch history yet — show a single welcome item
+            let welcome = TVTopShelfSectionedItem(identifier: "welcome")
+            welcome.title = "Start watching to see your top channels here"
+            if let launch = URL(string: "aerio://launch") {
+                welcome.displayAction = TVTopShelfAction(url: launch)
+            }
+            let section = TVTopShelfItemCollection(items: [welcome])
+            section.title = "Aerio"
+            return TVTopShelfSectionedContent(sections: [section])
         }
 
         var items: [TVTopShelfSectionedItem] = []
@@ -16,7 +24,13 @@ class ContentProvider: TVTopShelfContentProvider {
             guard let id = entry["id"], let name = entry["name"] else { continue }
 
             let item = TVTopShelfSectionedItem(identifier: id)
-            item.title = name
+            // Show channel name + current program
+            if let program = entry["currentProgram"], !program.isEmpty {
+                item.title = name
+                item.subtitle = program  // What's currently airing
+            } else {
+                item.title = name
+            }
 
             // Channel logo
             if let logoStr = entry["logoURL"], let logoURL = URL(string: logoStr) {
@@ -34,7 +48,7 @@ class ContentProvider: TVTopShelfContentProvider {
         }
 
         let section = TVTopShelfItemCollection(items: items)
-        section.title = "Favorite Channels"
+        section.title = "Most Watched"
 
         return TVTopShelfSectionedContent(sections: [section])
     }

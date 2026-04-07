@@ -529,6 +529,7 @@ final class ChannelStore: ObservableObject {
                 orderedGroups = groups
                 error = nil
                 debugLog("🔷 ChannelStore.load: published \(items.count) channels")
+                TopShelfDataManager.syncTopChannels(channels: items)
                 DebugLogger.shared.logChannelLoad(
                     serverType: type.rawValue,
                     channelCount: items.count,
@@ -609,6 +610,8 @@ final class ChannelStore: ObservableObject {
                     await EPGCache.shared.set(sorted, for: "d_\(baseURL)_\(tvgID)")
                 }
                 debugLog("📺 Bulk EPG loaded: \(programs.count) programs across \(byTvgID.count) channels")
+                // Refresh Top Shelf with updated program info
+                TopShelfDataManager.syncTopChannels(channels: self.channels)
             } catch {
                 debugLog("📺 Bulk EPG failed: \(error.localizedDescription) — falling back to lazy loading")
             }
@@ -995,6 +998,52 @@ final class FavoritesStore: ObservableObject {
     }
 }
 
+// MARK: - Top Shelf Data Manager (tvOS)
+/// Tracks most-watched channels and syncs current program info to the shared UserDefaults
+/// so the Top Shelf extension can display "now playing" cards.
+@MainActor
+enum TopShelfDataManager {
+    private static let appGroupID = "group.app.molinete.Dispatcharr"
+    private static var shared: UserDefaults? { UserDefaults(suiteName: appGroupID) }
+
+    /// Increment watch count for a channel. Called from NowPlayingManager.startPlaying().
+    static func incrementWatchCount(for channel: ChannelDisplayItem) {
+        #if os(tvOS)
+        guard let defaults = shared else { return }
+        var counts = defaults.dictionary(forKey: "channelWatchCounts") as? [String: Int] ?? [:]
+        counts[channel.id, default: 0] += 1
+        defaults.set(counts, forKey: "channelWatchCounts")
+        #endif
+    }
+
+    /// Write top 6 most-watched channels with current program info to shared UserDefaults.
+    /// Call this after EPG loads and whenever channels update.
+    static func syncTopChannels(channels: [ChannelDisplayItem]) {
+        #if os(tvOS)
+        guard let defaults = shared else { return }
+        let counts = defaults.dictionary(forKey: "channelWatchCounts") as? [String: Int] ?? [:]
+
+        // Sort by watch count descending, take top 6
+        let ranked = channels
+            .filter { counts[$0.id] ?? 0 > 0 }
+            .sorted { (counts[$0.id] ?? 0) > (counts[$1.id] ?? 0) }
+            .prefix(6)
+
+        let entries: [[String: String]] = ranked.map { item in
+            var entry: [String: String] = [
+                "id": item.id,
+                "name": item.name,
+                "number": item.number
+            ]
+            if let logo = item.logoURL?.absoluteString { entry["logoURL"] = logo }
+            if let program = item.currentProgram { entry["currentProgram"] = program }
+            return entry
+        }
+        defaults.set(entries, forKey: "topShelfChannels")
+        #endif
+    }
+}
+
 // MARK: - Now Playing Manager
 @MainActor
 final class NowPlayingManager: ObservableObject {
@@ -1010,6 +1059,8 @@ final class NowPlayingManager: ObservableObject {
         playingItem = item
         playingHeaders = headers
         isMinimized = false
+        // Track watch count for Top Shelf "most watched" ranking
+        TopShelfDataManager.incrementWatchCount(for: item)
     }
 
     func minimize() {
