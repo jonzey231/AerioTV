@@ -168,6 +168,24 @@ struct ChannelListView: View {
                         }
                     )
                 }
+                .onChange(of: servers.count) { _, _ in
+                    // Re-evaluate guide view default when servers arrive (e.g., fresh install + iCloud sync)
+                    let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+                    let hasEPG: Bool = {
+                        guard let s = activeServer else { return false }
+                        if s.type == .m3uPlaylist { return !s.epgURL.isEmpty }
+                        return true
+                    }()
+                    #if os(tvOS)
+                    if hasEPG && defaultLiveTVView == "guide" && !showGuideView {
+                        showGuideView = true
+                    }
+                    #else
+                    if UIDevice.current.userInterfaceIdiom == .pad && hasEPG && defaultLiveTVView == "guide" && !showGuideView {
+                        showGuideView = true
+                    }
+                    #endif
+                }
                 .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidApplyPreferences)) { _ in
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     if selectedGroup != "All" && hiddenGroups.contains(selectedGroup) {
@@ -723,22 +741,22 @@ struct ChannelRow: View {
             } label: {
                 HStack(spacing: 14) {
                     Text(item.number)
-                        .font(.body.monospaced())
+                        .font(.system(size: 24, weight: .medium, design: .monospaced))
                         .lineLimit(1)
                         .foregroundColor(.textTertiary)
-                        .frame(width: 34, alignment: .trailing)
+                        .frame(width: 42, alignment: .trailing)
 
                     AsyncImage(url: item.logoURL) { phase in
                         switch phase {
                         case .success(let image):
                             image.resizable()
                                 .aspectRatio(contentMode: .fit)
-                                .frame(width: 48, height: 34)
+                                .frame(width: 72, height: 48)
                         default:
                             ZStack {
                                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                                     .fill(Color.accentPrimary.opacity(0.12))
-                                    .frame(width: 48, height: 34)
+                                    .frame(width: 72, height: 48)
                                 NoPosterPlaceholder(compact: true)
                             }
                         }

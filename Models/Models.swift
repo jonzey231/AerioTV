@@ -176,35 +176,51 @@ final class ServerConnection {
             .filter { !$0.isEmpty }
     }
 
-    /// Returns localURL (normalized) when connected to any configured home WiFi SSID,
-    /// otherwise returns normalizedBaseURL.
-    /// Uses the SSID cached in UserDefaults by NetworkMonitor — no async needed.
+    /// Returns localURL (normalized) when connected to any configured home WiFi SSID
+    /// (iOS) or when LAN reachability was detected at startup (tvOS).
     var effectiveBaseURL: String {
         guard !localURL.isEmpty else { return normalizedBaseURL }
-        let ssids = homeSSIDs
-        guard !ssids.isEmpty else { return normalizedBaseURL }
-        let currentSSID = UserDefaults.standard.string(forKey: "cachedCurrentSSID") ?? ""
-        guard !currentSSID.isEmpty, ssids.contains(currentSSID) else { return normalizedBaseURL }
+        guard isOnLANNetwork else { return normalizedBaseURL }
+        return normalizedLocalURL
+    }
+
+    /// Returns localEPGURL when on a home network, otherwise returns epgURL.
+    var effectiveEPGURL: String {
+        guard !localEPGURL.isEmpty else { return epgURL }
+        guard isOnLANNetwork else { return epgURL }
+        return localEPGURL
+    }
+
+    /// The matched home SSID currently in use, if on LAN.
+    var activeHomeSSID: String? {
+        #if os(tvOS)
+        // tvOS can't detect SSIDs — return a synthetic label if LAN is detected
+        return isOnLANNetwork ? "Local Network" : nil
+        #else
+        let current = UserDefaults.standard.string(forKey: "cachedCurrentSSID") ?? ""
+        return homeSSIDs.first(where: { $0 == current })
+        #endif
+    }
+
+    var normalizedLocalURL: String {
         var url = localURL.trimmingCharacters(in: .whitespacesAndNewlines)
         if url.hasSuffix("/") { url = String(url.dropLast()) }
         if !url.hasPrefix("http://") && !url.hasPrefix("https://") { url = "http://" + url }
         return url
     }
 
-    /// Returns localEPGURL when on a home WiFi SSID, otherwise returns epgURL.
-    var effectiveEPGURL: String {
-        guard !localEPGURL.isEmpty else { return epgURL }
+    /// Whether this device is currently on the home/LAN network.
+    /// iOS: checks cached SSID against configured home SSIDs.
+    /// tvOS: checks a reachability flag set at startup by probing the local URL.
+    private var isOnLANNetwork: Bool {
+        #if os(tvOS)
+        return UserDefaults.standard.bool(forKey: "tvosLANDetected")
+        #else
         let ssids = homeSSIDs
-        guard !ssids.isEmpty else { return epgURL }
+        guard !ssids.isEmpty else { return false }
         let currentSSID = UserDefaults.standard.string(forKey: "cachedCurrentSSID") ?? ""
-        guard !currentSSID.isEmpty, ssids.contains(currentSSID) else { return epgURL }
-        return localEPGURL
-    }
-
-    /// The matched home SSID currently in use, if on LAN.
-    var activeHomeSSID: String? {
-        let current = UserDefaults.standard.string(forKey: "cachedCurrentSSID") ?? ""
-        return homeSSIDs.first(where: { $0 == current })
+        return !currentSSID.isEmpty && ssids.contains(currentSSID)
+        #endif
     }
 
     var isHTTPS: Bool {

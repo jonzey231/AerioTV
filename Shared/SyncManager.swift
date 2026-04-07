@@ -25,6 +25,7 @@ final class SyncManager: ObservableObject {
     // MARK: - KVS Keys
     private let kvsKey     = "syncedServers"
     private let prefKVSKey = "syncedPreferences"
+    private let watchProgressKVSKey = "syncedWatchProgress"
 
     /// Background queue used ONLY for the initial sync flow (ping → sleep → read).
     // initQueue removed — all KVS access must be on main dispatch queue.
@@ -36,6 +37,7 @@ final class SyncManager: ObservableObject {
     // MARK: - Debounce / Timers
     private var pushDebounce: DispatchWorkItem?
     private var prefPushDebounce: DispatchWorkItem?
+    private var watchProgressPushDebounce: DispatchWorkItem?
     private var importTimeoutWork: DispatchWorkItem?
 
     /// Prevents re-entrant updates (remote change → local save → push cycle).
@@ -166,14 +168,15 @@ final class SyncManager: ObservableObject {
             // Step 2: After a delay, read KVS on the main queue.
             // KVS internally calls dispatch_assert_queue(main) for both
             // reads AND writes, so all access must be on the main queue.
+            let wpKey = self.watchProgressKVSKey
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
                 let servers = NSUbiquitousKeyValueStore.default.array(forKey: serverKey) as? [[String: Any]]
                 let prefs   = NSUbiquitousKeyValueStore.default.dictionary(forKey: prefKey)
-                debugLog("🔵 SyncManager: initial KVS check — servers=\(servers != nil), prefs=\(prefs != nil)")
+                let wp      = NSUbiquitousKeyValueStore.default.array(forKey: wpKey) as? [[String: Any]]
+                debugLog("🔵 SyncManager: initial KVS check — servers=\(servers != nil), prefs=\(prefs != nil), watchProgress=\(wp != nil)")
 
-                // Already on main queue — hop to @MainActor for the merge.
                 Task { @MainActor [weak self] in
-                    self?.handleImportResult(servers: servers, prefs: prefs)
+                    self?.handleImportResult(servers: servers, prefs: prefs, watchProgress: wp)
                 }
             }
 
@@ -198,21 +201,25 @@ final class SyncManager: ObservableObject {
             // KVS clear on main dispatch queue.
             let sKey = kvsKey
             let pKey = prefKVSKey
+            let wpKey = watchProgressKVSKey
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: sKey)
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: pKey)
+                NSUbiquitousKeyValueStore.default.removeObject(forKey: wpKey)
                 debugLog("🔵 SyncManager: cleared KVS data")
             }
         }
     }
 
-    private func handleImportResult(servers: [[String: Any]]?, prefs: [String: Any]?) {
+    private func handleImportResult(servers: [[String: Any]]?, prefs: [String: Any]?,
+                                     watchProgress: [[String: Any]]? = nil) {
         guard isSyncEnabled, isImporting else { return }
 
-        if servers != nil || prefs != nil {
+        if servers != nil || prefs != nil || watchProgress != nil {
             importTimeoutWork?.cancel()
             doMerge(servers: servers, isInitial: true)
             doApplyPreferences(prefs: prefs)
+            mergeRemoteWatchProgress(watchProgress)
             isImporting = false
             startObservingDefaults()
             debugLog("🔵 SyncManager: import complete from initial check")
@@ -355,12 +362,14 @@ final class SyncManager: ObservableObject {
         // Already on main dispatch queue (observer registered with queue: .main).
         let servers = NSUbiquitousKeyValueStore.default.array(forKey: kvsKey) as? [[String: Any]]
         let prefs   = NSUbiquitousKeyValueStore.default.dictionary(forKey: prefKVSKey)
-        debugLog("🔵 SyncManager.remoteDidChange: servers=\(servers != nil), prefs=\(prefs != nil)")
+        let wp      = NSUbiquitousKeyValueStore.default.array(forKey: watchProgressKVSKey) as? [[String: Any]]
+        debugLog("🔵 SyncManager.remoteDidChange: servers=\(servers != nil), prefs=\(prefs != nil), wp=\(wp != nil)")
 
-        processRemoteChange(servers: servers, prefs: prefs, reason: reason)
+        processRemoteChange(servers: servers, prefs: prefs, watchProgress: wp, reason: reason)
     }
 
-    private func processRemoteChange(servers: [[String: Any]]?, prefs: [String: Any]?, reason: Int?) {
+    private func processRemoteChange(servers: [[String: Any]]?, prefs: [String: Any]?,
+                                     watchProgress: [[String: Any]]? = nil, reason: Int?) {
         guard isSyncEnabled else { return }
 
         // Skip bounce-backs: if we pushed within the last 5 seconds, this is
@@ -394,6 +403,7 @@ final class SyncManager: ObservableObject {
         debugLog("🔵 SyncManager.processRemoteChange: merging (initial=\(wasImporting))")
         doMerge(servers: servers, isInitial: wasImporting)
         doApplyPreferences(prefs: prefs)
+        mergeRemoteWatchProgress(watchProgress)
     }
 
     private func doMerge(servers: [[String: Any]]?, isInitial: Bool) {
@@ -548,6 +558,136 @@ final class SyncManager: ObservableObject {
         )
     }
 
+    // MARK: - Watch Progress Sync
+
+    private func serializeWatchProgress(_ p: WatchProgress) -> [String: Any] {
+        var dict: [String: Any] = [
+            "vodID": p.vodID,
+            "title": p.title,
+            "positionMs": Int(p.positionMs),
+            "durationMs": Int(p.durationMs),
+            "vodType": p.vodType,
+            "updatedAt": p.updatedAt.timeIntervalSince1970,
+            "isFinished": p.isFinished
+        ]
+        if let v = p.posterURL  { dict["posterURL"]  = v }
+        if let v = p.streamURL  { dict["streamURL"]  = v }
+        if let v = p.serverID   { dict["serverID"]   = v }
+        return dict
+    }
+
+    private struct SyncedWatchProgress {
+        let vodID: String
+        let title: String
+        let positionMs: Int32
+        let durationMs: Int32
+        let posterURL: String?
+        let vodType: String
+        let updatedAt: Date
+        let isFinished: Bool
+        let streamURL: String?
+        let serverID: String?
+    }
+
+    nonisolated private func deserializeWatchProgress(_ dict: [String: Any]) -> SyncedWatchProgress? {
+        guard let vodID = dict["vodID"] as? String,
+              let ts = dict["updatedAt"] as? TimeInterval else { return nil }
+        return SyncedWatchProgress(
+            vodID: vodID,
+            title: dict["title"] as? String ?? "",
+            positionMs: Int32(dict["positionMs"] as? Int ?? 0),
+            durationMs: Int32(dict["durationMs"] as? Int ?? 0),
+            posterURL: dict["posterURL"] as? String,
+            vodType: dict["vodType"] as? String ?? "movie",
+            updatedAt: Date(timeIntervalSince1970: ts),
+            isFinished: dict["isFinished"] as? Bool ?? false,
+            streamURL: dict["streamURL"] as? String,
+            serverID: dict["serverID"] as? String
+        )
+    }
+
+    /// Push all local watch progress entries to KVS (debounced).
+    func pushWatchProgress(_ entries: [WatchProgress], immediate: Bool = false) {
+        guard isSyncEnabled, !isMerging else { return }
+
+        let payload = entries.map { serializeWatchProgress($0) }
+        nonisolated(unsafe) let capturedPayload = payload
+
+        watchProgressPushDebounce?.cancel()
+        let key = watchProgressKVSKey
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                self?.lastPushTime = ProcessInfo.processInfo.systemUptime
+            }
+            NSUbiquitousKeyValueStore.default.set(capturedPayload, forKey: key)
+            debugLog("🔵 SyncManager: pushed \(capturedPayload.count) watch progress entries to KVS")
+        }
+        watchProgressPushDebounce = work
+        if immediate {
+            DispatchQueue.main.async(execute: work)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: work)
+        }
+    }
+
+    /// Merge remote watch progress into local SwiftData.
+    private func mergeRemoteWatchProgress(_ remoteEntries: [[String: Any]]?) {
+        guard let remoteEntries, !remoteEntries.isEmpty else { return }
+        guard let context = WatchProgressManager.modelContext else { return }
+
+        isMerging = true
+        defer { isMerging = false }
+
+        let remotes = remoteEntries.compactMap { deserializeWatchProgress($0) }
+        let remoteByID = Dictionary(uniqueKeysWithValues: remotes.map { ($0.vodID, $0) })
+        let remoteIDs = Set(remoteByID.keys)
+
+        // Fetch all local entries
+        let descriptor = FetchDescriptor<WatchProgress>()
+        guard let locals = try? context.fetch(descriptor) else { return }
+        let localByID = Dictionary(uniqueKeysWithValues: locals.map { ($0.vodID, $0) })
+
+        // Upsert remote → local
+        for remote in remotes {
+            if let local = localByID[remote.vodID] {
+                // Conflict: most recent updatedAt wins
+                if remote.updatedAt > local.updatedAt {
+                    local.title = remote.title
+                    local.positionMs = remote.positionMs
+                    local.durationMs = remote.durationMs
+                    local.posterURL = remote.posterURL
+                    local.vodType = remote.vodType
+                    local.updatedAt = remote.updatedAt
+                    local.isFinished = remote.isFinished
+                    local.streamURL = remote.streamURL
+                    local.serverID = remote.serverID
+                }
+            } else {
+                // Insert new
+                let wp = WatchProgress(
+                    vodID: remote.vodID, title: remote.title,
+                    positionMs: remote.positionMs, durationMs: remote.durationMs,
+                    posterURL: remote.posterURL, vodType: remote.vodType,
+                    updatedAt: remote.updatedAt, isFinished: remote.isFinished,
+                    streamURL: remote.streamURL, serverID: remote.serverID
+                )
+                context.insert(wp)
+            }
+        }
+
+        // Delete locals that are absent from remote (deleted on other device)
+        for local in locals {
+            if !remoteIDs.contains(local.vodID) {
+                context.delete(local)
+            }
+        }
+
+        try? context.save()
+        debugLog("🔵 SyncManager: merged \(remotes.count) remote watch progress entries")
+
+        NotificationCenter.default.post(name: .syncManagerDidUpdateWatchProgress, object: nil)
+    }
+
     // MARK: - Helpers
 
     var isSyncEnabled: Bool {
@@ -581,4 +721,6 @@ extension Notification.Name {
     static let syncManagerDidApplyPreferences = Notification.Name("syncManagerDidApplyPreferences")
     static let syncManagerNeedsPush = Notification.Name("syncManagerNeedsPush")
     static let stopPlaybackForBackground = Notification.Name("stopPlaybackForBackground")
+    static let watchProgressDidChange = Notification.Name("watchProgressDidChange")
+    static let syncManagerDidUpdateWatchProgress = Notification.Name("syncManagerDidUpdateWatchProgress")
 }

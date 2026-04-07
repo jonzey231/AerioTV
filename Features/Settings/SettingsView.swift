@@ -4,6 +4,7 @@ import SwiftData
 struct SettingsView: View {
     #if os(tvOS)
     @Binding var selectedTab: AppTab
+    @Binding var isSubPushed: Bool
     #endif
     @Query private var servers: [ServerConnection]
     @Environment(\.modelContext) private var modelContext
@@ -15,17 +16,30 @@ struct SettingsView: View {
     @State private var copiedAbout = false
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @AppStorage("syncLastDate") private var syncLastDate: Double = 0
+    #if os(tvOS)
+    @State private var navPath = NavigationPath()
+    #endif
 
     var body: some View {
-        NavigationStack {
+        settingsNavigationStack
+    }
+
+    @ViewBuilder
+    private var settingsNavigationStack: some View {
+        #if os(tvOS)
+        NavigationStack(path: $navPath) { settingsContent }
+        #else
+        NavigationStack { settingsContent }
+        #endif
+    }
+
+    @ViewBuilder
+    private var settingsContent: some View {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
 
                 #if os(tvOS)
                 tvOSContent
-                // Note: .onExitCommand removed — it intercepted Menu button presses
-                // in sub-menus (Network, Appearance), preventing navigation back.
-                // tvOS TabView handles Menu→exit from the root settings page natively.
                 #else
                 List {
                     // MARK: - Playlists Section
@@ -141,8 +155,8 @@ struct SettingsView: View {
                     Section {
                         Toggle(isOn: $iCloudSyncEnabled) {
                             SettingsRow(icon: "icloud.fill", iconColor: .accentPrimary,
-                                        title: "Sync Playlists via iCloud",
-                                        subtitle: "Share playlists across your Apple devices")
+                                        title: "iCloud Sync",
+                                        subtitle: "Sync playlists, preferences, and watch progress")
                         }
                         .tint(ThemeManager.shared.accent)
                         .onChange(of: iCloudSyncEnabled) { _, enabled in
@@ -154,13 +168,17 @@ struct SettingsView: View {
                                 debugLog("🔵 Sync Now tapped")
                                 SyncManager.shared.pushServers(servers, immediate: true)
                                 SyncManager.shared.pushPreferencesImmediate()
+                                if let ctx = WatchProgressManager.modelContext,
+                                   let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
+                                    SyncManager.shared.pushWatchProgress(all, immediate: true)
+                                }
                             } label: {
                                 SettingsRow(icon: "arrow.triangle.2.circlepath.icloud",
                                             iconColor: .accentPrimary,
                                             title: "Sync Now",
                                             subtitle: syncLastDate > 0
                                                 ? "Last synced \(lastSyncedString)"
-                                                : "Push playlists & preferences to iCloud now")
+                                                : "Push all data to iCloud now")
                             }
                             #if os(iOS)
                             .buttonStyle(PressableButtonStyle())
@@ -171,7 +189,7 @@ struct SettingsView: View {
                     } header: {
                         Text("Sync").sectionHeaderStyle()
                     } footer: {
-                        Text("Your playlist configurations sync across all devices signed into the same Apple ID. Credentials are stored securely in iCloud Keychain.")
+                        Text("Playlists, preferences, and VOD watch progress sync across all devices signed into the same Apple ID. Credentials are stored securely in iCloud Keychain.")
                             .font(.labelSmall).foregroundColor(.textTertiary)
                     }
                     .listRowBackground(Color.cardBackground)
@@ -284,6 +302,28 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.large)
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
+            #if os(tvOS)
+            .navigationDestination(for: String.self) { route in
+                switch route {
+                case "appearance": AppearanceSettingsView()
+                case "network":    NetworkSettingsView()
+                case "developer":  DeveloperSettingsView()
+                case "edit-server":
+                    if let server = serverToEdit {
+                        EditServerPage(server: server)
+                    }
+                default:           EmptyView()
+                }
+            }
+            .onChange(of: navPath) { _, path in
+                isSubPushed = !path.isEmpty
+            }
+            .onChange(of: isSubPushed) { _, pushed in
+                if !pushed && !navPath.isEmpty {
+                    navPath.removeLast()
+                }
+            }
+            #endif
             .sheet(isPresented: $showAddServer) {
                 NavigationStack { AddServerView(onSave: { _ in }) }
                     .overlay(alignment: .top) {
@@ -310,10 +350,17 @@ struct SettingsView: View {
             } message: {
                 Text("This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
             }
+            #if os(tvOS)
+            .onChange(of: serverToEdit) { _, server in
+                if let server {
+                    navPath.append("edit-server")
+                }
+            }
+            #else
             .sheet(item: $serverToEdit) { server in
                 EditServerSheet(server: server)
             }
-        }
+            #endif
     }
 
     // MARK: - Sync computed properties
@@ -468,13 +515,13 @@ struct SettingsView: View {
                 // MARK: App Settings
                 tvSettingsHeader("App Settings").padding(.top, 36)
                 VStack(spacing: 8) {
-                    TVSettingsNavRow(destination: AppearanceSettingsView()) {
-                        SettingsRow(icon: "paintbrush.fill", iconColor: .accentPrimary,
-                                    title: "Appearance", subtitle: "Theme & display options")
+                    TVSettingsNavButton(label: "Appearance", icon: "paintbrush.fill",
+                                        iconColor: .accentPrimary, subtitle: "Theme & display options") {
+                        navPath.append("appearance")
                     }
-                    TVSettingsNavRow(destination: NetworkSettingsView()) {
-                        SettingsRow(icon: "network", iconColor: .accentSecondary,
-                                    title: "Network", subtitle: "Timeout, buffer, home WiFi & refresh")
+                    TVSettingsNavButton(label: "Network", icon: "network",
+                                        iconColor: .accentSecondary, subtitle: "Timeout, buffer, home WiFi & refresh") {
+                        navPath.append("network")
                     }
                 }
 
@@ -484,8 +531,8 @@ struct SettingsView: View {
                     TVSettingsToggleRow(
                         icon: "icloud.fill",
                         iconColor: .accentPrimary,
-                        title: "Sync Playlists via iCloud",
-                        subtitle: "Share playlists across your Apple devices",
+                        title: "iCloud Sync",
+                        subtitle: "Sync playlists, preferences, and watch progress",
                         isOn: $iCloudSyncEnabled
                     ) { enabled in
                         SyncManager.shared.syncSettingChanged(enabled: enabled)
@@ -500,15 +547,19 @@ struct SettingsView: View {
                         ) {
                             SyncManager.shared.pushServers(servers, immediate: true)
                             SyncManager.shared.pushPreferencesImmediate()
+                            if let ctx = WatchProgressManager.modelContext,
+                               let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
+                                SyncManager.shared.pushWatchProgress(all, immediate: true)
+                            }
                         }
                     }
                 }
 
                 // MARK: Developer
                 tvSettingsHeader("Developer").padding(.top, 36)
-                TVSettingsNavRow(destination: DeveloperSettingsView()) {
-                    SettingsRow(icon: "ladybug.fill", iconColor: .accentSecondary,
-                                title: "Developer", subtitle: "Debug logging & diagnostics")
+                TVSettingsNavButton(label: "Developer", icon: "ladybug.fill",
+                                    iconColor: .accentSecondary, subtitle: "Debug logging & diagnostics") {
+                    navPath.append("developer")
                 }
 
                 // MARK: About
@@ -596,6 +647,32 @@ private struct TVSettingsNavRow<Destination: View, Content: View>: View {
     }
 }
 
+/// Button-based nav row that pushes onto a NavigationPath instead of using NavigationLink.
+/// This ensures the TabView's .onExitCommand can properly manage back navigation.
+private struct TVSettingsNavButton: View {
+    let label: String
+    let icon: String
+    let iconColor: Color
+    let subtitle: String
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            SettingsRow(icon: icon, iconColor: iconColor, title: label, subtitle: subtitle)
+                .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 6)
+                .background(tvSettingsCardBG(isFocused))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
 /// Plain action row (Add Playlist, Copy to Clipboard, etc.)
 /// with the same teal card highlight on focus.
 private struct TVSettingsActionRow: View {
@@ -631,7 +708,7 @@ private struct TVSettingsActionRow: View {
 
 /// Toggle row for tvOS — renders as a Button that flips a Bool on select,
 /// showing an "On / Off" indicator. Consistent with TVGroupToggleRow in ManageGroupsSheet.
-private struct TVSettingsToggleRow: View {
+struct TVSettingsToggleRow: View {
     let icon: String
     let iconColor: Color
     let title: String
@@ -1251,86 +1328,10 @@ struct EditServerSheet: View {
         NavigationStack {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
-                Form {
-                    // MARK: Connection
-                    Section {
-                        TextField("Name", text: $server.name)
-                            .listRowBackground(Color.cardBackground)
-                        TextField("URL", text: $server.baseURL)
-                            .keyboardType(.URL)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .listRowBackground(Color.cardBackground)
-                    } header: {
-                        Text("Connection").sectionHeaderStyle()
-                    }
-
-                    // MARK: Credentials (type-specific)
-                    if server.type == .xtreamCodes {
-                        Section {
-                            TextField("Username", text: $server.username)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .listRowBackground(Color.cardBackground)
-                            SecureField("Password", text: $server.password)
-                                .listRowBackground(Color.cardBackground)
-                        } header: {
-                            Text("Credentials").sectionHeaderStyle()
-                        }
-                    } else if server.type == .dispatcharrAPI {
-                        Section {
-                            SecureField("API Key", text: $server.apiKey)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .listRowBackground(Color.cardBackground)
-                        } header: {
-                            Text("Authentication").sectionHeaderStyle()
-                        }
-                    } else if server.type == .m3uPlaylist {
-                        Section {
-                            TextField("EPG URL (optional)", text: $server.epgURL)
-                                .keyboardType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .listRowBackground(Color.cardBackground)
-                        } header: {
-                            Text("EPG Guide").sectionHeaderStyle()
-                        }
-                    }
-
-                    // MARK: LAN / WAN (for network server types)
-                    if server.type != .m3uPlaylist {
-                        Section {
-                            TextField("Local URL", text: $server.localURL)
-                                .keyboardType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .listRowBackground(Color.cardBackground)
-                        } header: {
-                            Text("Local Network").sectionHeaderStyle()
-                        } footer: {
-                            Text("Used when connected to a home WiFi network. Add your home network SSIDs in Settings → Network → Home WiFi. Leave blank to always use the main URL.")
-                                .font(.labelSmall)
-                                .foregroundColor(.textTertiary)
-                        }
-                    }
-
-                    // MARK: Info
-                    Section {
-                        HStack {
-                            Text("Type")
-                                .foregroundColor(.textSecondary)
-                            Spacer()
-                            Text(server.type.displayName)
-                                .foregroundColor(.textTertiary)
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    } header: {
-                        Text("Info").sectionHeaderStyle()
-                    }
-                }
-                #if os(iOS)
-                .scrollContentBackground(.hidden)
+                #if os(tvOS)
+                tvOSEditContent
+                #else
+                iOSEditForm
                 #endif
             }
             .navigationTitle("Edit Playlist")
@@ -1356,8 +1357,333 @@ struct EditServerSheet: View {
             }
         }
     }
+
+    // MARK: - iOS Form
+    #if os(iOS)
+    private var iOSEditForm: some View {
+        Form {
+            Section {
+                TextField("Name", text: $server.name)
+                    .listRowBackground(Color.cardBackground)
+                TextField("URL", text: $server.baseURL)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("Connection").sectionHeaderStyle()
+            }
+
+            if server.type == .xtreamCodes {
+                Section {
+                    TextField("Username", text: $server.username)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .listRowBackground(Color.cardBackground)
+                    SecureField("Password", text: $server.password)
+                        .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Credentials").sectionHeaderStyle()
+                }
+            } else if server.type == .dispatcharrAPI {
+                Section {
+                    SecureField("API Key", text: $server.apiKey)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Authentication").sectionHeaderStyle()
+                }
+            } else if server.type == .m3uPlaylist {
+                Section {
+                    TextField("EPG URL (optional)", text: $server.epgURL)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("EPG Guide").sectionHeaderStyle()
+                }
+            }
+
+            if server.type != .m3uPlaylist {
+                Section {
+                    TextField("Local URL", text: $server.localURL)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Local Network").sectionHeaderStyle()
+                } footer: {
+                    Text("Used when connected to a home WiFi network. Add your home network SSIDs in Settings → Network → Home WiFi. Leave blank to always use the main URL.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                }
+            }
+
+            Section {
+                HStack {
+                    Text("Type")
+                        .foregroundColor(.textSecondary)
+                    Spacer()
+                    Text(server.type.displayName)
+                        .foregroundColor(.textTertiary)
+                }
+                .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("Info").sectionHeaderStyle()
+            }
+        }
+        .scrollContentBackground(.hidden)
+    }
+    #endif
+
+    // MARK: - tvOS Layout
+    #if os(tvOS)
+    private var tvOSEditContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 32) {
+                // Connection
+                tvEditSection("Connection") {
+                    tvEditField("Name", text: $server.name)
+                    tvEditField("URL", text: $server.baseURL)
+                }
+
+                // Credentials
+                if server.type == .xtreamCodes {
+                    tvEditSection("Credentials") {
+                        tvEditField("Username", text: $server.username)
+                        tvEditField("Password", text: $server.password, isSecure: true)
+                    }
+                } else if server.type == .dispatcharrAPI {
+                    tvEditSection("Authentication") {
+                        tvEditField("API Key", text: $server.apiKey, isSecure: true)
+                    }
+                } else if server.type == .m3uPlaylist {
+                    tvEditSection("EPG Guide") {
+                        tvEditField("EPG URL (optional)", text: $server.epgURL)
+                    }
+                }
+
+                // Local Network
+                if server.type != .m3uPlaylist {
+                    tvEditSection("Local Network") {
+                        tvEditField("Local URL", text: $server.localURL)
+                        Text("Used when the Apple TV detects the local server is reachable. Leave blank to always use the main URL.")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.top, 4)
+                    }
+                }
+
+                // Info
+                tvEditSection("Info") {
+                    HStack {
+                        Text("Type")
+                            .font(.system(size: 28, weight: .medium))
+                            .foregroundColor(.textSecondary)
+                        Spacer()
+                        Text(server.type.displayName)
+                            .font(.system(size: 28))
+                            .foregroundColor(.textTertiary)
+                    }
+                    .padding(.vertical, 8)
+                }
+            }
+            .padding(48)
+        }
+    }
+
+    private func tvEditSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title.uppercased())
+                .font(.system(size: 22, weight: .bold))
+                .foregroundColor(.textTertiary)
+                .tracking(1)
+            VStack(spacing: 16) {
+                content()
+            }
+            .padding(24)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.cardBackground)
+            )
+        }
+    }
+
+    private func tvEditField(_ placeholder: String, text: Binding<String>, isSecure: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(placeholder)
+                .font(.system(size: 22, weight: .medium))
+                .foregroundColor(.textTertiary)
+            if isSecure {
+                SecureField(placeholder, text: text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 28))
+                    .foregroundColor(.textPrimary)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.elevatedBackground)
+                    )
+            } else {
+                TextField(placeholder, text: text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 28))
+                    .foregroundColor(.textPrimary)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.elevatedBackground)
+                    )
+            }
+        }
+    }
+    #endif
 }
 
+
+// MARK: - tvOS Edit Server (full page, no modal)
+#if os(tvOS)
+struct EditServerPage: View {
+    @Bindable var server: ServerConnection
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 32) {
+                    // Connection
+                    tvSection("Connection") {
+                        tvField("Name", text: $server.name)
+                        tvField("URL", text: $server.baseURL)
+                    }
+
+                    // Credentials
+                    if server.type == .xtreamCodes {
+                        tvSection("Credentials") {
+                            tvField("Username", text: $server.username)
+                            tvField("Password", text: $server.password, isSecure: true)
+                        }
+                    } else if server.type == .dispatcharrAPI {
+                        tvSection("Authentication") {
+                            tvField("API Key", text: $server.apiKey, isSecure: true)
+                        }
+                    } else if server.type == .m3uPlaylist {
+                        tvSection("EPG Guide") {
+                            tvField("EPG URL (optional)", text: $server.epgURL)
+                        }
+                    }
+
+                    // Local Network
+                    if server.type != .m3uPlaylist {
+                        tvSection("Local Network") {
+                            tvField("Local URL", text: $server.localURL)
+                            Text("Used when the Apple TV detects the local server is reachable. Leave blank to always use the main URL.")
+                                .font(.system(size: 22))
+                                .foregroundColor(.textTertiary)
+                                .padding(.top, 4)
+                        }
+                    }
+
+                    // Info
+                    tvSection("Info") {
+                        HStack {
+                            Text("Type")
+                                .font(.system(size: 28, weight: .medium))
+                                .foregroundColor(.textSecondary)
+                            Spacer()
+                            Text(server.type.displayName)
+                                .font(.system(size: 28))
+                                .foregroundColor(.textTertiary)
+                        }
+                        .padding(.vertical, 8)
+                    }
+
+                    // Save
+                    HStack {
+                        Spacer()
+                        Button {
+                            SyncManager.shared.saveCredentialsSynced(for: server)
+                            dismiss()
+                        } label: {
+                            Text("Save Changes")
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 48)
+                                .padding(.vertical, 14)
+                                .background(LinearGradient.accentGradient)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(TVNoHighlightButtonStyle())
+                        .disabled(server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
+                                  server.baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Spacer()
+                    }
+                    .padding(.top, 16)
+                }
+                .padding(48)
+            }
+        }
+        .navigationTitle("Edit Playlist")
+        .toolbar(.hidden, for: .navigationBar)
+    }
+
+    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title.uppercased())
+                .font(.system(size: 22, weight: .bold))
+                .foregroundColor(.textTertiary)
+                .tracking(1)
+            VStack(spacing: 16) {
+                content()
+            }
+            .padding(24)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.cardBackground)
+            )
+        }
+    }
+
+    private func tvField(_ placeholder: String, text: Binding<String>, isSecure: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(placeholder)
+                .font(.system(size: 22, weight: .medium))
+                .foregroundColor(.textTertiary)
+            if isSecure {
+                SecureField(placeholder, text: text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 28))
+                    .foregroundColor(.textPrimary)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.elevatedBackground)
+                    )
+            } else {
+                TextField(placeholder, text: text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 28))
+                    .foregroundColor(.textPrimary)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.elevatedBackground)
+                    )
+            }
+        }
+    }
+}
+#endif
 
 // MARK: - Buffer size options
 private struct BufferOption: Identifiable {
@@ -1732,6 +2058,8 @@ struct NetworkSettingsView: View {
         .navigationTitle("Network")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        #else
+        .toolbar(.hidden, for: .navigationBar)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         #if os(iOS)

@@ -208,6 +208,8 @@ struct DeveloperSettingsView: View {
         .navigationTitle("Developer")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
+        #else
+        .toolbar(.hidden, for: .navigationBar)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
 

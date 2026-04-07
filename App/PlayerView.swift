@@ -78,6 +78,9 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var vodID: String?
     var vodTitle: String?
     var vodPosterURL: String?
+    var vodStreamURL: String?   // Resolved stream URL (for Continue Watching resume)
+    var vodServerID: String?    // Server UUID (for Continue Watching auth headers)
+    var explicitResumeMs: Int32?  // Pre-loaded resume position (bypasses DB lookup)
     /// Closure set by the Coordinator; call with a target position in ms to seek.
     var seekAction: ((Int32) -> Void)?
     /// Closure set by the Coordinator; toggles play/pause.
@@ -207,6 +210,8 @@ struct PlayerView: View {
     let artworkURL: URL?
     let vodID: String?
     let vodPosterURL: String?
+    let vodServerID: String?
+    let resumePositionMs: Int32?
     let onMinimize: (() -> Void)?
     let onClose: (() -> Void)?
 
@@ -215,6 +220,7 @@ struct PlayerView: View {
          subtitle: String? = nil, subtitleStart: Date? = nil, subtitleEnd: Date? = nil,
          artworkURL: URL? = nil,
          vodID: String? = nil, vodPosterURL: String? = nil,
+         vodServerID: String? = nil, resumePositionMs: Int32? = nil,
          onMinimize: (() -> Void)? = nil, onClose: (() -> Void)? = nil) {
         self.urls = urls
         self.title = title
@@ -226,6 +232,8 @@ struct PlayerView: View {
         self.artworkURL = artworkURL
         self.vodID = vodID
         self.vodPosterURL = vodPosterURL
+        self.vodServerID = vodServerID
+        self.resumePositionMs = resumePositionMs
         self.onMinimize = onMinimize
         self.onClose = onClose
     }
@@ -241,7 +249,8 @@ struct PlayerView: View {
             isLive: isLive,
             subtitle: subtitle, subtitleStart: subtitleStart, subtitleEnd: subtitleEnd,
             artworkURL: artworkURL,
-            vodID: vodID, vodPosterURL: vodPosterURL,
+            vodID: vodID, vodPosterURL: vodPosterURL, vodServerID: vodServerID,
+            resumePositionMs: resumePositionMs,
             onDismiss: { if let c = onClose { c() } else { dismiss() } },
             onMinimize: onMinimize,
             logStore: logStore,
@@ -265,6 +274,8 @@ private struct PlayerRootView: View {
     let artworkURL: URL?
     let vodID: String?
     let vodPosterURL: String?
+    let vodServerID: String?
+    let resumePositionMs: Int32?
     let onDismiss: () -> Void
     let onMinimize: (() -> Void)?
 
@@ -285,7 +296,7 @@ private struct PlayerRootView: View {
     @State private var dragFraction: CGFloat = 0
 
     #if os(tvOS)
-    @FocusState private var isPlayerFocused: Bool
+    @State private var isScrubbing = false  // True while user holds left/right
     #endif
 
     enum PlayState { case loading, playing, error }
@@ -337,19 +348,69 @@ private struct PlayerRootView: View {
                     }
 
                     #if os(tvOS)
-                    // tvOS: dedicated focus capture layer on top of the player.
-                    // This receives all Siri Remote events (play/pause, swipe, select, menu).
-                    Color.clear
-                        .contentShape(Rectangle())
-                        .ignoresSafeArea()
-                        .focusable()
-                        .focused($isPlayerFocused)
-                        .onPlayPauseCommand {
+                    // tvOS: UIKit press handler — captures all Siri Remote input with
+                    // proper pressesBegan/pressesEnded for reliable hold-to-scrub.
+                    TVRemoteInputView(
+                        onLeftHold: { holding in
+                            isScrubbing = holding
+                            if holding {
+                                withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+                            } else {
+                                scheduleControlsHide()
+                            }
+                        },
+                        onRightHold: { holding in
+                            isScrubbing = holding
+                            if holding {
+                                withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+                            } else {
+                                scheduleControlsHide()
+                            }
+                        },
+                        onSeek: { seekMs in
+                            guard !isLive, progressStore.durationMs > 0 else { return }
+                            let target = max(0, min(progressStore.durationMs, progressStore.currentMs + seekMs))
+                            progressStore.seekAction?(target)
+                        },
+                        onUp: {
+                            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+                            scheduleControlsHide()
+                            if !isLive {
+                                let speeds = PlayerProgressStore.speedOptions
+                                let idx = speeds.firstIndex(of: progressStore.speed) ?? 2
+                                progressStore.setSpeedAction?(speeds[(idx + 1) % speeds.count])
+                            }
+                        },
+                        onDown: {
+                            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+                            scheduleControlsHide()
+                            if !progressStore.subtitleTracks.isEmpty {
+                                let cur = progressStore.currentSubtitleTrackID
+                                if cur == 0 {
+                                    progressStore.setSubtitleTrackAction?(progressStore.subtitleTracks[0].id)
+                                } else if let i = progressStore.subtitleTracks.firstIndex(where: { $0.id == cur }),
+                                          i + 1 < progressStore.subtitleTracks.count {
+                                    progressStore.setSubtitleTrackAction?(progressStore.subtitleTracks[i + 1].id)
+                                } else {
+                                    progressStore.setSubtitleTrackAction?(0)
+                                }
+                            }
+                        },
+                        onSelect: {
+                            if showControls {
+                                progressStore.togglePauseAction?()
+                                if !progressStore.isPaused { scheduleControlsHide() }
+                            } else {
+                                withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+                                scheduleControlsHide()
+                            }
+                        },
+                        onPlayPause: {
                             progressStore.togglePauseAction?()
                             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
                             if !progressStore.isPaused { scheduleControlsHide() }
-                        }
-                        .onExitCommand {
+                        },
+                        onMenu: {
                             if showControls {
                                 withAnimation(.easeInOut(duration: 0.2)) { showControls = false }
                             } else if let minimize = onMinimize {
@@ -358,26 +419,8 @@ private struct PlayerRootView: View {
                                 onDismiss()
                             }
                         }
-                        .onMoveCommand { direction in
-                            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
-                            scheduleControlsHide()
-                            // Left/right dpad seeks for VOD content
-                            if !isLive, progressStore.durationMs > 0 {
-                                switch direction {
-                                case .left:
-                                    let newMs = max(0, progressStore.currentMs - 30_000)  // -30s
-                                    progressStore.seekAction?(newMs)
-                                case .right:
-                                    let newMs = min(progressStore.durationMs, progressStore.currentMs + 30_000)  // +30s
-                                    progressStore.seekAction?(newMs)
-                                default: break
-                                }
-                            }
-                        }
-                        .onLongPressGesture(minimumDuration: 0.01) {
-                            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
-                            scheduleControlsHide()
-                        }
+                    )
+                    .ignoresSafeArea()
                     #else
                     // iOS: transparent tap layer — toggles controls on tap.
                     Color.clear
@@ -458,9 +501,7 @@ private struct PlayerRootView: View {
             // Grab focus from the guide/channel list behind the player ZStack overlay.
             // Without this, the guide retains focus and d-pad scrolls channels instead
             // of showing media controls.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                isPlayerFocused = true
-            }
+            // TVRemoteInputView grabs focus automatically via canBecomeFocused
             #endif
         }
         .onChange(of: progressStore.isPaused) { _, isPaused in
@@ -633,6 +674,43 @@ private struct PlayerRootView: View {
         .animation(.easeInOut(duration: 0.12), value: isDragging)
     }
 
+    #if os(tvOS)
+    // MARK: - tvOS Scrubber (visual only — input handled by TVRemoteInputView)
+
+    private var tvScrubberBar: some View {
+        let active = isScrubbing
+        let displayFraction: CGFloat = max(0, min(1, currentFraction))
+
+        return GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                // Track — expands while scrubbing
+                Capsule()
+                    .fill(Color.white.opacity(active ? 0.35 : 0.25))
+                    .frame(height: active ? 10 : 4)
+
+                // Filled portion
+                Capsule()
+                    .fill(active ? Color.accentPrimary : Color.accentPrimary.opacity(0.8))
+                    .frame(width: geo.size.width * displayFraction,
+                           height: active ? 10 : 4)
+
+                // Thumb — large and glowing while scrubbing
+                if isScrubberActive {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: active ? 28 : 14, height: active ? 28 : 14)
+                        .shadow(color: active ? Color.accentPrimary.opacity(0.7) : .black.opacity(0.4),
+                                radius: active ? 12 : 3)
+                        .offset(x: geo.size.width * displayFraction - (active ? 14 : 7))
+                }
+            }
+            .frame(height: 30)
+        }
+        .frame(height: 30)
+        .animation(.easeInOut(duration: 0.15), value: active)
+    }
+    #endif
+
     // MARK: - Bottom controls (timeline + skip buttons)
     private var bottomControls: some View {
         VStack(spacing: 10) {
@@ -705,7 +783,11 @@ private struct PlayerRootView: View {
     // MARK: - VOD Controls (scrubber + skip + time labels)
     private var vodControlsSection: some View {
         VStack(spacing: 8) {
+            #if os(tvOS)
+            tvScrubberBar
+            #else
             scrubberBar
+            #endif
 
             HStack(spacing: 0) {
                 let leftMs: Int32 = isDragging
@@ -723,7 +805,8 @@ private struct PlayerRootView: View {
 
                 Spacer()
 
-                // Skip back 10 s
+                #if !os(tvOS)
+                // Skip back 10 s (iOS only — tvOS uses the scrubber)
                 Button {
                     let target = max(0, progressStore.currentMs - 10_000)
                     progressStore.seekAction?(target)
@@ -734,15 +817,12 @@ private struct PlayerRootView: View {
                         .foregroundColor(.white)
                         .frame(width: 44, height: 44)
                 }
-                #if os(tvOS)
-                .buttonStyle(TVNoRingButtonStyle())
-                #endif
                 .opacity(canSeekBackward ? 1 : 0.3)
                 .disabled(!canSeekBackward)
 
                 Spacer().frame(width: 32)
 
-                // Skip forward 10 s
+                // Skip forward 10 s (iOS only)
                 Button {
                     let target = progressStore.durationMs > 0
                         ? min(progressStore.durationMs, progressStore.currentMs + 10_000)
@@ -755,13 +835,11 @@ private struct PlayerRootView: View {
                         .foregroundColor(.white)
                         .frame(width: 44, height: 44)
                 }
-                #if os(tvOS)
-                .buttonStyle(TVNoRingButtonStyle())
-                #endif
                 .opacity(canSeekForward ? 1 : 0.3)
                 .disabled(!canSeekForward)
 
                 Spacer()
+                #endif
 
                 Text(formatMs(progressStore.durationMs))
                     #if os(tvOS)
@@ -907,9 +985,11 @@ private struct PlayerRootView: View {
             // Center play/pause button
             centerPlayPauseButton
 
-            // (Resume prompt removed — no DVR.)
+            #if os(tvOS)
+            // D-pad control hints
+            tvRemoteHints
+            #endif
         }
-        // .animation removed (resume prompt removed)
     }
 
     // MARK: - Audio Track Menu
@@ -1033,6 +1113,9 @@ private struct PlayerRootView: View {
         progressStore.vodID = vodID
         progressStore.vodTitle = title
         progressStore.vodPosterURL = vodPosterURL
+        progressStore.vodStreamURL = urls.first?.absoluteString
+        progressStore.vodServerID = vodServerID
+        progressStore.explicitResumeMs = resumePositionMs
         state = .playing
         scheduleControlsHide()
     }
@@ -1068,6 +1151,9 @@ private struct PlayerRootView: View {
 
     private func scheduleControlsHide() {
         guard !progressStore.isPaused else { return }
+        #if os(tvOS)
+        guard !isScrubbing else { return }  // Never auto-hide while user is scrubbing
+        #endif
         controlsHideTask?.cancel()
         controlsHideTask = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
@@ -1078,7 +1164,45 @@ private struct PlayerRootView: View {
         }
     }
 
-    // formatOffset removed — DVR/resume prompt removed.
+    #if os(tvOS)
+    // MARK: - tvOS Remote Hints
+
+    private var tvRemoteHints: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            VStack(spacing: 10) {
+                // Speed / subtitle hints above scrubber
+                HStack(spacing: 24) {
+                    if !isLive {
+                        hintPill(icon: "chevron.up", text: "Speed")
+                    }
+                    hintPill(icon: "circle.fill", text: "Play/Pause", size: 8)
+                    if !progressStore.subtitleTracks.isEmpty {
+                        hintPill(icon: "chevron.down", text: "Subtitles")
+                    }
+                }
+                // Scrubber hint
+                if !isLive {
+                    hintPill(icon: "arrow.left.and.right", text: "Scrub Timeline  \u{2022}  Hold to Seek Faster")
+                }
+            }
+            .padding(.bottom, 160)
+        }
+    }
+
+    private func hintPill(icon: String, text: String, size: CGFloat = 10) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: size, weight: .bold))
+            Text(text)
+                .font(.system(size: 16, weight: .medium))
+        }
+        .foregroundColor(.white.opacity(0.6))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.white.opacity(0.1), in: Capsule())
+    }
+    #endif
 }
 
 
@@ -1097,6 +1221,183 @@ struct AirPlayButton: UIViewRepresentable {
 #else
 struct AirPlayButton: View {
     var body: some View { EmptyView() }
+}
+#endif
+
+// MARK: - tvOS Remote Input Handler (gesture recognizers for hold-to-scrub)
+#if os(tvOS)
+struct TVRemoteInputView: UIViewRepresentable {
+    var onLeftHold: (Bool) -> Void    // true = started, false = ended
+    var onRightHold: (Bool) -> Void
+    var onSeek: (Int32) -> Void       // signed seek delta in ms (negative = back)
+    var onUp: () -> Void
+    var onDown: () -> Void
+    var onSelect: () -> Void
+    var onPlayPause: () -> Void
+    var onMenu: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> TVRemoteUIView {
+        let view = TVRemoteUIView()
+        view.coordinator = context.coordinator
+        context.coordinator.callbacks = self
+        view.setupGestures()
+        return view
+    }
+
+    func updateUIView(_ uiView: TVRemoteUIView, context: Context) {
+        context.coordinator.callbacks = self
+    }
+
+    class Coordinator: @unchecked Sendable {
+        var callbacks: TVRemoteInputView?
+        var scrubTimer: Timer?
+        var scrubTickCount: Int = 0
+        private var activeScrubDirection: Int = 0
+
+        func startScrubTimer(direction: Int) {
+            scrubTickCount = 0
+            activeScrubDirection = direction
+            scrubTimer?.invalidate()
+            // First accelerated tick fires immediately
+            fireTick()
+            // Repeat every 200ms while held
+            scrubTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+                self?.fireTick()
+            }
+        }
+
+        func stopScrubTimer() {
+            scrubTimer?.invalidate()
+            scrubTimer = nil
+            scrubTickCount = 0
+            activeScrubDirection = 0
+        }
+
+        private func fireTick() {
+            scrubTickCount += 1
+            let tick = scrubTickCount
+            let sec: Int32
+            if tick <= 3 { sec = 10 }
+            else if tick <= 8 { sec = 20 }
+            else if tick <= 15 { sec = 30 }
+            else { sec = 60 }
+            let delta = Int32(activeScrubDirection) * sec * 1000
+            DispatchQueue.main.async { [weak self] in
+                self?.callbacks?.onSeek(delta)
+            }
+        }
+    }
+
+    class TVRemoteUIView: UIView {
+        weak var coordinator: Coordinator?
+
+        override var canBecomeFocused: Bool { true }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if window != nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    self?.setNeedsFocusUpdate()
+                    self?.updateFocusIfNeeded()
+                }
+            }
+        }
+
+        func setupGestures() {
+            // --- Left arrow: tap + long-press ---
+            let leftLong = UILongPressGestureRecognizer(target: self, action: #selector(leftLongPress(_:)))
+            leftLong.allowedPressTypes = [NSNumber(value: UIPress.PressType.leftArrow.rawValue)]
+            leftLong.minimumPressDuration = 0.3
+            addGestureRecognizer(leftLong)
+
+            let leftTap = UITapGestureRecognizer(target: self, action: #selector(leftTapped))
+            leftTap.allowedPressTypes = [NSNumber(value: UIPress.PressType.leftArrow.rawValue)]
+            leftTap.require(toFail: leftLong)
+            addGestureRecognizer(leftTap)
+
+            // --- Right arrow: tap + long-press ---
+            let rightLong = UILongPressGestureRecognizer(target: self, action: #selector(rightLongPress(_:)))
+            rightLong.allowedPressTypes = [NSNumber(value: UIPress.PressType.rightArrow.rawValue)]
+            rightLong.minimumPressDuration = 0.3
+            addGestureRecognizer(rightLong)
+
+            let rightTap = UITapGestureRecognizer(target: self, action: #selector(rightTapped))
+            rightTap.allowedPressTypes = [NSNumber(value: UIPress.PressType.rightArrow.rawValue)]
+            rightTap.require(toFail: rightLong)
+            addGestureRecognizer(rightTap)
+
+            // --- Other buttons: tap only ---
+            let pressTypes: [(UIPress.PressType, Selector)] = [
+                (.upArrow, #selector(upTapped)),
+                (.downArrow, #selector(downTapped)),
+                (.select, #selector(selectTapped)),
+                (.playPause, #selector(playPauseTapped)),
+                (.menu, #selector(menuTapped)),
+            ]
+            for (pt, sel) in pressTypes {
+                let tap = UITapGestureRecognizer(target: self, action: sel)
+                tap.allowedPressTypes = [NSNumber(value: pt.rawValue)]
+                addGestureRecognizer(tap)
+            }
+        }
+
+        // MARK: - Left arrow
+
+        @objc private func leftTapped() {
+            coordinator?.callbacks?.onSeek(-10_000)
+            // Brief visual feedback
+            coordinator?.callbacks?.onLeftHold(true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.coordinator?.callbacks?.onLeftHold(false)
+            }
+        }
+
+        @objc private func leftLongPress(_ gesture: UILongPressGestureRecognizer) {
+            guard let coordinator else { return }
+            switch gesture.state {
+            case .began:
+                coordinator.callbacks?.onLeftHold(true)
+                coordinator.startScrubTimer(direction: -1)
+            case .ended, .cancelled, .failed:
+                coordinator.stopScrubTimer()
+                coordinator.callbacks?.onLeftHold(false)
+            default: break
+            }
+        }
+
+        // MARK: - Right arrow
+
+        @objc private func rightTapped() {
+            coordinator?.callbacks?.onSeek(10_000)
+            coordinator?.callbacks?.onRightHold(true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.coordinator?.callbacks?.onRightHold(false)
+            }
+        }
+
+        @objc private func rightLongPress(_ gesture: UILongPressGestureRecognizer) {
+            guard let coordinator else { return }
+            switch gesture.state {
+            case .began:
+                coordinator.callbacks?.onRightHold(true)
+                coordinator.startScrubTimer(direction: 1)
+            case .ended, .cancelled, .failed:
+                coordinator.stopScrubTimer()
+                coordinator.callbacks?.onRightHold(false)
+            default: break
+            }
+        }
+
+        // MARK: - Other buttons
+
+        @objc private func upTapped() { coordinator?.callbacks?.onUp() }
+        @objc private func downTapped() { coordinator?.callbacks?.onDown() }
+        @objc private func selectTapped() { coordinator?.callbacks?.onSelect() }
+        @objc private func playPauseTapped() { coordinator?.callbacks?.onPlayPause() }
+        @objc private func menuTapped() { coordinator?.callbacks?.onMenu() }
+    }
 }
 #endif
 

@@ -1123,6 +1123,8 @@ struct MainTabView: View {
     @State private var isVODDetailPushed = false
     /// Signal to VOD views to pop their navigation stack.
     @State private var vodNavPopRequested = false
+    /// Tracks whether Settings has a sub-page pushed (Appearance, Network, etc.).
+    @State private var isSettingsSubPushed = false
     #if os(tvOS)
     @State private var showExitConfirmation = false
     #endif
@@ -1332,7 +1334,7 @@ struct MainTabView: View {
                 .tag(AppTab.tv)
 
             #if os(tvOS)
-            SettingsView(selectedTab: $selectedTab)
+            SettingsView(selectedTab: $selectedTab, isSubPushed: $isSettingsSubPushed)
                 .tabItem { Label(AppTab.settings.title, systemImage: AppTab.settings.icon) }
                 .tag(AppTab.settings)
             #else
@@ -1435,6 +1437,9 @@ struct MainTabView: View {
             if nowPlaying.isActive && !nowPlaying.isMinimized {
                 debugLog("🎮 Menu pressed: full-screen player → minimize to corner")
                 withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() }
+            } else if nowPlaying.isActive && nowPlaying.isMinimized {
+                debugLog("🎮 Menu pressed: mini player → stop playback")
+                nowPlaying.stop()
             } else if isVODDetailPushed {
                 // Pop the VOD detail view back to the browse list.
                 // We must do this programmatically because .onExitCommand consumes
@@ -1442,6 +1447,11 @@ struct MainTabView: View {
                 debugLog("🎮 Menu pressed: VOD detail pushed → popping to browse list")
                 isVODDetailPushed = false
                 vodNavPopRequested = true
+            } else if isSettingsSubPushed {
+                // Let NavigationStack handle the pop — don't consume the Menu press.
+                // Setting the flag to false tells SettingsView to pop its nav stack.
+                debugLog("🎮 Menu pressed: Settings sub-page → popping to Settings root")
+                isSettingsSubPushed = false
             } else if selectedTab == .liveTV {
                 debugLog("🎮 Menu pressed: Live TV tab → show exit confirmation")
                 showExitConfirmation = true

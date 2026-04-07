@@ -10,8 +10,177 @@ struct AppearanceSettingsView: View {
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
-            List {
+            #if os(tvOS)
+            tvOSBody
+            #else
+            iOSBody
+            #endif
+        }
+        .navigationTitle("Appearance")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #else
+        .toolbar(.hidden, for: .navigationBar)
+        #endif
+        .toolbarBackground(Color.appBackground, for: .navigationBar)
+    }
 
+    // MARK: - tvOS Body
+    #if os(tvOS)
+    private var tvOSBody: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 32) {
+                // Default Tab
+                tvAppearanceSection("Default Landing Tab") {
+                    ForEach(AppTab.allCases, id: \.self) { tab in
+                        tvOptionRow(icon: tab.icon, label: tab.title,
+                                    isSelected: defaultTabRaw == tab.rawValue) {
+                            defaultTabRaw = tab.rawValue
+                        }
+                    }
+                }
+
+                // Default Live TV View
+                tvAppearanceSection("Default Live TV View") {
+                    ForEach(["list", "guide"], id: \.self) { option in
+                        tvOptionRow(icon: option == "list" ? "list.bullet" : "calendar",
+                                    label: option == "list" ? "List" : "Guide",
+                                    isSelected: defaultLiveTVView == option) {
+                            defaultLiveTVView = option
+                        }
+                    }
+                }
+
+                // Color Theme
+                tvAppearanceSection("Color Theme") {
+                    ForEach(AppTheme.allCases, id: \.self) { t in
+                        Button { theme.setTheme(t) } label: {
+                            HStack(spacing: 14) {
+                                Circle()
+                                    .fill(t.accentPrimary)
+                                    .frame(width: 28, height: 28)
+                                    .overlay(Circle().stroke(Color.borderMedium, lineWidth: 1))
+                                Text(t.displayName)
+                                    .font(.system(size: 28, weight: .medium))
+                                    .foregroundColor(.textPrimary)
+                                Spacer()
+                                if theme.selectedTheme == t {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 22, weight: .semibold))
+                                        .foregroundColor(theme.accent)
+                                }
+                            }
+                            .padding(.vertical, 6)
+                        }
+                        .buttonStyle(TVNoHighlightButtonStyle())
+                    }
+
+                    // Custom accent toggle
+                    TVSettingsToggleRow(
+                        icon: "paintpalette.fill", iconColor: theme.accent,
+                        title: "Custom Accent Color",
+                        subtitle: "Override the theme accent with a custom hex color",
+                        isOn: $theme.useCustomAccent
+                    ) { _ in }
+
+                    if theme.useCustomAccent {
+                        HStack {
+                            Text("Hex")
+                                .font(.system(size: 26, weight: .medium))
+                                .foregroundColor(.textSecondary)
+                            Spacer()
+                            TextField("2DD4BF", text: $theme.customAccentHex)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 26, design: .monospaced))
+                                .foregroundColor(.textPrimary)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 200)
+                                .autocorrectionDisabled()
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                        .fill(Color.elevatedBackground)
+                                )
+                        }
+                    }
+                }
+
+                // Liquid Glass
+                tvAppearanceSection("Glass Effect") {
+                    ForEach(LiquidGlassStyle.allCases, id: \.self) { style in
+                        tvOptionRow(label: style.displayName,
+                                    subtitle: liquidGlassDescription(style),
+                                    isSelected: theme.liquidGlassStyle == style) {
+                            theme.setLiquidGlassStyle(style)
+                        }
+                    }
+                }
+
+                // Preview
+                tvAppearanceSection("Preview") {
+                    swatchPreview
+                }
+            }
+            .padding(48)
+        }
+    }
+
+    private func tvAppearanceSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title.uppercased())
+                .font(.system(size: 22, weight: .bold))
+                .foregroundColor(.textTertiary)
+                .tracking(1)
+            VStack(alignment: .leading, spacing: 12) {
+                content()
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(Color.cardBackground)
+            )
+        }
+    }
+
+    private func tvOptionRow(icon: String? = nil, label: String, subtitle: String? = nil,
+                              isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 22))
+                        .foregroundColor(theme.accent)
+                        .frame(width: 32)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label)
+                        .font(.system(size: 28, weight: .medium))
+                        .foregroundColor(.textPrimary)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 20))
+                            .foregroundColor(.textSecondary)
+                    }
+                }
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(theme.accent)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+    }
+    #endif
+
+    // MARK: - iOS Body
+    #if os(iOS)
+    private var iOSBody: some View {
+        List {
                 // MARK: Default Tab
                 Section {
                     ForEach(AppTab.allCases, id: \.self) { tab in
@@ -42,42 +211,9 @@ struct AppearanceSettingsView: View {
                     Text("The tab shown when the app first launches.")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
-                #if os(iOS)
                 .listSectionSeparator(.hidden)
-                #endif
 
-                // MARK: Default Live TV View (iPad & tvOS only — iPhone always uses list)
-                #if os(tvOS)
-                Section {
-                    ForEach(["list", "guide"], id: \.self) { option in
-                        Button {
-                            defaultLiveTVView = option
-                        } label: {
-                            HStack {
-                                Image(systemName: option == "list" ? "list.bullet" : "calendar")
-                                    .font(.system(size: 15))
-                                    .foregroundColor(theme.accent)
-                                    .frame(width: 24)
-                                Text(option == "list" ? "List" : "Guide")
-                                    .font(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Spacer()
-                                if defaultLiveTVView == option {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-                } header: {
-                    Text("Default Live TV View").sectionHeaderStyle()
-                } footer: {
-                    Text("The layout shown when you open the Live TV tab.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-                #else
+                // MARK: Default Live TV View (iPad only — iPhone always uses list)
                 if UIDevice.current.userInterfaceIdiom == .pad {
                     Section {
                         ForEach(["list", "guide"], id: \.self) { option in
@@ -110,7 +246,6 @@ struct AppearanceSettingsView: View {
                     }
                     .listSectionSeparator(.hidden)
                 }
-                #endif
 
                 // MARK: Color Theme
                 Section {
@@ -195,9 +330,7 @@ struct AppearanceSettingsView: View {
                     Text("Colors used throughout the app.")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
-                #if os(iOS)
                 .listSectionSeparator(.hidden)
-                #endif
 
                 // MARK: Liquid Glass
                 Section {
@@ -228,12 +361,9 @@ struct AppearanceSettingsView: View {
                     Text(liquidGlassFootnote)
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
-                #if os(iOS)
                 .listSectionSeparator(.hidden)
-                #endif
 
                 // MARK: Playback
-                #if os(iOS)
                 Section {
                     Toggle(isOn: $pipEnabled) {
                         HStack(spacing: 10) {
@@ -256,7 +386,6 @@ struct AppearanceSettingsView: View {
                     Text("Playback").sectionHeaderStyle()
                 }
                 .listSectionSeparator(.hidden)
-                #endif
 
                 // MARK: Preview Swatch
                 Section {
@@ -265,23 +394,12 @@ struct AppearanceSettingsView: View {
                 } header: {
                     Text("Preview").sectionHeaderStyle()
                 }
-                #if os(iOS)
                 .listSectionSeparator(.hidden)
-                #endif
             }
-            #if os(iOS)
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
-            #else
-            .listStyle(.plain)
-            #endif
-        }
-        .navigationTitle("Appearance")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
     }
+    #endif
 
     private var swatchPreview: some View {
         HStack(spacing: 14) {

@@ -140,6 +140,10 @@ struct AerioApp: App {
                 #endif
                 // Start iCloud sync if enabled
                 SyncManager.shared.startObserving()
+                #if os(tvOS)
+                // Re-probe LAN on every foreground so switching networks is detected
+                // (servers read from SwiftData in RootView, probed there on change)
+                #endif
             case .inactive:    DebugLogger.shared.logLifecycle("Scene → inactive")
             case .background:
                 DebugLogger.shared.logLifecycle("Scene → background")
@@ -310,6 +314,48 @@ private class LocationDelegate: NSObject, CLLocationManagerDelegate {
 }
 #endif
 
+// MARK: - tvOS LAN Probe
+// tvOS has no SSID detection API. Instead, we probe the local URL at startup —
+// if it responds, the device is on the home network.
+#if os(tvOS)
+@MainActor
+enum TVLANProbe {
+    /// Probes each server's localURL. If ANY responds within 2s, sets tvosLANDetected = true.
+    static func probe(servers: [ServerConnection]) {
+        let candidates = servers.compactMap { s -> URL? in
+            guard !s.localURL.isEmpty else { return nil }
+            var url = s.localURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if url.hasSuffix("/") { url = String(url.dropLast()) }
+            if !url.hasPrefix("http://") && !url.hasPrefix("https://") { url = "http://" + url }
+            return URL(string: url)
+        }
+        guard !candidates.isEmpty else {
+            UserDefaults.standard.set(false, forKey: "tvosLANDetected")
+            return
+        }
+        Task {
+            var detected = false
+            for baseURL in candidates {
+                // Quick HEAD request with short timeout
+                var request = URLRequest(url: baseURL, timeoutInterval: 2.0)
+                request.httpMethod = "HEAD"
+                do {
+                    let (_, response) = try await URLSession.shared.data(for: request)
+                    if let http = response as? HTTPURLResponse, http.statusCode < 500 {
+                        detected = true
+                        break
+                    }
+                } catch {
+                    // Unreachable — try next
+                }
+            }
+            UserDefaults.standard.set(detected, forKey: "tvosLANDetected")
+            debugLog("📡 tvOS LAN probe: detected=\(detected) (checked \(candidates.count) local URLs)")
+        }
+    }
+}
+#endif
+
 // MARK: - App Entry View (Splash → Root)
 // splashFinished is @State (in-memory only), so it resets to false on every
 // cold launch (force-close + reopen or first install). When the user simply
@@ -371,6 +417,9 @@ struct RootView: View {
                 if !hasCompletedOnboarding && !hasAnySource {
                     showOnboarding = true
                 }
+                #if os(tvOS)
+                TVLANProbe.probe(servers: servers)
+                #endif
             }
             .onChange(of: hasCompletedOnboarding) { _, done in
                 if done && showOnboarding {
@@ -387,6 +436,10 @@ struct RootView: View {
             }
             .onChange(of: servers.count) { _, count in
                 debugLog("🟡 RootView.onChange(servers.count): count=\(count), isMergingRemote=\(isMergingRemote)")
+                #if os(tvOS)
+                // Re-probe LAN whenever servers change (e.g., iCloud sync delivers a server with localURL)
+                TVLANProbe.probe(servers: servers)
+                #endif
                 guard !isMergingRemote else {
                     debugLog("🟡 RootView.onChange(servers.count): SKIPPED (isMergingRemote)")
                     return
@@ -417,6 +470,18 @@ struct RootView: View {
             .onReceive(NotificationCenter.default.publisher(for: .syncManagerNeedsPush)) { notification in
                 let immediate = notification.userInfo?["immediate"] as? Bool ?? false
                 SyncManager.shared.pushServers(servers, immediate: immediate)
+                // Also push watch progress on initial sync
+                if let ctx = WatchProgressManager.modelContext,
+                   let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
+                    SyncManager.shared.pushWatchProgress(all, immediate: immediate)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .watchProgressDidChange)) { _ in
+                guard !isMergingRemote else { return }
+                if let ctx = WatchProgressManager.modelContext,
+                   let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
+                    SyncManager.shared.pushWatchProgress(all)
+                }
             }
     }
 

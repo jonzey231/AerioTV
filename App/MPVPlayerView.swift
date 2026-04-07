@@ -166,10 +166,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         #if os(iOS)
         private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?  // iOS: PiP-compatible
         #endif
-        private var pixelBuffers: [CVPixelBuffer?] = [nil, nil]  // Double-buffered
+        private var pixelBuffers: [CVPixelBuffer?] = [nil, nil, nil]  // Triple-buffered (eliminates tearing)
         private var currentBufferIndex = 0
         private var renderWidth: Int = 0
         private var renderHeight: Int = 0
+        private var videoNativeWidth: Int = 0   // Video's display width (for render sizing)
+        private var videoNativeHeight: Int = 0
 
         // Failover & retry state (identical to VLC coordinator)
         private var currentIndex = 0
@@ -195,6 +197,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var setupStartTime: Date?
         private var lastProgressSave: Date = .distantPast  // Debounce VOD progress saves to every 10s
         private var hasAttemptedResume = false  // Only auto-seek once per playback session
+        private var playbackEnded = false      // Guard against seek-after-EOF
         // renderPending: accessed from mpv callback thread + render thread — use lock
         private var renderPending = false
         private var renderLock = os_unfair_lock()
@@ -220,9 +223,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &newFlag)
             }
 
-            // Seek closure — VOD only
+            // Seek closure — VOD only. Guards against seek-after-EOF.
             progressStore.seekAction = { [weak self] targetMs in
-                guard let self, !self.isLive, let mpv = self.mpv else { return }
+                guard let self, !self.isLive, !self.playbackEnded, let mpv = self.mpv else { return }
                 let secs = String(format: "%.3f", Double(targetMs) / 1000.0)
                 self.mpvCommand(mpv, ["seek", secs, "absolute"])
             }
@@ -261,13 +264,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         @objc private func didEnterBackground() {
             guard let mpv else { return }
-            // Disable video output to prevent Metal crash on background
+            #if os(iOS)
+            // Keep video alive if PiP is active or AirPlay is connected —
+            // disabling vid kills the PiP window and drops AirPlay video.
+            if progressStore.isPiPActive { return }
+            if AVAudioSession.sharedInstance().currentRoute.outputs
+                .contains(where: { $0.portType == .airPlay }) { return }
+            #endif
+            // No PiP / no AirPlay — disable video to prevent GPU crash on background
             mpv_set_property_string(mpv, "vid", "no")
         }
 
         @objc private func willEnterForeground() {
             guard let mpv else { return }
-            mpv_set_property_string(mpv, "vid", "auto")
+            // Re-enable video if it was disabled on background entry
+            let vid = mpv_get_property_string(mpv, "vid")
+            if let v = vid, String(cString: v) == "no" {
+                mpv_set_property_string(mpv, "vid", "auto")
+            }
+            mpv_free(vid)
         }
 
         // MARK: - Lifecycle
@@ -284,6 +299,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             hasPerformedWarmupRetry = false
             sameURLRetryCount = 0
             isShuttingDown = false
+            playbackEnded = false
             // Reset diagnostics
             diagStartTime = Date()
             prevDroppedFrames = 0; prevDecoderDrops = 0
@@ -309,14 +325,34 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var mpvStarted = false
 
         /// Handle rotation/resize — creates or recreates double-buffered CVPixelBuffers.
+        /// Uses video native dimensions when known to avoid oversized render buffers
+        /// (e.g., 720p content rendered into a 1080p buffer wastes 2.25x pixels).
         func handleResize(size: CGSize) {
-            #if os(tvOS)
-            let scale: CGFloat = 1.0
-            #else
-            let scale: CGFloat = 2.0  // Cap at 2x — sufficient for video, avoids 3x overhead
-            #endif
-            let w = Int(size.width * scale)
-            let h = Int(size.height * scale)
+            let w: Int
+            let h: Int
+            if videoNativeWidth > 0 && videoNativeHeight > 0 {
+                // Render at the video's native resolution (capped at 1920px).
+                // CALayer / AVSampleBufferDisplayLayer scales to fit the view.
+                let maxDim = 1920
+                if videoNativeWidth > maxDim || videoNativeHeight > maxDim {
+                    let ratio = min(Double(maxDim) / Double(videoNativeWidth),
+                                    Double(maxDim) / Double(videoNativeHeight))
+                    w = Int(Double(videoNativeWidth) * ratio)
+                    h = Int(Double(videoNativeHeight) * ratio)
+                } else {
+                    w = videoNativeWidth
+                    h = videoNativeHeight
+                }
+            } else {
+                // Video dimensions unknown yet — use a small initial buffer.
+                // Pre-keyframe frames are broken anyway (PPS errors, software fallback).
+                // Resizes to native resolution on PLAYBACK_RESTART.
+                #if os(tvOS)
+                w = 640; h = 360
+                #else
+                w = 640; h = 360
+                #endif
+            }
             guard w > 0 && h > 0 else { return }
             guard w != renderWidth || h != renderHeight else { return }
 
@@ -327,7 +363,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let attrs: [CFString: Any] = [
                 kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
             ]
-            for i in 0..<2 {
+            for i in 0..<3 {
                 var pb: CVPixelBuffer?
                 CVPixelBufferCreate(kCFAllocatorDefault, w, h,
                                     kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
@@ -403,8 +439,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
 
-            // Flip double buffer for next frame
-            currentBufferIndex = 1 - bufIdx
+            // Cycle to next buffer (triple-buffered: 0→1→2→0)
+            currentBufferIndex = (bufIdx + 1) % 3
 
             #if os(iOS)
             // iOS: enqueue CMSampleBuffer to AVSampleBufferDisplayLayer (PiP-compatible)
@@ -416,11 +452,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
             }
             #else
-            // tvOS: direct IOSurface display via CALayer.contents (simpler, proven path)
+            // tvOS: direct IOSurface display via CALayer.contents.
+            // Use CATransaction to disable implicit animation and commit atomically,
+            // preventing tearing (visible as a horizontal line during fast motion).
             nonisolated(unsafe) let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue()
             let layer = displayLayer
             DispatchQueue.main.async {
+                CATransaction.begin()
+                CATransaction.setDisableActions(true)
                 layer?.contents = surface
+                CATransaction.commit()
             }
             #endif
 
@@ -511,7 +552,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "600"))  // Live MPEG-TS joins mid-GOP without SPS/PPS — VT errors until keyframe arrives
             #endif
 
-            checkError(mpv_set_option_string(mpv, "cache-pause-wait", "2"))  // Buffer 2s before starting playback
+            // Initial buffer before playback starts:
+            // Live: 0.5s for fast channel start (cache-pause disabled after playback-restart anyway).
+            // VOD: 2s for smooth resume-after-seek.
+            checkError(mpv_set_option_string(mpv, "cache-pause-wait", isLive ? "0.5" : "2"))
 
             #if DEBUG
             print("[MPV-DIAG] setupMPV: options set, calling mpv_initialize...")
@@ -610,9 +654,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             mpv_set_property_string(mpv, "cache", "yes")
             mpv_set_property_string(mpv, "demuxer-readahead-secs", String(format: "%.1f", cachingSecs))
-            mpv_set_property_string(mpv, "demuxer-max-bytes", "50MiB")
 
             if isLive {
+                // Live: small demuxer buffer prevents A-V desync from runaway video queues.
+                // 50MiB was far too large — video piled up 4000+ packets while audio starved.
+                mpv_set_property_string(mpv, "demuxer-max-bytes", "8MiB")
                 // cache-pause stays "yes" initially — switched to "no" after playback-restart
                 // so mpv builds an initial 2s buffer before starting playback.
                 mpv_set_property_string(mpv, "cache-secs", String(format: "%.1f", cachingSecs))
@@ -621,12 +667,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 mpv_set_property_string(mpv, "demuxer-lavf-probe-info", "nostreams")
                 mpv_set_property_string(mpv, "demuxer-lavf-analyzeduration", "0")
             } else {
+                // VOD: larger buffer for seek-back
+                mpv_set_property_string(mpv, "demuxer-max-bytes", "50MiB")
                 mpv_set_property_string(mpv, "demuxer-max-back-bytes", "10MiB")
             }
 
-            mpv_set_property_string(mpv, "framedrop", "decoder")
+            mpv_set_property_string(mpv, "framedrop", "decoder+vo")
             mpv_set_property_string(mpv, "video-sync", "audio")
             mpv_set_property_string(mpv, "audio-buffer", "1.5")
+            // Correct A-V sync for live TS streams — drop late video frames
+            // rather than letting the video queue grow unbounded.
+            mpv_set_property_string(mpv, "hr-seek-framedrop", "yes")
 
             if let ua = headers["User-Agent"], !ua.isEmpty {
                 mpv_set_property_string(mpv, "user-agent", ua)
@@ -730,14 +781,41 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         }
                         // Populate audio/subtitle track lists for the UI
                         self.queryTracks()
+                        // Update render buffer to match video's native dimensions.
+                        // iOS: correct PiP aspect ratio. tvOS: avoid oversized buffer
+                        // (e.g., 720p stream was rendering into 1920×1080 — 2.25x wasted pixels).
+                        if let mpv = self.mpv {
+                            var dw: Int64 = 0; var dh: Int64 = 0
+                            mpv_get_property(mpv, "dwidth", MPV_FORMAT_INT64, &dw)
+                            mpv_get_property(mpv, "dheight", MPV_FORMAT_INT64, &dh)
+                            if dw > 0 && dh > 0 &&
+                               (Int(dw) != self.videoNativeWidth || Int(dh) != self.videoNativeHeight) {
+                                self.videoNativeWidth = Int(dw)
+                                self.videoNativeHeight = Int(dh)
+                                let curW = self.renderWidth
+                                let curH = self.renderHeight
+                                self.renderWidth = 0; self.renderHeight = 0
+                                DispatchQueue.main.async { [weak self] in
+                                    self?.handleResize(size: CGSize(width: curW, height: curH))
+                                }
+                            }
+                        }
                         // Auto-resume VOD from saved position (once per session)
-                        if !self.isLive, !self.hasAttemptedResume, self.mpv != nil,
-                           let vodID = self.progressStore.vodID {
+                        if !self.isLive, !self.hasAttemptedResume, self.mpv != nil {
                             self.hasAttemptedResume = true
                             let seekAction = self.progressStore.seekAction
+                            let explicitMs = self.progressStore.explicitResumeMs
+                            let vodID = self.progressStore.vodID
                             Task { @MainActor in
-                                guard let resumeMs = WatchProgressManager.getResumePosition(vodID: vodID),
-                                      resumeMs > 0 else { return }
+                                // Prefer explicit position (from Continue Watching), fall back to DB
+                                let resumeMs: Int32? = if let explicitMs, explicitMs > 0 {
+                                    explicitMs
+                                } else if let vodID, !vodID.isEmpty {
+                                    WatchProgressManager.getResumePosition(vodID: vodID)
+                                } else {
+                                    nil
+                                }
+                                guard let resumeMs, resumeMs > 0 else { return }
                                 seekAction?(resumeMs)
                                 debugLog("📼 VOD resume: seeking to \(resumeMs)ms")
                             }
@@ -948,6 +1026,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
             } else {
                 // VOD ended normally — not an error
+                playbackEnded = true
                 DebugLogger.shared.logPlayback(event: "ended normally")
                 logStore.append("ℹ️ MPV: playback ended")
             }
@@ -1017,11 +1096,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         if let vodID = ps.vodID, !vodID.isEmpty, durMs > 0 {
                             let title = ps.vodTitle ?? ""
                             let poster = ps.vodPosterURL
+                            let streamURLStr = ps.vodStreamURL
+                            let serverIDStr = ps.vodServerID
                             let finished = durMs > 0 && posMs > Int32(Double(durMs) * 0.9)
                             Task { @MainActor in
                                 WatchProgressManager.save(
                                     vodID: vodID, title: title, positionMs: posMs,
-                                    durationMs: durMs, posterURL: poster, isFinished: finished
+                                    durationMs: durMs, posterURL: poster, isFinished: finished,
+                                    streamURL: streamURLStr, serverID: serverIDStr
                                 )
                             }
                         }

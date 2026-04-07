@@ -8,23 +8,47 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
 
 **Live TV**
 
-Stream live channels with MPV-powered playback. Browse channels in a scrollable list or a full EPG guide view with program titles, descriptions, and time slots. Minimize playback to a picture-in-picture style mini player while browsing other content.
+Stream live channels with MPV-powered playback. Browse channels in a scrollable list or a full EPG guide view with program titles, descriptions, and time slots. Minimize playback to a floating mini player while browsing other content. Sort channels by number, name, or favorites.
 
 **Electronic Program Guide**
 
-tvOS supports grid and list views while iOS supports list view for viewing channels and programs. Program data is cached locally and configurable from 6 hours to the full available window.
+Grid and list views on tvOS and iPad, list view on iPhone. Program data is cached locally and configurable from 6 hours to the full available window. Channels without guide data are still selectable from the grid.
 
 **Movies and Series**
 
-Browse and filter on-demand content by category. Categories are pulled from the server's VOD library and can be toggled on or off through the filter menu.
+Browse and filter on-demand content by category. Categories are pulled from the server's VOD library and can be toggled on or off through the filter menu. Resume playback from where you left off with Continue Watching.
+
+**Continue Watching**
+
+VOD watch progress is tracked automatically. Resume movies and episodes from the Continue Watching section on the Movies or Series tabs. Long-press to remove items. Progress syncs across all your devices via iCloud.
+
+**Audio and Subtitle Selection**
+
+Switch between audio tracks and subtitle tracks during playback. Available tracks are detected automatically from the stream.
+
+**Playback Speed**
+
+Cycle through playback speeds (0.5x to 2x) for VOD content.
+
+**Picture-in-Picture (iOS)**
+
+Swipe home during playback and the stream continues in a floating PiP window. Supports AirPlay video output.
 
 **iCloud Sync**
 
-Server configurations and preferences sync across devices using iCloud Key-Value Storage. Set up once on one Apple device and your subsequent Apple devices will pick up the same servers automatically if you select to import during the onboarding process.
+Server configurations, preferences, and VOD watch progress sync across devices using iCloud Key-Value Storage. Set up once on one device and all your Apple devices pick up the same servers and resume positions.
 
 **Apple TV Optimized**
 
-Full support for the Siri Remote with directional navigation, focus management, and context menus. The guide view extends edge to edge and text is sized for the living room viewing distance.
+Full Siri Remote support with hold-to-scrub seeking on the timeline, accelerating seek speed, play/pause, speed cycling, and subtitle toggling. D-pad control hints appear when the overlay is visible. Channels and logos are sized for living room viewing. LAN detection probes the local server URL automatically (no SSID configuration needed on tvOS).
+
+**tvOS Floating Player**
+
+Press Menu to minimize live TV to a floating corner player. Press Menu again to stop playback. Browse channels, movies, or settings while the stream continues.
+
+**Top Shelf (tvOS)**
+
+The Top Shelf extension shows your 6 most-watched channels with the currently airing program.
 
 ## Supported Server Types
 

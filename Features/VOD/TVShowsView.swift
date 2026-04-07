@@ -13,6 +13,16 @@ struct TVShowsView: View {
     @State private var hiddenGroups: Set<String> = []
     @State private var showManageGroups = false
     @State private var navPath = NavigationPath()
+    #if os(tvOS)
+    @State private var showSearchField = false
+    #endif
+    @State private var resumePlayingURL: IdentifiableURL?
+    @State private var resumePlayingTitle = ""
+    @State private var resumePlayingHeaders: [String: String] = [:]
+    @State private var resumeVodID: String?
+    @State private var resumePosterURL: String?
+    @State private var resumeServerID: String?
+    @State private var resumePositionMs: Int32 = 0
 
     private let hiddenGroupsKey = "hiddenSeriesGroups"
 
@@ -79,14 +89,9 @@ struct TVShowsView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
+            #if os(iOS)
             .toolbar {
-                ToolbarItem(placement: {
-                    #if os(iOS)
-                    .navigationBarTrailing
-                    #else
-                    .automatic
-                    #endif
-                }()) {
+                ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showManageGroups = true
                     } label: {
@@ -96,12 +101,9 @@ struct TVShowsView: View {
                     }
                 }
             }
-            #if os(iOS)
             .searchable(text: $searchText,
                         placement: .navigationBarDrawer(displayMode: .always),
                         prompt: "Search series")
-            #else
-            .searchable(text: $searchText, prompt: "Search series")
             #endif
             .onAppear {
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
@@ -142,12 +144,104 @@ struct TVShowsView: View {
             .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidApplyPreferences)) { _ in
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
             }
+            .fullScreenCover(item: $resumePlayingURL) { wrapper in
+                PlayerView(
+                    urls: [wrapper.url],
+                    title: resumePlayingTitle,
+                    headers: resumePlayingHeaders,
+                    isLive: false,
+                    artworkURL: resumePosterURL.flatMap { URL(string: $0) },
+                    vodID: resumeVodID,
+                    vodPosterURL: resumePosterURL,
+                    vodServerID: resumeServerID,
+                    resumePositionMs: resumePositionMs
+                )
+                .onDisappear { isPlaying = false }
+            }
+        }
+    }
+
+    private func resumeFromContinueWatching(_ progress: WatchProgress) {
+        if let urlStr = progress.streamURL, let url = URL(string: urlStr) {
+            resumePlayingTitle = progress.title
+            resumeVodID = progress.vodID
+            resumePosterURL = progress.posterURL
+            resumeServerID = progress.serverID
+            resumePositionMs = progress.positionMs
+            if let sid = progress.serverID,
+               let serverUUID = UUID(uuidString: sid),
+               let server = servers.first(where: { $0.id == serverUUID }) {
+                resumePlayingHeaders = server.authHeaders
+            } else {
+                resumePlayingHeaders = dispatcharrHeaders
+            }
+            resumePlayingURL = IdentifiableURL(url: url)
+            isPlaying = true
+            return
+        }
+        // Fallback: find the series in the store and push to its detail view
+        if let item = vodStore.series.first(where: { $0.id == progress.vodID }) {
+            navPath.append(item)
         }
     }
 
     // MARK: - Content
     private var content: some View {
         VStack(spacing: 0) {
+            #if os(tvOS)
+            // tvOS: search toggle + inline text field (replaces .searchable keyboard)
+            HStack(spacing: 12) {
+                Button {
+                    withAnimation(.spring(response: 0.25)) {
+                        showSearchField.toggle()
+                        if !showSearchField { searchText = "" }
+                    }
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundColor(showSearchField ? .accentPrimary : .textSecondary)
+                        .frame(width: 56, height: 56)
+                        .background(
+                            Circle()
+                                .fill(showSearchField ? Color.accentPrimary.opacity(0.15) : Color.elevatedBackground)
+                        )
+                }
+                .buttonStyle(TVNoHighlightButtonStyle())
+
+                if showSearchField {
+                    TextField("Search series", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 24))
+                        .foregroundColor(.textPrimary)
+                        .frame(width: 400)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(
+                            Capsule()
+                                .fill(Color.elevatedBackground)
+                                .overlay(
+                                    Capsule()
+                                        .stroke(Color.accentPrimary.opacity(0.3), lineWidth: 1)
+                                )
+                        )
+                        .transition(.move(edge: .leading).combined(with: .opacity))
+                }
+
+                Spacer()
+
+                Button {
+                    showManageGroups = true
+                } label: {
+                    Text("Filter")
+                        .font(.headlineSmall)
+                        .foregroundColor(.accentPrimary)
+                }
+                .buttonStyle(TVNoHighlightButtonStyle())
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            #endif
+
             // Hidden groups indicator
             if !hiddenGroups.isEmpty && searchText.isEmpty {
                 HStack(spacing: 6) {
@@ -179,7 +273,8 @@ struct TVShowsView: View {
                     // Continue Watching section
                     ContinueWatchingSection(
                         vodType: "episode",
-                        headers: dispatcharrHeaders
+                        headers: dispatcharrHeaders,
+                        onPlay: { progress in resumeFromContinueWatching(progress) }
                     )
 
                     LazyVGrid(columns: columns, spacing: gridRowSpacing) {

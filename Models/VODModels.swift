@@ -14,10 +14,12 @@ final class WatchProgress {
     var vodType: String          // "movie" or "episode"
     var updatedAt: Date
     var isFinished: Bool
+    var streamURL: String?       // Resolved stream URL for resume playback
+    var serverID: String?        // Server UUID for auth headers
 
     init(vodID: String, title: String, positionMs: Int32 = 0, durationMs: Int32 = 0,
          posterURL: String? = nil, vodType: String = "movie", updatedAt: Date = Date(),
-         isFinished: Bool = false) {
+         isFinished: Bool = false, streamURL: String? = nil, serverID: String? = nil) {
         self.vodID = vodID
         self.title = title
         self.positionMs = positionMs
@@ -26,6 +28,8 @@ final class WatchProgress {
         self.vodType = vodType
         self.updatedAt = updatedAt
         self.isFinished = isFinished
+        self.streamURL = streamURL
+        self.serverID = serverID
     }
 }
 
@@ -38,7 +42,8 @@ enum WatchProgressManager {
 
     /// Save or update watch progress. Call from main thread.
     static func save(vodID: String, title: String, positionMs: Int32, durationMs: Int32,
-                     posterURL: String? = nil, vodType: String = "movie", isFinished: Bool = false) {
+                     posterURL: String? = nil, vodType: String = "movie", isFinished: Bool = false,
+                     streamURL: String? = nil, serverID: String? = nil) {
         guard let context = modelContext else { return }
         let descriptor = FetchDescriptor<WatchProgress>(predicate: #Predicate { $0.vodID == vodID })
         if let existing = try? context.fetch(descriptor).first {
@@ -47,13 +52,17 @@ enum WatchProgressManager {
             existing.updatedAt = Date()
             existing.isFinished = isFinished
             if let poster = posterURL { existing.posterURL = poster }
+            if let url = streamURL { existing.streamURL = url }
+            if let sid = serverID { existing.serverID = sid }
         } else {
             let progress = WatchProgress(vodID: vodID, title: title, positionMs: positionMs,
                                          durationMs: durationMs, posterURL: posterURL,
-                                         vodType: vodType, isFinished: isFinished)
+                                         vodType: vodType, isFinished: isFinished,
+                                         streamURL: streamURL, serverID: serverID)
             context.insert(progress)
         }
         try? context.save()
+        NotificationCenter.default.post(name: .watchProgressDidChange, object: nil)
     }
 
     /// Get saved position for a VOD item. Returns nil if no progress or already finished.
@@ -72,6 +81,7 @@ enum WatchProgressManager {
         if let existing = try? context.fetch(descriptor).first {
             context.delete(existing)
             try? context.save()
+            NotificationCenter.default.post(name: .watchProgressDidChange, object: nil)
         }
     }
 }
@@ -81,6 +91,7 @@ enum WatchProgressManager {
 struct ContinueWatchingSection: View {
     let vodType: String   // "movie" or "episode"
     var headers: [String: String] = [:]
+    var onPlay: ((WatchProgress) -> Void)?
 
     @Query(
         filter: #Predicate<WatchProgress> { !$0.isFinished },
@@ -93,19 +104,51 @@ struct ContinueWatchingSection: View {
 
     var body: some View {
         if !items.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: {
+                #if os(tvOS)
+                return CGFloat(20)
+                #else
+                return CGFloat(8)
+                #endif
+            }()) {
                 Text("Continue Watching")
                     .font(.headline)
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, 16)
+                    .zIndex(0)
 
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
+                    HStack(spacing: {
+                        #if os(tvOS)
+                        return CGFloat(24)
+                        #else
+                        return CGFloat(12)
+                        #endif
+                    }()) {
                         ForEach(items) { progress in
-                            continueWatchingCard(progress)
+                            Button {
+                                onPlay?(progress)
+                            } label: {
+                                ContinueWatchingCard(progress: progress, headers: headers)
+                            }
+                            #if os(tvOS)
+                            .buttonStyle(TVCardButtonStyle())
+                            #else
+                            .buttonStyle(.plain)
+                            #endif
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    WatchProgressManager.delete(vodID: progress.vodID)
+                                } label: {
+                                    Label("Remove from Continue Watching", systemImage: "trash")
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 16)
+                    #if os(tvOS)
+                    .padding(.vertical, 20)
+                    #endif
                 }
             }
             .padding(.top, 12)
@@ -113,19 +156,36 @@ struct ContinueWatchingSection: View {
         }
     }
 
-    private func continueWatchingCard(_ progress: WatchProgress) -> some View {
+}
+
+// MARK: - Continue Watching Card (extracted for tvOS @Environment(\.isFocused) support)
+
+private struct ContinueWatchingCard: View {
+    let progress: WatchProgress
+    var headers: [String: String] = [:]
+
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    private let cardWidth: CGFloat = 200
+    private let cardHeight: CGFloat = 300
+    #else
+    private let cardWidth: CGFloat = 120
+    private let cardHeight: CGFloat = 180
+    #endif
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             ZStack(alignment: .bottom) {
                 // Poster
                 if let urlStr = progress.posterURL, let url = URL(string: urlStr) {
                     AuthPosterImage(url: url, headers: headers)
                         .aspectRatio(2/3, contentMode: .fill)
-                        .frame(width: 120, height: 180)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .frame(width: cardWidth, height: cardHeight)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 } else {
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(Color.cardBackground)
-                        .frame(width: 120, height: 180)
+                        .frame(width: cardWidth, height: cardHeight)
                         .overlay {
                             Image(systemName: "film")
                                 .font(.title2)
@@ -150,15 +210,21 @@ struct ContinueWatchingSection: View {
                         }
                     }
                 }
-                .frame(width: 120, height: 180)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .frame(width: cardWidth, height: cardHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
+            #if os(tvOS)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isFocused ? Color.accentPrimary : .clear, lineWidth: 2.5)
+            )
+            #endif
 
             Text(progress.title)
                 .font(.caption)
                 .foregroundColor(.textSecondary)
                 .lineLimit(1)
-                .frame(width: 120, alignment: .leading)
+                .frame(width: cardWidth, alignment: .leading)
         }
     }
 }

@@ -137,11 +137,24 @@ final class GuideStore: ObservableObject {
             guard let title = ch.currentProgram, !title.isEmpty,
                   let start = ch.currentProgramStart,
                   let end = ch.currentProgramEnd else { continue }
+            let desc = ch.currentProgramDescription ?? ""
             let gp = GuideProgram(channelID: ch.id, title: title,
-                                  description: "", start: start, end: end, category: "")
-            // Only add if not already in cache for this channel
+                                  description: desc, start: start, end: end, category: "")
             if result[ch.id] == nil || result[ch.id]?.isEmpty == true {
+                // No programs yet for this channel — seed it
                 result[ch.id] = [gp]
+            } else if !desc.isEmpty, var list = result[ch.id] {
+                // Channel has programs but check if current one is missing its description
+                var updated = false
+                for i in list.indices {
+                    if list[i].title == title
+                        && abs(list[i].start.timeIntervalSince(start)) < 60
+                        && list[i].description.isEmpty {
+                        list[i] = gp
+                        updated = true
+                    }
+                }
+                if updated { result[ch.id] = list }
             }
         }
         programs = result
@@ -481,21 +494,27 @@ final class GuideStore: ObservableObject {
     private func mergeProgram(_ prog: GuideProgram, for channelID: String) {
         let target = _isBatching ? _pendingPrograms : programs
         var list = target[channelID] ?? []
-        let dominated = list.contains(where: { existing in
-            // Original check: same title and start within 60s
+        // Check for duplicate: same title+time or >80% overlap
+        if let idx = list.firstIndex(where: { existing in
             if existing.title == prog.title && abs(existing.start.timeIntervalSince(prog.start)) < 60 {
                 return true
             }
-            // Overlap check: if >80% of the new program's time range overlaps
-            // with an existing program, treat as duplicate (handles slightly
-            // different titles/times from different data sources).
             let overlapStart = max(existing.start, prog.start)
             let overlapEnd   = min(existing.end, prog.end)
             let overlap = overlapEnd.timeIntervalSince(overlapStart)
             let progDuration = prog.end.timeIntervalSince(prog.start)
             return progDuration > 0 && overlap > 0 && overlap / progDuration > 0.8
-        })
-        if dominated { return }
+        }) {
+            // Duplicate found — always replace if the new version has a longer description
+            // (e.g., seedFromChannels created a placeholder without description,
+            // then fetchUpcoming returned the same program with a description).
+            if prog.description.count > list[idx].description.count {
+                list[idx] = prog
+                if _isBatching { _pendingPrograms[channelID] = list }
+                else { programs[channelID] = list }
+            }
+            return
+        }
         list.append(prog)
         list.sort { $0.start < $1.start }
         if _isBatching {
@@ -563,7 +582,7 @@ struct EPGGuideView: View {
 
     // Layout constants
     #if os(tvOS)
-    private let channelColumnWidth: CGFloat = 200
+    private let channelColumnWidth: CGFloat = 240
     private let rowHeight: CGFloat = 110
     private let timeHeaderHeight: CGFloat = 50
     private let pixelsPerHour: CGFloat = 600
@@ -615,9 +634,14 @@ struct EPGGuideView: View {
             // Seed EPGCache so List-view card expansion is instant
             guideStore.seedEPGCache(channels: channels, server: activeServer)
 
-            // Phase 2: fetch from network only if cache is stale
-            guard !cacheIsFresh else {
-                debugLog("📺 EPG cache is fresh — skipping network fetch")
+            // Phase 2: fetch from network only if cache is stale.
+            // Also fetch if the cache has no future programs (e.g., fresh install with only
+            // seedFromChannels data — only current programs, nothing upcoming).
+            let hasFuturePrograms = guideStore.programs.values
+                .flatMap { $0 }
+                .contains { $0.end > Date().addingTimeInterval(1800) }
+            guard !cacheIsFresh || !hasFuturePrograms else {
+                debugLog("📺 EPG cache is fresh with future programs — skipping network fetch")
                 return
             }
             channelStore.isEPGLoading = true
@@ -628,6 +652,14 @@ struct EPGGuideView: View {
             // Re-seed EPGCache with freshly fetched data
             guideStore.seedEPGCache(channels: channels, server: activeServer)
             channelStore.isEPGLoading = false
+        }
+        // When MainTabView's loadAllEPG() finishes, re-seed guide from EPGCache
+        .onChange(of: channelStore.isEPGLoading) { wasLoading, isLoading in
+            if wasLoading && !isLoading && !channels.isEmpty {
+                let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+                guideStore.seedFromChannels(channels)
+                guideStore.seedEPGCache(channels: channels, server: activeServer)
+            }
         }
         // Timer removed — time indicator redraws via TimelineView
     }
@@ -792,18 +824,20 @@ struct EPGGuideView: View {
             let progs = guideStore.programs[channel.id] ?? []
 
             if progs.isEmpty {
-                // Show current program name from channel if available, else "No guide data"
-                if let title = channel.currentProgram, !title.isEmpty {
-                    Text(title)
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                        .frame(width: totalGridWidth, height: rowHeight, alignment: .center)
-                } else {
-                    Text("No guide data")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                        .frame(width: totalGridWidth, height: rowHeight, alignment: .center)
-                }
+                // No guide programs — show a tappable row so the channel is still selectable
+                #if os(tvOS)
+                GuideEmptyRowButton(
+                    label: channel.currentProgram ?? "No guide data",
+                    width: totalGridWidth, rowHeight: rowHeight
+                ) { onSelectChannel(channel) }
+                #else
+                Text(channel.currentProgram ?? "No guide data")
+                    .font(.labelSmall)
+                    .foregroundColor(.textTertiary)
+                    .frame(width: totalGridWidth, height: rowHeight, alignment: .center)
+                    .contentShape(Rectangle())
+                    .onTapGesture { onSelectChannel(channel) }
+                #endif
             } else {
                 // Viewport clipping: only render programs overlapping the visible time window
                 // plus 30-min padding on each side for smooth scrolling.
@@ -924,19 +958,21 @@ private struct GuideChannelButton: View {
     private var channelLabel: some View {
         #if os(tvOS)
         // Emby-style: channel number on left, logo + name on right
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Text(channel.number)
-                .font(.system(size: 18, weight: .medium, design: .monospaced))
+                .font(.system(size: 22, weight: .medium, design: .monospaced))
                 .foregroundColor(.textTertiary)
-                .frame(width: 32, alignment: .trailing)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+                .frame(minWidth: 38, alignment: .trailing)
 
-            VStack(spacing: 3) {
+            VStack(spacing: 4) {
                 if let logo = channel.logoURL {
                     AsyncImage(url: logo) { phase in
                         switch phase {
                         case .success(let img):
                             img.resizable().aspectRatio(contentMode: .fit)
-                                .frame(width: 56, height: 36)
+                                .frame(width: 72, height: 48)
                         default:
                             guidePlaceholder
                         }
@@ -945,13 +981,13 @@ private struct GuideChannelButton: View {
                     guidePlaceholder
                 }
                 Text(channel.name)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 18, weight: .medium))
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         #else
         VStack(spacing: 4) {
@@ -991,7 +1027,7 @@ private struct GuideChannelButton: View {
             NoPosterPlaceholder(compact: true)
         }
         #if os(tvOS)
-        .frame(width: 56, height: 38)
+        .frame(width: 72, height: 48)
         #else
         .frame(width: 36, height: 24)
         #endif
@@ -1131,6 +1167,29 @@ private struct GuideProgramButton: View {
     }
     #endif
 }
+
+// MARK: - Guide Empty Row Button (tvOS — channels without EPG data)
+#if os(tvOS)
+private struct GuideEmptyRowButton: View {
+    let label: String
+    let width: CGFloat
+    let rowHeight: CGFloat
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 24, weight: .medium))
+                .foregroundColor(isFocused ? .white : .textTertiary)
+                .frame(width: width, height: rowHeight, alignment: .center)
+                .background(isFocused ? Color.white.opacity(0.25) : Color.white.opacity(0.05))
+        }
+        .buttonStyle(GuideButtonStyle())
+        .focused($isFocused)
+    }
+}
+#endif
 
 // MARK: - Guide Button Style (tvOS)
 // Emby-style: NO scale on focus, just color change handled by the cell itself.
