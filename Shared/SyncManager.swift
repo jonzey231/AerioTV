@@ -26,6 +26,7 @@ final class SyncManager: ObservableObject {
     private let kvsKey     = "syncedServers"
     private let prefKVSKey = "syncedPreferences"
     private let watchProgressKVSKey = "syncedWatchProgress"
+    private let reminderKVSKey = "syncedReminders"
 
     /// Background queue used ONLY for the initial sync flow (ping → sleep → read).
     // initQueue removed — all KVS access must be on main dispatch queue.
@@ -33,11 +34,13 @@ final class SyncManager: ObservableObject {
     // MARK: - Notification Observers
     private var kvsObserver: NSObjectProtocol?
     private var udObserver: NSObjectProtocol?
+    private var reminderObserver: NSObjectProtocol?
 
     // MARK: - Debounce / Timers
     private var pushDebounce: DispatchWorkItem?
     private var prefPushDebounce: DispatchWorkItem?
     private var watchProgressPushDebounce: DispatchWorkItem?
+    private var reminderPushDebounce: DispatchWorkItem?
     private var importTimeoutWork: DispatchWorkItem?
 
     /// Prevents re-entrant updates (remote change → local save → push cycle).
@@ -112,6 +115,19 @@ final class SyncManager: ObservableObject {
                 SyncManager.shared.handleRemoteChange(reason: reason)
             }
         }
+
+        // Observe local reminder changes to push to iCloud
+        if reminderObserver == nil {
+            reminderObserver = NotificationCenter.default.addObserver(
+                forName: .remindersDidChange,
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    SyncManager.shared.pushReminders()
+                }
+            }
+        }
     }
 
     private func startObservingDefaults() {
@@ -139,6 +155,10 @@ final class SyncManager: ObservableObject {
         if let obs = udObserver {
             NotificationCenter.default.removeObserver(obs)
             udObserver = nil
+        }
+        if let obs = reminderObserver {
+            NotificationCenter.default.removeObserver(obs)
+            reminderObserver = nil
         }
         isObservingDefaults = false
     }
@@ -169,14 +189,16 @@ final class SyncManager: ObservableObject {
             // KVS internally calls dispatch_assert_queue(main) for both
             // reads AND writes, so all access must be on the main queue.
             let wpKey = self.watchProgressKVSKey
+            let rKey  = self.reminderKVSKey
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                let servers = NSUbiquitousKeyValueStore.default.array(forKey: serverKey) as? [[String: Any]]
-                let prefs   = NSUbiquitousKeyValueStore.default.dictionary(forKey: prefKey)
-                let wp      = NSUbiquitousKeyValueStore.default.array(forKey: wpKey) as? [[String: Any]]
-                debugLog("🔵 SyncManager: initial KVS check — servers=\(servers != nil), prefs=\(prefs != nil), watchProgress=\(wp != nil)")
+                let servers   = NSUbiquitousKeyValueStore.default.array(forKey: serverKey) as? [[String: Any]]
+                let prefs     = NSUbiquitousKeyValueStore.default.dictionary(forKey: prefKey)
+                let wp        = NSUbiquitousKeyValueStore.default.array(forKey: wpKey) as? [[String: Any]]
+                let reminders = NSUbiquitousKeyValueStore.default.array(forKey: rKey) as? [[String: Any]]
+                debugLog("🔵 SyncManager: initial KVS check — servers=\(servers != nil), prefs=\(prefs != nil), watchProgress=\(wp != nil), reminders=\(reminders != nil)")
 
                 Task { @MainActor [weak self] in
-                    self?.handleImportResult(servers: servers, prefs: prefs, watchProgress: wp)
+                    self?.handleImportResult(servers: servers, prefs: prefs, watchProgress: wp, reminders: reminders)
                 }
             }
 
@@ -202,24 +224,28 @@ final class SyncManager: ObservableObject {
             let sKey = kvsKey
             let pKey = prefKVSKey
             let wpKey = watchProgressKVSKey
+            let rKey = reminderKVSKey
             DispatchQueue.main.async {
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: sKey)
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: pKey)
                 NSUbiquitousKeyValueStore.default.removeObject(forKey: wpKey)
+                NSUbiquitousKeyValueStore.default.removeObject(forKey: rKey)
                 debugLog("🔵 SyncManager: cleared KVS data")
             }
         }
     }
 
     private func handleImportResult(servers: [[String: Any]]?, prefs: [String: Any]?,
-                                     watchProgress: [[String: Any]]? = nil) {
+                                     watchProgress: [[String: Any]]? = nil,
+                                     reminders: [[String: Any]]? = nil) {
         guard isSyncEnabled, isImporting else { return }
 
-        if servers != nil || prefs != nil || watchProgress != nil {
+        if servers != nil || prefs != nil || watchProgress != nil || reminders != nil {
             importTimeoutWork?.cancel()
             doMerge(servers: servers, isInitial: true)
             doApplyPreferences(prefs: prefs)
             mergeRemoteWatchProgress(watchProgress)
+            mergeRemoteReminders(reminders)
             isImporting = false
             startObservingDefaults()
             debugLog("🔵 SyncManager: import complete from initial check")
@@ -246,6 +272,7 @@ final class SyncManager: ObservableObject {
                 userInfo: ["immediate": true]
             )
             self.doPushPreferences(immediate: true)
+            self.pushReminders(immediate: true)
         }
     }
 
@@ -360,16 +387,19 @@ final class SyncManager: ObservableObject {
         debugLog("🔵 SyncManager.remoteDidChange: fired on main queue, reason=\(String(describing: reason))")
 
         // Already on main dispatch queue (observer registered with queue: .main).
-        let servers = NSUbiquitousKeyValueStore.default.array(forKey: kvsKey) as? [[String: Any]]
-        let prefs   = NSUbiquitousKeyValueStore.default.dictionary(forKey: prefKVSKey)
-        let wp      = NSUbiquitousKeyValueStore.default.array(forKey: watchProgressKVSKey) as? [[String: Any]]
-        debugLog("🔵 SyncManager.remoteDidChange: servers=\(servers != nil), prefs=\(prefs != nil), wp=\(wp != nil)")
+        let servers   = NSUbiquitousKeyValueStore.default.array(forKey: kvsKey) as? [[String: Any]]
+        let prefs     = NSUbiquitousKeyValueStore.default.dictionary(forKey: prefKVSKey)
+        let wp        = NSUbiquitousKeyValueStore.default.array(forKey: watchProgressKVSKey) as? [[String: Any]]
+        let reminders = NSUbiquitousKeyValueStore.default.array(forKey: reminderKVSKey) as? [[String: Any]]
+        debugLog("🔵 SyncManager.remoteDidChange: servers=\(servers != nil), prefs=\(prefs != nil), wp=\(wp != nil), reminders=\(reminders != nil)")
 
-        processRemoteChange(servers: servers, prefs: prefs, watchProgress: wp, reason: reason)
+        processRemoteChange(servers: servers, prefs: prefs, watchProgress: wp, reminders: reminders, reason: reason)
     }
 
     private func processRemoteChange(servers: [[String: Any]]?, prefs: [String: Any]?,
-                                     watchProgress: [[String: Any]]? = nil, reason: Int?) {
+                                     watchProgress: [[String: Any]]? = nil,
+                                     reminders: [[String: Any]]? = nil,
+                                     reason: Int?) {
         guard isSyncEnabled else { return }
 
         // Skip bounce-backs: if we pushed within the last 5 seconds, this is
@@ -404,6 +434,7 @@ final class SyncManager: ObservableObject {
         doMerge(servers: servers, isInitial: wasImporting)
         doApplyPreferences(prefs: prefs)
         mergeRemoteWatchProgress(watchProgress)
+        mergeRemoteReminders(reminders)
     }
 
     private func doMerge(servers: [[String: Any]]?, isInitial: Bool) {
@@ -688,6 +719,119 @@ final class SyncManager: ObservableObject {
         NotificationCenter.default.post(name: .syncManagerDidUpdateWatchProgress, object: nil)
     }
 
+    // MARK: - Reminder Sync
+
+    /// Push local reminders to iCloud KVS (debounced).
+    func pushReminders(immediate: Bool = false) {
+        guard isSyncEnabled, !isMerging else { return }
+
+        let reminders = ReminderManager.shared.syncableReminders
+        var payload: [[String: Any]] = []
+        for (key, r) in reminders {
+            payload.append([
+                "key": key,
+                "programTitle": r.programTitle,
+                "channelName": r.channelName,
+                "startTime": r.startTime.timeIntervalSince1970,
+                "updatedAt": r.updatedAt.timeIntervalSince1970
+            ])
+        }
+        nonisolated(unsafe) let capturedPayload = payload
+
+        reminderPushDebounce?.cancel()
+        let key = reminderKVSKey
+        let work = DispatchWorkItem {
+            MainActor.assumeIsolated {
+                SyncManager.shared.lastPushTime = ProcessInfo.processInfo.systemUptime
+            }
+            NSUbiquitousKeyValueStore.default.set(capturedPayload, forKey: key)
+            debugLog("🔵 SyncManager: pushed \(capturedPayload.count) reminders to KVS")
+        }
+        reminderPushDebounce = work
+        if immediate {
+            DispatchQueue.main.async(execute: work)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
+        }
+    }
+
+    /// Merge remote reminders from iCloud into local ReminderManager.
+    private func mergeRemoteReminders(_ remoteEntries: [[String: Any]]?) {
+        guard let remoteEntries else { return }
+
+        isMerging = true
+        defer { isMerging = false }
+
+        var remoteReminders: [String: SyncableReminder] = [:]
+        for dict in remoteEntries {
+            guard let key       = dict["key"] as? String,
+                  let title     = dict["programTitle"] as? String,
+                  let channel   = dict["channelName"] as? String,
+                  let startTs   = dict["startTime"] as? TimeInterval,
+                  let updatedTs = dict["updatedAt"] as? TimeInterval else { continue }
+            remoteReminders[key] = SyncableReminder(
+                programTitle: title,
+                channelName: channel,
+                startTime: Date(timeIntervalSince1970: startTs),
+                updatedAt: Date(timeIntervalSince1970: updatedTs)
+            )
+        }
+
+        ReminderManager.shared.mergeRemote(remoteReminders)
+        debugLog("🔵 SyncManager: merged \(remoteReminders.count) remote reminders")
+    }
+
+    // MARK: - Active Pull (foreground resume)
+
+    /// Reads ALL KVS keys and merges remote data into local state.
+    /// Called every time the app enters the foreground so changes made
+    /// on other devices are picked up immediately — even when no KVS
+    /// `didChangeExternally` notification was delivered (common on tvOS).
+    /// Timestamp of last pull — used to throttle so we don't re-merge on
+    /// every scenePhase == .active (which fires frequently on tvOS).
+    nonisolated(unsafe) private static var lastPullTime: TimeInterval = 0
+
+    func pullFromCloud() {
+        guard isSyncEnabled, !isMerging, !isImporting else { return }
+
+        // Throttle: skip if we pulled within the last 60 seconds
+        let now = ProcessInfo.processInfo.systemUptime
+        guard now - Self.lastPullTime > 60 else {
+            debugLog("🔵 SyncManager.pullFromCloud: throttled (\(Int(now - Self.lastPullTime))s since last)")
+            return
+        }
+        Self.lastPullTime = now
+        debugLog("🔵 SyncManager.pullFromCloud: reading KVS on foreground")
+
+        let sKey = kvsKey
+        let pKey = prefKVSKey
+        let wpKey = watchProgressKVSKey
+        let rKey = reminderKVSKey
+
+        DispatchQueue.main.async {
+            let servers   = NSUbiquitousKeyValueStore.default.array(forKey: sKey) as? [[String: Any]]
+            let prefs     = NSUbiquitousKeyValueStore.default.dictionary(forKey: pKey)
+            let wp        = NSUbiquitousKeyValueStore.default.array(forKey: wpKey) as? [[String: Any]]
+            let reminders = NSUbiquitousKeyValueStore.default.array(forKey: rKey) as? [[String: Any]]
+
+            guard servers != nil || prefs != nil || wp != nil || reminders != nil else {
+                debugLog("🔵 SyncManager.pullFromCloud: no remote data")
+                return
+            }
+
+            Task { @MainActor in
+                let mgr = SyncManager.shared
+                // Use the same merge paths as handleRemoteChange — each
+                // method manages its own isMerging guard internally.
+                mgr.doMerge(servers: servers, isInitial: false)
+                mgr.doApplyPreferences(prefs: prefs)
+                mgr.mergeRemoteWatchProgress(wp)
+                mgr.mergeRemoteReminders(reminders)
+                debugLog("🔵 SyncManager.pullFromCloud: merge complete")
+            }
+        }
+    }
+
     // MARK: - Helpers
 
     var isSyncEnabled: Bool {
@@ -723,4 +867,5 @@ extension Notification.Name {
     static let stopPlaybackForBackground = Notification.Name("stopPlaybackForBackground")
     static let watchProgressDidChange = Notification.Name("watchProgressDidChange")
     static let syncManagerDidUpdateWatchProgress = Notification.Name("syncManagerDidUpdateWatchProgress")
+    static let remindersDidChange = Notification.Name("remindersDidChange")
 }

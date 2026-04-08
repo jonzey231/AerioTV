@@ -6,18 +6,17 @@ import UIKit
 import Libmpv
 import CoreVideo
 import CoreMedia  // For CMSampleBuffer
-#if os(tvOS)
-import IOSurface  // For CVPixelBufferGetIOSurface on tvOS
-#endif
 
 // MARK: - MPV Player View Controller (SW render → AVSampleBufferDisplayLayer → PiP)
 
 class MPVPlayerViewController: UIViewController {
     weak var coordinator: MPVPlayerViewRepresentable.Coordinator?
 
-    #if os(iOS)
-    /// AVSampleBufferDisplayLayer for PiP-compatible display (iOS only).
+    /// AVSampleBufferDisplayLayer — vsync-synchronized frame presentation.
+    /// Used on both iOS (PiP-compatible) and tvOS (tear-free).
     let sampleBufferLayer = AVSampleBufferDisplayLayer()
+
+    #if os(iOS)
     /// PiP controller — initialized after view loads.
     var pipController: AVPictureInPictureController?
     #endif
@@ -27,12 +26,12 @@ class MPVPlayerViewController: UIViewController {
         view.isUserInteractionEnabled = false
         view.layer.isOpaque = true
 
-        #if os(iOS)
-        // iOS: AVSampleBufferDisplayLayer for PiP support
+        // AVSampleBufferDisplayLayer for vsync-synchronized presentation (both platforms).
         sampleBufferLayer.videoGravity = .resizeAspect
         sampleBufferLayer.frame = view.bounds
         view.layer.addSublayer(sampleBufferLayer)
 
+        #if os(iOS)
         if AVPictureInPictureController.isPictureInPictureSupported(),
            let coordinator {
             let contentSource = AVPictureInPictureController.ContentSource(
@@ -42,9 +41,6 @@ class MPVPlayerViewController: UIViewController {
             pipController = AVPictureInPictureController(contentSource: contentSource)
             pipController?.delegate = coordinator
         }
-        #else
-        // tvOS: plain CALayer — no PiP, simpler display path
-        view.layer.contentsGravity = .resizeAspect
         #endif
 
         #if DEBUG
@@ -58,12 +54,10 @@ class MPVPlayerViewController: UIViewController {
         super.viewDidLayoutSubviews()
         let size = view.bounds.size
         guard size.width > 0 && size.height > 0 else { return }
-        #if os(iOS)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         sampleBufferLayer.frame = view.bounds
         CATransaction.commit()
-        #endif
         coordinator?.handleResize(size: size)
     }
 }
@@ -162,11 +156,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // SW render — background thread renders to CVPixelBuffer
         private let renderQueue = DispatchQueue(label: "com.aerio.mpv.render", qos: .userInteractive)
-        private weak var displayLayer: CALayer?  // tvOS: direct CALayer.contents
-        #if os(iOS)
-        private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?  // iOS: PiP-compatible
-        #endif
-        private var pixelBuffers: [CVPixelBuffer?] = [nil, nil, nil]  // Triple-buffered (eliminates tearing)
+        private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?  // vsync-synchronized display
+        private var pixelBuffers: [CVPixelBuffer?] = [nil, nil]  // Double-buffered (vsync handles sync)
         private var currentBufferIndex = 0
         private var renderWidth: Int = 0
         private var renderHeight: Int = 0
@@ -201,6 +192,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // renderPending: accessed from mpv callback thread + render thread — use lock
         private var renderPending = false
         private var renderLock = os_unfair_lock()
+
+        // Stream info refresh timer (2s interval for volatile stats).
+        // Runs on its own low-priority queue — NEVER on renderQueue (would block frame delivery).
+        private var streamInfoTimer: DispatchSourceTimer?
+        private let statsQueue = DispatchQueue(label: "com.aerio.mpv.stats", qos: .utility)
+
+        // Frame timing — jitter & tearing diagnostics
+        private var lastRenderTime: CFAbsoluteTime = 0       // When last frame finished rendering
+        private var lastEnqueueTime: CFAbsoluteTime = 0      // When last frame was enqueued to display layer
+        private var frameIntervals: [Double] = []             // Recent inter-frame intervals (ms)
+        private var renderDurations: [Double] = []            // Recent render durations (ms)
+        private var lateFrameCount: Int64 = 0                 // Frames that took longer than expected
+        private var totalFrameCount: Int64 = 0                // Total frames rendered
+        private let frameSampleSize = 120                     // Rolling window size (~2-4s at 30-60fps)
 
         init(urls: [URL], headers: [String: String], isLive: Bool,
              progressStore: PlayerProgressStore,
@@ -256,6 +261,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                                    name: UIApplication.didEnterBackgroundNotification, object: nil)
             NotificationCenter.default.addObserver(self, selector: #selector(willEnterForeground),
                                                    name: UIApplication.willEnterForegroundNotification, object: nil)
+            // Audio route change — log AirPlay connect/disconnect
+            NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChanged),
+                                                   name: AVAudioSession.routeChangeNotification, object: nil)
         }
 
         deinit {
@@ -266,10 +274,23 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             guard let mpv else { return }
             #if os(iOS)
             // Keep video alive if PiP is active or AirPlay is connected —
-            // disabling vid kills the PiP window and drops AirPlay video.
-            if progressStore.isPiPActive { return }
-            if AVAudioSession.sharedInstance().currentRoute.outputs
-                .contains(where: { $0.portType == .airPlay }) { return }
+            // disabling vid kills the PiP window and drops AirPlay audio.
+            if progressStore.isPiPActive {
+                #if DEBUG
+                print("[MPV-AIRPLAY] Background: PiP active, keeping vid")
+                #endif
+                return
+            }
+
+            let route = AVAudioSession.sharedInstance().currentRoute
+            let airPlayAudio = route.outputs.contains(where: { $0.portType == .airPlay })
+
+            #if DEBUG
+            let outputs = route.outputs.map { "\($0.portName)(\($0.portType.rawValue))" }.joined(separator: ", ")
+            print("[MPV-AIRPLAY] Background: airPlayAudio=\(airPlayAudio), isPiP=\(progressStore.isPiPActive), outputs=[\(outputs)]")
+            #endif
+
+            if airPlayAudio { return }
             #endif
             // No PiP / no AirPlay — disable video to prevent GPU crash on background
             mpv_set_property_string(mpv, "vid", "no")
@@ -279,10 +300,54 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             guard let mpv else { return }
             // Re-enable video if it was disabled on background entry
             let vid = mpv_get_property_string(mpv, "vid")
-            if let v = vid, String(cString: v) == "no" {
+            let vidStr = vid.flatMap { String(cString: $0) }
+            #if DEBUG
+            let route = AVAudioSession.sharedInstance().currentRoute
+            let outputs = route.outputs.map { "\($0.portName)(\($0.portType.rawValue))" }.joined(separator: ", ")
+            print("[MPV-AIRPLAY] Foreground: vid=\(vidStr ?? "nil"), isPiP=\(progressStore.isPiPActive), outputs=[\(outputs)]")
+            #endif
+            if vidStr == "no" {
                 mpv_set_property_string(mpv, "vid", "auto")
             }
             mpv_free(vid)
+        }
+
+        @objc private func audioRouteChanged(_ notification: Notification) {
+            guard let userInfo = notification.userInfo,
+                  let reasonValue = userInfo[AVAudioSessionRouteChangeReasonKey] as? UInt,
+                  let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue) else { return }
+
+            let route = AVAudioSession.sharedInstance().currentRoute
+            let outputs = route.outputs.map { "\($0.portName)(\($0.portType.rawValue))" }
+            let hasAirPlay = route.outputs.contains(where: { $0.portType == .airPlay })
+
+            let reasonStr: String = switch reason {
+            case .newDeviceAvailable: "newDevice"
+            case .oldDeviceUnavailable: "deviceRemoved"
+            case .categoryChange: "categoryChange"
+            case .override: "override"
+            case .routeConfigurationChange: "routeConfig"
+            default: "other(\(reasonValue))"
+            }
+
+            #if DEBUG
+            print("[MPV-AIRPLAY] Route changed: reason=\(reasonStr), airPlay=\(hasAirPlay), outputs=\(outputs)")
+            #endif
+
+            // If AirPlay just connected and we're in the background with vid disabled, re-enable
+            #if os(iOS)
+            if hasAirPlay, reason == .newDeviceAvailable, let mpv = self.mpv {
+                let vid = mpv_get_property_string(mpv, "vid")
+                let vidStr = vid.flatMap { String(cString: $0) }
+                mpv_free(vid)
+                if vidStr == "no" {
+                    #if DEBUG
+                    print("[MPV-AIRPLAY] AirPlay connected while vid=no, re-enabling video")
+                    #endif
+                    mpv_set_property_string(mpv, "vid", "auto")
+                }
+            }
+            #endif
         }
 
         // MARK: - Lifecycle
@@ -316,10 +381,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Called from viewDidLoad. Stores layer reference. Pixel buffers deferred to handleResize.
         @MainActor
         func setupRenderer(layer: CALayer) {
-            self.displayLayer = layer
-            #if os(iOS)
             self.sampleBufferLayer = layer.sublayers?.compactMap { $0 as? AVSampleBufferDisplayLayer }.first
-            #endif
         }
 
         private var mpvStarted = false
@@ -331,17 +393,42 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let w: Int
             let h: Int
             if videoNativeWidth > 0 && videoNativeHeight > 0 {
-                // Render at the video's native resolution (capped at 1920px).
-                // CALayer / AVSampleBufferDisplayLayer scales to fit the view.
+                // Render at the video's native resolution, with platform caps.
+                // AVSampleBufferDisplayLayer scales to fit the view.
+                var targetW = videoNativeWidth
+                var targetH = videoNativeHeight
+                #if os(tvOS)
+                // tvOS SW render budget: cap total pixels/sec so the A15 can sustain
+                // smooth playback. UHD@24fps is fine, 1080p@30fps is fine, 720p@60fps
+                // needs a small downscale. The threshold is ~40M pixels/sec.
+                if isLive {
+                    var fps: Double = 30
+                    if let mpv = self.mpv {
+                        var fpsVal: Double = 0
+                        mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fpsVal)
+                        if fpsVal > 0 { fps = fpsVal }
+                    }
+                    let maxPixelsPerSec: Double = 40_000_000
+                    let currentPixelsPerSec = Double(targetW * targetH) * fps
+                    if currentPixelsPerSec > maxPixelsPerSec {
+                        let scale = sqrt(maxPixelsPerSec / currentPixelsPerSec)
+                        targetW = Int(Double(targetW) * scale)
+                        targetH = Int(Double(targetH) * scale)
+                        // Round to even dimensions for video codecs
+                        targetW = targetW & ~1
+                        targetH = targetH & ~1
+                    }
+                }
+                #endif
                 let maxDim = 1920
-                if videoNativeWidth > maxDim || videoNativeHeight > maxDim {
-                    let ratio = min(Double(maxDim) / Double(videoNativeWidth),
-                                    Double(maxDim) / Double(videoNativeHeight))
-                    w = Int(Double(videoNativeWidth) * ratio)
-                    h = Int(Double(videoNativeHeight) * ratio)
+                if targetW > maxDim || targetH > maxDim {
+                    let ratio = min(Double(maxDim) / Double(targetW),
+                                    Double(maxDim) / Double(targetH))
+                    w = Int(Double(targetW) * ratio)
+                    h = Int(Double(targetH) * ratio)
                 } else {
-                    w = videoNativeWidth
-                    h = videoNativeHeight
+                    w = targetW
+                    h = targetH
                 }
             } else {
                 // Video dimensions unknown yet — use a small initial buffer.
@@ -363,7 +450,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let attrs: [CFString: Any] = [
                 kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
             ]
-            for i in 0..<3 {
+            for i in 0..<2 {
                 var pb: CVPixelBuffer?
                 CVPixelBufferCreate(kCFAllocatorDefault, w, h,
                                     kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
@@ -411,6 +498,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let bufIdx = currentBufferIndex
             guard w > 0, h > 0, let pixelBuffer = pixelBuffers[bufIdx] else { return }
 
+            let renderStart = CACurrentMediaTime()
+
             CVPixelBufferLockBaseAddress(pixelBuffer, [])
 
             guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
@@ -439,37 +528,44 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
 
-            // Cycle to next buffer (triple-buffered: 0→1→2→0)
-            currentBufferIndex = (bufIdx + 1) % 3
+            let renderEnd = CACurrentMediaTime()
+            let renderMs = (renderEnd - renderStart) * 1000.0
 
-            #if os(iOS)
-            // iOS: enqueue CMSampleBuffer to AVSampleBufferDisplayLayer (PiP-compatible)
+            // Track frame timing for jitter analysis
+            totalFrameCount += 1
+            if lastEnqueueTime > 0 {
+                let intervalMs = (renderEnd - lastEnqueueTime) * 1000.0
+                frameIntervals.append(intervalMs)
+                if frameIntervals.count > frameSampleSize { frameIntervals.removeFirst() }
+            }
+            renderDurations.append(renderMs)
+            if renderDurations.count > frameSampleSize { renderDurations.removeFirst() }
+            lastRenderTime = renderEnd
+
+            // Detect late frames — render took longer than one frame period at 30fps (33ms)
+            if renderMs > 33.0 { lateFrameCount += 1 }
+
+            // Flip double buffer for next frame
+            currentBufferIndex = 1 - bufIdx
+
+            // Enqueue CMSampleBuffer to AVSampleBufferDisplayLayer — vsync-synchronized,
+            // tear-free presentation on both iOS (PiP-compatible) and tvOS.
+            // NOTE: enqueue directly from renderQueue (NOT main thread).
+            // AVSampleBufferRenderer.enqueue() is thread-safe (iOS 17+).
+            // Dispatching to main thread caused PiP video to freeze when backgrounded
+            // because iOS throttles the main thread for background apps.
             if let sampleBuffer = Self.makeSampleBuffer(from: pixelBuffer) {
                 nonisolated(unsafe) let sb = sampleBuffer
-                let layer = sampleBufferLayer
-                DispatchQueue.main.async {
-                    layer?.sampleBufferRenderer.enqueue(sb)
-                }
+                sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
             }
-            #else
-            // tvOS: direct IOSurface display via CALayer.contents.
-            // Use CATransaction to disable implicit animation and commit atomically,
-            // preventing tearing (visible as a horizontal line during fast motion).
-            nonisolated(unsafe) let surface = CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue()
-            let layer = displayLayer
-            DispatchQueue.main.async {
-                CATransaction.begin()
-                CATransaction.setDisableActions(true)
-                layer?.contents = surface
-                CATransaction.commit()
-            }
-            #endif
 
+            lastEnqueueTime = CACurrentMediaTime()
             mpv_render_context_report_swap(mpvGL)
         }
 
         func stop() {
             isShuttingDown = true
+            stopStreamInfoTimer()
             DebugLogger.shared.logPlayback(event: "Stop",
                                            url: urls[safe: currentIndex]?.absoluteString)
 
@@ -758,6 +854,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         #if DEBUG
                         print("[MPV-DIAG] Event: shutdown")
                         #endif
+                        self.stopStreamInfoTimer()
                         if !self.isShuttingDown {
                             mpv_set_wakeup_callback(mpv, nil, nil)
                             if let retain = self.wakeupRetain {
@@ -820,30 +917,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                 debugLog("📼 VOD resume: seeking to \(resumeMs)ms")
                             }
                         }
-                        #if DEBUG
+                        // Populate stream info for the UI overlay
                         if let mpv = self.mpv {
+                            let info = self.populateStreamInfo(mpv)
+                            self.startStreamInfoTimer()
+
+                            #if DEBUG
                             var cacheDur: Double = 0
                             mpv_get_property(mpv, "demuxer-cache-duration", MPV_FORMAT_DOUBLE, &cacheDur)
                             var avsync: Double = 0
                             mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsync)
-
-                            // Stream params are now populated (unlike at FILE_LOADED)
-                            let videoCodec = self.getMPVString(mpv, "video-codec") ?? "?"
-                            let audioCodec = self.getMPVString(mpv, "audio-codec") ?? "?"
-                            let hwdecCurrent = self.getMPVString(mpv, "hwdec-current") ?? "none"
-                            let videoFormat = self.getMPVString(mpv, "video-params/pixelformat") ?? "?"
-                            var videoW: Int64 = 0; var videoH: Int64 = 0
-                            mpv_get_property(mpv, "video-params/w", MPV_FORMAT_INT64, &videoW)
-                            mpv_get_property(mpv, "video-params/h", MPV_FORMAT_INT64, &videoH)
-                            var sampleRate: Int64 = 0; var channels: Int64 = 0
-                            mpv_get_property(mpv, "audio-params/samplerate", MPV_FORMAT_INT64, &sampleRate)
-                            mpv_get_property(mpv, "audio-params/channel-count", MPV_FORMAT_INT64, &channels)
-
                             print("[MPV-DIAG] Event: playback-restart — cache=\(String(format: "%.2f", cacheDur))s, avsync=\(String(format: "%.4f", avsync))s")
-                            print("[MPV-STREAM] video=\(videoCodec) \(videoW)×\(videoH) \(videoFormat), hwdec=\(hwdecCurrent)")
-                            print("[MPV-STREAM] audio=\(audioCodec) \(sampleRate)Hz \(channels)ch")
+                            print("[MPV-STREAM] video=\(info.videoCodec) \(info.width)×\(info.height) \(info.pixelFormat), hwdec=\(info.hwdec)")
+                            print("[MPV-STREAM] audio=\(info.audioCodec) \(info.sampleRate)Hz \(info.channels)ch")
+                            #endif
                         }
-                        #endif
                         break
 
                     default:
@@ -1201,11 +1289,42 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             let hwdecCurrent = getMPVString(mpv, "hwdec-current") ?? "none"
 
+            // Frame timing / jitter stats
+            let frameCount = totalFrameCount
+            let lateFrames = lateFrameCount
+
+            var avgInterval: Double = 0, jitterMs: Double = 0, maxInterval: Double = 0, minInterval: Double = 0
+            if frameIntervals.count > 2 {
+                let sum = frameIntervals.reduce(0, +)
+                avgInterval = sum / Double(frameIntervals.count)
+                let variance = frameIntervals.reduce(0.0) { $0 + ($1 - avgInterval) * ($1 - avgInterval) } / Double(frameIntervals.count)
+                jitterMs = sqrt(variance)  // Standard deviation = jitter
+                maxInterval = frameIntervals.max() ?? 0
+                minInterval = frameIntervals.min() ?? 0
+            }
+
+            var avgRenderMs: Double = 0, maxRenderMs: Double = 0
+            if renderDurations.count > 2 {
+                avgRenderMs = renderDurations.reduce(0, +) / Double(renderDurations.count)
+                maxRenderMs = renderDurations.max() ?? 0
+            }
+
+            // Display layer health
+            var layerStatus = "ok"
+            if let layer = sampleBufferLayer {
+                if layer.sampleBufferRenderer.status == .failed {
+                    layerStatus = "FAILED: \(layer.sampleBufferRenderer.error?.localizedDescription ?? "?")"
+                } else if layer.sampleBufferRenderer.isReadyForMoreMediaData == false {
+                    layerStatus = "BACKPRESSURE"
+                }
+            }
+
             #if DEBUG
             let ts = logTimestamp
             let ms = Int32(timeSec * 1000)
             print("[\(ts)] [MPV-DIAG] time=\(ms)ms isPlaying=\(isPlaying) callbacks/\(isLive ? 15 : 5)s=\(timeChangeCount)")
             print("[\(ts)] [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: \(String(format: "%.1f", estimatedFPS))/\(String(format: "%.1f", displayFPS))disp, hwdec=\(hwdecCurrent)")
+            print("[\(ts)] [MPV-FRAME] render: \(String(format: "%.1f", avgRenderMs))ms avg / \(String(format: "%.1f", maxRenderMs))ms max, interval: \(String(format: "%.1f", avgInterval))ms avg [\(String(format: "%.1f", minInterval))-\(String(format: "%.1f", maxInterval))ms], jitter: \(String(format: "%.2f", jitterMs))ms, late: \(lateFrames)/\(frameCount), layer: \(layerStatus)")
             print("[\(ts)] [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(demuxerBytes / 1024)KB/s, paused_for_cache: \(pausedForCache != 0)")
             print("[\(ts)] [MPV-AUDIO] avsync: \(String(format: "%.4f", avsync))s, audio_pts: \(String(format: "%.2f", audioPts))s, underruns: \(audioUnderrunCount), buf_events: \(bufferEventCount), buf_time: \(String(format: "%.1f", totalBufferingDuration))s")
             #endif
@@ -1359,6 +1478,103 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
+        // MARK: - Stream Info
+
+        /// Populate static stream info fields (codec, resolution, hwdec, audio params).
+        /// Called once on PLAYBACK_RESTART from mpvQueue. Returns the info for debug logging.
+        @discardableResult
+        private func populateStreamInfo(_ mpv: OpaquePointer) -> StreamInfo {
+            let videoCodec = getMPVString(mpv, "video-codec") ?? ""
+            let audioCodec = getMPVString(mpv, "audio-codec") ?? ""
+            let hwdecCurrent = getMPVString(mpv, "hwdec-current") ?? "none"
+            let pixelFormat = getMPVString(mpv, "video-params/pixelformat") ?? ""
+
+            var videoW: Int64 = 0; var videoH: Int64 = 0
+            mpv_get_property(mpv, "video-params/w", MPV_FORMAT_INT64, &videoW)
+            mpv_get_property(mpv, "video-params/h", MPV_FORMAT_INT64, &videoH)
+
+            var sampleRate: Int64 = 0; var channels: Int64 = 0
+            mpv_get_property(mpv, "audio-params/samplerate", MPV_FORMAT_INT64, &sampleRate)
+            mpv_get_property(mpv, "audio-params/channel-count", MPV_FORMAT_INT64, &channels)
+
+            var fps: Double = 0
+            mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &fps)
+            if fps <= 0 {
+                mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fps)
+            }
+
+            // Also grab initial volatile values
+            var cacheDur: Double = 0; var avsync: Double = 0; var drops: Int64 = 0; var bitrate: Double = 0
+            mpv_get_property(mpv, "demuxer-cache-duration", MPV_FORMAT_DOUBLE, &cacheDur)
+            mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsync)
+            mpv_get_property(mpv, "frame-drop-count", MPV_FORMAT_INT64, &drops)
+            mpv_get_property(mpv, "demuxer-cache-state/raw-input-rate", MPV_FORMAT_DOUBLE, &bitrate)
+
+            let info = StreamInfo(
+                videoCodec: videoCodec,
+                width: Int(videoW),
+                height: Int(videoH),
+                fps: fps,
+                pixelFormat: pixelFormat,
+                hwdec: hwdecCurrent,
+                audioCodec: audioCodec,
+                sampleRate: Int(sampleRate),
+                channels: Int(channels),
+                cacheDuration: cacheDur,
+                bitrate: bitrate,
+                droppedFrames: Int(drops),
+                avsync: avsync
+            )
+
+            let ps = progressStore
+            DispatchQueue.main.async { ps.streamInfo = info }
+            return info
+        }
+
+        /// Refresh volatile stream info (cache, bitrate, drops, sync, fps).
+        /// Called every 2s from the stream info timer on statsQueue.
+        /// Skips the mpv property reads when the overlay is hidden to avoid
+        /// lock contention with the render thread.
+        private func refreshVolatileStreamInfo() {
+            guard let mpv = self.mpv,
+                  progressStore.isStreamInfoVisible else { return }
+            var cacheDur: Double = 0; var avsync: Double = 0
+            var drops: Int64 = 0; var bitrate: Double = 0; var fps: Double = 0
+            mpv_get_property(mpv, "demuxer-cache-duration", MPV_FORMAT_DOUBLE, &cacheDur)
+            mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsync)
+            mpv_get_property(mpv, "frame-drop-count", MPV_FORMAT_INT64, &drops)
+            mpv_get_property(mpv, "demuxer-cache-state/raw-input-rate", MPV_FORMAT_DOUBLE, &bitrate)
+            mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &fps)
+
+            let ps = progressStore
+            DispatchQueue.main.async {
+                ps.streamInfo.cacheDuration = cacheDur
+                ps.streamInfo.bitrate = bitrate
+                ps.streamInfo.droppedFrames = Int(drops)
+                ps.streamInfo.avsync = avsync
+                if fps > 0 { ps.streamInfo.fps = fps }
+            }
+        }
+
+        /// Start the 2-second refresh timer for volatile stream info fields.
+        /// Uses statsQueue (utility QoS) — never renderQueue — to avoid blocking frame delivery.
+        private func startStreamInfoTimer() {
+            streamInfoTimer?.cancel()
+            let timer = DispatchSource.makeTimerSource(queue: statsQueue)
+            timer.schedule(deadline: .now() + 2, repeating: 2)
+            timer.setEventHandler { [weak self] in
+                self?.refreshVolatileStreamInfo()
+            }
+            timer.resume()
+            streamInfoTimer = timer
+        }
+
+        /// Stop the stream info refresh timer.
+        private func stopStreamInfoTimer() {
+            streamInfoTimer?.cancel()
+            streamInfoTimer = nil
+        }
+
         private func getMPVString(_ mpv: OpaquePointer, _ name: String) -> String? {
             var cstr: UnsafeMutablePointer<CChar>?
             guard mpv_get_property(mpv, name, MPV_FORMAT_STRING, &cstr) >= 0, let cstr else { return nil }
@@ -1449,12 +1665,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             _ pictureInPictureController: AVPictureInPictureController
         ) {
             debugLog("🖼️ PiP: starting")
+            DispatchQueue.main.async { self.progressStore.isPiPActive = true }
         }
 
         func pictureInPictureControllerDidStopPictureInPicture(
             _ pictureInPictureController: AVPictureInPictureController
         ) {
             debugLog("🖼️ PiP: stopped")
+            DispatchQueue.main.async { self.progressStore.isPiPActive = false }
         }
     }
 }

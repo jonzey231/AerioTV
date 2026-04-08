@@ -264,6 +264,7 @@ struct ChannelListView: View {
                     .padding(.vertical, 10)
                     #if os(tvOS)
                     .focusSection()
+                    .focusEffectDisabled()
                     #endif
             }
 
@@ -628,6 +629,8 @@ struct ChannelRow: View {
     @State private var isExpanded = false
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
+    @State private var reminderTarget: EPGEntry?
+    @State private var showReminderDialog = false
     #if os(tvOS)
     /// Tracks which part of the row has focus.
     /// Navigation: D-pad LEFT → star, D-pad RIGHT → expand/guide.
@@ -979,37 +982,22 @@ struct ChannelRow: View {
     #endif
 
     // MARK: - Guide Panel (shared iOS + tvOS)
+
+    /// Upcoming programs filtered to exclude the currently-airing program
+    /// (already shown in the channel card header).
+    private var futurePrograms: [EPGEntry] {
+        let now = Date()
+        return upcomingPrograms.filter { entry in
+            guard let end = entry.endTime else { return true }
+            return end > now && (entry.startTime ?? now) > now
+        }
+    }
+
     @ViewBuilder
     private var guidePanel: some View {
         Divider()
             .background(Color.borderSubtle)
             .padding(.horizontal, 14)
-
-        if let program = item.currentProgram {
-            HStack(spacing: 12) {
-                Rectangle()
-                    .fill(Color.accentPrimary)
-                    .frame(width: 2, height: 44)
-                    .cornerRadius(1)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("On Now")
-                        .font(.labelSmall)
-                        .foregroundColor(.accentPrimary)
-                    Text(program)
-                        .font(.bodySmall)
-                        .foregroundColor(.textPrimary)
-                        .lineLimit(1)
-                    if let end = item.currentProgramEnd {
-                        Text("Until \(end, style: .time)")
-                            .font(.labelSmall)
-                            .foregroundColor(.textSecondary)
-                    }
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-        }
 
         if fetchUpcoming != nil {
             if isLoadingUpcoming {
@@ -1021,7 +1009,7 @@ struct ChannelRow: View {
                 }
                 .padding(.horizontal, 14)
                 .padding(.bottom, 8)
-            } else if upcomingPrograms.isEmpty {
+            } else if futurePrograms.isEmpty {
                 HStack(spacing: 6) {
                     Image(systemName: "calendar.badge.exclamationmark")
                         .font(.system(size: 12))
@@ -1035,16 +1023,25 @@ struct ChannelRow: View {
             } else {
                 ScrollView(.vertical, showsIndicators: true) {
                     VStack(spacing: 0) {
-                        ForEach(upcomingPrograms) { entry in
+                        ForEach(futurePrograms) { entry in
                             #if os(tvOS)
                             Button(action: {}) {
-                                epgEntryRow(entry: entry, isLast: entry.id == upcomingPrograms.last?.id)
+                                epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
                             }
                             .buttonStyle(EPGRowButtonStyle())
                             .contextMenu { reminderMenu(for: entry) }
                             #else
-                            epgEntryRow(entry: entry, isLast: entry.id == upcomingPrograms.last?.id)
-                                .contextMenu { reminderMenu(for: entry) }
+                            PressableEPGRow(
+                                entry: entry,
+                                isLast: entry.id == futurePrograms.last?.id,
+                                isFuture: entry.startTime.map { $0 > Date() } ?? false,
+                                channelName: item.name,
+                                rowContent: { epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id) },
+                                onLongPress: {
+                                    reminderTarget = entry
+                                    showReminderDialog = true
+                                }
+                            )
                             #endif
                         }
                     }
@@ -1054,6 +1051,40 @@ struct ChannelRow: View {
                 .focusSection()
                 #endif
                 .padding(.bottom, 4)
+                #if os(iOS)
+                .confirmationDialog(
+                    reminderTarget.flatMap { entry in
+                        entry.startTime.map { start in
+                            ReminderManager.shared.hasReminder(
+                                forKey: ReminderManager.programKey(channelName: item.name, title: entry.title, start: start)
+                            ) ? "Cancel Reminder" : "Set Reminder"
+                        }
+                    } ?? "Set Reminder",
+                    isPresented: $showReminderDialog,
+                    titleVisibility: .visible
+                ) {
+                    if let entry = reminderTarget, let start = entry.startTime {
+                        let key = ReminderManager.programKey(channelName: item.name, title: entry.title, start: start)
+                        if ReminderManager.shared.hasReminder(forKey: key) {
+                            Button("Cancel Reminder", role: .destructive) {
+                                ReminderManager.shared.cancelReminder(forKey: key)
+                            }
+                        } else {
+                            Button("Remind Me 5 Min Before") {
+                                ReminderManager.shared.scheduleReminder(
+                                    programTitle: entry.title,
+                                    channelName: item.name,
+                                    startTime: start
+                                )
+                            }
+                        }
+                    }
+                } message: {
+                    if let entry = reminderTarget {
+                        Text(entry.title)
+                    }
+                }
+                #endif
             }
         }
     }
@@ -1176,6 +1207,21 @@ struct ChannelRow: View {
                     }
                 }
                 Spacer()
+
+                // Bell indicator for programs with active reminders
+                if let start = entry.startTime, start > Date(),
+                   ReminderManager.shared.hasReminder(
+                       forKey: ReminderManager.programKey(channelName: item.name, title: entry.title, start: start)
+                   ) {
+                    Image(systemName: "bell.fill")
+                        #if os(tvOS)
+                        .font(.system(size: 18))
+                        #else
+                        .font(.system(size: 12))
+                        #endif
+                        .foregroundColor(.accentPrimary)
+                        .padding(.trailing, 4)
+                }
             }
             #if os(tvOS)
             .padding(.horizontal, 18)
@@ -1239,6 +1285,41 @@ private struct ConditionalExitCommandModifier: ViewModifier {
 extension View {
     func conditionalExitCommand(isActive: Bool, perform action: @escaping () -> Void) -> some View {
         modifier(ConditionalExitCommandModifier(isActive: isActive, action: action))
+    }
+}
+#endif
+
+// MARK: - Pressable EPG Row (iOS only)
+// Wraps an EPG entry row with a short long-press gesture (0.35s) and
+// visual press feedback (dimming + slight scale). Replaces .contextMenu
+// which doesn't reliably trigger inside nested ScrollViews.
+#if os(iOS)
+private struct PressableEPGRow<Row: View>: View {
+    let entry: EPGEntry
+    let isLast: Bool
+    let isFuture: Bool
+    let channelName: String
+    @ViewBuilder let rowContent: () -> Row
+    let onLongPress: () -> Void
+
+    @State private var isPressed = false
+
+    var body: some View {
+        rowContent()
+            .contentShape(Rectangle())
+            .opacity(isPressed ? 0.5 : 1.0)
+            .scaleEffect(isPressed ? 0.98 : 1.0)
+            .animation(.easeInOut(duration: 0.12), value: isPressed)
+            .onLongPressGesture(minimumDuration: 0.35, pressing: { pressing in
+                if isFuture {
+                    isPressed = pressing
+                }
+            }, perform: {
+                guard isFuture else { return }
+                let generator = UIImpactFeedbackGenerator(style: .medium)
+                generator.impactOccurred()
+                onLongPress()
+            })
     }
 }
 #endif
@@ -1368,29 +1449,31 @@ private struct TVGroupPill: View {
     @FocusState private var isFocused: Bool
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                if let img = systemImage {
-                    Image(systemName: img)
-                        .font(.system(size: 18, weight: .medium))
-                }
-                Text(group)
-                    .font(.system(size: 22, weight: .medium))
+        HStack(spacing: 6) {
+            if let img = systemImage {
+                Image(systemName: img)
+                    .font(.system(size: 18, weight: .medium))
             }
-                .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
-                .padding(.horizontal, 26)
-                .padding(.vertical, 13)
-                .background(
-                    Capsule()
-                        .fill(isSelected ? Color.accentPrimary
-                              : (isFocused ? Color.accentPrimary.opacity(0.25) : Color.elevatedBackground))
-                )
-                .scaleEffect(isFocused ? 1.08 : 1.0)
-                .shadow(color: Color.accentPrimary.opacity(isFocused ? 0.55 : 0), radius: 14)
-                .animation(.easeInOut(duration: 0.15), value: isFocused)
+            Text(group)
+                .font(.system(size: 22, weight: .medium))
         }
-        .buttonStyle(TVNoRingButtonStyle())
+        .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
+        .padding(.horizontal, 26)
+        .padding(.vertical, 13)
+        .background(
+            Capsule()
+                .fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
+        )
+        .overlay(
+            Capsule()
+                .stroke(isFocused && !isSelected ? Color.accentPrimary : Color.clear, lineWidth: 2)
+        )
+        .scaleEffect(isFocused ? 1.05 : 1.0)
+        .opacity(isFocused ? 1.0 : (isSelected ? 1.0 : 0.85))
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+        .focusable(interactions: .activate)
         .focused($isFocused)
+        .onTapGesture { action() }
     }
 }
 

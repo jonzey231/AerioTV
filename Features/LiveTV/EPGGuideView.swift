@@ -1051,13 +1051,24 @@ private struct GuideProgramButton: View {
     @FocusState private var isFocused: Bool
     #endif
 
+    private var hasReminder: Bool {
+        isFutureProgram && reminderManager.hasReminder(forKey: reminderKey)
+    }
+
     private var cellContent: some View {
         VStack(alignment: .leading, spacing: 2) {
             #if os(tvOS)
-            Text(prog.title)
-                .font(.system(size: 26, weight: .semibold))
-                .foregroundColor(isFocused ? .white : .textPrimary)
-                .lineLimit(1)
+            HStack(spacing: 4) {
+                Text(prog.title)
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundColor(isFocused ? .white : .textPrimary)
+                    .lineLimit(1)
+                if hasReminder {
+                    Image(systemName: "bell.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(isFocused ? .white : .accentPrimary)
+                }
+            }
             if !prog.description.isEmpty {
                 Text(prog.description)
                     .font(.system(size: 18))
@@ -1068,10 +1079,17 @@ private struct GuideProgramButton: View {
                 .font(.system(size: 17))
                 .foregroundColor(isFocused ? .white.opacity(0.6) : .textTertiary)
             #else
-            Text(prog.title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(.textPrimary)
-                .lineLimit(1)
+            HStack(spacing: 4) {
+                Text(prog.title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.textPrimary)
+                    .lineLimit(1)
+                if hasReminder {
+                    Image(systemName: "bell.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(.accentPrimary)
+                }
+            }
             if !prog.description.isEmpty {
                 Text(prog.description)
                     .font(.system(size: 10))

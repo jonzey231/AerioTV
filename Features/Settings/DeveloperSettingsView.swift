@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -7,6 +8,7 @@ import UIKit
 
 struct DeveloperSettingsView: View {
     @AppStorage("debugLoggingEnabled") private var debugLoggingEnabled = false
+    @Query private var servers: [ServerConnection]
 
     @State private var showEnableConfirmation = false
     @State private var showDisableConfirmation = false
@@ -14,7 +16,6 @@ struct DeveloperSettingsView: View {
     @State private var showClearConfirmation = false
     @State private var showLogViewer = false
     @State private var logSize = "Empty"
-
     private let logger = DebugLogger.shared
 
     var body: some View {
@@ -191,12 +192,11 @@ struct DeveloperSettingsView: View {
                     Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
-                        .padding(.top, 4)
                 }
                 #if os(iOS)
                 .listSectionSeparator(.hidden)
                 #endif
-                .listRowBackground(Color.cardBackground)
+
             }
             #if os(iOS)
             .listStyle(.insetGrouped)

@@ -58,6 +58,24 @@ struct MediaTrack: Identifiable, Equatable {
     }
 }
 
+// MARK: - Stream Info
+
+struct StreamInfo: Equatable {
+    var videoCodec: String = ""
+    var width: Int = 0
+    var height: Int = 0
+    var fps: Double = 0
+    var pixelFormat: String = ""
+    var hwdec: String = ""
+    var audioCodec: String = ""
+    var sampleRate: Int = 0
+    var channels: Int = 0
+    var cacheDuration: Double = 0
+    var bitrate: Double = 0       // bytes/sec from demuxer
+    var droppedFrames: Int = 0
+    var avsync: Double = 0
+}
+
 // MARK: - Player Progress Store
 // @unchecked Sendable: all @Published mutations dispatched to main queue manually.
 final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
@@ -95,6 +113,12 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var togglePiPAction: (() -> Void)?
     /// Whether PiP is currently active.
     @Published var isPiPActive: Bool = false
+    /// Stream technical info (codec, resolution, bitrate, etc.)
+    @Published var streamInfo = StreamInfo()
+    /// When true, the stream info overlay is visible and the volatile
+    /// stats timer should be running. When false, the timer is paused
+    /// to avoid mpv lock contention that causes frame-delivery jitter.
+    var isStreamInfoVisible: Bool = false
 
     static let speedOptions: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 }
@@ -263,6 +287,18 @@ struct PlayerView: View {
 
 
 // MARK: - Player Root View
+#if os(tvOS)
+/// Focus targets for the tvOS player — SwiftUI's native focus system
+/// replaces TVRemoteInputView so the player reliably captures focus
+/// from the guide/channel list behind it.
+enum TVPlayerFocus: Hashable {
+    case background   // invisible layer when controls are hidden
+    case gearIcon     // options pill when controls are visible
+    case playPause    // center play/pause button
+    case optionsPanel // inside the options popup
+}
+#endif
+
 private struct PlayerRootView: View {
     let urls: [URL]
     let title: String
@@ -289,6 +325,23 @@ private struct PlayerRootView: View {
     @State private var controlsHideTask: Task<Void, Never>?
     @State private var dragOffset: CGFloat = 0
     // Resume prompt removed — no DVR.
+
+    // Sleep timer
+    @State private var sleepTimerEnd: Date?
+
+    // Stream info
+    @State private var showStreamInfo = false
+    #if os(iOS)
+    /// User-draggable position for the stream info overlay (nil = default top-center).
+    @State private var streamInfoPosition: CGPoint?
+    #endif
+
+    #if os(tvOS)
+    /// tvOS Player Options overlay (shown via gear icon or long-press Select).
+    @State private var showTVOptions = false
+    /// Focus target for tvOS — drives which element receives Siri Remote input.
+    @FocusState private var tvFocus: TVPlayerFocus?
+    #endif
 
     // Timeline / scrubber
     @StateObject private var progressStore = PlayerProgressStore()
@@ -347,80 +400,60 @@ private struct PlayerRootView: View {
                             .transition(.opacity)
                     }
 
+                    // Stream info overlay — visible when toggled, independent of controls auto-hide
+                    if showStreamInfo {
+                        #if os(iOS)
+                        GeometryReader { geo in
+                            let defaultPos = CGPoint(
+                                x: geo.size.width / 2,
+                                y: deviceSafeAreaTop + 70
+                            )
+                            let pos = streamInfoPosition ?? defaultPos
+                            streamInfoOverlay
+                                .position(pos)
+                                .gesture(
+                                    DragGesture()
+                                        .onChanged { value in
+                                            streamInfoPosition = value.location
+                                        }
+                                )
+                        }
+                        .transition(.opacity)
+                        #else
+                        VStack {
+                            streamInfoOverlay
+                                .padding(.top, deviceSafeAreaTop + 24)
+                            Spacer()
+                        }
+                        .transition(.opacity)
+                        .allowsHitTesting(false)
+                        #endif
+                    }
+
                     #if os(tvOS)
-                    // tvOS: UIKit press handler — captures all Siri Remote input with
-                    // proper pressesBegan/pressesEnded for reliable hold-to-scrub.
-                    TVRemoteInputView(
-                        onLeftHold: { holding in
-                            isScrubbing = holding
-                            if holding {
-                                withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
-                            } else {
-                                scheduleControlsHide()
-                            }
-                        },
-                        onRightHold: { holding in
-                            isScrubbing = holding
-                            if holding {
-                                withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
-                            } else {
-                                scheduleControlsHide()
-                            }
-                        },
-                        onSeek: { seekMs in
-                            guard !isLive, progressStore.durationMs > 0 else { return }
-                            let target = max(0, min(progressStore.durationMs, progressStore.currentMs + seekMs))
-                            progressStore.seekAction?(target)
-                        },
-                        onUp: {
+                    // tvOS: SwiftUI-native input layer — truly invisible focusable
+                    // surface that captures Siri Remote input when controls are hidden.
+                    // Always present (avoids view create/destroy lag) but only focusable
+                    // when controls are hidden.
+                    Color.clear
+                        .focusable(!showControls && !NowPlayingManager.shared.isMinimized)
+                        .focused($tvFocus, equals: .background)
+                        .onMoveCommand { direction in
                             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
                             scheduleControlsHide()
                             if !isLive {
-                                let speeds = PlayerProgressStore.speedOptions
-                                let idx = speeds.firstIndex(of: progressStore.speed) ?? 2
-                                progressStore.setSpeedAction?(speeds[(idx + 1) % speeds.count])
-                            }
-                        },
-                        onDown: {
-                            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
-                            scheduleControlsHide()
-                            if !progressStore.subtitleTracks.isEmpty {
-                                let cur = progressStore.currentSubtitleTrackID
-                                if cur == 0 {
-                                    progressStore.setSubtitleTrackAction?(progressStore.subtitleTracks[0].id)
-                                } else if let i = progressStore.subtitleTracks.firstIndex(where: { $0.id == cur }),
-                                          i + 1 < progressStore.subtitleTracks.count {
-                                    progressStore.setSubtitleTrackAction?(progressStore.subtitleTracks[i + 1].id)
-                                } else {
-                                    progressStore.setSubtitleTrackAction?(0)
+                                if direction == .left {
+                                    progressStore.seekAction?(max(0, progressStore.currentMs - 10_000))
+                                } else if direction == .right {
+                                    let target = progressStore.durationMs > 0
+                                        ? min(progressStore.durationMs, progressStore.currentMs + 10_000)
+                                        : progressStore.currentMs + 10_000
+                                    progressStore.seekAction?(target)
                                 }
                             }
-                        },
-                        onSelect: {
-                            if showControls {
-                                progressStore.togglePauseAction?()
-                                if !progressStore.isPaused { scheduleControlsHide() }
-                            } else {
-                                withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
-                                scheduleControlsHide()
-                            }
-                        },
-                        onPlayPause: {
-                            progressStore.togglePauseAction?()
-                            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
-                            if !progressStore.isPaused { scheduleControlsHide() }
-                        },
-                        onMenu: {
-                            if showControls {
-                                withAnimation(.easeInOut(duration: 0.2)) { showControls = false }
-                            } else if let minimize = onMinimize {
-                                minimize()
-                            } else {
-                                onDismiss()
-                            }
                         }
-                    )
-                    .ignoresSafeArea()
+                        .ignoresSafeArea()
+
                     #else
                     // iOS: transparent tap layer — toggles controls on tap.
                     Color.clear
@@ -487,22 +520,28 @@ private struct PlayerRootView: View {
         )
         #endif
         .task { await startPlayback() }
+        .task(id: sleepTimerEnd) {
+            // Sleep timer countdown — checks every 30s, pauses playback when expired
+            guard let end = sleepTimerEnd else { return }
+            while true {
+                let remaining = end.timeIntervalSince(Date())
+                if remaining <= 0 {
+                    progressStore.togglePauseAction?()
+                    sleepTimerEnd = nil
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 30_000_000_000) // 30s
+            }
+        }
         .preferredColorScheme(.dark)
         #if os(iOS)
         .statusBarHidden(!showControls)
         #endif
         #if os(tvOS)
-        // Focus section isolates the player from tab content behind it
         .focusSection()
         #endif
         .onAppear {
             scheduleControlsHide()
-            #if os(tvOS)
-            // Grab focus from the guide/channel list behind the player ZStack overlay.
-            // Without this, the guide retains focus and d-pad scrolls channels instead
-            // of showing media controls.
-            // TVRemoteInputView grabs focus automatically via canBecomeFocused
-            #endif
         }
         .onChange(of: progressStore.isPaused) { _, isPaused in
             if isPaused {
@@ -512,6 +551,44 @@ private struct PlayerRootView: View {
                 scheduleControlsHide()
             }
         }
+        .onChange(of: showStreamInfo) { _, visible in
+            // Bridge to the coordinator so the volatile stats timer
+            // only runs while the overlay is visible — avoids mpv
+            // lock contention that causes frame-delivery jitter.
+            progressStore.isStreamInfoVisible = visible
+        }
+        #if os(tvOS)
+        .onChange(of: showControls) { _, visible in
+            // Drive focus between the invisible background capture layer
+            // (when controls are hidden) and the gear icon (when visible).
+            tvFocus = visible ? .gearIcon : .background
+        }
+        .onChange(of: showTVOptions) { _, showing in
+            // Panel's own @FocusState + onAppear handles focus when opening.
+            // When closing, return focus to the Options pill.
+            if !showing { tvFocus = .gearIcon }
+        }
+        .onAppear { tvFocus = showControls ? .gearIcon : .background }
+        // Handle Menu/Back and Play/Pause at the player level so they
+        // work regardless of which element currently has focus.
+        .onExitCommand {
+            if showTVOptions {
+                withAnimation(.easeInOut(duration: 0.2)) { showTVOptions = false }
+                scheduleControlsHide()
+            } else if showControls {
+                withAnimation(.easeInOut(duration: 0.2)) { showControls = false }
+            } else if let minimize = onMinimize {
+                minimize()
+            } else {
+                onDismiss()
+            }
+        }
+        .onPlayPauseCommand {
+            progressStore.togglePauseAction?()
+            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+            if !progressStore.isPaused { scheduleControlsHide() }
+        }
+        #endif
     }
 
     // MARK: - Loading
@@ -570,6 +647,18 @@ private struct PlayerRootView: View {
             .safeAreaInsets.top ?? 44
         #else
         60   // tvOS has no notch / Dynamic Island
+        #endif
+    }
+
+    private var deviceSafeAreaLeading: CGFloat {
+        #if os(iOS)
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow }?
+            .safeAreaInsets.left ?? 0
+        #else
+        0
         #endif
     }
 
@@ -714,6 +803,78 @@ private struct PlayerRootView: View {
     // MARK: - Bottom controls (timeline + skip buttons)
     private var bottomControls: some View {
         VStack(spacing: 10) {
+            #if os(tvOS)
+            // Options pill + popup — anchored to bottom-right (hidden in mini player)
+            if !NowPlayingManager.shared.isMinimized {
+            HStack {
+                Spacer()
+                ZStack(alignment: .bottomTrailing) {
+                    // Popup panel — extends upward from the pill
+                    if showTVOptions {
+                        TVPlayerOptionsPanel(
+                            audioTracks: progressStore.audioTracks,
+                            currentAudioTrackID: progressStore.currentAudioTrackID,
+                            subtitleTracks: progressStore.subtitleTracks,
+                            currentSubtitleTrackID: progressStore.currentSubtitleTrackID,
+                            speed: progressStore.speed,
+                            isLive: isLive,
+                            sleepTimerEnd: $sleepTimerEnd,
+                            showStreamInfo: $showStreamInfo,
+                            setAudioTrack: { progressStore.setAudioTrackAction?($0) },
+                            setSubtitleTrack: { progressStore.setSubtitleTrackAction?($0) },
+                            setSpeed: { progressStore.setSpeedAction?($0) },
+                            onDismiss: {
+                                withAnimation(.easeInOut(duration: 0.15)) { showTVOptions = false }
+                                scheduleControlsHide()
+                            }
+                        )
+                        .focusSection()
+                        // Back/Menu inside the panel closes it (not the app)
+                        .onExitCommand {
+                            withAnimation(.easeInOut(duration: 0.15)) { showTVOptions = false }
+                            scheduleControlsHide()
+                        }
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .padding(.bottom, 48) // offset above the pill
+                    }
+
+                    // Options pill / hint
+                    if showTVOptions {
+                        // Hint text when panel is open
+                        Text("Press \(Image(systemName: "chevron.left")) to close")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.white.opacity(0.5))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                    } else {
+                        // Options pill button
+                        Button {
+                            controlsHideTask?.cancel()
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                                showTVOptions = true
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "slider.horizontal.3")
+                                    .font(.system(size: 16, weight: .semibold))
+                                Text("Options")
+                                    .font(.system(size: 16, weight: .semibold))
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 10)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 1))
+                        }
+                        .buttonStyle(TVNoHighlightButtonStyle())
+                        .focusEffectDisabled()
+                        .focused($tvFocus, equals: .gearIcon)
+                    }
+                }
+            }
+            } // if !isMinimized
+            #endif
+
             // Live streams: program progress bar. VOD: scrubber + skip buttons.
             if isLive {
                 liveProgressSection
@@ -919,41 +1080,13 @@ private struct PlayerRootView: View {
                     Spacer()
 
                     HStack(spacing: 10) {
-                        // Audio track selector — only when multiple tracks
-                        if progressStore.audioTracks.count > 1 {
-                            audioTrackMenu
-                        }
-
-                        // Subtitle track selector — only when subs available
-                        if !progressStore.subtitleTracks.isEmpty {
-                            subtitleTrackMenu
-                        }
-
-                        // Playback speed (VOD only — live streams always 1x)
-                        if !isLive {
-                            speedButton
-                        }
+                        #if os(iOS)
+                        // Overflow menu — all secondary controls
+                        playerOverflowMenu
+                        #endif
 
                         #if os(iOS)
-                        // Audio-only toggle (iOS only)
-                        liquidButton(
-                            systemName: isAudioOnly ? "video.fill" : "music.note",
-                            tint: isAudioOnly ? Color.accentPrimary : .white
-                        ) {
-                            withAnimation(.spring(response: 0.3)) { isAudioOnly.toggle() }
-                        }
-
-                        // Picture-in-Picture
-                        if progressStore.togglePiPAction != nil {
-                            liquidButton(
-                                systemName: progressStore.isPiPActive ? "pip.exit" : "pip.enter",
-                                tint: progressStore.isPiPActive ? Color.accentPrimary : .white
-                            ) {
-                                progressStore.togglePiPAction?()
-                            }
-                        }
-
-                        // AirPlay
+                        // AirPlay — always visible (system routing control)
                         ZStack {
                             Circle()
                                 .fill(.ultraThinMaterial)
@@ -984,15 +1117,38 @@ private struct PlayerRootView: View {
 
             // Center play/pause button
             centerPlayPauseButton
-
-            #if os(tvOS)
-            // D-pad control hints
-            tvRemoteHints
-            #endif
         }
     }
 
-    // MARK: - Audio Track Menu
+    // MARK: - Player Overflow Menu (ellipsis)
+
+    private var playerOverflowMenu: some View {
+        PlayerOverflowMenu(
+            audioTracks: progressStore.audioTracks,
+            currentAudioTrackID: progressStore.currentAudioTrackID,
+            subtitleTracks: progressStore.subtitleTracks,
+            currentSubtitleTrackID: progressStore.currentSubtitleTrackID,
+            speed: progressStore.speed,
+            isLive: isLive,
+            isPiPActive: progressStore.isPiPActive,
+            hasPiP: progressStore.togglePiPAction != nil,
+            sleepTimerEnd: sleepTimerEnd,
+            showStreamInfo: showStreamInfo,
+            isAudioOnly: isAudioOnly,
+            setAudioTrack: { [weak progressStore] in progressStore?.setAudioTrackAction?($0) },
+            setSubtitleTrack: { [weak progressStore] in progressStore?.setSubtitleTrackAction?($0) },
+            setSpeed: { [weak progressStore] in progressStore?.setSpeedAction?($0) },
+            togglePiP: { [weak progressStore] in progressStore?.togglePiPAction?() },
+            setSleepTimer: { sleepTimerEnd = $0 },
+            toggleStreamInfo: { withAnimation(.easeInOut(duration: 0.2)) { showStreamInfo.toggle() } },
+            toggleAudioOnly: { withAnimation(.spring(response: 0.3)) { isAudioOnly.toggle() } },
+            onMenuOpen: { controlsHideTask?.cancel() },
+            onMenuClose: { if !progressStore.isPaused { scheduleControlsHide() } }
+        )
+        .equatable()
+    }
+
+    // MARK: - Audio Track Menu (legacy — now used inside overflow menu)
 
     private var audioTrackMenu: some View {
         Menu {
@@ -1081,6 +1237,132 @@ private struct PlayerRootView: View {
         #endif
     }
 
+    // MARK: - Sleep Timer Menu
+
+    private var sleepTimerMenu: some View {
+        Menu {
+            if sleepTimerEnd != nil {
+                Button(role: .destructive) {
+                    sleepTimerEnd = nil
+                } label: {
+                    Label("Cancel Timer", systemImage: "xmark")
+                }
+            }
+            ForEach([30, 60, 90, 120], id: \.self) { minutes in
+                Button {
+                    sleepTimerEnd = Date().addingTimeInterval(Double(minutes) * 60)
+                } label: {
+                    Label("\(minutes) minutes", systemImage: minutes == 30 ? "moon" : minutes == 60 ? "moon.fill" : minutes == 90 ? "moon.stars" : "moon.stars.fill")
+                }
+            }
+        } label: {
+            VStack(spacing: 2) {
+                Image(systemName: sleepTimerEnd != nil ? "moon.zzz.fill" : "moon.zzz")
+                    #if os(tvOS)
+                    .font(.system(size: 28, weight: .semibold))
+                    #else
+                    .font(.system(size: 19, weight: .semibold))
+                    #endif
+                    .foregroundColor(sleepTimerEnd != nil ? Color.accentPrimary : .white)
+
+                if let remaining = sleepTimerRemainingText {
+                    Text(remaining)
+                        #if os(tvOS)
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        #else
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        #endif
+                        .foregroundColor(Color.accentPrimary)
+                }
+            }
+            #if os(tvOS)
+            .frame(width: 64, height: 64)
+            #else
+            .frame(width: 52, height: 52)
+            #endif
+            .background(.ultraThinMaterial, in: Circle())
+            .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+            .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+        }
+    }
+
+    private var sleepTimerRemainingText: String? {
+        guard let end = sleepTimerEnd else { return nil }
+        let remaining = end.timeIntervalSince(Date())
+        guard remaining > 0 else { return nil }
+        let mins = Int(remaining / 60)
+        if mins >= 60 {
+            let h = mins / 60
+            let m = mins % 60
+            return m > 0 ? "\(h)h\(m)m" : "\(h)h"
+        }
+        return "\(mins)m"
+    }
+
+    // MARK: - Stream Info Overlay
+
+    private var streamInfoOverlay: some View {
+        let info = progressStore.streamInfo
+        return VStack(alignment: .leading, spacing: 6) {
+            streamInfoRow(label: "VIDEO", value: "\(info.videoCodec)  \(info.width)×\(info.height)")
+            streamInfoRow(label: "", value: "\(String(format: "%.2f", info.fps))fps  \(info.pixelFormat)")
+            streamInfoRow(label: "", value: "hwdec: \(info.hwdec)")
+            streamInfoRow(label: "AUDIO", value: "\(info.audioCodec)  \(info.sampleRate)Hz  \(info.channels)ch")
+            streamInfoRow(label: "CACHE", value: "\(String(format: "%.1f", info.cacheDuration))s  \(formatBitrate(info.bitrate))")
+            streamInfoRow(label: "SYNC", value: "\(String(format: "%.3f", info.avsync))s  drops: \(info.droppedFrames)")
+        }
+        #if os(tvOS)
+        .padding(20)
+        #else
+        .padding(12)
+        #endif
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+    }
+
+    private func streamInfoRow(label: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            if !label.isEmpty {
+                Text(label)
+                    #if os(tvOS)
+                    .font(.system(size: 14, weight: .bold, design: .monospaced))
+                    #else
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    #endif
+                    .foregroundColor(Color.accentPrimary)
+                    .frame(width: 46, alignment: .trailing)
+            } else {
+                Color.clear
+                    #if os(tvOS)
+                    .frame(width: 46, height: 1)
+                    #else
+                    .frame(width: 46, height: 1)
+                    #endif
+            }
+            Text(value)
+                #if os(tvOS)
+                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                #else
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                #endif
+                .foregroundColor(.white.opacity(0.9))
+        }
+    }
+
+    private func formatBitrate(_ bytesPerSec: Double) -> String {
+        let mbps = bytesPerSec * 8.0 / 1_000_000.0
+        if mbps >= 1.0 {
+            return String(format: "%.1f Mbps", mbps)
+        } else {
+            return String(format: "%.0f kbps", mbps * 1000)
+        }
+    }
+
     private func liquidButton(
         systemName: String,
         tint: Color = .white,
@@ -1145,6 +1427,7 @@ private struct PlayerRootView: View {
         }
         #if os(tvOS)
         .buttonStyle(TVNoRingButtonStyle())
+        .focused($tvFocus, equals: .playPause)
         #endif
         .animation(.easeInOut(duration: 0.15), value: progressStore.isPaused)
     }
@@ -1204,6 +1487,386 @@ private struct PlayerRootView: View {
     }
     #endif
 }
+
+// MARK: - Player Overflow Menu (isolated from rapid progress updates)
+
+/// Extracted into its own Equatable view so that high-frequency
+/// `PlayerProgressStore` publishes (position, stream-info, buffer) don't
+/// cause the system Menu popover to flicker.  SwiftUI skips re-rendering
+/// when all Equatable inputs are unchanged.
+struct PlayerOverflowMenu: View, Equatable {
+    // Value properties — used for rendering AND equality comparison.
+    let audioTracks: [MediaTrack]
+    let currentAudioTrackID: Int
+    let subtitleTracks: [MediaTrack]
+    let currentSubtitleTrackID: Int
+    let speed: Double
+    let isLive: Bool
+    let isPiPActive: Bool
+    let hasPiP: Bool
+    let sleepTimerEnd: Date?
+    let showStreamInfo: Bool
+    let isAudioOnly: Bool
+
+    // Action closures — excluded from equality check.
+    var setAudioTrack: ((Int) -> Void)?
+    var setSubtitleTrack: ((Int) -> Void)?
+    var setSpeed: ((Double) -> Void)?
+    var togglePiP: (() -> Void)?
+    var setSleepTimer: ((Date?) -> Void)?
+    var toggleStreamInfo: (() -> Void)?
+    var toggleAudioOnly: (() -> Void)?
+    var onMenuOpen: (() -> Void)?
+    var onMenuClose: (() -> Void)?
+
+    // Only compare the data that affects rendering — skip closures.
+    nonisolated static func == (lhs: PlayerOverflowMenu, rhs: PlayerOverflowMenu) -> Bool {
+        lhs.audioTracks == rhs.audioTracks &&
+        lhs.currentAudioTrackID == rhs.currentAudioTrackID &&
+        lhs.subtitleTracks == rhs.subtitleTracks &&
+        lhs.currentSubtitleTrackID == rhs.currentSubtitleTrackID &&
+        lhs.speed == rhs.speed &&
+        lhs.isLive == rhs.isLive &&
+        lhs.isPiPActive == rhs.isPiPActive &&
+        lhs.hasPiP == rhs.hasPiP &&
+        lhs.sleepTimerEnd == rhs.sleepTimerEnd &&
+        lhs.showStreamInfo == rhs.showStreamInfo &&
+        lhs.isAudioOnly == rhs.isAudioOnly
+    }
+
+    private var sleepTimerRemainingText: String? {
+        guard let end = sleepTimerEnd else { return nil }
+        let remaining = end.timeIntervalSince(Date())
+        guard remaining > 0 else { return nil }
+        let mins = Int(remaining / 60)
+        if mins >= 60 {
+            let h = mins / 60
+            let m = mins % 60
+            return m > 0 ? "\(h)h\(m)m" : "\(h)h"
+        }
+        return "\(mins)m"
+    }
+
+    var body: some View {
+        Menu {
+            Group {
+                // Audio track (sub-menu, only when multiple)
+                if audioTracks.count > 1 {
+                    Menu {
+                        ForEach(audioTracks) { track in
+                            Button {
+                                setAudioTrack?(track.id)
+                            } label: {
+                                if track.id == currentAudioTrackID {
+                                    Label(track.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(track.displayName)
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Audio Track", systemImage: "waveform.circle")
+                    }
+                }
+
+                // Subtitles (sub-menu, only when available)
+                if !subtitleTracks.isEmpty {
+                    Menu {
+                        Button {
+                            setSubtitleTrack?(0)
+                        } label: {
+                            if currentSubtitleTrackID == 0 {
+                                Label("Off", systemImage: "checkmark")
+                            } else {
+                                Text("Off")
+                            }
+                        }
+                        ForEach(subtitleTracks) { track in
+                            Button {
+                                setSubtitleTrack?(track.id)
+                            } label: {
+                                if track.id == currentSubtitleTrackID {
+                                    Label(track.displayName, systemImage: "checkmark")
+                                } else {
+                                    Text(track.displayName)
+                                }
+                            }
+                        }
+                    } label: {
+                        Label {
+                            if currentSubtitleTrackID != 0,
+                               let track = subtitleTracks.first(where: { $0.id == currentSubtitleTrackID }) {
+                                Text("Subtitles: \(track.displayName)")
+                            } else {
+                                Text("Subtitles")
+                            }
+                        } icon: {
+                            Image(systemName: "captions.bubble")
+                        }
+                    }
+                }
+
+                // Playback speed (VOD only)
+                if !isLive {
+                    let speeds = PlayerProgressStore.speedOptions
+                    Menu {
+                        ForEach(speeds, id: \.self) { spd in
+                            Button {
+                                setSpeed?(spd)
+                            } label: {
+                                let label = spd == 1.0 ? "Normal" : "\(String(format: "%g", spd))x"
+                                if spd == speed {
+                                    Label(label, systemImage: "checkmark")
+                                } else {
+                                    Text(label)
+                                }
+                            }
+                        }
+                    } label: {
+                        let speedLabel = speed == 1.0 ? "1x" : "\(String(format: "%g", speed))x"
+                        Label("Speed: \(speedLabel)", systemImage: "gauge.with.dots.needle.67percent")
+                    }
+                }
+
+                Divider()
+
+                // Sleep timer (sub-menu)
+                Menu {
+                    if sleepTimerEnd != nil {
+                        Button(role: .destructive) {
+                            setSleepTimer?(nil)
+                        } label: {
+                            Label("Cancel Timer", systemImage: "xmark")
+                        }
+                        Divider()
+                    }
+                    ForEach([30, 60, 90, 120], id: \.self) { minutes in
+                        Button {
+                            setSleepTimer?(Date().addingTimeInterval(Double(minutes) * 60))
+                        } label: {
+                            Text("\(minutes) minutes")
+                        }
+                    }
+                } label: {
+                    if let remaining = sleepTimerRemainingText {
+                        Label("Sleep Timer: \(remaining)", systemImage: "moon.zzz.fill")
+                    } else {
+                        Label("Sleep Timer", systemImage: "moon.zzz")
+                    }
+                }
+
+                // Stream info (toggle)
+                Button {
+                    toggleStreamInfo?()
+                } label: {
+                    Label(
+                        showStreamInfo ? "Hide Stream Info" : "Stream Info",
+                        systemImage: showStreamInfo ? "info.circle.fill" : "info.circle"
+                    )
+                }
+
+                #if os(iOS)
+                Divider()
+
+                // Audio only
+                Button {
+                    toggleAudioOnly?()
+                } label: {
+                    Label(
+                        isAudioOnly ? "Show Video" : "Audio Only",
+                        systemImage: isAudioOnly ? "video.fill" : "music.note"
+                    )
+                }
+
+                // Picture-in-Picture
+                if hasPiP {
+                    Button {
+                        togglePiP?()
+                    } label: {
+                        Label(
+                            isPiPActive ? "Exit Picture in Picture" : "Picture in Picture",
+                            systemImage: isPiPActive ? "pip.exit" : "pip.enter"
+                        )
+                    }
+                }
+                #endif
+            }
+            #if os(iOS)
+            // Cancel auto-hide while the menu popover is open so the
+            // anchor view stays in the hierarchy and items remain tappable.
+            .onAppear { onMenuOpen?() }
+            .onDisappear { onMenuClose?() }
+            #endif
+        } label: {
+            Image(systemName: "ellipsis")
+                #if os(tvOS)
+                .font(.system(size: 28, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 64, height: 64)
+                #else
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 52, height: 52)
+                #endif
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+        }
+    }
+}
+
+// MARK: - tvOS Player Options Sheet
+
+#if os(tvOS)
+/// Full-screen options sheet presented on tvOS when the user presses Select
+/// while player controls are visible. Provides audio, subtitle, speed,
+/// sleep timer, and stream info toggles in a focusable list.
+/// Compact floating options panel that extends upward from the Options pill.
+struct TVPlayerOptionsPanel: View {
+    let audioTracks: [MediaTrack]
+    let currentAudioTrackID: Int
+    let subtitleTracks: [MediaTrack]
+    let currentSubtitleTrackID: Int
+    let speed: Double
+    let isLive: Bool
+
+    @Binding var sleepTimerEnd: Date?
+    @Binding var showStreamInfo: Bool
+
+    var setAudioTrack: ((Int) -> Void)?
+    var setSubtitleTrack: ((Int) -> Void)?
+    var setSpeed: ((Double) -> Void)?
+    var onDismiss: (() -> Void)?
+
+    /// Internal focus state — the first item gets focus when the panel appears.
+    @FocusState private var panelFocus: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                audioSection
+                subtitleSection
+                if !isLive { speedSection }
+                sleepTimerSection
+                streamInfoButton
+            }
+            .padding(20)
+        }
+        .focusEffectDisabled()
+        .frame(width: 420)
+        .frame(maxHeight: 500)
+        .background(Color.black.opacity(0.92), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.6), radius: 16, y: 6)
+        .onAppear {
+            // Explicitly set focus to the first item after the panel is laid out
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                panelFocus = "first"
+            }
+        }
+    }
+
+    // MARK: - Sections
+
+    @ViewBuilder private var audioSection: some View {
+        if audioTracks.count > 1 {
+            sectionHeader("Audio Track")
+            ForEach(audioTracks) { track in
+                optionRow(text: track.displayName, isSelected: track.id == currentAudioTrackID) {
+                    setAudioTrack?(track.id); onDismiss?()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var subtitleSection: some View {
+        if !subtitleTracks.isEmpty {
+            sectionHeader("Subtitles")
+            optionRow(text: "Off", isSelected: currentSubtitleTrackID == 0) {
+                setSubtitleTrack?(0); onDismiss?()
+            }
+            ForEach(subtitleTracks) { track in
+                optionRow(text: track.displayName, isSelected: track.id == currentSubtitleTrackID) {
+                    setSubtitleTrack?(track.id); onDismiss?()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var speedSection: some View {
+        sectionHeader("Speed")
+        ForEach(PlayerProgressStore.speedOptions, id: \.self) { spd in
+            let selected = spd == speed
+            optionRow(
+                text: spd == 1.0 ? "Normal" : "\(String(format: "%g", spd))x",
+                isSelected: selected
+            ) {
+                setSpeed?(spd); onDismiss?()
+            }
+        }
+    }
+
+    @ViewBuilder private var sleepTimerSection: some View {
+        sectionHeader("Sleep Timer")
+        if sleepTimerEnd != nil {
+            optionRow(text: "Cancel Timer", isSelected: false) {
+                sleepTimerEnd = nil; onDismiss?()
+            }
+        }
+        ForEach([30, 60, 90, 120], id: \.self) { mins in
+            optionRow(text: "\(mins) minutes", isSelected: false) {
+                sleepTimerEnd = Date().addingTimeInterval(Double(mins) * 60); onDismiss?()
+            }
+        }
+    }
+
+    private var streamInfoButton: some View {
+        Button { showStreamInfo.toggle(); onDismiss?() } label: {
+            HStack(spacing: 6) {
+                Image(systemName: showStreamInfo ? "info.circle.fill" : "info.circle").font(.system(size: 15))
+                Text(showStreamInfo ? "Hide Stream Info" : "Stream Info").font(.system(size: 15, weight: .medium))
+            }
+            .foregroundColor(.white.opacity(0.8))
+            .padding(.horizontal, 14).padding(.vertical, 6)
+            .background(Color.white.opacity(0.1), in: Capsule())
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focusEffectDisabled()
+        .focused($panelFocus, equals: "first")
+    }
+
+    private func sectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundColor(.white.opacity(0.45))
+            .textCase(.uppercase)
+    }
+
+    private func optionRow(text: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(text)
+                    .font(.system(size: 17, weight: isSelected ? .semibold : .regular))
+                    .foregroundColor(.white)
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.accentPrimary)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(isSelected ? Color.white.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focusEffectDisabled()
+    }
+}
+#endif
 
 
 // MARK: - AirPlay Route Picker Button
@@ -1295,12 +1958,21 @@ struct TVRemoteInputView: UIViewRepresentable {
 
         override var canBecomeFocused: Bool { true }
 
+        // Explicitly declare self as the preferred focus target so the
+        // tvOS focus engine doesn't fall through to views behind the player.
+        override var preferredFocusEnvironments: [UIFocusEnvironment] { [self] }
+
         override func didMoveToWindow() {
             super.didMoveToWindow()
             if window != nil {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                    self?.setNeedsFocusUpdate()
-                    self?.updateFocusIfNeeded()
+                // Retry focus grab — the first attempt may lose to views
+                // that are already in the hierarchy (e.g. the guide).
+                for delay in [0.15, 0.5, 1.0] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                        guard let self, self.window != nil, !self.isFocused else { return }
+                        self.setNeedsFocusUpdate()
+                        self.updateFocusIfNeeded()
+                    }
                 }
             }
         }

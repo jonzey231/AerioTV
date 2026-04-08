@@ -138,8 +138,9 @@ struct AerioApp: App {
                 #if os(iOS)
                 NetworkMonitor.shared.refresh()
                 #endif
-                // Start iCloud sync if enabled
+                // Start iCloud sync if enabled and pull latest data
                 SyncManager.shared.startObserving()
+                SyncManager.shared.pullFromCloud()
                 #if os(tvOS)
                 // Re-probe LAN on every foreground so switching networks is detected
                 // (servers read from SwiftData in RootView, probed there on change)

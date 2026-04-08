@@ -1253,21 +1253,8 @@ struct MainTabView: View {
                         .padding(.top, minimized ? 40 : 0)
 
                         // Stop button — only visible when minimized
-                        if minimized {
-                            VStack {
-                                Spacer().frame(height: miniH + 48) // Below the video
-                                Button {
-                                    nowPlaying.stop()
-                                } label: {
-                                    Label("Stop", systemImage: "stop.fill")
-                                        .font(.system(size: 18, weight: .medium))
-                                        .padding(.horizontal, 20)
-                                        .padding(.vertical, 8)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .padding(.trailing, 40)
-                        }
+                        // Mini player: no stop button — press Menu/Back to stop
+                        // (handled by .onExitCommand on the outer ZStack).
                     }
                     .frame(width: geo.size.width, height: geo.size.height, alignment: minimized ? .topTrailing : .center)
                     .animation(.spring(response: 0.35), value: minimized)
@@ -1280,6 +1267,9 @@ struct MainTabView: View {
                 .focusSection()
                 #endif
             }
+
+            // In-app reminder banner — shows when a reminder fires while app is in foreground
+            ReminderBannerView()
         }
         // safeAreaInset on the outer ZStack pushes the entire TabView (including its tab bar)
         // upward so the tab bar sits above the mini player bar and remains tappable.

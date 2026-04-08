@@ -63,7 +63,7 @@ struct SettingsView: View {
                             ForEach(servers) { server in
                                 NavigationLink(destination: ServerDetailView(server: server)) {
                                     ServerListRow(server: server,
-                                                  onSetActive: { setActiveServer(server) })
+                                                  onSetActive: servers.count > 1 ? { setActiveServer(server) } : nil)
                                 }
                                 #if os(iOS)
                                 .buttonStyle(PressableButtonStyle())
