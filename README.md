@@ -10,73 +10,114 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
 
 **Live TV**
 
-Stream live channels with MPV-powered playback. Browse channels in a scrollable list or a full EPG guide view with program titles, descriptions, and time slots. Minimize playback to a floating mini player while browsing other content. Sort channels by number, name, or favorites.
+- Stream live channels with MPV-powered, GPU-accelerated playback
+- Browse channels in a scrollable list or full EPG guide view
+- Program titles, descriptions, and time slots in the guide
+- Minimize playback to a floating mini player while browsing
+- Sort channels by number, name, or favorites
+- Tap a channel to play, long-press to add to favorites
 
 **Electronic Program Guide**
 
-Grid and list views on tvOS and iPad, list view on iPhone. Program data is cached locally and configurable from 6 hours to the full available window. Channels without guide data are still selectable from the grid.
+- Grid and list views on tvOS and iPad, list view on iPhone
+- Program data cached locally and configurable from 6 hours to full available window
+- Channels without guide data still selectable from the grid
+- Long-press future programs to set reminders or (coming soon) schedule recordings
 
 **Movies and Series**
 
-Browse and filter on-demand content by category. Categories are pulled from the server's VOD library and can be toggled on or off through the filter menu. Resume playback from where you left off with Continue Watching.
+- Browse and filter on-demand content by category
+- Categories pulled from the server's VOD library
+- Toggle categories on or off through the filter menu
+- Resume playback from where you left off with Continue Watching
 
 **Continue Watching**
 
-VOD watch progress is tracked automatically. Resume movies and episodes from the Continue Watching section on the Movies or Series tabs. Long-press to remove items. Progress syncs across all your devices via iCloud.
+- VOD watch progress tracked automatically
+- Resume movies and episodes from the Continue Watching section
+- Long-press to remove items
+- Progress syncs across all your devices via iCloud
 
 **Player Controls**
 
-All secondary controls (audio tracks, subtitles, playback speed, sleep timer, stream info, audio-only mode, Picture-in-Picture) are accessible from a single overflow menu on iOS or an Options panel on tvOS.
+- All secondary controls accessible from a single overflow menu (iOS) or Options panel (tvOS)
+- Audio track selection, subtitle selection, playback speed
+- Sleep timer, stream info overlay, audio-only mode
+- Picture-in-Picture (iOS), AirPlay
 
 **Sleep Timer**
 
-Set a sleep timer (30, 60, 90, or 120 minutes) and playback pauses automatically when it expires.
+- Set a timer for 30, 60, 90, or 120 minutes
+- Playback pauses automatically when the timer expires
+- Countdown displayed in the overflow menu / Options panel
 
 **Stream Info Overlay**
 
-Toggle a real-time overlay showing video codec, resolution, FPS, bitrate, cache duration, A/V sync, and dropped frames. Draggable anywhere on iOS, fixed top-center on tvOS.
+- Real-time overlay showing video codec, resolution, FPS, pixel format, hardware decode status
+- Audio codec, sample rate, channel count
+- Cache duration, bitrate, A/V sync, dropped frames
+- Draggable anywhere on iOS, fixed top-center on tvOS
 
 **EPG Reminders**
 
-Long-press an upcoming program in the channel list (iOS) or guide (tvOS) to set a reminder. A notification fires 5 minutes before the program starts. When the app is in the foreground, an in-app banner appears instead.
+- Long-press an upcoming program in the channel list (iOS) or guide (tvOS)
+- Notification fires 5 minutes before the program starts
+- In-app banner appears when the app is in the foreground
+- Reminders sync across devices via iCloud
 
 **Audio and Subtitle Selection**
 
-Switch between audio tracks and subtitle tracks during playback. Available tracks are detected automatically from the stream.
+- Switch between audio tracks and subtitle tracks during playback
+- Available tracks detected automatically from the stream
+- Current selection shown with checkmark in the menu
 
 **Playback Speed**
 
-Cycle through playback speeds (0.5x to 2x) for VOD content.
+- Cycle through playback speeds: 0.5x, 0.75x, 1x, 1.25x, 1.5x, 2x
+- Available for VOD content (not live streams)
 
 **Picture-in-Picture (iOS)**
 
-Swipe home during playback and the stream continues in a floating PiP window. Supports AirPlay video output.
+- Swipe home during playback and the stream continues in a floating PiP window
+- Supports AirPlay video output
+- Full playback controls in PiP mode
 
 **iCloud Sync**
 
-Server configurations, preferences, VOD watch progress, and EPG reminders sync across devices using iCloud Key-Value Storage. Set up once on one device and all your Apple devices pick up the same servers, resume positions, and reminders. Data is pulled automatically on every app launch.
+- Server configurations, preferences, VOD watch progress, and EPG reminders sync across devices
+- Uses iCloud Key-Value Storage
+- Set up once on one device and all your Apple devices pick up the same data
+- Data pulled automatically on every app launch
 
 **Apple TV Optimized**
 
-Full Siri Remote support with d-pad seeking, play/pause, and an Options panel for audio, subtitles, speed, sleep timer, and stream info. Channels and logos are sized for living room viewing. LAN detection probes the local server URL automatically (no SSID configuration needed on tvOS).
+- Full Siri Remote support with d-pad navigation
+- Options panel for audio, subtitles, speed, sleep timer, and stream info
+- Channels and logos sized for living room viewing
+- LAN detection probes local server URL automatically (no SSID configuration needed)
 
 **tvOS Floating Player**
 
-Press Menu to minimize live TV to a floating corner player. Press Menu again to stop playback. Browse channels, movies, or settings while the stream continues.
+- Press Menu to minimize live TV to a floating corner player
+- Press Menu again to stop playback
+- Browse channels, movies, or settings while the stream continues
 
 **Top Shelf (tvOS)**
 
-The Top Shelf extension shows your 6 most-watched channels with the currently airing program.
+- Shows your 6 most-watched channels
+- Displays the currently airing program for each channel
 
 ## Supported Server Types
 
-1. **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** (native API with API key authentication). See the [Dispatcharr GitHub repository](https://github.com/Dispatcharr/Dispatcharr) for more information about the API integration.
-2. **Xtream Codes** (Provider URL + username & password authentication)
-3. **M3U Playlist** (direct URL + optional XMLTV EPG)
+1. **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** — Native API with API key authentication. See the [Dispatcharr GitHub repository](https://github.com/Dispatcharr/Dispatcharr) for more information.
+2. **Xtream Codes** — Provider URL + username & password authentication.
+3. **M3U Playlist** — Direct URL + optional XMLTV EPG.
 
 ## Requirements
 
-Xcode 15 or later. iOS 18.0+, iPadOS 18.0+, tvOS 18.0+, macOS 15.0+ (using the iPad app). The project uses CocoaPods for dependency management.
+- Xcode 15 or later
+- iOS 18.0+, iPadOS 18.0+, tvOS 18.0+, macOS 15.0+ (using the iPad app)
+- Swift Package Manager for dependency management
 
 ## Getting Started
 
@@ -98,7 +139,8 @@ Select either the `Aerio_iOS` or `Aerio_tvOS` scheme and build to a simulator or
 
 ## Dependencies
 
-The project uses Swift Package Manager for dependency management. The `Pods/` directory (if present from legacy builds) is excluded from version control.
+- Swift Package Manager for dependency management
+- The `Pods/` directory (if present from legacy builds) is excluded from version control
 
 ## Project Structure
 
@@ -121,17 +163,24 @@ TopShelfExtension/      Apple TV Top Shelf content provider
 
 ## Configuration
 
-On first launch the app presents an onboarding flow where you add your server. You can also import server configurations from another device through iCloud sync.
-
-EPG data is downloaded once and cached locally. The default window is 36 hours ahead. This can be changed in Settings under Network. On a fresh install the app will show a loading screen until the initial EPG download completes.
+- On first launch the app presents an onboarding flow where you add your server
+- Server configurations can be imported from another device through iCloud sync
+- EPG data is downloaded once and cached locally
+- Default EPG window is 36 hours ahead (configurable in Settings > Network)
+- Fresh install shows a loading screen until the initial EPG download completes
 
 ## Sideloading
 
-Pre-built .ipa files for iOS and tvOS are available on the [Releases](https://github.com/jonzey231/AerioTV/releases) page. Download the .ipa for your platform and install using your preferred sideloading method (AltStore, Sideloadly, etc.).
+- Pre-built .ipa files for iOS and tvOS are available on the [Releases](https://github.com/jonzey231/AerioTV/releases) page
+- Download the .ipa for your platform
+- Install using your preferred sideloading method (AltStore, Sideloadly, etc.)
 
 ## Building for Release
 
-Import this repository into Xcode. Select the appropriate scheme (`Aerio_iOS` or `Aerio_tvOS`), set the destination to your preferred device, then build and/or run it. You can generate your own .ipa file by creating an archive in Xcode at Product > Archive.
+- Import this repository into Xcode
+- Select the appropriate scheme (`Aerio_iOS` or `Aerio_tvOS`)
+- Set the destination to your preferred device
+- Build and/or run, or generate a .ipa via Product > Archive
 
 ## License
 
