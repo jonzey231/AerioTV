@@ -71,17 +71,17 @@ struct ChannelListView: View {
                             Button {
                                 sortModeRaw = "number"
                             } label: {
-                                Label("By Number", systemImage: sortModeRaw == "number" ? "checkmark" : "")
+                                if sortModeRaw == "number" { Label("By Number", systemImage: "checkmark") } else { Text("By Number") }
                             }
                             Button {
                                 sortModeRaw = "name"
                             } label: {
-                                Label("By Name", systemImage: sortModeRaw == "name" ? "checkmark" : "")
+                                if sortModeRaw == "name" { Label("By Name", systemImage: "checkmark") } else { Text("By Name") }
                             }
                             Button {
                                 sortModeRaw = "favorites"
                             } label: {
-                                Label("Favorites First", systemImage: sortModeRaw == "favorites" ? "checkmark" : "")
+                                if sortModeRaw == "favorites" { Label("Favorites First", systemImage: "checkmark") } else { Text("Favorites First") }
                             }
                         } label: {
                             Image(systemName: "arrow.up.arrow.down")
@@ -126,6 +126,9 @@ struct ChannelListView: View {
                 }
                 .onAppear {
                     debugLog("🔷 ChannelListView.onAppear: channels=\(channelStore.channels.count), isLoading=\(channelStore.isLoading), thread=\(Thread.current)")
+                    // Pull iCloud data while the user waits for channels/EPG to load
+                    // (runs concurrently, doesn't block channel startup).
+                    SyncManager.shared.pullFromCloud()
                     // Default to guide view if the active server has EPG data.
                     // M3U without EPG → default to list view (no guide data to show).
                     let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
@@ -248,6 +251,9 @@ struct ChannelListView: View {
                             }
                         }
                     )
+                    #if os(tvOS)
+                    .focusSection()
+                    #endif
                 }
             } else {
                 channelListContent
@@ -289,6 +295,7 @@ struct ChannelListView: View {
                 .padding(.vertical, 8)
             }
             .background(Color.appBackground)
+            .focusSection()
             #else
             List {
                 ForEach(filteredChannels) { item in

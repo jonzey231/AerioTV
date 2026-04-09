@@ -159,6 +159,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?  // vsync-synchronized display
         private var pixelBuffers: [CVPixelBuffer?] = [nil, nil]  // Double-buffered (vsync handles sync)
         private var currentBufferIndex = 0
+        /// Detected stream FPS — used for accurate CMSampleBuffer presentation timing.
+        /// Updated from container-fps at playback start and estimated-vf-fps during playback.
+        private var detectedFps: Double = 0
         private var renderWidth: Int = 0
         private var renderHeight: Int = 0
         private var videoNativeWidth: Int = 0   // Video's display width (for render sizing)
@@ -205,6 +208,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var renderDurations: [Double] = []            // Recent render durations (ms)
         private var lateFrameCount: Int64 = 0                 // Frames that took longer than expected
         private var totalFrameCount: Int64 = 0                // Total frames rendered
+        private var coalescedFrameCount: Int64 = 0            // Render requests coalesced (dropped)
         private let frameSampleSize = 120                     // Rolling window size (~2-4s at 30-60fps)
 
         init(urls: [URL], headers: [String: String], isLive: Bool,
@@ -406,7 +410,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     if let mpv = self.mpv {
                         var fpsVal: Double = 0
                         mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fpsVal)
-                        if fpsVal > 0 { fps = fpsVal }
+                        if fpsVal > 0 { fps = fpsVal; detectedFps = fpsVal }
                     }
                     let maxPixelsPerSec: Double = 40_000_000
                     let currentPixelsPerSec = Double(targetW * targetH) * fps
@@ -478,7 +482,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let pending = renderPending
             renderPending = true
             os_unfair_lock_unlock(&renderLock)
-            guard !pending else { return }
+            if pending {
+                coalescedFrameCount += 1
+                return
+            }
 
             renderQueue.async { [weak self] in
                 self?.renderAndPresent()
@@ -499,6 +506,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             guard w > 0, h > 0, let pixelBuffer = pixelBuffers[bufIdx] else { return }
 
             let renderStart = CACurrentMediaTime()
+            // Capture presentation timestamp BEFORE rendering — using the time
+            // the frame is intended for display, not when the buffer is wrapped.
+            let presentationTime = CMClockGetTime(CMClockGetHostTimeClock())
+            let fps = detectedFps
 
             CVPixelBufferLockBaseAddress(pixelBuffer, [])
 
@@ -548,18 +559,58 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Flip double buffer for next frame
             currentBufferIndex = 1 - bufIdx
 
-            // Enqueue CMSampleBuffer to AVSampleBufferDisplayLayer — vsync-synchronized,
-            // tear-free presentation on both iOS (PiP-compatible) and tvOS.
-            // NOTE: enqueue directly from renderQueue (NOT main thread).
-            // AVSampleBufferRenderer.enqueue() is thread-safe (iOS 17+).
-            // Dispatching to main thread caused PiP video to freeze when backgrounded
-            // because iOS throttles the main thread for background apps.
-            if let sampleBuffer = Self.makeSampleBuffer(from: pixelBuffer) {
+            // Check display layer readiness before enqueue
+            let layerReady = sampleBufferLayer?.sampleBufferRenderer.isReadyForMoreMediaData ?? false
+            let layerStatus = sampleBufferLayer?.sampleBufferRenderer.status
+
+            // Enqueue CMSampleBuffer to AVSampleBufferDisplayLayer
+            var enqueued = false
+            if let sampleBuffer = Self.makeSampleBuffer(from: pixelBuffer, presentationTime: presentationTime) {
                 nonisolated(unsafe) let sb = sampleBuffer
                 sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
+                enqueued = true
             }
 
-            lastEnqueueTime = CACurrentMediaTime()
+            let enqueueTime = CACurrentMediaTime()
+            let intervalMs = lastEnqueueTime > 0 ? (enqueueTime - lastEnqueueTime) * 1000.0 : 0
+            let expectedIntervalMs = fps > 0 ? 1000.0 / fps : 33.3
+
+            // ── Per-frame diagnostics ──
+            // Log every frame for the first 120 frames (startup analysis),
+            // then only log anomalies (jitter, drops, layer errors).
+            let isAnomaly = intervalMs > 0 && (
+                intervalMs > expectedIntervalMs * 2.0 ||   // frame took 2x longer than expected
+                intervalMs < expectedIntervalMs * 0.3 ||   // frame arrived way too fast
+                !layerReady ||                              // display layer had backpressure
+                layerStatus == .failed ||                   // display layer failed
+                !enqueued                                   // sample buffer creation failed
+            )
+
+            if totalFrameCount <= 120 || isAnomaly {
+                let tag = isAnomaly ? "⚠️" : "🎞️"
+                print("\(tag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms buf=\(bufIdx) fps=\(String(format: "%.1f", fps)) pts=\(String(format: "%.3f", CMTimeGetSeconds(presentationTime)))s ready=\(layerReady) enqueued=\(enqueued) status=\(layerStatus == .failed ? "FAILED" : "ok")")
+            }
+
+            // Log layer errors immediately
+            if layerStatus == .failed, let err = sampleBufferLayer?.sampleBufferRenderer.error {
+                print("🔴 [LAYER FAILED] \(err.localizedDescription)")
+            }
+
+            // Periodic summary every 300 frames
+            if totalFrameCount > 0 && totalFrameCount % 300 == 0 {
+                let avgRender = renderDurations.isEmpty ? 0 : renderDurations.reduce(0, +) / Double(renderDurations.count)
+                let maxRender = renderDurations.max() ?? 0
+                let avgInt = frameIntervals.isEmpty ? 0 : frameIntervals.reduce(0, +) / Double(frameIntervals.count)
+                let jitter: Double = {
+                    guard frameIntervals.count > 2 else { return 0 }
+                    let mean = frameIntervals.reduce(0, +) / Double(frameIntervals.count)
+                    let variance = frameIntervals.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / Double(frameIntervals.count)
+                    return sqrt(variance)
+                }()
+                print("📊 [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
+            }
+
+            lastEnqueueTime = enqueueTime
             mpv_render_context_report_swap(mpvGL)
         }
 
@@ -1409,7 +1460,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var logTimestamp: String { Self.logDateFormatter.string(from: Date()) }
 
         /// Convert CVPixelBuffer to CMSampleBuffer for AVSampleBufferDisplayLayer.
-        private static func makeSampleBuffer(from pixelBuffer: CVPixelBuffer) -> CMSampleBuffer? {
+        private static func makeSampleBuffer(
+            from pixelBuffer: CVPixelBuffer,
+            presentationTime: CMTime
+        ) -> CMSampleBuffer? {
             var formatDesc: CMFormatDescription?
             let status = CMVideoFormatDescriptionCreateForImageBuffer(
                 allocator: kCFAllocatorDefault,
@@ -1418,9 +1472,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             )
             guard status == noErr, let desc = formatDesc else { return nil }
 
+            // Duration is .invalid — mpv with video-sync=audio delivers frames
+            // at display refresh rate (~60fps) regardless of content FPS,
+            // duplicating frames as needed. Declaring a content-based duration
+            // (e.g. 33ms for 30fps) conflicts with the actual 16.5ms delivery
+            // interval, confusing the display layer. With .invalid duration,
+            // each frame shows until the next one is enqueued — matching exactly
+            // how mpv delivers them.
             var timingInfo = CMSampleTimingInfo(
-                duration: CMTime(value: 1, timescale: 60),  // 60fps frame duration
-                presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+                duration: .invalid,
+                presentationTimeStamp: presentationTime,
                 decodeTimeStamp: .invalid
             )
 
@@ -1502,6 +1563,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if fps <= 0 {
                 mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fps)
             }
+            if fps > 0 { detectedFps = fps }
 
             // Also grab initial volatile values
             var cacheDur: Double = 0; var avsync: Double = 0; var drops: Int64 = 0; var bitrate: Double = 0
@@ -1545,6 +1607,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             mpv_get_property(mpv, "frame-drop-count", MPV_FORMAT_INT64, &drops)
             mpv_get_property(mpv, "demuxer-cache-state/raw-input-rate", MPV_FORMAT_DOUBLE, &bitrate)
             mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &fps)
+            if fps > 0 { self.detectedFps = fps }
 
             let ps = progressStore
             DispatchQueue.main.async {

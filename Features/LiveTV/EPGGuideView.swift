@@ -775,6 +775,9 @@ struct EPGGuideView: View {
                 .zIndex(0.5) // above unfocused programs (zIndex 0), below focused (zIndex 1)
         }
         .frame(width: screenWidth, height: rowHeight, alignment: .leading)
+        #if os(tvOS)
+        .focusSection() // each row is a distinct focus region — Down always moves to the next row
+        #endif
         .clipped() // clip right edge only — focused cells overflow vertically via row spacing
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.accentPrimary.opacity(0.08)).frame(height: 1)

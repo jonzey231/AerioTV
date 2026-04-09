@@ -91,13 +91,9 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager.startObserving: sync disabled, skipping")
             return
         }
+        // Skip if already observing — avoids remove-then-re-add churn on every foreground.
+        guard kvsObserver == nil else { return }
         debugLog("🔵 SyncManager.startObserving: registering KVS observer")
-
-        // Remove previous observer if any.
-        if let obs = kvsObserver {
-            NotificationCenter.default.removeObserver(obs)
-            kvsObserver = nil
-        }
 
         // Use block-based observer with queue: .main so the callback always
         // runs on the literal main dispatch queue.  The old selector-based API
@@ -808,7 +804,9 @@ final class SyncManager: ObservableObject {
         let wpKey = watchProgressKVSKey
         let rKey = reminderKVSKey
 
-        DispatchQueue.main.async {
+        // Read KVS off the main thread — reads are thread-safe (local cache).
+        // Merge still runs on MainActor (required by @MainActor isolation).
+        Task.detached(priority: .utility) {
             let servers   = NSUbiquitousKeyValueStore.default.array(forKey: sKey) as? [[String: Any]]
             let prefs     = NSUbiquitousKeyValueStore.default.dictionary(forKey: pKey)
             let wp        = NSUbiquitousKeyValueStore.default.array(forKey: wpKey) as? [[String: Any]]
@@ -819,10 +817,8 @@ final class SyncManager: ObservableObject {
                 return
             }
 
-            Task { @MainActor in
+            await MainActor.run {
                 let mgr = SyncManager.shared
-                // Use the same merge paths as handleRemoteChange — each
-                // method manages its own isMerging guard internally.
                 mgr.doMerge(servers: servers, isInitial: false)
                 mgr.doApplyPreferences(prefs: prefs)
                 mgr.mergeRemoteWatchProgress(wp)

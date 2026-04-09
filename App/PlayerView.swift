@@ -1156,8 +1156,11 @@ private struct PlayerRootView: View {
                 Button {
                     progressStore.setAudioTrackAction?(track.id)
                 } label: {
-                    Label(track.displayName,
-                          systemImage: track.id == progressStore.currentAudioTrackID ? "checkmark" : "")
+                    if track.id == progressStore.currentAudioTrackID {
+                        Label(track.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(track.displayName)
+                    }
                 }
             }
         } label: {
@@ -1183,15 +1186,21 @@ private struct PlayerRootView: View {
             Button {
                 progressStore.setSubtitleTrackAction?(0)
             } label: {
-                Label("Off",
-                      systemImage: progressStore.currentSubtitleTrackID == 0 ? "checkmark" : "")
+                if progressStore.currentSubtitleTrackID == 0 {
+                    Label("Off", systemImage: "checkmark")
+                } else {
+                    Text("Off")
+                }
             }
             ForEach(progressStore.subtitleTracks) { track in
                 Button {
                     progressStore.setSubtitleTrackAction?(track.id)
                 } label: {
-                    Label(track.displayName,
-                          systemImage: track.id == progressStore.currentSubtitleTrackID ? "checkmark" : "")
+                    if track.id == progressStore.currentSubtitleTrackID {
+                        Label(track.displayName, systemImage: "checkmark")
+                    } else {
+                        Text(track.displayName)
+                    }
                 }
             }
         } label: {
