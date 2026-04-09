@@ -104,8 +104,12 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
 
 **Top Shelf (tvOS)**
 
-- Shows your 6 most-watched channels
-- Displays the currently airing program for each channel
+- Shows your 6 most-watched channels with currently airing program
+- Continue Watching row with posters for movies and episodes you haven't finished
+- Click a channel card to instantly start playing it in Aerio
+- Click a movie card to jump straight to its detail view
+- Click an episode card to jump to its parent series detail view
+- Populates as soon as Aerio is on the top row of the Home screen — no extra setup
 
 ## Supported Server Types
 

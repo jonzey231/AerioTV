@@ -87,47 +87,57 @@ final class GuideStore: ObservableObject {
     }
 
     /// Save current programs to SwiftData for persistent caching.
+    /// Runs on a background ModelContext (Task.detached) to avoid blocking the main thread.
+    /// For 4000+ programs, a main-thread save can cause a 700ms+ hang.
     func saveToCache(modelContext: ModelContext, serverID: String) {
-        let now = Date()
-        let hourAgo = now.addingTimeInterval(-3600)
-
-        // Delete stale programs (ended > 1 hour ago)
-        let staleDescriptor = FetchDescriptor<EPGProgram>(
-            predicate: #Predicate<EPGProgram> { $0.endTime < hourAgo }
-        )
-        if let stale = try? modelContext.fetch(staleDescriptor) {
-            for s in stale { modelContext.delete(s) }
-        }
-
-        // Delete existing programs for this server in the current window
-        // to avoid duplicates on re-fetch
-        let windowStart = now.addingTimeInterval(-3600)
+        let container = modelContext.container
+        // Snapshot the programs dictionary on the main actor before detaching
+        let snapshot = programs
         let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
         let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
-        let windowEnd = now.addingTimeInterval(Double(max(effectiveWindowHours, 24)) * 3600)
-        let existingDescriptor = FetchDescriptor<EPGProgram>(
-            predicate: #Predicate<EPGProgram> {
-                $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < windowEnd
-            }
-        )
-        if let existing = try? modelContext.fetch(existingDescriptor) {
-            for e in existing { modelContext.delete(e) }
-        }
 
-        // Insert current programs
-        var count = 0
-        for (channelID, progs) in programs {
-            for gp in progs {
-                let ep = EPGProgram(channelID: channelID, title: gp.title,
-                                    description: gp.description,
-                                    startTime: gp.start, endTime: gp.end,
-                                    category: gp.category, serverID: serverID)
-                modelContext.insert(ep)
-                count += 1
+        Task.detached(priority: .utility) {
+            let bgContext = ModelContext(container)
+            bgContext.autosaveEnabled = false
+
+            let now = Date()
+            let hourAgo = now.addingTimeInterval(-3600)
+
+            // Delete stale programs (ended > 1 hour ago)
+            let staleDescriptor = FetchDescriptor<EPGProgram>(
+                predicate: #Predicate<EPGProgram> { $0.endTime < hourAgo }
+            )
+            if let stale = try? bgContext.fetch(staleDescriptor) {
+                for s in stale { bgContext.delete(s) }
             }
+
+            // Delete existing programs for this server in the current window
+            let windowStart = now.addingTimeInterval(-3600)
+            let windowEnd = now.addingTimeInterval(Double(max(effectiveWindowHours, 24)) * 3600)
+            let existingDescriptor = FetchDescriptor<EPGProgram>(
+                predicate: #Predicate<EPGProgram> {
+                    $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < windowEnd
+                }
+            )
+            if let existing = try? bgContext.fetch(existingDescriptor) {
+                for e in existing { bgContext.delete(e) }
+            }
+
+            // Insert current programs
+            var count = 0
+            for (channelID, progs) in snapshot {
+                for gp in progs {
+                    let ep = EPGProgram(channelID: channelID, title: gp.title,
+                                        description: gp.description,
+                                        startTime: gp.start, endTime: gp.end,
+                                        category: gp.category, serverID: serverID)
+                    bgContext.insert(ep)
+                    count += 1
+                }
+            }
+            try? bgContext.save()
+            debugLog("📺 GuideStore.saveToCache: saved \(count) programs for server \(serverID) (background)")
         }
-        try? modelContext.save()
-        debugLog("📺 GuideStore.saveToCache: saved \(count) programs for server \(serverID)")
     }
 
     /// Phase 1 — instant: build guide rows from data that's already in memory.
@@ -527,33 +537,46 @@ final class GuideStore: ObservableObject {
     // MARK: - Seed EPGCache for List-View Cards
     /// Populates the in-memory EPGCache (used by channel card expansion) from
     /// GuideStore data so that cards open instantly without a network fetch.
+    /// Runs in a single background Task so 691 channels don't spawn 691 tasks and
+    /// block the main thread with the building of entries.
     func seedEPGCache(channels: [ChannelDisplayItem], server: ServerConnection?) {
         guard let server else { return }
-        let now = Date()
+        let serverType = server.type
         let baseURL = server.effectiveBaseURL
-        for ch in channels {
-            let tvgID = ch.tvgID ?? ""
-            let cacheKey: String
-            switch server.type {
-            case .dispatcharrAPI:
-                cacheKey = "d_\(baseURL)_\(tvgID.isEmpty ? ch.id : tvgID)"
-            case .xtreamCodes:
-                cacheKey = "x_\(baseURL)_\(ch.id)"
-            case .m3uPlaylist:
-                guard !tvgID.isEmpty else { continue }
-                cacheKey = "m3u_\(tvgID)"
+        // Snapshot the programs dictionary (MainActor-isolated) before detaching
+        let snapshot = programs
+        let channelRefs: [(id: String, tvgID: String?)] = channels.map { ($0.id, $0.tvgID) }
+
+        Task.detached(priority: .utility) {
+            let now = Date()
+            var built: [(key: String, entries: [EPGEntry])] = []
+            built.reserveCapacity(channelRefs.count)
+            for ref in channelRefs {
+                let tvgID = ref.tvgID ?? ""
+                let cacheKey: String
+                switch serverType {
+                case .dispatcharrAPI:
+                    cacheKey = "d_\(baseURL)_\(tvgID.isEmpty ? ref.id : tvgID)"
+                case .xtreamCodes:
+                    cacheKey = "x_\(baseURL)_\(ref.id)"
+                case .m3uPlaylist:
+                    guard !tvgID.isEmpty else { continue }
+                    cacheKey = "m3u_\(tvgID)"
+                }
+                guard let progs = snapshot[ref.id], !progs.isEmpty else { continue }
+                let entries = progs
+                    .filter { $0.end > now }
+                    .sorted { $0.start < $1.start }
+                    .map { EPGEntry(title: $0.title, description: $0.description, startTime: $0.start, endTime: $0.end) }
+                guard !entries.isEmpty else { continue }
+                built.append((cacheKey, entries))
             }
-            guard let progs = programs[ch.id], !progs.isEmpty else { continue }
-            let entries = progs
-                .filter { $0.end > now }
-                .sorted { $0.start < $1.start }
-                .map { EPGEntry(title: $0.title, description: $0.description, startTime: $0.start, endTime: $0.end) }
-            guard !entries.isEmpty else { continue }
-            Task {
-                await EPGCache.shared.set(entries, for: cacheKey)
+            // Write all entries to the actor-protected cache
+            for item in built {
+                await EPGCache.shared.set(item.entries, for: item.key)
             }
+            debugLog("📺 GuideStore.seedEPGCache: seeded \(built.count) entries (background)")
         }
-        debugLog("📺 GuideStore.seedEPGCache: seeded EPGCache for \(channels.count) channels")
     }
 
     // MARK: - Helpers

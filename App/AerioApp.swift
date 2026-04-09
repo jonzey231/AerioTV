@@ -110,13 +110,47 @@ struct AerioApp: App {
                 }
                 #if os(tvOS)
                 .onOpenURL { url in
-                    // Handle aerio://channel/<id> deep links from Top Shelf
-                    guard url.scheme == "aerio",
-                          url.host == "channel",
-                          let channelID = url.pathComponents.last, !channelID.isEmpty else { return }
-                    // Store the channel ID for the Live TV tab to pick up
-                    UserDefaults.standard.set(channelID, forKey: "launchChannelID")
-                    UserDefaults.standard.set(true, forKey: "launchOnLiveTV")
+                    // Handle Top Shelf deep links:
+                    //   aerio://channel/<id>            → play live channel
+                    //   aerio://vod/movie/<movieID>     → navigate to movie detail
+                    //   aerio://vod/series/<seriesID>   → navigate to series detail
+                    //
+                    // We set UserDefaults (so a cold launch can pick up the
+                    // deep link on first onAppear) AND post a notification (so
+                    // a warm launch where the app is already in memory can
+                    // react immediately without waiting for an onAppear that
+                    // will never come).
+                    guard url.scheme == "aerio" else { return }
+                    debugLog("🔗 Deep link received: \(url.absoluteString)")
+                    switch url.host {
+                    case "channel":
+                        guard let channelID = url.pathComponents.last, !channelID.isEmpty else { return }
+                        UserDefaults.standard.set(channelID, forKey: "launchChannelID")
+                        UserDefaults.standard.set(true, forKey: "launchOnLiveTV")
+                        NotificationCenter.default.post(
+                            name: .aerioOpenChannel,
+                            object: nil,
+                            userInfo: ["channelID": channelID]
+                        )
+                    case "vod":
+                        // pathComponents for "aerio://vod/movie/abc" is
+                        // ["/", "movie", "abc"]. Strip leading "/" separators.
+                        let parts = url.pathComponents.filter { $0 != "/" }
+                        guard parts.count >= 2 else { return }
+                        let vodType = parts[0]   // "movie" or "series"
+                        let vodID = parts[1]
+                        let targetTab = (vodType == "series") ? "launchOnSeries" : "launchOnMovies"
+                        UserDefaults.standard.set(vodID, forKey: "launchVODID")
+                        UserDefaults.standard.set(vodType, forKey: "launchVODType")
+                        UserDefaults.standard.set(true, forKey: targetTab)
+                        NotificationCenter.default.post(
+                            name: .aerioOpenVOD,
+                            object: nil,
+                            userInfo: ["vodID": vodID, "vodType": vodType]
+                        )
+                    default:
+                        break
+                    }
                 }
                 #endif
         }
@@ -419,6 +453,10 @@ struct RootView: View {
                 }
                 #if os(tvOS)
                 TVLANProbe.probe(servers: servers)
+                // Initial Top Shelf sync for Continue Watching
+                if let all = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
+                    TopShelfDataManager.syncContinueWatching(all)
+                }
                 #endif
             }
             .onChange(of: hasCompletedOnboarding) { _, done in
@@ -481,6 +519,9 @@ struct RootView: View {
                 if let ctx = WatchProgressManager.modelContext,
                    let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
                     SyncManager.shared.pushWatchProgress(all)
+                    #if os(tvOS)
+                    TopShelfDataManager.syncContinueWatching(all)
+                    #endif
                 }
             }
     }

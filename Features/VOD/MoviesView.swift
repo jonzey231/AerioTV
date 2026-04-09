@@ -196,6 +196,24 @@ struct MoviesView: View {
                 // Reload hidden groups from UserDefaults after an iCloud sync applies remote prefs.
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
             }
+            #if os(tvOS)
+            // Top Shelf deep link for a movie → navigate to its detail view.
+            // Warm-launch path: app is already in memory, movies are loaded,
+            // notification fires. Cold-launch path below (in onChange) catches
+            // the case where movies arrive AFTER the deep link was received.
+            .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
+                guard let vodType = notif.userInfo?["vodType"] as? String, vodType == "movie",
+                      let vodID = notif.userInfo?["vodID"] as? String else { return }
+                tryHandleMovieDeepLink(id: vodID, from: vodStore.movies)
+            }
+            .onChange(of: vodStore.movies) { _, movies in
+                // Cold-launch path: deep link stored launchVODID in UserDefaults,
+                // and now the movies list just finished loading.
+                guard UserDefaults.standard.string(forKey: "launchVODType") == "movie",
+                      let pendingID = UserDefaults.standard.string(forKey: "launchVODID") else { return }
+                tryHandleMovieDeepLink(id: pendingID, from: movies)
+            }
+            #endif
             .fullScreenCover(item: $resumePlayingURL) { wrapper in
                 PlayerView(
                     urls: [wrapper.url],
@@ -206,12 +224,29 @@ struct MoviesView: View {
                     vodID: resumeVodID,
                     vodPosterURL: resumePosterURL,
                     vodServerID: resumeServerID,
+                    vodType: "movie",
                     resumePositionMs: resumePositionMs
                 )
                 .onDisappear { isPlaying = false }
             }
         }
     }
+
+    #if os(tvOS)
+    /// Looks up a movie by ID in the given list and pushes its detail view
+    /// onto the nav stack. Clears any existing detail first so repeated
+    /// deep links don't stack. Clears the UserDefaults deep-link markers
+    /// on success so the cold-launch handler doesn't re-fire later.
+    private func tryHandleMovieDeepLink(id: String, from movies: [VODDisplayItem]) {
+        guard let item = movies.first(where: { $0.id == id }) else { return }
+        UserDefaults.standard.removeObject(forKey: "launchVODID")
+        UserDefaults.standard.removeObject(forKey: "launchVODType")
+        UserDefaults.standard.removeObject(forKey: "launchOnMovies")
+        debugLog("🔗 MoviesView: deep link → pushing \(item.name)")
+        navPath = NavigationPath()
+        navPath.append(item)
+    }
+    #endif
 
     private func resumeFromContinueWatching(_ progress: WatchProgress) {
         // If we have a stored stream URL, launch playback directly with the saved position

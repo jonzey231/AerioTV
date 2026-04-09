@@ -115,15 +115,29 @@ struct ChannelListView: View {
                     filterChannels()
                     favoritesStore.register(items: items)
                     #if os(tvOS)
-                    // Handle deep link from Top Shelf
-                    if let channelID = UserDefaults.standard.string(forKey: "launchChannelID"),
-                       let channel = items.first(where: { $0.id == channelID }),
-                       !channel.streamURLs.isEmpty {
-                        UserDefaults.standard.removeObject(forKey: "launchChannelID")
-                        nowPlaying.startPlaying(channel, headers: playerHeaders())
-                    }
+                    // Cold-launch deep link: channels just finished loading and
+                    // we have a pending channel ID from a Top Shelf click.
+                    tryHandlePendingChannelDeepLink(from: items)
                     #endif
                 }
+                #if os(tvOS)
+                // Warm-launch deep link: the app was already running, channels
+                // are already loaded, and a Top Shelf click posted an
+                // aerioOpenChannel notification. Start playback immediately.
+                .onReceive(NotificationCenter.default.publisher(for: .aerioOpenChannel)) { notif in
+                    guard let channelID = notif.userInfo?["channelID"] as? String else { return }
+                    if let channel = channelStore.channels.first(where: { $0.id == channelID }),
+                       !channel.streamURLs.isEmpty {
+                        debugLog("🔗 ChannelListView: warm deep link → playing \(channel.name)")
+                        UserDefaults.standard.removeObject(forKey: "launchChannelID")
+                        nowPlaying.startPlaying(channel, headers: playerHeaders())
+                    } else {
+                        // Channels not yet loaded — leave launchChannelID set so
+                        // the cold-path handler picks it up when they arrive.
+                        debugLog("🔗 ChannelListView: warm deep link received but channel not loaded yet")
+                    }
+                }
+                #endif
                 .onAppear {
                     debugLog("🔷 ChannelListView.onAppear: channels=\(channelStore.channels.count), isLoading=\(channelStore.isLoading), thread=\(Thread.current)")
                     // Pull iCloud data while the user waits for channels/EPG to load
@@ -150,6 +164,14 @@ struct ChannelListView: View {
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     filterChannels()
                     favoritesStore.register(items: channelStore.channels)
+                    #if os(tvOS)
+                    // If channels are already loaded when this view appears
+                    // (e.g. warm launch via Top Shelf deep link or tab switch),
+                    // handle any pending deep link now since onChange won't fire.
+                    if !channelStore.channels.isEmpty {
+                        tryHandlePendingChannelDeepLink(from: channelStore.channels)
+                    }
+                    #endif
                     debugLog("🔷 ChannelListView.onAppear: done")
                 }
                 .onDisappear {
@@ -499,6 +521,23 @@ struct ChannelListView: View {
         }
         return server.authHeaders
     }
+
+    // MARK: - Deep Link Handler
+
+    #if os(tvOS)
+    /// If `launchChannelID` is set in UserDefaults (from a Top Shelf deep
+    /// link that arrived before channels were loaded), look it up in the
+    /// freshly loaded channel list and start playback. No-op if no pending
+    /// ID or the channel isn't found.
+    private func tryHandlePendingChannelDeepLink(from items: [ChannelDisplayItem]) {
+        guard let channelID = UserDefaults.standard.string(forKey: "launchChannelID"),
+              let channel = items.first(where: { $0.id == channelID }),
+              !channel.streamURLs.isEmpty else { return }
+        UserDefaults.standard.removeObject(forKey: "launchChannelID")
+        debugLog("🔗 ChannelListView: cold deep link → playing \(channel.name)")
+        nowPlaying.startPlaying(channel, headers: playerHeaders())
+    }
+    #endif
 
     // MARK: - Upcoming EPG Closure Factory
 

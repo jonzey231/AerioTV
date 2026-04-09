@@ -16,10 +16,16 @@ final class WatchProgress {
     var isFinished: Bool
     var streamURL: String?       // Resolved stream URL for resume playback
     var serverID: String?        // Server UUID for auth headers
+    /// Parent series ID for episode-type progress entries. nil for movies.
+    /// Used by the Top Shelf extension to build a `aerio://vod/series/<id>`
+    /// deep link that navigates to the series detail (not the episode,
+    /// which has no standalone detail view of its own).
+    var seriesID: String?
 
     init(vodID: String, title: String, positionMs: Int32 = 0, durationMs: Int32 = 0,
          posterURL: String? = nil, vodType: String = "movie", updatedAt: Date = Date(),
-         isFinished: Bool = false, streamURL: String? = nil, serverID: String? = nil) {
+         isFinished: Bool = false, streamURL: String? = nil, serverID: String? = nil,
+         seriesID: String? = nil) {
         self.vodID = vodID
         self.title = title
         self.positionMs = positionMs
@@ -30,6 +36,7 @@ final class WatchProgress {
         self.isFinished = isFinished
         self.streamURL = streamURL
         self.serverID = serverID
+        self.seriesID = seriesID
     }
 }
 
@@ -41,9 +48,14 @@ enum WatchProgressManager {
     static var modelContext: ModelContext?
 
     /// Save or update watch progress. Call from main thread.
+    /// Merge semantics: optional fields (posterURL, streamURL, serverID,
+    /// seriesID) only overwrite existing values when they are non-nil, so
+    /// periodic save calls from the player don't stomp on the seriesID
+    /// that was set once from the detail view when playback started.
     static func save(vodID: String, title: String, positionMs: Int32, durationMs: Int32,
                      posterURL: String? = nil, vodType: String = "movie", isFinished: Bool = false,
-                     streamURL: String? = nil, serverID: String? = nil) {
+                     streamURL: String? = nil, serverID: String? = nil,
+                     seriesID: String? = nil) {
         guard let context = modelContext else { return }
         let descriptor = FetchDescriptor<WatchProgress>(predicate: #Predicate { $0.vodID == vodID })
         if let existing = try? context.fetch(descriptor).first {
@@ -54,11 +66,13 @@ enum WatchProgressManager {
             if let poster = posterURL { existing.posterURL = poster }
             if let url = streamURL { existing.streamURL = url }
             if let sid = serverID { existing.serverID = sid }
+            if let ser = seriesID { existing.seriesID = ser }
         } else {
             let progress = WatchProgress(vodID: vodID, title: title, positionMs: positionMs,
                                          durationMs: durationMs, posterURL: posterURL,
                                          vodType: vodType, isFinished: isFinished,
-                                         streamURL: streamURL, serverID: serverID)
+                                         streamURL: streamURL, serverID: serverID,
+                                         seriesID: seriesID)
             context.insert(progress)
         }
         try? context.save()

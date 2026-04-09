@@ -98,6 +98,7 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var vodPosterURL: String?
     var vodStreamURL: String?   // Resolved stream URL (for Continue Watching resume)
     var vodServerID: String?    // Server UUID (for Continue Watching auth headers)
+    var vodType: String = "movie"  // "movie" or "episode" — determines which Continue Watching section
     var explicitResumeMs: Int32?  // Pre-loaded resume position (bypasses DB lookup)
     /// Closure set by the Coordinator; call with a target position in ms to seek.
     var seekAction: ((Int32) -> Void)?
@@ -235,6 +236,7 @@ struct PlayerView: View {
     let vodID: String?
     let vodPosterURL: String?
     let vodServerID: String?
+    let vodType: String  // "movie" or "episode" — only used when vodID != nil
     let resumePositionMs: Int32?
     let onMinimize: (() -> Void)?
     let onClose: (() -> Void)?
@@ -244,7 +246,8 @@ struct PlayerView: View {
          subtitle: String? = nil, subtitleStart: Date? = nil, subtitleEnd: Date? = nil,
          artworkURL: URL? = nil,
          vodID: String? = nil, vodPosterURL: String? = nil,
-         vodServerID: String? = nil, resumePositionMs: Int32? = nil,
+         vodServerID: String? = nil, vodType: String = "movie",
+         resumePositionMs: Int32? = nil,
          onMinimize: (() -> Void)? = nil, onClose: (() -> Void)? = nil) {
         self.urls = urls
         self.title = title
@@ -257,6 +260,7 @@ struct PlayerView: View {
         self.vodID = vodID
         self.vodPosterURL = vodPosterURL
         self.vodServerID = vodServerID
+        self.vodType = vodType
         self.resumePositionMs = resumePositionMs
         self.onMinimize = onMinimize
         self.onClose = onClose
@@ -274,6 +278,7 @@ struct PlayerView: View {
             subtitle: subtitle, subtitleStart: subtitleStart, subtitleEnd: subtitleEnd,
             artworkURL: artworkURL,
             vodID: vodID, vodPosterURL: vodPosterURL, vodServerID: vodServerID,
+            vodType: vodType,
             resumePositionMs: resumePositionMs,
             onDismiss: { if let c = onClose { c() } else { dismiss() } },
             onMinimize: onMinimize,
@@ -311,6 +316,7 @@ private struct PlayerRootView: View {
     let vodID: String?
     let vodPosterURL: String?
     let vodServerID: String?
+    let vodType: String  // "movie" or "episode"
     let resumePositionMs: Int32?
     let onDismiss: () -> Void
     let onMinimize: (() -> Void)?
@@ -1406,6 +1412,7 @@ private struct PlayerRootView: View {
         progressStore.vodPosterURL = vodPosterURL
         progressStore.vodStreamURL = urls.first?.absoluteString
         progressStore.vodServerID = vodServerID
+        progressStore.vodType = vodType
         progressStore.explicitResumeMs = resumePositionMs
         state = .playing
         scheduleControlsHide()

@@ -144,6 +144,25 @@ struct TVShowsView: View {
             .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidApplyPreferences)) { _ in
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
             }
+            #if os(tvOS)
+            // Top Shelf deep link for a series → navigate to its detail view.
+            // The extension constructs `aerio://vod/series/<seriesID>` for
+            // episode-type Continue Watching entries, so vodType == "series"
+            // here matches both "tapped a series directly" and "tapped an
+            // episode whose parent series we've navigated to".
+            .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
+                guard let vodType = notif.userInfo?["vodType"] as? String, vodType == "series",
+                      let vodID = notif.userInfo?["vodID"] as? String else { return }
+                tryHandleSeriesDeepLink(id: vodID, from: vodStore.series)
+            }
+            .onChange(of: vodStore.series) { _, series in
+                // Cold-launch path: deep link came in before the series list
+                // had loaded; try to resolve it now that the data is here.
+                guard UserDefaults.standard.string(forKey: "launchVODType") == "series",
+                      let pendingID = UserDefaults.standard.string(forKey: "launchVODID") else { return }
+                tryHandleSeriesDeepLink(id: pendingID, from: series)
+            }
+            #endif
             .fullScreenCover(item: $resumePlayingURL) { wrapper in
                 PlayerView(
                     urls: [wrapper.url],
@@ -154,12 +173,28 @@ struct TVShowsView: View {
                     vodID: resumeVodID,
                     vodPosterURL: resumePosterURL,
                     vodServerID: resumeServerID,
+                    vodType: "episode",
                     resumePositionMs: resumePositionMs
                 )
                 .onDisappear { isPlaying = false }
             }
         }
     }
+
+    #if os(tvOS)
+    /// Looks up a series by ID in the given list and pushes its detail view
+    /// onto the nav stack. Clears any existing detail first so repeated
+    /// deep links don't stack.
+    private func tryHandleSeriesDeepLink(id: String, from series: [VODDisplayItem]) {
+        guard let item = series.first(where: { $0.id == id }) else { return }
+        UserDefaults.standard.removeObject(forKey: "launchVODID")
+        UserDefaults.standard.removeObject(forKey: "launchVODType")
+        UserDefaults.standard.removeObject(forKey: "launchOnSeries")
+        debugLog("🔗 TVShowsView: deep link → pushing \(item.name)")
+        navPath = NavigationPath()
+        navPath.append(item)
+    }
+    #endif
 
     private func resumeFromContinueWatching(_ progress: WatchProgress) {
         if let urlStr = progress.streamURL, let url = URL(string: urlStr) {

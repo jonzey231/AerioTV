@@ -521,20 +521,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             renderWidth = w
             renderHeight = h
 
-            // Create OpenGL FBO backed by IOSurface CVPixelBuffer
-            setupFBO(width: w, height: h)
-
-            #if DEBUG
-            print("[MPV-DIAG] FBO: \(w)x\(h)")
-            #endif
-
-            // Start mpv on render thread if first time
+            // Start mpv on render thread if first time (creates EAGLContext + textureCache)
             if !mpvStarted {
                 mpvStarted = true
                 renderQueue.async { [weak self] in
                     self?.start()
                 }
             }
+
+            // Create OpenGL FBO backed by IOSurface CVPixelBuffer.
+            // Dispatched to renderQueue so it (a) doesn't block the main thread
+            // and (b) runs AFTER setupMPV (which created the EAGLContext).
+            // Serial queue guarantees FIFO ordering.
+            renderQueue.async { [weak self] in
+                self?.setupFBO(width: w, height: h)
+            }
+
+            #if DEBUG
+            print("[MPV-DIAG] FBO queued: \(w)x\(h)")
+            #endif
         }
 
         // MARK: - Background OpenGL ES Render + Display via AVSampleBufferDisplayLayer
@@ -1340,11 +1345,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             let poster = ps.vodPosterURL
                             let streamURLStr = ps.vodStreamURL
                             let serverIDStr = ps.vodServerID
+                            let vodType = ps.vodType
                             let finished = durMs > 0 && posMs > Int32(Double(durMs) * 0.9)
                             Task { @MainActor in
                                 WatchProgressManager.save(
                                     vodID: vodID, title: title, positionMs: posMs,
-                                    durationMs: durMs, posterURL: poster, isFinished: finished,
+                                    durationMs: durMs, posterURL: poster, vodType: vodType,
+                                    isFinished: finished,
                                     streamURL: streamURLStr, serverID: serverIDStr
                                 )
                             }

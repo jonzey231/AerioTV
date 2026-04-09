@@ -864,4 +864,10 @@ extension Notification.Name {
     static let watchProgressDidChange = Notification.Name("watchProgressDidChange")
     static let syncManagerDidUpdateWatchProgress = Notification.Name("syncManagerDidUpdateWatchProgress")
     static let remindersDidChange = Notification.Name("remindersDidChange")
+    /// Posted when the Top Shelf extension (or any other source) opens a
+    /// channel deep link. userInfo["channelID"] contains the channel ID.
+    static let aerioOpenChannel = Notification.Name("aerioOpenChannel")
+    /// Posted when a VOD deep link is opened.
+    /// userInfo["vodID"] and userInfo["vodType"] ("movie" or "episode").
+    static let aerioOpenVOD = Notification.Name("aerioOpenVOD")
 }

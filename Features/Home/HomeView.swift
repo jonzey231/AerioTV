@@ -1,6 +1,7 @@
 import SwiftUI
 import SwiftData
 import Foundation
+import Security
 
 // MARK: - VOD Store
 // Shared ObservableObject owned by MainTabView.
@@ -950,7 +951,7 @@ final class FavoritesStore: ObservableObject {
     private var favoriteIDs: Set<String>
 
     /// App Group suite name — shared with the Top Shelf extension.
-    static let appGroupID = "group.app.molinete.Dispatcharr"
+    static let appGroupID = "group.app.molinete.aerio.topshelf"
     private var sharedDefaults: UserDefaults? { UserDefaults(suiteName: Self.appGroupID) }
 
     init() {
@@ -999,48 +1000,229 @@ final class FavoritesStore: ObservableObject {
 }
 
 // MARK: - Top Shelf Data Manager (tvOS)
-/// Tracks most-watched channels and syncs current program info to the shared UserDefaults
-/// so the Top Shelf extension can display "now playing" cards.
+/// Syncs Continue Watching VOD + most-watched channels to a **shared
+/// Keychain item**, which is then read by the Top Shelf extension.
+///
+/// Why Keychain instead of App Groups? On this project's Apple TV, the
+/// sandbox denies writes to every app group container with EPERM even
+/// though the entitlement is present in the signed binary and
+/// containermanagerd recognizes it (we verified both with SecTask* runtime
+/// dumps and direct container probes). Keychain sharing goes through a
+/// completely separate sandbox path (`keychain-access-groups`) that
+/// already has a wildcard `47DTJ3Q67T.*` granted in the provisioning
+/// profile, so it works without any portal changes.
+///
+/// Payload sizes are well under keychain item limits (~10-20 KB total).
 @MainActor
 enum TopShelfDataManager {
-    private static let appGroupID = "group.app.molinete.Dispatcharr"
-    private static var shared: UserDefaults? { UserDefaults(suiteName: appGroupID) }
+    /// Used only by the (tvOS) `FavoritesStore` below, which still wants a
+    /// stable identifier string for UserDefaults suite naming — keychain
+    /// shuttling doesn't need it.
+    static let appGroupID = "group.app.molinete.aerio.topshelf"
 
-    /// Increment watch count for a channel. Called from NowPlayingManager.startPlaying().
+    // MARK: - Public API
+
     static func incrementWatchCount(for channel: ChannelDisplayItem) {
         #if os(tvOS)
-        guard let defaults = shared else { return }
-        var counts = defaults.dictionary(forKey: "channelWatchCounts") as? [String: Int] ?? [:]
+        var counts = TopShelfKeychain.readDictionary(key: "watchCounts") as? [String: Int] ?? [:]
         counts[channel.id, default: 0] += 1
-        defaults.set(counts, forKey: "channelWatchCounts")
+        TopShelfKeychain.write(dictionary: counts, key: "watchCounts")
         #endif
     }
 
-    /// Write top 6 most-watched channels with current program info to shared UserDefaults.
-    /// Call this after EPG loads and whenever channels update.
+    /// Write top 6 channels (most-watched first, padded with first
+    /// logo-bearing channels) to the shared keychain item. Only metadata +
+    /// raw logo URLs are stored — no downloading or image processing happens
+    /// in the main app. The Top Shelf extension passes the raw `logoURL`
+    /// directly to `setImageURL(_:for:)` and tvOS fetches it natively.
+    ///
+    /// Earlier iterations of this code tried to pre-process the logos into
+    /// padded, aspect-fit local PNGs so they'd render consistently at the
+    /// `.square` shape. That whole pipeline (main-app → Caches → extension
+    /// → file URL → tvOS) was empirically proven unworkable: tvOS's host
+    /// process cannot read files from either the extension's OR the main
+    /// app's data containers — both are private sandboxes. The only file
+    /// locations tvOS can read from are the extension's bundle Resources,
+    /// which are sealed at build time and cannot hold dynamic per-user data.
+    /// So we rely on remote URLs and accept tvOS's default scaling behavior.
     static func syncTopChannels(channels: [ChannelDisplayItem]) {
         #if os(tvOS)
-        guard let defaults = shared else { return }
-        let counts = defaults.dictionary(forKey: "channelWatchCounts") as? [String: Int] ?? [:]
+        let counts = TopShelfKeychain.readDictionary(key: "watchCounts") as? [String: Int] ?? [:]
 
-        // Sort by watch count descending, take top 6
-        let ranked = channels
+        // Most-watched channels first, ranked by play count.
+        let watched = channels
             .filter { counts[$0.id] ?? 0 > 0 }
             .sorted { (counts[$0.id] ?? 0) > (counts[$1.id] ?? 0) }
-            .prefix(6)
 
-        let entries: [[String: String]] = ranked.map { item in
-            var entry: [String: String] = [
-                "id": item.id,
-                "name": item.name,
-                "number": item.number
-            ]
+        // Pad the ranked list up to 6 with the first logo-bearing channels
+        // that aren't already in the watched list. This way a user who has
+        // only ever played 1–2 channels still sees a full shelf row.
+        var ranked: [ChannelDisplayItem] = Array(watched.prefix(6))
+        if ranked.count < 6 {
+            let watchedIDs = Set(ranked.map { $0.id })
+            for channel in channels where channel.logoURL != nil && !watchedIDs.contains(channel.id) {
+                ranked.append(channel)
+                if ranked.count >= 6 { break }
+            }
+        }
+
+        let channelEntries: [[String: String]] = ranked.map { item in
+            var entry: [String: String] = ["id": item.id, "name": item.name, "number": item.number]
             if let logo = item.logoURL?.absoluteString { entry["logoURL"] = logo }
             if let program = item.currentProgram { entry["currentProgram"] = program }
             return entry
         }
-        defaults.set(entries, forKey: "topShelfChannels")
+
+        debugLog("🔐 TopShelf: syncTopChannels — \(channelEntries.count) channels (from \(channels.count) total)")
+        TopShelfKeychain.write(array: channelEntries, key: "topChannels")
         #endif
+    }
+
+    /// Sync up to 10 most recent unfinished VOD items to the shared keychain.
+    /// Like `syncTopChannels`, this only stores metadata + raw poster URLs —
+    /// the extension passes `posterURL` directly to `setImageURL`.
+    static func syncContinueWatching(_ items: [WatchProgress]) {
+        #if os(tvOS)
+        let recent = items
+            .filter { !$0.isFinished }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .prefix(10)
+
+        let vodEntries: [[String: String]] = recent.map { p in
+            var entry: [String: String] = [
+                "vodID": p.vodID, "title": p.title,
+                "vodType": p.vodType,
+                "positionMs": String(p.positionMs),
+                "durationMs": String(p.durationMs)
+            ]
+            if let poster = p.posterURL { entry["posterURL"] = poster }
+            if let stream = p.streamURL { entry["streamURL"] = stream }
+            if let serverID = p.serverID { entry["serverID"] = serverID }
+            if let seriesID = p.seriesID { entry["seriesID"] = seriesID }
+            return entry
+        }
+
+        debugLog("🔐 TopShelf: syncContinueWatching — \(vodEntries.count) entries (from \(items.count) total, \(items.filter{!$0.isFinished}.count) unfinished)")
+        TopShelfKeychain.write(array: vodEntries, key: "continueWatching")
+        #endif
+    }
+}
+
+// MARK: - Shared Keychain Storage
+/// Small generic-password keychain helper that stores arbitrary JSON values
+/// under `service = "aerio.topshelf"` and a per-key `account`. The access
+/// group `$(AppIdentifierPrefix)aerio.topshelf.shared` is covered by the
+/// existing `47DTJ3Q67T.*` wildcard in the provisioning profile, so both
+/// the main tvOS app and the Top Shelf extension can read/write these
+/// items without any portal changes.
+enum TopShelfKeychain {
+    /// Keychain service identifier — groups all Top Shelf entries together.
+    static let service = "aerio.topshelf"
+    /// Keychain access group. The team ID prefix is required by iOS and is
+    /// covered by the `47DTJ3Q67T.*` wildcard `keychain-access-groups`
+    /// entitlement already granted by the provisioning profile.
+    static let accessGroup = "47DTJ3Q67T.aerio.topshelf.shared"
+
+    // MARK: Write
+
+    static func write(array: [[String: String]], key: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: array) else {
+            debugLog("🔐 TopShelf: JSON serialization failed for key=\(key)")
+            return
+        }
+        writeData(data, key: key)
+    }
+
+    static func write(dictionary: [String: Any], key: String) {
+        guard let data = try? JSONSerialization.data(withJSONObject: dictionary) else {
+            debugLog("🔐 TopShelf: JSON serialization failed for key=\(key)")
+            return
+        }
+        writeData(data, key: key)
+    }
+
+
+    private static func writeData(_ data: Data, key: String) {
+        #if os(tvOS)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+            kSecAttrAccessGroup as String: accessGroup,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
+        let attrs: [String: Any] = [kSecValueData as String: data]
+
+        let status = SecItemUpdate(query as CFDictionary, attrs as CFDictionary)
+        if status == errSecSuccess {
+            debugLog("🔐 TopShelf: updated \(data.count)B → keychain[\(key)]")
+            return
+        }
+        if status == errSecItemNotFound {
+            var addQuery = query
+            addQuery[kSecValueData as String] = data
+            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+            if addStatus == errSecSuccess {
+                debugLog("🔐 TopShelf: added \(data.count)B → keychain[\(key)]")
+            } else {
+                debugLog("🔐 TopShelf: ❌ SecItemAdd failed key=\(key) status=\(addStatus) (\(secErrorMessage(addStatus)))")
+            }
+            return
+        }
+        debugLog("🔐 TopShelf: ❌ SecItemUpdate failed key=\(key) status=\(status) (\(secErrorMessage(status)))")
+        #endif
+    }
+
+    // MARK: Read
+
+    static func readArray(key: String) -> [[String: String]]? {
+        guard let data = readData(key: key),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] else {
+            return nil
+        }
+        return obj
+    }
+
+    static func readDictionary(key: String) -> Any? {
+        guard let data = readData(key: key),
+              let obj = try? JSONSerialization.jsonObject(with: data) else {
+            return nil
+        }
+        return obj
+    }
+
+
+    private static func readData(key: String) -> Data? {
+        #if os(tvOS)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+            kSecAttrAccessGroup as String: accessGroup,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        if status == errSecSuccess, let data = item as? Data {
+            return data
+        }
+        if status != errSecItemNotFound {
+            debugLog("🔐 TopShelf: ❌ SecItemCopyMatching failed key=\(key) status=\(status) (\(secErrorMessage(status)))")
+        }
+        return nil
+        #else
+        return nil
+        #endif
+    }
+
+    // MARK: Diagnostics
+
+    private static func secErrorMessage(_ status: OSStatus) -> String {
+        if let msg = SecCopyErrorMessageString(status, nil) as String? {
+            return msg
+        }
+        return "OSStatus \(status)"
     }
 }
 
@@ -1470,6 +1652,20 @@ struct MainTabView: View {
                 nowPlaying.stop()
                 NowPlayingBridge.shared.teardown()
             }
+        }
+        // Top Shelf deep link for a channel → switch to Live TV tab.
+        // ChannelListView itself handles starting playback once channels are loaded.
+        .onReceive(NotificationCenter.default.publisher(for: .aerioOpenChannel)) { _ in
+            debugLog("🔗 MainTabView: aerioOpenChannel → switch to Live TV tab")
+            withAnimation { selectedTab = .liveTV }
+        }
+        // Top Shelf deep link for a VOD item → switch to the matching tab.
+        // MoviesView / TVShowsView handle navigating to the specific item.
+        .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
+            guard let vodType = notif.userInfo?["vodType"] as? String else { return }
+            let target: AppTab = (vodType == "series") ? .tv : .movies
+            debugLog("🔗 MainTabView: aerioOpenVOD(\(vodType)) → switch to \(target.rawValue) tab")
+            withAnimation { selectedTab = target }
         }
         #endif
     }

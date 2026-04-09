@@ -14,7 +14,11 @@
 	<string>$(TeamIdentifierPrefix)$(CFBundleIdentifier)</string>
 	<key>com.apple.security.application-groups</key>
 	<array>
-		<string>group.app.molinete.Dispatcharr</string>
+		<string>group.app.molinete.aerio.topshelf</string>
+	</array>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>47DTJ3Q67T.aerio.topshelf.shared</string>
 	</array>
 </dict>
 </plist>

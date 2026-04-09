@@ -13,6 +13,9 @@ struct VODDetailView: View {
     @State private var playingURL: IdentifiableURL?
     @State private var playingTitle = ""
     @State private var playingHeaders: [String: String] = [:]
+    @State private var playingVodID: String = ""       // movie.id or episode.id depending on context
+    @State private var playingVodType: String = "movie" // "movie" or "episode"
+    @State private var playingPosterURL: String?       // episode poster overrides series poster when playing an episode
     @State private var isLoadingDetail = false
     @State private var isResolvingURL = false
     @Binding var isPlaying: Bool
@@ -45,10 +48,11 @@ struct VODDetailView: View {
                 title: playingTitle,
                 headers: playingHeaders,
                 isLive: false,
-                artworkURL: item.posterURL,
-                vodID: item.id,
-                vodPosterURL: item.posterURL?.absoluteString,
-                vodServerID: item.serverID.uuidString
+                artworkURL: (playingPosterURL.flatMap { URL(string: $0) }) ?? item.posterURL,
+                vodID: playingVodID,
+                vodPosterURL: playingPosterURL ?? item.posterURL?.absoluteString,
+                vodServerID: item.serverID.uuidString,
+                vodType: playingVodType
             )
             .onDisappear { isPlaying = false }
         }
@@ -188,9 +192,7 @@ struct VODDetailView: View {
 
     private func episodeRow(_ ep: VODEpisode) -> some View {
         TVEpisodeRowButton(ep: ep, headers: serverHeaders()) {
-            if let url = ep.streamURL {
-                playEpisode(url: url, title: ep.title)
-            }
+            playEpisode(ep)
         }
     }
 
@@ -203,17 +205,43 @@ struct VODDetailView: View {
         }
     }
 
-    private func playEpisode(url: URL, title: String) {
-        Task { await resolveAndLaunch(url: url, title: title) }
+    private func playEpisode(_ ep: VODEpisode) {
+        guard let url = ep.streamURL else { return }
+        // Stash the parent series ID into WatchProgress before playback starts.
+        // The Top Shelf extension uses this to build a deep link that
+        // navigates back to the series detail — the episode itself doesn't
+        // have a standalone detail view to return to.
+        WatchProgressManager.save(
+            vodID: ep.id,
+            title: ep.title,
+            positionMs: 0,
+            durationMs: 0,
+            posterURL: ep.posterURL?.absoluteString,
+            vodType: "episode",
+            seriesID: ep.seriesID
+        )
+        Task {
+            await resolveAndLaunch(
+                url: url,
+                title: ep.title,
+                vodID: ep.id,               // episode's own unique ID
+                vodType: "episode",
+                posterURL: ep.posterURL?.absoluteString
+            )
+        }
     }
 
     /// Resolves any redirects in the proxy URL with auth headers before handing off to the player.
     /// Dispatcharr's /proxy/vod/* endpoints often redirect to a session-based or provider URL.
     /// The player follows redirects but can drop custom headers; resolving first avoids that.
     @MainActor
-    private func resolveAndLaunch(url: URL, title: String) async {
+    private func resolveAndLaunch(url: URL, title: String, vodID: String? = nil,
+                                  vodType: String = "movie", posterURL: String? = nil) async {
         playingTitle = title
         playingHeaders = serverHeaders()
+        playingVodID = vodID ?? item.id  // default to movie id
+        playingVodType = vodType
+        playingPosterURL = posterURL
 
         var resolvedURL = url
         if let server, server.type == .dispatcharrAPI {
