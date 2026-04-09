@@ -756,21 +756,7 @@ struct ChannelRow: View {
                         .foregroundColor(.textTertiary)
                         .frame(width: 42, alignment: .trailing)
 
-                    AsyncImage(url: item.logoURL) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image.resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .frame(width: 72, height: 48)
-                        default:
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(Color.accentPrimary.opacity(0.12))
-                                    .frame(width: 72, height: 48)
-                                NoPosterPlaceholder(compact: true)
-                            }
-                        }
-                    }
+                    CachedLogoImage(url: item.logoURL, width: 72, height: 48)
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text(item.name)
@@ -872,21 +858,11 @@ struct ChannelRow: View {
                     .foregroundColor(.textTertiary)
                     .frame(width: isWide ? 36 : 26, alignment: .trailing)
 
-                AsyncImage(url: item.logoURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: isWide ? 50 : 38, height: isWide ? 34 : 26)
-                    default:
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(Color.accentPrimary.opacity(0.12))
-                                .frame(width: isWide ? 50 : 38, height: isWide ? 34 : 26)
-                            NoPosterPlaceholder(compact: true)
-                        }
-                    }
-                }
+                CachedLogoImage(
+                    url: item.logoURL,
+                    width: isWide ? 50 : 38,
+                    height: isWide ? 34 : 26
+                )
 
                 VStack(alignment: .leading, spacing: isWide ? 4 : 2) {
                     Text(item.name)
@@ -898,7 +874,8 @@ struct ChannelRow: View {
                         HStack(spacing: 8) {
                             MarqueeText(text: program,
                                         font: isWide ? .subheadline : .labelSmall,
-                                        color: .accentPrimary.opacity(0.85))
+                                        color: .accentPrimary.opacity(0.85),
+                                        isActive: false)  // Static during scroll — saves GPU
                                 .frame(height: isWide ? 20 : 16)
                             if let end = item.currentProgramEnd {
                                 nowPlayingTimeRemaining(end: end)
@@ -926,65 +903,57 @@ struct ChannelRow: View {
 
                 Spacer()
 
-                // ── Action buttons with generous tap targets ──
-                HStack(spacing: isWide ? 8 : 4) {
-                    if item.currentProgram != nil || fetchUpcoming != nil {
-                        Button {
-                            withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
-                            if isExpanded && upcomingPrograms.isEmpty, fetchUpcoming != nil {
-                                isLoadingUpcoming = true
-                                Task {
-                                    upcomingPrograms = await fetchUpcoming?() ?? []
-                                    isLoadingUpcoming = false
-                                }
-                            }
-                        } label: {
-                            if isWide {
-                                HStack(spacing: 5) {
-                                    Image(systemName: isExpanded ? "chevron.up" : "list.bullet")
-                                        .font(.system(size: 11, weight: .medium))
-                                    Text(isExpanded ? "Hide Schedule" : "Schedule")
-                                        .font(.subheadline.weight(.medium))
-                                }
-                                .foregroundColor(.accentPrimary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(Capsule().fill(Color.accentPrimary.opacity(0.12)))
-                                .contentShape(Capsule())
-                            } else {
-                                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundColor(.textTertiary)
-                                    .frame(width: 44, height: 44)
-                                    .contentShape(Rectangle())
+                // ── Expand chevron (only action button remaining) ──
+                if item.currentProgram != nil || fetchUpcoming != nil {
+                    Button {
+                        withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
+                        if isExpanded && upcomingPrograms.isEmpty, fetchUpcoming != nil {
+                            isLoadingUpcoming = true
+                            Task {
+                                upcomingPrograms = await fetchUpcoming?() ?? []
+                                isLoadingUpcoming = false
                             }
                         }
-                        .buttonStyle(.plain)
-                    }
-
-                    if !item.streamURLs.isEmpty {
-                        Image(systemName: "play.circle.fill")
-                            .font(.system(size: isWide ? 26 : 22))
-                            .foregroundColor(.accentPrimary.opacity(0.7))
-                            .frame(width: 44, height: 44)
-                    }
-
-                    Button {
-                        favoritesStore.toggle(item)
                     } label: {
-                        Image(systemName: favoritesStore.isFavorite(item.id) ? "star.fill" : "star")
-                            .font(.system(size: isWide ? 18 : 16))
-                            .foregroundColor(favoritesStore.isFavorite(item.id) ? .statusWarning : .textTertiary)
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
+                        if isWide {
+                            HStack(spacing: 5) {
+                                Image(systemName: isExpanded ? "chevron.up" : "list.bullet")
+                                    .font(.system(size: 11, weight: .medium))
+                                Text(isExpanded ? "Hide Schedule" : "Schedule")
+                                    .font(.subheadline.weight(.medium))
+                            }
+                            .foregroundColor(.accentPrimary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Color.accentPrimary.opacity(0.12)))
+                            .contentShape(Capsule())
+                        } else {
+                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.textTertiary)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
                     }
                     .buttonStyle(.plain)
                 }
             }
             .padding(.vertical, isWide ? 18 : 13)
             .padding(.horizontal, isWide ? 18 : 14)
+            .contentShape(Rectangle())  // Ensure entire row area is tappable
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            let isFav = favoritesStore.isFavorite(item.id)
+            Button {
+                favoritesStore.toggle(item)
+            } label: {
+                Label(
+                    isFav ? "Remove from Favorites" : "Add to Favorites",
+                    systemImage: isFav ? "star.slash" : "star.fill"
+                )
+            }
+        }
     }
     #endif
 
@@ -1099,45 +1068,43 @@ struct ChannelRow: View {
     // MARK: - Now Playing Helpers
 
     /// Compact time-remaining badge shown beside the current program title.
+    /// Uses a plain Date() snapshot — accurate when the row appears, no per-row
+    /// TimelineView overhead that causes batch re-renders during scroll.
     private func nowPlayingTimeRemaining(end: Date) -> some View {
-        TimelineView(.everyMinute) { context in
-            let remaining = max(0, end.timeIntervalSince(context.date))
-            let mins = Int(remaining / 60)
-            let label = mins < 60 ? "\(mins)m" : "\(mins / 60)h\(mins % 60 > 0 ? " \(mins % 60)m" : "")"
-            Text(label)
-                #if os(tvOS)
-                .font(.system(size: 18, weight: .medium, design: .monospaced))
-                #else
-                .font(.system(size: isWide ? 11 : 9, weight: .medium, design: .monospaced))
-                #endif
-                .foregroundColor(.textSecondary)
-                .lineLimit(1)
-                .fixedSize()
-        }
+        let remaining = max(0, end.timeIntervalSince(Date()))
+        let mins = Int(remaining / 60)
+        let label = mins < 60 ? "\(mins)m" : "\(mins / 60)h\(mins % 60 > 0 ? " \(mins % 60)m" : "")"
+        return Text(label)
+            #if os(tvOS)
+            .font(.system(size: 18, weight: .medium, design: .monospaced))
+            #else
+            .font(.system(size: isWide ? 11 : 9, weight: .medium, design: .monospaced))
+            #endif
+            .foregroundColor(.textSecondary)
+            .lineLimit(1)
+            .fixedSize()
     }
 
     /// Thin progress bar showing how far through the current program we are.
     private func nowPlayingProgressBar(start: Date, end: Date) -> some View {
-        TimelineView(.everyMinute) { context in
-            let total = end.timeIntervalSince(start)
-            let elapsed = context.date.timeIntervalSince(start)
-            let fraction = total > 0 ? min(1, max(0, elapsed / total)) : 0
+        let total = end.timeIntervalSince(start)
+        let elapsed = Date().timeIntervalSince(start)
+        let fraction = total > 0 ? min(1, max(0, elapsed / total)) : 0
 
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.accentPrimary.opacity(0.15))
-                    RoundedRectangle(cornerRadius: 2)
-                        .fill(Color.accentPrimary.opacity(0.7))
-                        .frame(width: geo.size.width * fraction)
-                }
+        return GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.accentPrimary.opacity(0.15))
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(Color.accentPrimary.opacity(0.7))
+                    .frame(width: geo.size.width * fraction)
             }
-            #if os(tvOS)
-            .frame(height: 5)
-            #else
-            .frame(height: 3)
-            #endif
         }
+        #if os(tvOS)
+        .frame(height: 5)
+        #else
+        .frame(height: 3)
+        #endif
     }
 
     // MARK: - EPG Entry Row
@@ -1486,3 +1453,55 @@ private struct TVGroupPill: View {
 
 // MARK: - tvOS No-Ring Button Style
 #endif
+
+// MARK: - Cached Channel Logo Image
+
+/// In-memory logo cache — prevents AsyncImage from re-fetching on every scroll.
+private final class LogoCache: @unchecked Sendable {
+    static let shared = LogoCache()
+    private let cache = NSCache<NSString, UIImage>()
+    private init() { cache.countLimit = 500 }
+    func image(for key: String) -> UIImage? { cache.object(forKey: key as NSString) }
+    func store(_ img: UIImage, for key: String) { cache.setObject(img, forKey: key as NSString) }
+}
+
+/// Drop-in replacement for AsyncImage that caches logos in memory.
+private struct CachedLogoImage: View {
+    let url: URL?
+    let width: CGFloat
+    let height: CGFloat
+
+    @State private var uiImage: UIImage?
+
+    var body: some View {
+        Group {
+            if let img = uiImage {
+                Image(uiImage: img).resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: width, height: height)
+            } else {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.accentPrimary.opacity(0.12))
+                        .frame(width: width, height: height)
+                    NoPosterPlaceholder(compact: true)
+                }
+            }
+        }
+        .task(id: url?.absoluteString) {
+            guard let url else { return }
+            let key = url.absoluteString
+            if let cached = LogoCache.shared.image(for: key) {
+                uiImage = cached
+                return
+            }
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                if let img = UIImage(data: data) {
+                    LogoCache.shared.store(img, for: key)
+                    uiImage = img
+                }
+            } catch {}
+        }
+    }
+}

@@ -6,8 +6,9 @@ import UIKit
 import Libmpv
 import CoreVideo
 import CoreMedia  // For CMSampleBuffer
+import OpenGLES
 
-// MARK: - MPV Player View Controller (SW render → AVSampleBufferDisplayLayer → PiP)
+// MARK: - MPV Player View Controller (OpenGL ES render → AVSampleBufferDisplayLayer → PiP)
 
 class MPVPlayerViewController: UIViewController {
     weak var coordinator: MPVPlayerViewRepresentable.Coordinator?
@@ -150,17 +151,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // mpv handles
         private var mpv: OpaquePointer?
-        private var mpvGL: OpaquePointer?  // mpv_render_context (SW render API)
+        private var mpvGL: OpaquePointer?  // mpv_render_context (OpenGL render API)
         private let mpvQueue = DispatchQueue(label: "com.aerio.mpv", qos: .userInteractive)
         private var wakeupRetain: Unmanaged<Coordinator>?  // Balances passRetained in setupMPV
 
-        // SW render — background thread renders to CVPixelBuffer
+        // OpenGL ES render — GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy)
         private let renderQueue = DispatchQueue(label: "com.aerio.mpv.render", qos: .userInteractive)
         private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?  // vsync-synchronized display
-        private var pixelBuffers: [CVPixelBuffer?] = [nil, nil]  // Double-buffered (vsync handles sync)
-        private var currentBufferIndex = 0
-        /// Detected stream FPS — used for accurate CMSampleBuffer presentation timing.
-        /// Updated from container-fps at playback start and estimated-vf-fps during playback.
+        private var eaglContext: EAGLContext?
+        private var textureCache: CVOpenGLESTextureCache?
+        private var renderPixelBuffer: CVPixelBuffer?   // IOSurface-backed, reused per resolution
+        private var renderTexture: CVOpenGLESTexture?    // GL texture wrapping the pixel buffer
+        private var fbo: GLuint = 0                      // FBO with texture as color attachment
+        private var fboWidth: Int = 0
+        private var fboHeight: Int = 0
+        /// Detected stream FPS — used for diagnostics.
         private var detectedFps: Double = 0
         private var renderWidth: Int = 0
         private var renderHeight: Int = 0
@@ -176,6 +181,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var sameURLRetryCount = 0
         private let maxSameURLRetries = 3
         private var isShuttingDown = false
+        private var hwdecFallbackApplied = false  // Prevents repeated fallback attempts for 10-bit streams
 
         // Diagnostics
         private var diagStartTime: Date?
@@ -390,7 +396,72 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         private var mpvStarted = false
 
-        /// Handle rotation/resize — creates or recreates double-buffered CVPixelBuffers.
+        /// Creates (or recreates) the OpenGL FBO backed by an IOSurface CVPixelBuffer.
+        /// mpv renders into this FBO; the CVPixelBuffer IS the rendered frame (zero copy).
+        private func setupFBO(width: Int, height: Int) {
+            guard let eaglContext, let textureCache else { return }
+            EAGLContext.setCurrent(eaglContext)
+
+            // Clean up old resources
+            if fbo != 0 { glDeleteFramebuffers(1, &fbo); fbo = 0 }
+            renderTexture = nil
+            renderPixelBuffer = nil
+            CVOpenGLESTextureCacheFlush(textureCache, 0)
+
+            // Create IOSurface-backed CVPixelBuffer (shared with GL via texture cache)
+            let attrs: [CFString: Any] = [
+                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+                kCVPixelBufferOpenGLESCompatibilityKey: true as CFBoolean
+            ]
+            var pb: CVPixelBuffer?
+            CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
+            guard let pixelBuffer = pb else { return }
+            renderPixelBuffer = pixelBuffer
+
+            // Wrap as OpenGL ES texture (zero-copy — shares IOSurface)
+            var texture: CVOpenGLESTexture?
+            let texResult = CVOpenGLESTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault, textureCache, pixelBuffer, nil,
+                GLenum(GL_TEXTURE_2D), GL_RGBA,
+                GLsizei(width), GLsizei(height),
+                GLenum(GL_BGRA), GLenum(GL_UNSIGNED_BYTE),
+                0, &texture
+            )
+            guard texResult == kCVReturnSuccess, let glTexture = texture else {
+                #if DEBUG
+                print("[MPV-ERR] CVOpenGLESTextureCacheCreateTextureFromImage failed: \(texResult)")
+                #endif
+                return
+            }
+            renderTexture = glTexture
+
+            // Create FBO with the texture as color attachment
+            let texName = CVOpenGLESTextureGetName(glTexture)
+            glGenFramebuffers(1, &fbo)
+            glBindFramebuffer(GLenum(GL_FRAMEBUFFER), fbo)
+            glFramebufferTexture2D(
+                GLenum(GL_FRAMEBUFFER), GLenum(GL_COLOR_ATTACHMENT0),
+                GLenum(GL_TEXTURE_2D), texName, 0
+            )
+
+            let fbStatus = glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))
+            if fbStatus != GL_FRAMEBUFFER_COMPLETE {
+                #if DEBUG
+                print("[MPV-ERR] FBO incomplete: \(fbStatus)")
+                #endif
+            }
+
+            glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
+            fboWidth = width
+            fboHeight = height
+
+            #if DEBUG
+            print("[MPV-DIAG] FBO created: \(width)x\(height), fbo=\(fbo), tex=\(texName)")
+            #endif
+        }
+
+        /// Handle rotation/resize — creates or recreates the GL FBO.
         /// Uses video native dimensions when known to avoid oversized render buffers
         /// (e.g., 720p content rendered into a 1080p buffer wastes 2.25x pixels).
         func handleResize(size: CGSize) {
@@ -450,19 +521,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             renderWidth = w
             renderHeight = h
 
-            // Create IOSurface-backed pixel buffers for zero-copy CALayer display
-            let attrs: [CFString: Any] = [
-                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary
-            ]
-            for i in 0..<2 {
-                var pb: CVPixelBuffer?
-                CVPixelBufferCreate(kCFAllocatorDefault, w, h,
-                                    kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
-                pixelBuffers[i] = pb
-            }
+            // Create OpenGL FBO backed by IOSurface CVPixelBuffer
+            setupFBO(width: w, height: h)
 
             #if DEBUG
-            print("[MPV-DIAG] CVPixelBuffer: \(w)x\(h)")
+            print("[MPV-DIAG] FBO: \(w)x\(h)")
             #endif
 
             // Start mpv on render thread if first time
@@ -474,7 +537,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
-        // MARK: - Background SW Render + Display via AVSampleBufferDisplayLayer
+        // MARK: - Background OpenGL ES Render + Display via AVSampleBufferDisplayLayer
 
         /// Called from mpv's update callback — schedules render on background thread.
         func scheduleRender() {
@@ -492,52 +555,46 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
-        /// Runs on renderQueue — renders mpv frame to CVPixelBuffer, enqueues to AVSampleBufferDisplayLayer.
-        /// No OpenGL, no vsync blocking. ~3ms per frame vs 15-31ms with GL.
+        /// Runs on renderQueue — GPU renders mpv frame to CVPixelBuffer via OpenGL FBO,
+        /// then enqueues to AVSampleBufferDisplayLayer. Zero CPU pixel copies.
         private func renderAndPresent() {
             os_unfair_lock_lock(&renderLock)
             renderPending = false
             os_unfair_lock_unlock(&renderLock)
 
-            guard let mpvGL else { return }
-            let w = renderWidth
-            let h = renderHeight
-            let bufIdx = currentBufferIndex
-            guard w > 0, h > 0, let pixelBuffer = pixelBuffers[bufIdx] else { return }
+            guard let mpvGL, let eaglContext, let renderPixelBuffer else { return }
+            let w = fboWidth
+            let h = fboHeight
+            guard w > 0, h > 0, fbo != 0 else { return }
 
             let renderStart = CACurrentMediaTime()
-            // Capture presentation timestamp BEFORE rendering — using the time
-            // the frame is intended for display, not when the buffer is wrapped.
             let presentationTime = CMClockGetTime(CMClockGetHostTimeClock())
             let fps = detectedFps
 
-            CVPixelBufferLockBaseAddress(pixelBuffer, [])
+            // Make our GL context current on the render thread
+            EAGLContext.setCurrent(eaglContext)
 
-            guard let baseAddress = CVPixelBufferGetBaseAddress(pixelBuffer) else {
-                CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
-                return
-            }
-            var stride = CVPixelBufferGetBytesPerRow(pixelBuffer)
-            var size: [CInt] = [CInt(w), CInt(h)]
-
-            // "bgr0" = B,G,R,padding — matches kCVPixelFormatType_32BGRA on little-endian ARM.
-            // MPV_RENDER_PARAM_SW_FORMAT expects char* (data points to the string directly).
-            withUnsafeMutablePointer(to: &size[0]) { sizePtr in
-                withUnsafeMutablePointer(to: &stride) { stridePtr in
-                    "bgr0".withCString { fmtCStr in
-                        var params: [mpv_render_param] = [
-                            mpv_render_param(type: MPV_RENDER_PARAM_SW_SIZE, data: sizePtr),
-                            mpv_render_param(type: MPV_RENDER_PARAM_SW_FORMAT, data: UnsafeMutableRawPointer(mutating: fmtCStr)),
-                            mpv_render_param(type: MPV_RENDER_PARAM_SW_STRIDE, data: stridePtr),
-                            mpv_render_param(type: MPV_RENDER_PARAM_SW_POINTER, data: baseAddress),
+            // Tell mpv to render into our FBO (GPU handles color conversion, scaling, OSD).
+            // withUnsafeMutablePointer ensures the data pointers outlive the render call.
+            var fboData = mpv_opengl_fbo(fbo: Int32(fbo), w: Int32(w), h: Int32(h), internal_format: 0)
+            var flipY: CInt = 0  // Don't flip — CVPixelBuffer and AVSampleBufferDisplayLayer share the same top-down row order
+            var blockForTarget: CInt = 0  // Don't block — AVSampleBufferDisplayLayer manages timing
+            withUnsafeMutablePointer(to: &fboData) { fboPtr in
+                withUnsafeMutablePointer(to: &flipY) { flipPtr in
+                    withUnsafeMutablePointer(to: &blockForTarget) { blockPtr in
+                        var renderParams = [
+                            mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_FBO, data: fboPtr),
+                            mpv_render_param(type: MPV_RENDER_PARAM_FLIP_Y, data: flipPtr),
+                            mpv_render_param(type: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: blockPtr),
                             mpv_render_param()
                         ]
-                        mpv_render_context_render(mpvGL, &params)
+                        mpv_render_context_render(mpvGL, &renderParams)
                     }
                 }
             }
 
-            CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+            // Flush GPU work (non-blocking — just ensures commands are submitted)
+            glFlush()
 
             let renderEnd = CACurrentMediaTime()
             let renderMs = (renderEnd - renderStart) * 1000.0
@@ -553,19 +610,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if renderDurations.count > frameSampleSize { renderDurations.removeFirst() }
             lastRenderTime = renderEnd
 
-            // Detect late frames — render took longer than one frame period at 30fps (33ms)
+            // Detect late frames
             if renderMs > 33.0 { lateFrameCount += 1 }
-
-            // Flip double buffer for next frame
-            currentBufferIndex = 1 - bufIdx
 
             // Check display layer readiness before enqueue
             let layerReady = sampleBufferLayer?.sampleBufferRenderer.isReadyForMoreMediaData ?? false
             let layerStatus = sampleBufferLayer?.sampleBufferRenderer.status
 
-            // Enqueue CMSampleBuffer to AVSampleBufferDisplayLayer
+            // Enqueue — the renderPixelBuffer IS the rendered frame (zero copy via IOSurface)
             var enqueued = false
-            if let sampleBuffer = Self.makeSampleBuffer(from: pixelBuffer, presentationTime: presentationTime) {
+            if let sampleBuffer = Self.makeSampleBuffer(from: renderPixelBuffer, presentationTime: presentationTime) {
                 nonisolated(unsafe) let sb = sampleBuffer
                 sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
                 enqueued = true
@@ -576,22 +630,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let expectedIntervalMs = fps > 0 ? 1000.0 / fps : 33.3
 
             // ── Per-frame diagnostics ──
-            // Log every frame for the first 120 frames (startup analysis),
-            // then only log anomalies (jitter, drops, layer errors).
             let isAnomaly = intervalMs > 0 && (
-                intervalMs > expectedIntervalMs * 2.0 ||   // frame took 2x longer than expected
-                intervalMs < expectedIntervalMs * 0.3 ||   // frame arrived way too fast
-                !layerReady ||                              // display layer had backpressure
-                layerStatus == .failed ||                   // display layer failed
-                !enqueued                                   // sample buffer creation failed
+                intervalMs > expectedIntervalMs * 2.0 ||
+                intervalMs < expectedIntervalMs * 0.3 ||
+                !layerReady || layerStatus == .failed || !enqueued
             )
 
             if totalFrameCount <= 120 || isAnomaly {
                 let tag = isAnomaly ? "⚠️" : "🎞️"
-                print("\(tag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms buf=\(bufIdx) fps=\(String(format: "%.1f", fps)) pts=\(String(format: "%.3f", CMTimeGetSeconds(presentationTime)))s ready=\(layerReady) enqueued=\(enqueued) status=\(layerStatus == .failed ? "FAILED" : "ok")")
+                print("\(tag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) pts=\(String(format: "%.3f", CMTimeGetSeconds(presentationTime)))s ready=\(layerReady) enqueued=\(enqueued) status=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
 
-            // Log layer errors immediately
             if layerStatus == .failed, let err = sampleBufferLayer?.sampleBufferRenderer.error {
                 print("🔴 [LAYER FAILED] \(err.localizedDescription)")
             }
@@ -628,6 +677,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 if let retain = wakeupRetain {
                     wakeupRetain = nil
                     retain.release()
+                }
+
+                // Free OpenGL resources before destroying render context
+                if let ctx = eaglContext {
+                    EAGLContext.setCurrent(ctx)
+                    if fbo != 0 { glDeleteFramebuffers(1, &fbo); fbo = 0 }
+                    renderTexture = nil
+                    renderPixelBuffer = nil
+                    if let cache = textureCache { CVOpenGLESTextureCacheFlush(cache, 0) }
+                    textureCache = nil
+                    EAGLContext.setCurrent(nil)
+                    eaglContext = nil
                 }
 
                 // Free render context before destroying mpv
@@ -674,28 +735,29 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // ── Pre-init options ──
 
+            // Request error-level logs in release builds so we can detect
+            // GL interop failures (10-bit HEVC) and fall back dynamically.
             #if DEBUG
             checkError(mpv_request_log_messages(mpv, "warn"))
             #else
-            checkError(mpv_request_log_messages(mpv, "no"))
+            checkError(mpv_request_log_messages(mpv, "error"))
             #endif
 
             checkError(mpv_set_option_string(mpv, "subs-match-os-language", "yes"))
             checkError(mpv_set_option_string(mpv, "subs-fallback", "yes"))
 
-            // vo=libmpv: app drives rendering via software render API.
-            // Background thread renders to CVPixelBuffer; main thread displays via CALayer.contents.
-            // No OpenGL, no GL→Metal translation overhead, no rotation bugs.
+            // vo=libmpv: app drives rendering via OpenGL ES render API.
+            // GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy).
             checkError(mpv_set_option_string(mpv, "vo", "libmpv"))
             checkError(mpv_set_option_string(mpv, "profile", "fast"))  // Disable expensive post-processing for mobile
 
             #if targetEnvironment(simulator)
             checkError(mpv_set_option_string(mpv, "hwdec", "no"))
             #else
-            // videotoolbox-copy: hardware decode on GPU, then copy frame to CPU memory
-            // for the SW render API. Pure "videotoolbox" outputs GPU textures which the
-            // SW renderer can't read, causing fallback to full software decoding.
-            checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox-copy"))
+            // videotoolbox (no -copy): GPU decode → GPU texture via IOSurface interop.
+            // Decoded frames stay on GPU — the OpenGL render API maps them as textures
+            // for zero-copy color conversion, scaling, and OSD.
+            checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
             checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "600"))  // Live MPEG-TS joins mid-GOP without SPS/PPS — VT errors until keyframe arrives
             #endif
 
@@ -733,13 +795,42 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             print("[MPV-DIAG] setupMPV: mpv_initialize succeeded ✓ (\(String(format: "%.0f", initMs))ms)")
             #endif
 
-            // ── Post-init: create software render context ──
-            let api = UnsafeMutableRawPointer(mutating: (MPV_RENDER_API_TYPE_SW as NSString).utf8String)
-            var renderParams = [
-                mpv_render_param(type: MPV_RENDER_PARAM_API_TYPE, data: api),
-                mpv_render_param()
-            ]
-            let renderCreateResult = mpv_render_context_create(&mpvGL, mpv, &renderParams)
+            // ── Post-init: create OpenGL ES render context ──
+
+            // EAGLContext for GPU-accelerated mpv rendering
+            eaglContext = EAGLContext(api: .openGLES3) ?? EAGLContext(api: .openGLES2)
+            guard let glCtx = eaglContext else {
+                logStore.append("✗ MPV: failed to create EAGLContext")
+                let callback = onFatalError
+                Task { await callback("MPV: OpenGL ES context creation failed") }
+                return
+            }
+            EAGLContext.setCurrent(glCtx)
+
+            // Texture cache for zero-copy CVPixelBuffer ↔ GL texture sharing
+            var cache: CVOpenGLESTextureCache?
+            CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, nil, glCtx, nil, &cache)
+            textureCache = cache
+
+            // OpenGL render API — GPU handles color conversion, scaling, OSD.
+            // get_proc_address resolves GL function pointers from the loaded OpenGLES.framework.
+            let apiType = UnsafeMutableRawPointer(mutating: (MPV_RENDER_API_TYPE_OPENGL as NSString).utf8String)
+            var glInitParams = mpv_opengl_init_params(
+                get_proc_address: { (ctx, name) -> UnsafeMutableRawPointer? in
+                    guard let name else { return nil }
+                    return dlsym(dlopen(nil, RTLD_LAZY), name)
+                },
+                get_proc_address_ctx: nil
+            )
+            // withUnsafeMutablePointer ensures glInitParams outlives the create call.
+            let renderCreateResult: CInt = withUnsafeMutablePointer(to: &glInitParams) { glPtr in
+                var renderParams = [
+                    mpv_render_param(type: MPV_RENDER_PARAM_API_TYPE, data: apiType),
+                    mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, data: glPtr),
+                    mpv_render_param()
+                ]
+                return mpv_render_context_create(&mpvGL, mpv, &renderParams)
+            }
 
             if renderCreateResult < 0 {
                 let errStr = String(cString: mpv_error_string(renderCreateResult))
@@ -755,11 +846,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             #if DEBUG
-            print("[MPV-DIAG] setupMPV: SW render context created ✓")
+            print("[MPV-DIAG] setupMPV: OpenGL ES render context created ✓")
             #endif
 
             // When mpv has a new frame, schedule render on background thread.
-            // SW render writes to CVPixelBuffer; main thread displays via CALayer.contents.
+            // GPU renders to CVPixelBuffer via IOSurface FBO; displayed via AVSampleBufferDisplayLayer.
             mpv_render_context_set_update_callback(mpvGL, { ctx in
                 guard let ctx else { return }
                 let coord = Unmanaged<MPVPlayerViewRepresentable.Coordinator>.fromOpaque(ctx).takeUnretainedValue()
@@ -838,7 +929,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             let cacheStr = String(format: "%.1f", cachingSecs)
             let totalSetupMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
-            print("[MPV-DIAG] ✓ mpv fully initialized: vo=libmpv (SW render), hwdec=videotoolbox-copy (requested)")
+            print("[MPV-DIAG] ✓ mpv fully initialized: vo=libmpv (OpenGL ES render), hwdec=videotoolbox (requested)")
             print("[MPV-DIAG]   cache=\(cacheStr)s, readahead=\(cacheStr)s, isLive=\(isLive), setup_time=\(String(format: "%.0f", totalSetupMs))ms")
             #endif
         }
@@ -892,6 +983,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             let text = msg.pointee.text.map { String(cString: $0) } ?? ""
                             if text.contains("underrun") {
                                 self.audioUnderrunCount += 1
+                            }
+                            // 10-bit HEVC: OpenGL ES can't map the VideoToolbox texture.
+                            // Fall back to videotoolbox-copy (GPU decode → CPU copy → GL upload).
+                            // This is slower than zero-copy but still hardware-decoded.
+                            if text.contains("Initializing texture for hardware decoding failed") && !self.hwdecFallbackApplied {
+                                self.hwdecFallbackApplied = true
+                                print("[MPV-DIAG] ⚠️ GL interop failed (likely 10-bit HEVC) — falling back to videotoolbox-copy")
+                                mpv_set_property_string(mpv, "hwdec", "videotoolbox-copy")
+                                // Seek to current position to force reinit with the new hwdec
+                                var timePos: Double = 0
+                                mpv_get_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &timePos)
+                                self.mpvCommand(mpv, ["seek", String(format: "%.1f", timePos), "absolute", "exact"])
                             }
                             #if DEBUG
                             let prefix = msg.pointee.prefix.map { String(cString: $0) } ?? "?"
