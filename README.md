@@ -24,6 +24,22 @@ Browse and filter on-demand content by category. Categories are pulled from the 
 
 VOD watch progress is tracked automatically. Resume movies and episodes from the Continue Watching section on the Movies or Series tabs. Long-press to remove items. Progress syncs across all your devices via iCloud.
 
+**Player Controls**
+
+All secondary controls (audio tracks, subtitles, playback speed, sleep timer, stream info, audio-only mode, Picture-in-Picture) are accessible from a single overflow menu on iOS or an Options panel on tvOS.
+
+**Sleep Timer**
+
+Set a sleep timer (30, 60, 90, or 120 minutes) and playback pauses automatically when it expires.
+
+**Stream Info Overlay**
+
+Toggle a real-time overlay showing video codec, resolution, FPS, bitrate, cache duration, A/V sync, and dropped frames. Draggable anywhere on iOS, fixed top-center on tvOS.
+
+**EPG Reminders**
+
+Long-press an upcoming program in the channel list (iOS) or guide (tvOS) to set a reminder. A notification fires 5 minutes before the program starts. When the app is in the foreground, an in-app banner appears instead.
+
 **Audio and Subtitle Selection**
 
 Switch between audio tracks and subtitle tracks during playback. Available tracks are detected automatically from the stream.
@@ -38,11 +54,11 @@ Swipe home during playback and the stream continues in a floating PiP window. Su
 
 **iCloud Sync**
 
-Server configurations, preferences, and VOD watch progress sync across devices using iCloud Key-Value Storage. Set up once on one device and all your Apple devices pick up the same servers and resume positions.
+Server configurations, preferences, VOD watch progress, and EPG reminders sync across devices using iCloud Key-Value Storage. Set up once on one device and all your Apple devices pick up the same servers, resume positions, and reminders. Data is pulled automatically on every app launch.
 
 **Apple TV Optimized**
 
-Full Siri Remote support with hold-to-scrub seeking on the timeline, accelerating seek speed, play/pause, speed cycling, and subtitle toggling. D-pad control hints appear when the overlay is visible. Channels and logos are sized for living room viewing. LAN detection probes the local server URL automatically (no SSID configuration needed on tvOS).
+Full Siri Remote support with d-pad seeking, play/pause, and an Options panel for audio, subtitles, speed, sleep timer, and stream info. Channels and logos are sized for living room viewing. LAN detection probes the local server URL automatically (no SSID configuration needed on tvOS).
 
 **tvOS Floating Player**
 
