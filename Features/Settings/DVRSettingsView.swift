@@ -27,6 +27,9 @@ struct DVRSettingsView: View {
     // Deletion confirmation
     @State private var showClearConfirmation = false
 
+    // Folder picker
+    @State private var showFolderPicker = false
+
     private var activeServer: ServerConnection? {
         servers.first(where: { $0.isActive }) ?? servers.first
     }
@@ -147,26 +150,28 @@ struct DVRSettingsView: View {
             .listRowBackground(Color.cardBackground)
 
             // MARK: - Recordings folder
-            Section {
-                HStack {
-                    Text("Recordings folder")
-                    Spacer()
-                    Text(recordingsFolderLabel)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+            if !isDispatcharr || activeServer?.defaultRecordingDestination != .dispatcharrServer {
+                Section {
+                    HStack {
+                        Text("Recordings folder")
+                        Spacer()
+                        Text(recordingsFolderLabel)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
 
-                #if os(iOS)
-                Button("Choose custom folder…") {
-                    // TODO: Present UIDocumentPickerViewController
+                    #if os(iOS)
+                    Button("Choose custom folder…") {
+                        showFolderPicker = true
+                    }
+                    #endif
+                } header: {
+                    Text("Storage Location")
+                        .sectionHeaderStyle()
                 }
-                #endif
-            } header: {
-                Text("Storage Location")
-                    .sectionHeaderStyle()
+                .listRowBackground(Color.cardBackground)
             }
-            .listRowBackground(Color.cardBackground)
 
             // MARK: - My Recordings
             Section {
@@ -215,6 +220,17 @@ struct DVRSettingsView: View {
                 defaultPostRoll = customPostRollValue
             }
         }
+        #if os(iOS)
+        .sheet(isPresented: $showFolderPicker) {
+            FolderPickerView { url in
+                guard url.startAccessingSecurityScopedResource() else { return }
+                defer { url.stopAccessingSecurityScopedResource() }
+                if let bookmark = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    UserDefaults.standard.set(bookmark, forKey: "dvrCustomFolderBookmark")
+                }
+            }
+        }
+        #endif
     }
 
     // MARK: - Helpers
@@ -324,3 +340,32 @@ struct DVRSettingsView: View {
         return formatter.string(fromByteCount: bytes)
     }
 }
+
+// MARK: - Folder Picker (iOS only)
+#if os(iOS)
+import UniformTypeIdentifiers
+
+struct FolderPickerView: UIViewControllerRepresentable {
+    let onPick: (URL) -> Void
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+    class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            guard let url = urls.first else { return }
+            onPick(url)
+        }
+    }
+}
+#endif

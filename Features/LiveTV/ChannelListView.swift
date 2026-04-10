@@ -677,6 +677,8 @@ struct ChannelRow: View {
     @State private var isLoadingUpcoming = false
     @State private var reminderTarget: EPGEntry?
     @State private var showReminderDialog = false
+    @State private var recordTarget: EPGEntry?
+    @State private var showRecordSheet = false
     #if os(tvOS)
     /// Tracks which part of the row has focus.
     /// Navigation: D-pad LEFT → star, D-pad RIGHT → expand/guide.
@@ -693,6 +695,8 @@ struct ChannelRow: View {
 
     /// True when running on a wider display (iPad / macOS).
     private var isWide: Bool { sizeClass == .regular }
+
+    @State private var showCardMenu = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -889,108 +893,124 @@ struct ChannelRow: View {
     #if !os(tvOS)
     @ViewBuilder
     private var iOSRow: some View {
-        Button(action: onTap) {
-            HStack(spacing: isWide ? 14 : 10) {
-                Text(item.number)
-                    .font(isWide ? .body.monospaced() : .monoSmall)
+        HStack(spacing: isWide ? 14 : 10) {
+            Text(item.number)
+                .font(isWide ? .body.monospaced() : .monoSmall)
+                .lineLimit(1)
+                .foregroundColor(.textTertiary)
+                .frame(width: isWide ? 36 : 26, alignment: .trailing)
+
+            CachedLogoImage(
+                url: item.logoURL,
+                width: isWide ? 50 : 38,
+                height: isWide ? 34 : 26
+            )
+
+            VStack(alignment: .leading, spacing: isWide ? 4 : 2) {
+                Text(item.name)
+                    .font(isWide ? .body.weight(.medium) : .bodyMedium)
+                    .foregroundColor(.textPrimary)
                     .lineLimit(1)
-                    .foregroundColor(.textTertiary)
-                    .frame(width: isWide ? 36 : 26, alignment: .trailing)
 
-                CachedLogoImage(
-                    url: item.logoURL,
-                    width: isWide ? 50 : 38,
-                    height: isWide ? 34 : 26
-                )
-
-                VStack(alignment: .leading, spacing: isWide ? 4 : 2) {
-                    Text(item.name)
-                        .font(isWide ? .body.weight(.medium) : .bodyMedium)
-                        .foregroundColor(.textPrimary)
-                        .lineLimit(1)
-
-                    if let program = item.currentProgram, !program.isEmpty {
-                        HStack(spacing: 8) {
-                            MarqueeText(text: program,
-                                        font: isWide ? .subheadline : .labelSmall,
-                                        color: .accentPrimary.opacity(0.85),
-                                        isActive: false)  // Static during scroll — saves GPU
-                                .frame(height: isWide ? 20 : 16)
-                            if let end = item.currentProgramEnd {
-                                nowPlayingTimeRemaining(end: end)
-                            }
+                if let program = item.currentProgram, !program.isEmpty {
+                    HStack(spacing: 8) {
+                        MarqueeText(text: program,
+                                    font: isWide ? .subheadline : .labelSmall,
+                                    color: .accentPrimary.opacity(0.85),
+                                    isActive: false)  // Static during scroll — saves GPU
+                            .frame(height: isWide ? 20 : 16)
+                        if let end = item.currentProgramEnd {
+                            nowPlayingTimeRemaining(end: end)
                         }
-                        if let desc = item.currentProgramDescription, !desc.isEmpty {
-                            Text(desc)
-                                .font(isWide ? .caption : .system(size: 10))
-                                .foregroundColor(.textSecondary)
-                                .lineLimit(2)
-                        }
-                    } else {
-                        Text(item.group)
-                            .font(isWide ? .subheadline : .labelSmall)
+                    }
+                    if let desc = item.currentProgramDescription, !desc.isEmpty {
+                        Text(desc)
+                            .font(isWide ? .caption : .system(size: 10))
                             .foregroundColor(.textSecondary)
-                            .lineLimit(1)
+                            .lineLimit(2)
                     }
-
-                    if let start = item.currentProgramStart,
-                       let end   = item.currentProgramEnd,
-                       item.currentProgram != nil {
-                        nowPlayingProgressBar(start: start, end: end)
-                    }
+                } else {
+                    Text(item.group)
+                        .font(isWide ? .subheadline : .labelSmall)
+                        .foregroundColor(.textSecondary)
+                        .lineLimit(1)
                 }
 
-                Spacer()
-
-                // ── Expand chevron (only action button remaining) ──
-                if item.currentProgram != nil || fetchUpcoming != nil {
-                    Button {
-                        withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
-                        if isExpanded && upcomingPrograms.isEmpty, fetchUpcoming != nil {
-                            isLoadingUpcoming = true
-                            Task {
-                                upcomingPrograms = await fetchUpcoming?() ?? []
-                                isLoadingUpcoming = false
-                            }
-                        }
-                    } label: {
-                        if isWide {
-                            HStack(spacing: 5) {
-                                Image(systemName: isExpanded ? "chevron.up" : "list.bullet")
-                                    .font(.system(size: 11, weight: .medium))
-                                Text(isExpanded ? "Hide Schedule" : "Schedule")
-                                    .font(.subheadline.weight(.medium))
-                            }
-                            .foregroundColor(.accentPrimary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
-                            .background(Capsule().fill(Color.accentPrimary.opacity(0.12)))
-                            .contentShape(Capsule())
-                        } else {
-                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundColor(.textTertiary)
-                                .frame(width: 44, height: 44)
-                                .contentShape(Rectangle())
-                        }
-                    }
-                    .buttonStyle(.plain)
+                if let start = item.currentProgramStart,
+                   let end   = item.currentProgramEnd,
+                   item.currentProgram != nil {
+                    nowPlayingProgressBar(start: start, end: end)
                 }
             }
-            .padding(.vertical, isWide ? 18 : 13)
-            .padding(.horizontal, isWide ? 18 : 14)
-            .contentShape(Rectangle())  // Ensure entire row area is tappable
+
+            Spacer()
+
+            // ── Expand chevron (only action button remaining) ──
+            if item.currentProgram != nil || fetchUpcoming != nil {
+                Button {
+                    withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
+                    if isExpanded && upcomingPrograms.isEmpty, fetchUpcoming != nil {
+                        isLoadingUpcoming = true
+                        Task {
+                            upcomingPrograms = await fetchUpcoming?() ?? []
+                            isLoadingUpcoming = false
+                        }
+                    }
+                } label: {
+                    if isWide {
+                        HStack(spacing: 5) {
+                            Image(systemName: isExpanded ? "chevron.up" : "list.bullet")
+                                .font(.system(size: 11, weight: .medium))
+                            Text(isExpanded ? "Hide Schedule" : "Schedule")
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .foregroundColor(.accentPrimary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(Color.accentPrimary.opacity(0.12)))
+                        .contentShape(Capsule())
+                    } else {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.textTertiary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .buttonStyle(.plain)
-        .contextMenu {
+        .padding(.vertical, isWide ? 18 : 13)
+        .padding(.horizontal, isWide ? 18 : 14)
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
+        .onLongPressGesture(minimumDuration: 0.5) {
+            let generator = UIImpactFeedbackGenerator(style: .medium)
+            generator.impactOccurred()
+            showCardMenu = true
+        }
+        .confirmationDialog(
+            item.currentProgram ?? item.name,
+            isPresented: $showCardMenu,
+            titleVisibility: .visible
+        ) {
             let isFav = favoritesStore.isFavorite(item.id)
-            Button {
+            Button(isFav ? "Remove from Favorites" : "Add to Favorites") {
                 favoritesStore.toggle(item)
-            } label: {
-                Label(
-                    isFav ? "Remove from Favorites" : "Add to Favorites",
-                    systemImage: isFav ? "star.slash" : "star.fill"
-                )
+            }
+
+            // Record the currently-airing program
+            if let program = item.currentProgram,
+               let end = item.currentProgramEnd, end > Date() {
+                Button("Record from Now") {
+                    recordTarget = EPGEntry(
+                        title: program,
+                        description: item.currentProgramDescription ?? "",
+                        startTime: item.currentProgramStart,
+                        endTime: end
+                    )
+                    showRecordSheet = true
+                }
             }
         }
     }
@@ -1044,19 +1064,95 @@ struct ChannelRow: View {
                                 epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
                             }
                             .buttonStyle(EPGRowButtonStyle())
-                            .contextMenu { reminderMenu(for: entry) }
-                            #else
-                            PressableEPGRow(
-                                entry: entry,
-                                isLast: entry.id == futurePrograms.last?.id,
-                                isFuture: entry.startTime.map { $0 > Date() } ?? false,
-                                channelName: item.name,
-                                rowContent: { epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id) },
-                                onLongPress: {
-                                    reminderTarget = entry
-                                    showReminderDialog = true
+                            .contextMenu {
+                                reminderMenu(for: entry)
+                                if let end = entry.endTime, end > Date() {
+                                    let isLive = (entry.startTime ?? Date()) <= Date()
+                                    Button {
+                                        recordTarget = entry
+                                        showRecordSheet = true
+                                    } label: {
+                                        Label(isLive ? "Record from Now" : "Record",
+                                              systemImage: "record.circle")
+                                    }
                                 }
-                            )
+                            }
+                            #else
+                            epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(Color.cardBackground)
+                                )
+                                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10))
+                                .contextMenu {
+                                    if let start = entry.startTime, start > Date() {
+                                        let key = ReminderManager.programKey(channelName: item.name, title: entry.title, start: start)
+                                        if ReminderManager.shared.hasReminder(forKey: key) {
+                                            Button(role: .destructive) {
+                                                ReminderManager.shared.cancelReminder(forKey: key)
+                                            } label: {
+                                                Label("Cancel Reminder", systemImage: "bell.slash")
+                                            }
+                                        } else {
+                                            Button {
+                                                ReminderManager.shared.scheduleReminder(
+                                                    programTitle: entry.title,
+                                                    channelName: item.name,
+                                                    startTime: start
+                                                )
+                                            } label: {
+                                                Label("Set Reminder", systemImage: "bell.badge")
+                                            }
+                                        }
+                                    }
+                                    if let end = entry.endTime, end > Date() {
+                                        Button {
+                                            recordTarget = entry
+                                            showRecordSheet = true
+                                        } label: {
+                                            Label("Record", systemImage: "record.circle")
+                                        }
+                                    }
+                                } preview: {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack(spacing: 8) {
+                                            if let logoURL = item.logoURL {
+                                                CachedLogoImage(url: logoURL, width: 32, height: 22)
+                                            }
+                                            Text(item.name)
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundColor(.textSecondary)
+                                        }
+                                        Divider()
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(entry.title)
+                                                .font(.body.weight(.semibold))
+                                                .foregroundColor(.textPrimary)
+                                            if !entry.description.isEmpty {
+                                                Text(entry.description)
+                                                    .font(.caption)
+                                                    .foregroundColor(.accentPrimary.opacity(0.85))
+                                                    .lineLimit(2)
+                                            }
+                                            if let start = entry.startTime {
+                                                HStack(spacing: 4) {
+                                                    Text(start, style: .time)
+                                                    if let end = entry.endTime {
+                                                        Text("–")
+                                                        Text(end, style: .time)
+                                                    }
+                                                }
+                                                .font(.caption)
+                                                .foregroundColor(.textTertiary)
+                                            }
+                                        }
+                                    }
+                                    .padding(14)
+                                    .frame(width: 300, alignment: .leading)
+                                    .background(Color.cardBackground)
+                                }
                             #endif
                         }
                     }
@@ -1066,40 +1162,19 @@ struct ChannelRow: View {
                 .focusSection()
                 #endif
                 .padding(.bottom, 4)
-                #if os(iOS)
-                .confirmationDialog(
-                    reminderTarget.flatMap { entry in
-                        entry.startTime.map { start in
-                            ReminderManager.shared.hasReminder(
-                                forKey: ReminderManager.programKey(channelName: item.name, title: entry.title, start: start)
-                            ) ? "Cancel Reminder" : "Set Reminder"
-                        }
-                    } ?? "Set Reminder",
-                    isPresented: $showReminderDialog,
-                    titleVisibility: .visible
-                ) {
-                    if let entry = reminderTarget, let start = entry.startTime {
-                        let key = ReminderManager.programKey(channelName: item.name, title: entry.title, start: start)
-                        if ReminderManager.shared.hasReminder(forKey: key) {
-                            Button("Cancel Reminder", role: .destructive) {
-                                ReminderManager.shared.cancelReminder(forKey: key)
-                            }
-                        } else {
-                            Button("Remind Me 5 Min Before") {
-                                ReminderManager.shared.scheduleReminder(
-                                    programTitle: entry.title,
-                                    channelName: item.name,
-                                    startTime: start
-                                )
-                            }
-                        }
-                    }
-                } message: {
-                    if let entry = reminderTarget {
-                        Text(entry.title)
+                .sheet(isPresented: $showRecordSheet) {
+                    if let entry = recordTarget {
+                        RecordProgramSheet(
+                            programTitle: entry.title,
+                            programDescription: entry.description,
+                            channelID: item.id,
+                            channelName: item.name,
+                            scheduledStart: entry.startTime ?? Date(),
+                            scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
+                            isLive: (entry.startTime ?? Date()) <= Date()
+                        )
                     }
                 }
-                #endif
             }
         }
     }
