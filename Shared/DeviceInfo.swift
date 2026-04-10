@@ -189,4 +189,47 @@ enum DeviceInfo {
         }
         return attrs[.modificationDate] as? Date
     }
+
+    // MARK: - User-Agent
+
+    /// App's marketing version from the bundle (e.g. "1.4.0"), used in the
+    /// default User-Agent string.
+    static var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
+    }
+
+    /// Platform identifier for the User-Agent string.
+    static var platformName: String {
+        #if os(tvOS)
+        return "tvOS"
+        #else
+        return "iOS"
+        #endif
+    }
+
+    /// User-editable device nickname that shows up in Dispatcharr's admin
+    /// Stats panel. Persisted in UserDefaults so onboarding and Settings
+    /// can read/write the same value. Defaults to `modelName` if unset.
+    static var deviceNickname: String {
+        get {
+            let stored = UserDefaults.standard.string(forKey: "deviceNickname") ?? ""
+            return stored.isEmpty ? modelName : stored
+        }
+        set {
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            UserDefaults.standard.set(trimmed, forKey: "deviceNickname")
+        }
+    }
+
+    /// Computed default User-Agent used for Dispatcharr API + stream
+    /// requests when a server has no custom override. Format mirrors
+    /// RFC 7231 product-version-comment so it renders cleanly in the
+    /// Dispatcharr Stats page.
+    ///
+    /// Example: `AerioTV/1.4.0 (iOS; iPhone 15 Pro; Archie)`
+    static var defaultUserAgent: String {
+        let nickname = deviceNickname
+        let base = "AerioTV/\(appVersion) (\(platformName); \(modelName)"
+        return nickname == modelName ? "\(base))" : "\(base); \(nickname))"
+    }
 }

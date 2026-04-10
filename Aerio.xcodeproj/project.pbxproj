@@ -8,12 +8,14 @@
 
 /* Begin PBXBuildFile section */
 		000A4A7BFF25A66945137BB3 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
+		07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */; };
 		0823BE6E3373A83D3FEBC32F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
 		0A23BE6E3373A83D3FEBC001 /* ManageGroupsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1DD47CBF4B1FE912B0A001 /* ManageGroupsSheet.swift */; };
 		1083DB8B620ABAC3ECAB3823 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 875B0901B53C33B024AF597F /* Models.swift */; };
 		10D8764EE31D09E18D0C2CFB /* AddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F00 /* AddServerView.swift */; };
 		10D8764EE31D09E18D0C2CFC /* ServerSyncView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F01 /* ServerSyncView.swift */; };
 		11120119C5A64353490041AC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5806A5B948B604B451A5F5C7 /* Assets.xcassets */; };
+		115F4DEA73DE0C5C49817C04 /* RecordProgramSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */; };
 		134BBEA37092BE9ED06DE967 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */; };
 		1868ADFE12C568F8FC5FED53 /* StreamingAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* StreamingAPIs.swift */; };
 		19AE345D39FB441F217ABCE7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
@@ -24,7 +26,10 @@
 		20FAAE7F6DB7B9506F08F8E7 /* Pods-Aerio_iOS-dummy.m in Sources */ = {isa = PBXBuildFile; fileRef = 46BC9C3B09ACE5A89FC5C0E9 /* Pods-Aerio_iOS-dummy.m */; };
 		23CF3BDA1A62692EC1141F06 /* AerioTopShelf.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 980F01E6377A91F10236C4D5 /* AerioTopShelf.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2527936283FB11BD5201E1DA /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
+		27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
 		294AE2B45D4A82E38B1D09C4 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
+		29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */; };
+		2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		2DD98124C6F98D06EFED419A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C5D08BD1430E78C26390734 /* SettingsView.swift */; };
 		30FA1CA916C8DDE2001C592F /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 875B0901B53C33B024AF597F /* Models.swift */; };
 		315EA1921B10CD36DE7A8A1F /* Pods-Aerio_iOS-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8EEF8CE5358378E2CF3F4012 /* Pods-Aerio_iOS-Info.plist */; };
@@ -32,6 +37,7 @@
 		349A1C11393E9A07EDE93974 /* ServerConnectionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */; };
 		353CD0D32CB0D6B2998B1AD4 /* VODDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20C769771A1085A303FFC0F0 /* VODDetailView.swift */; };
 		36B1927A52630A63A061D530 /* Pods-Aerio_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */; };
+		38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
 		483F98D5B841C7C3E8491885 /* Pods_Aerio_tvOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 24C772C96083DF7C60C170B6 /* Pods_Aerio_tvOS.framework */; };
 		5585996EF79BB170CAD2D6F3 /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */; };
@@ -62,11 +68,13 @@
 		81212E73B4BFE131270C2907 /* Pods_Aerio_iOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0E2CA9C8C9A444D2FA2C29DC /* Pods_Aerio_iOS.framework */; };
 		81A5CE2643A02F7A26B2B5CF /* AddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F00 /* AddServerView.swift */; };
 		81A5CE2643A02F7A26B2B5D0 /* ServerSyncView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F01 /* ServerSyncView.swift */; };
+		84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D60A8F073408CAFD075C499C /* MyRecordingsView.swift */; };
 		84D478A2A84F9A8A2FEE8EA4 /* PlaylistModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA33B18A62A3411B6425B661 /* PlaylistModels.swift */; };
 		85F0D65172F55DFA1D3DA20B /* Pods-Aerio_iOS-frameworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */; };
 		867C07594A685FB5BDCA5BB3 /* SplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5044B9CD69C05A6836588548 /* SplashView.swift */; };
 		87062C2D2515CB8999B9C4E6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5806A5B948B604B451A5F5C7 /* Assets.xcassets */; };
 		8AC25DFB7121C1AEBCE36729 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */; };
+		8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
 		8CF1E8A8912F0A98110ABF07 /* Pods-Aerio_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */; };
 		8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
 		8F5A030376AB114E38DAE4AD /* ReminderBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */; };
@@ -77,6 +85,7 @@
 		A2B3C4D5E6F7A80901CD3456 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
 		A41AA69146981E08D85F8439 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
 		A4A40B2ADBF625F5928EF0C1 /* Pods-Aerio_iOS-dummy.m in Sources */ = {isa = PBXBuildFile; fileRef = 46BC9C3B09ACE5A89FC5C0E9 /* Pods-Aerio_iOS-dummy.m */; };
+		A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D60A8F073408CAFD075C499C /* MyRecordingsView.swift */; };
 		A8E322C238A7CE0B55BA3D4D /* AerioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* AerioApp.swift */; };
 		ACAEB60B5118B283BF99CF16 /* PlaylistImportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */; };
 		AD422FFDD689840F76B8A238 /* MediaServerAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */; };
@@ -99,6 +108,7 @@
 		CD1234567890ABCDEF123456 /* NowPlayingBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */; };
 		CF38B25676730E71C9AD497A /* AerioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* AerioApp.swift */; };
 		D0C107746AE8D043B81554D2 /* ServerConnectionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */; };
+		D50E5DFBD9787AC5568AD17A /* LocalRecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */; };
 		D707545F75A250B3657868F5 /* VODService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C548BC428D32F3966A46C27 /* VODService.swift */; };
 		D9B2C4CC2563512B2741AF83 /* TVShowsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */; };
 		DA8D78550B95A889171982BC /* MoviesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */; };
@@ -150,6 +160,7 @@
 		08B4D4146C07D85405524861 /* AerioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AerioApp.swift; sourceTree = "<group>"; };
 		0E2CA9C8C9A444D2FA2C29DC /* Pods_Aerio_iOS.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Aerio_iOS.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		0EEF62484815637B5043D834 /* Pods-Aerio_tvOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_tvOS.debug.xcconfig"; path = "Target Support Files/Pods-Aerio_tvOS/Pods-Aerio_tvOS.debug.xcconfig"; sourceTree = "<group>"; };
+		0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DVRSettingsView.swift; sourceTree = "<group>"; };
 		1603AF9E4D31DB8BDC708C06 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		20C769771A1085A303FFC0F0 /* VODDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODDetailView.swift; sourceTree = "<group>"; };
 		24C772C96083DF7C60C170B6 /* Pods_Aerio_tvOS.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Aerio_tvOS.framework; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -182,6 +193,7 @@
 		7A1DD47CBF4B1FE912B0A001 /* ManageGroupsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManageGroupsSheet.swift; sourceTree = "<group>"; };
 		7CE1F656E39A506614FF4497 /* MobileVLCKit.debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = MobileVLCKit.debug.xcconfig; sourceTree = "<group>"; };
 		7D1DD47CBF4B1FE912B0AF08 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
+		7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecordProgramSheet.swift; sourceTree = "<group>"; };
 		8087BB36936B80A3234428C4 /* COPYING.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = COPYING.txt; sourceTree = "<group>"; };
 		828A599894F381F7A78BFDF8 /* MobileVLCKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = MobileVLCKit.xcframework; sourceTree = "<group>"; };
 		875B0901B53C33B024AF597F /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
@@ -203,6 +215,7 @@
 		A660E9D8B5D23C804B590C79 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		AA1234567890ABCDEF123456 /* DebugLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogger.swift; sourceTree = "<group>"; };
 		AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingBridge.swift; sourceTree = "<group>"; };
+		B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LocalRecordingSession.swift; sourceTree = "<group>"; };
 		B3B1522EE96446B1A667FDEB /* Pods-Aerio_iOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_iOS.debug.xcconfig"; path = "Target Support Files/Pods-Aerio_iOS/Pods-Aerio_iOS.debug.xcconfig"; sourceTree = "<group>"; };
 		B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistImportViews.swift; sourceTree = "<group>"; };
 		BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeveloperSettingsView.swift; sourceTree = "<group>"; };
@@ -216,6 +229,7 @@
 		CC1061A736638618318B7F01 /* ServerSyncView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerSyncView.swift; sourceTree = "<group>"; };
 		CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
 		CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "Pods-Aerio_iOS-frameworks.sh"; sourceTree = "<group>"; };
+		D60A8F073408CAFD075C499C /* MyRecordingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MyRecordingsView.swift; sourceTree = "<group>"; };
 		D699360A522DBC839FC6BA69 /* Pods-Aerio_iOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_iOS.release.xcconfig"; path = "Target Support Files/Pods-Aerio_iOS/Pods-Aerio_iOS.release.xcconfig"; sourceTree = "<group>"; };
 		D6A98EC87AA5F1A5CD0E5606 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; name = Info.plist; path = TopShelfExtension/Info.plist; sourceTree = "<group>"; };
 		D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVShowsView.swift; sourceTree = "<group>"; };
@@ -224,6 +238,7 @@
 		E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EPGGuideView.swift; sourceTree = "<group>"; };
 		E71FA151241E7264059B0E3A /* Pods-Aerio_iOS-frameworks-Debug-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Debug-input-files.xcfilelist"; sourceTree = "<group>"; };
 		EA33B18A62A3411B6425B661 /* PlaylistModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistModels.swift; sourceTree = "<group>"; };
+		EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecordingCoordinator.swift; sourceTree = "<group>"; };
 		F249D5C39D90BC11107F3420 /* Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist"; sourceTree = "<group>"; };
 		F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConnectionViewModel.swift; sourceTree = "<group>"; };
 		F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ReminderBannerView.swift; path = Shared/ReminderBannerView.swift; sourceTree = SOURCE_ROOT; };
@@ -268,6 +283,7 @@
 			children = (
 				94C2469FCAE37105952DCC28 /* ChannelListView.swift */,
 				E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */,
+				7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */,
 			);
 			path = LiveTV;
 			sourceTree = "<group>";
@@ -485,6 +501,8 @@
 				2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */,
 				BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */,
 				9C5D08BD1430E78C26390734 /* SettingsView.swift */,
+				0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */,
+				D60A8F073408CAFD075C499C /* MyRecordingsView.swift */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
@@ -574,6 +592,8 @@
 				4B9C3D4E2F6A718903BB5C6D /* SyncManager.swift */,
 				F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */,
 				62C0C151EAA6394D32003217 /* DeviceInfo.swift */,
+				B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */,
+				EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -812,6 +832,11 @@
 				1D11DF914E50BF1810089A1E /* XtreamSeriesAPI.swift in Sources */,
 				7A7218D999F2EBB150A606A1 /* ReminderBannerView.swift in Sources */,
 				A41AA69146981E08D85F8439 /* DeviceInfo.swift in Sources */,
+				29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */,
+				27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */,
+				2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */,
+				A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */,
+				07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -860,6 +885,11 @@
 				3349C24B50E8CC1C902B358F /* XtreamSeriesAPI.swift in Sources */,
 				8F5A030376AB114E38DAE4AD /* ReminderBannerView.swift in Sources */,
 				000A4A7BFF25A66945137BB3 /* DeviceInfo.swift in Sources */,
+				D50E5DFBD9787AC5568AD17A /* LocalRecordingSession.swift in Sources */,
+				8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */,
+				38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */,
+				84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */,
+				115F4DEA73DE0C5C49817C04 /* RecordProgramSheet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -899,7 +929,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.3.4;
+				MARKETING_VERSION = 1.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio.TopShelf;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -918,6 +948,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
 				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
 				CODE_SIGN_ENTITLEMENTS = Aerio_tvOS.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = AerioTV;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
@@ -952,7 +983,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.4;
+				MARKETING_VERSION = 1.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio;
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -978,7 +1009,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.3.4;
+				MARKETING_VERSION = 1.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio.TopShelf;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1047,7 +1078,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.3.4;
+				MARKETING_VERSION = 1.4.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1079,7 +1110,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.4;
+				MARKETING_VERSION = 1.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio;
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1148,7 +1179,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.3.4;
+				MARKETING_VERSION = 1.4.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1169,6 +1200,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
 				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
 				CODE_SIGN_ENTITLEMENTS = Aerio_tvOS.entitlements;
+				CURRENT_PROJECT_VERSION = 1;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = AerioTV;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";

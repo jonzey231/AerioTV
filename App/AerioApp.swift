@@ -161,7 +161,8 @@ struct AerioApp: App {
             EPGProgram.self,
             M3UPlaylist.self,
             EPGSource.self,
-            WatchProgress.self
+            WatchProgress.self,
+            Recording.self
         ])
         .onChange(of: scenePhase) { _, phase in
             switch phase {
@@ -186,6 +187,13 @@ struct AerioApp: App {
                 // tvOS has no PiP or background audio entitlement for IPTV streams.
                 NotificationCenter.default.post(name: .stopPlaybackForBackground, object: nil)
                 #endif
+                // Stop all active local recordings — iOS suspends URLSession
+                // data tasks within ~30s of backgrounding, so the recording
+                // would fail silently. Better to stop cleanly. The model
+                // context update happens inside RootView's own onChange.
+                Task { @MainActor in
+                    RecordingCoordinator.shared.stopAllSessionsOnBackground()
+                }
             @unknown default:  break
             }
         }

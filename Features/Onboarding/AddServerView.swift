@@ -23,6 +23,10 @@ struct AddServerView: View {
     /// Server that was just saved — triggers the sync loading screen.
     @State private var savedServer: ServerConnection?
 
+    // DVR onboarding (Dispatcharr only)
+    @State private var deviceNickname: String = DeviceInfo.modelName
+    @State private var dvrDestination: RecordingDestination = .dispatcharrServer
+
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
@@ -35,6 +39,11 @@ struct AddServerView: View {
                         serverForm
                         lanWANSection
                         verifySection
+
+                        // DVR & identity onboarding (Dispatcharr only)
+                        if viewModel.verificationSuccess && viewModel.serverType == .dispatcharrAPI {
+                            dispatcharrOnboardingSection
+                        }
 
                         if viewModel.verificationSuccess {
                             PrimaryButton("Save Playlist", icon: "checkmark") {
@@ -535,6 +544,40 @@ struct AddServerView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
+    // MARK: - Dispatcharr Onboarding
+
+    @ViewBuilder
+    private var dispatcharrOnboardingSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Device Identity")
+                .font(.headline)
+                .foregroundColor(.textPrimary)
+            Text("This name identifies your device in Dispatcharr's admin panel.")
+                .font(.subheadline)
+                .foregroundColor(.textSecondary)
+            AppTextField("Device Name", placeholder: DeviceInfo.modelName,
+                         text: $deviceNickname, icon: "iphone")
+
+            Divider().padding(.vertical, 8)
+
+            Text("Default Recording Destination")
+                .font(.headline)
+                .foregroundColor(.textPrimary)
+            Text("Where should recordings be saved by default? Server-side is recommended — recordings continue even when AerioTV is closed.")
+                .font(.subheadline)
+                .foregroundColor(.textSecondary)
+
+            Picker("Destination", selection: $dvrDestination) {
+                Text("Dispatcharr server (recommended)").tag(RecordingDestination.dispatcharrServer)
+                Text("This device").tag(RecordingDestination.local)
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding(16)
+        .background(Color.cardBackground.cornerRadius(12))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
     private func saveServer() {
         // Deactivate all existing servers so only the newly added one is active.
         let existing = (try? modelContext.fetch(FetchDescriptor<ServerConnection>())) ?? []
@@ -542,6 +585,11 @@ struct AddServerView: View {
         let server = viewModel.buildServerConnection()
         server.isVerified = true
         server.lastConnected = Date()
+        // Dispatcharr onboarding extras
+        if server.type == .dispatcharrAPI {
+            server.defaultRecordingDestination = dvrDestination
+            DeviceInfo.deviceNickname = deviceNickname
+        }
         modelContext.insert(server)
         try? modelContext.save()
         onSave?(server)

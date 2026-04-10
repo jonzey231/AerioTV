@@ -219,6 +219,25 @@ struct SettingsView: View {
                     .listSectionSeparator(.hidden)
                     #endif
 
+                    // MARK: - DVR Section
+                    Section {
+                        NavigationLink(destination: DVRSettingsView()) {
+                            SettingsRow(icon: "record.circle", iconColor: .red,
+                                        title: "DVR",
+                                        subtitle: "Recordings, buffers & storage")
+                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
+                        .listRowBackground(Color.cardBackground)
+                    } header: {
+                        Text("DVR")
+                            .sectionHeaderStyle()
+                    }
+                    #if os(iOS)
+                    .listSectionSeparator(.hidden)
+                    #endif
+
                     // MARK: - Developer Section
                     Section {
                         NavigationLink(destination: DeveloperSettingsView()) {
@@ -329,6 +348,7 @@ struct SettingsView: View {
                 switch route {
                 case "appearance": AppearanceSettingsView()
                 case "network":    NetworkSettingsView()
+                case "dvr-settings": DVRSettingsView()
                 case "developer":  DeveloperSettingsView()
                 case "edit-server":
                     if let server = serverToEdit {
@@ -573,6 +593,13 @@ struct SettingsView: View {
                             }
                         }
                     }
+                }
+
+                // MARK: DVR
+                tvSettingsHeader("DVR").padding(.top, 36)
+                TVSettingsNavButton(label: "DVR", icon: "record.circle",
+                                    iconColor: .red, subtitle: "Recordings, buffers & storage") {
+                    navPath.append("dvr-settings")
                 }
 
                 // MARK: Developer
@@ -1425,6 +1452,27 @@ struct EditServerSheet: View {
                 }
             }
 
+            if server.type == .dispatcharrAPI {
+                Section {
+                    TextField("User-Agent", text: $server.customUserAgent,
+                              prompt: Text(DeviceInfo.defaultUserAgent))
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .listRowBackground(Color.cardBackground)
+                    Button("Reset to Default") {
+                        server.customUserAgent = ""
+                    }
+                    .foregroundColor(.accentPrimary)
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("User-Agent").sectionHeaderStyle()
+                } footer: {
+                    Text("Shown in Dispatcharr's admin Stats panel to identify this device. Default: \(DeviceInfo.defaultUserAgent)")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                }
+            }
+
             Section {
                 HStack {
                     Text("Type")
@@ -1474,6 +1522,17 @@ struct EditServerSheet: View {
                     tvEditSection("Local Network") {
                         tvEditField("Local URL", text: $server.localURL)
                         Text("Used when the Apple TV detects the local server is reachable. Leave blank to always use the main URL.")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.top, 4)
+                    }
+                }
+
+                // User-Agent (Dispatcharr only)
+                if server.type == .dispatcharrAPI {
+                    tvEditSection("User-Agent") {
+                        tvEditField("User-Agent", text: $server.customUserAgent)
+                        Text("Shown in Dispatcharr's admin Stats panel. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.top, 4)
