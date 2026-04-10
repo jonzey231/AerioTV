@@ -40,7 +40,7 @@ struct WelcomeView: View {
                         .padding(.bottom, 24)
                         .padding(.top, 60)
 
-                    Text("Aerio")
+                    Text("AerioTV")
                         .font(.system(size: 60, weight: .bold))
                         .foregroundColor(.textPrimary)
                     Text("Your IPTV & Media Hub")
@@ -105,7 +105,7 @@ struct WelcomeView: View {
 
                     // Title
                     VStack(spacing: 4) {
-                        Text("Aerio")
+                        Text("AerioTV")
                             .font(.displayLarge)
                             .foregroundColor(.textPrimary)
                         Text("Your IPTV & Media Hub")

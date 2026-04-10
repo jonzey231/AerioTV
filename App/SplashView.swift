@@ -41,7 +41,7 @@ private struct UniversalSplashView: View {
                             y: logoSize * 0.075)
                     .padding(.bottom, logoBottomPad)
 
-                Text("Aerio")
+                Text("AerioTV")
                     .font(.system(size: titleSize, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
 

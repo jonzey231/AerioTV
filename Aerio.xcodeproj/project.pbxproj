@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		000A4A7BFF25A66945137BB3 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
 		0823BE6E3373A83D3FEBC32F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
 		0A23BE6E3373A83D3FEBC001 /* ManageGroupsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1DD47CBF4B1FE912B0A001 /* ManageGroupsSheet.swift */; };
 		1083DB8B620ABAC3ECAB3823 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 875B0901B53C33B024AF597F /* Models.swift */; };
@@ -74,6 +75,7 @@
 		9D874ED59E97CB1D868F596D /* VODModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */; };
 		9F9A37C29E5E186E323737C0 /* ChannelListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94C2469FCAE37105952DCC28 /* ChannelListView.swift */; };
 		A2B3C4D5E6F7A80901CD3456 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
+		A41AA69146981E08D85F8439 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
 		A4A40B2ADBF625F5928EF0C1 /* Pods-Aerio_iOS-dummy.m in Sources */ = {isa = PBXBuildFile; fileRef = 46BC9C3B09ACE5A89FC5C0E9 /* Pods-Aerio_iOS-dummy.m */; };
 		A8E322C238A7CE0B55BA3D4D /* AerioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* AerioApp.swift */; };
 		ACAEB60B5118B283BF99CF16 /* PlaylistImportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */; };
@@ -172,6 +174,7 @@
 		5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Pods-Aerio_iOS-acknowledgements.plist"; sourceTree = "<group>"; };
 		5957CC8A6CC0000B14ED47C5 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		628C021FBBB1C5C00F6640EA /* TVServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = TVServices.framework; path = System/Library/Frameworks/TVServices.framework; sourceTree = SDKROOT; };
+		62C0C151EAA6394D32003217 /* DeviceInfo.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DeviceInfo.swift; sourceTree = "<group>"; };
 		693A71F4A4429F56337992E6 /* StreamingAPIs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingAPIs.swift; sourceTree = "<group>"; };
 		6C96AEA17257AA77D4EBE291 /* Pods-Aerio_iOS-frameworks-Release-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Release-output-files.xcfilelist"; sourceTree = "<group>"; };
 		6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
@@ -570,6 +573,7 @@
 				265A7DFCEC12544455827DB3 /* ReminderManager.swift */,
 				4B9C3D4E2F6A718903BB5C6D /* SyncManager.swift */,
 				F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */,
+				62C0C151EAA6394D32003217 /* DeviceInfo.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -807,6 +811,7 @@
 				1868ADFE12C568F8FC5FED53 /* StreamingAPIs.swift in Sources */,
 				1D11DF914E50BF1810089A1E /* XtreamSeriesAPI.swift in Sources */,
 				7A7218D999F2EBB150A606A1 /* ReminderBannerView.swift in Sources */,
+				A41AA69146981E08D85F8439 /* DeviceInfo.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -854,6 +859,7 @@
 				98B0C60D6099DEF55810D175 /* StreamingAPIs.swift in Sources */,
 				3349C24B50E8CC1C902B358F /* XtreamSeriesAPI.swift in Sources */,
 				8F5A030376AB114E38DAE4AD /* ReminderBannerView.swift in Sources */,
+				000A4A7BFF25A66945137BB3 /* DeviceInfo.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -893,7 +899,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.3.3;
+				MARKETING_VERSION = 1.3.4;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio.TopShelf;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -913,7 +919,7 @@
 				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
 				CODE_SIGN_ENTITLEMENTS = Aerio_tvOS.entitlements;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Aerio;
+				INFOPLIST_KEY_CFBundleDisplayName = AerioTV;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -939,14 +945,14 @@
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Aerio;
+				INFOPLIST_KEY_CFBundleDisplayName = AerioTV;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.3;
+				MARKETING_VERSION = 1.3.4;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio;
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -972,7 +978,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.3.3;
+				MARKETING_VERSION = 1.3.4;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio.TopShelf;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1041,7 +1047,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.3.3;
+				MARKETING_VERSION = 1.3.4;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1066,14 +1072,14 @@
 				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Aerio;
+				INFOPLIST_KEY_CFBundleDisplayName = AerioTV;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.3.3;
+				MARKETING_VERSION = 1.3.4;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio;
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1142,7 +1148,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.3.3;
+				MARKETING_VERSION = 1.3.4;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1164,7 +1170,7 @@
 				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
 				CODE_SIGN_ENTITLEMENTS = Aerio_tvOS.entitlements;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = Aerio;
+				INFOPLIST_KEY_CFBundleDisplayName = AerioTV;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

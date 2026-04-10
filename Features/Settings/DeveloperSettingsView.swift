@@ -73,7 +73,7 @@ struct DeveloperSettingsView: View {
                     Text("Logging")
                         .sectionHeaderStyle()
                 } footer: {
-                    Text("When enabled, detailed logs are written to a file in On My iPhone › Aerio. Logs include network requests, playback events, EPG activity, errors, and app lifecycle events. No personally identifiable information is collected.")
+                    Text("When enabled, detailed logs are written to a file in On My iPhone › AerioTV. Logs include network requests, playback events, EPG activity, errors, and app lifecycle events. No personally identifiable information is collected.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.top, 4)
@@ -222,7 +222,7 @@ struct DeveloperSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Aerio will write detailed diagnostic logs to a file on your device.\n\nThis includes network requests, playback events, and error details. The file is only accessible from this device via the Files app or the share button below.\n\nLogging has a minor impact on performance and storage. You can disable it at any time.")
+            Text("AerioTV will write detailed diagnostic logs to a file on your device.\n\nThis includes network requests, playback events, and error details. The file is only accessible from this device via the Files app or the share button below.\n\nLogging has a minor impact on performance and storage. You can disable it at any time.")
         }
 
         // MARK: - Disable Confirmation

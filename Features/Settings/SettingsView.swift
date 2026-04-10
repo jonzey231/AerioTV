@@ -4,7 +4,6 @@ import SwiftData
 struct SettingsView: View {
     #if os(tvOS)
     @Binding var selectedTab: AppTab
-    @Binding var isSubPushed: Bool
     #endif
     @Query private var servers: [ServerConnection]
     @Environment(\.modelContext) private var modelContext
@@ -21,7 +20,30 @@ struct SettingsView: View {
     #endif
 
     var body: some View {
+        #if os(tvOS)
+        // Attach .onExitCommand directly to SettingsView. tvOS dispatches
+        // Menu-button events to the innermost .onExitCommand in the focus
+        // path, so this handler runs BEFORE MainTabView's outer handler
+        // whenever focus is anywhere inside Settings (including pushed
+        // detail pages like EditServerPage, Appearance, Network, etc.).
+        // When the nav stack is non-empty we pop directly here — no
+        // ping-pong through @Binding, no dependence on SwiftUI update
+        // ordering. When the nav stack is empty, we fall through to
+        // MainTabView's default "return to Live TV" behavior by switching
+        // the selected tab ourselves.
         settingsNavigationStack
+            .onExitCommand {
+                if !navPath.isEmpty {
+                    debugLog("🎮 Menu (Settings): popping nav stack")
+                    navPath.removeLast()
+                } else {
+                    debugLog("🎮 Menu (Settings): at root → switch to Live TV")
+                    selectedTab = .liveTV
+                }
+            }
+        #else
+        settingsNavigationStack
+        #endif
     }
 
     @ViewBuilder
@@ -315,14 +337,6 @@ struct SettingsView: View {
                 default:           EmptyView()
                 }
             }
-            .onChange(of: navPath) { _, path in
-                isSubPushed = !path.isEmpty
-            }
-            .onChange(of: isSubPushed) { _, pushed in
-                if !pushed && !navPath.isEmpty {
-                    navPath.removeLast()
-                }
-            }
             #endif
             .sheet(isPresented: $showAddServer) {
                 NavigationStack { AddServerView(onSave: { _ in }) }
@@ -339,7 +353,24 @@ struct SettingsView: View {
             .alert("Delete Playlist?", isPresented: $showDeleteAlert) {
                 Button("Delete", role: .destructive) {
                     if let server = serverToDelete {
+                        let sid = server.id.uuidString
                         server.deleteCredentialsFromKeychain()
+                        // Cascade: delete any EPGProgram rows scoped to this
+                        // server so they don't orphan and get reused by a
+                        // later server of a different type with different
+                        // channel IDs. Without this, deleting an Xtream
+                        // playlist and re-adding the same server via
+                        // Dispatcharr API leaves stale XC EPG rows in
+                        // SwiftData that loadFromCache would otherwise
+                        // return, bypassing the network fetch and leaving
+                        // the guide empty.
+                        let epgDescriptor = FetchDescriptor<EPGProgram>(
+                            predicate: #Predicate<EPGProgram> { $0.serverID == sid }
+                        )
+                        if let stale = try? modelContext.fetch(epgDescriptor) {
+                            for p in stale { modelContext.delete(p) }
+                            debugLog("🗑️ Deleted \(stale.count) orphaned EPGProgram rows for server \(sid)")
+                        }
                         modelContext.delete(server)
                         try? modelContext.save()
                         // Push updated list to iCloud (server removed)
@@ -379,13 +410,7 @@ struct SettingsView: View {
 
     // MARK: - About computed properties
 
-    private var aboutDevice: String {
-#if canImport(UIKit)
-        return UIDevice.current.model
-#else
-        return "Mac"
-#endif
-    }
+    private var aboutDevice: String { DeviceInfo.modelName }
 
     private var aboutSystem: String {
 #if canImport(UIKit)
@@ -402,22 +427,13 @@ struct SettingsView: View {
         return "\(version) (\(build))"
     }
 
-    private var aboutInstallDate: String {
-        guard let docs  = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
-              let attrs = try? FileManager.default.attributesOfItem(atPath: docs.deletingLastPathComponent().path),
-              let date  = attrs[.creationDate] as? Date else { return "—" }
-        return date.formatted(date: .long, time: .omitted)
-    }
+    private var aboutInstallDate: String { DeviceInfo.firstInstalledText }
 
-    private var aboutUpdateDate: String {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: Bundle.main.bundlePath),
-              let date  = attrs[.modificationDate] as? Date else { return "—" }
-        return date.formatted(date: .long, time: .omitted)
-    }
+    private var aboutUpdateDate: String { DeviceInfo.lastUpdatedText }
 
     private var aboutCopyText: String {
         [
-            "Aerio \(aboutVersion)",
+            "AerioTV \(aboutVersion)",
             "Device: \(aboutDevice)",
             "System: \(aboutSystem)",
             "First Installed: \(aboutInstallDate)",
@@ -477,8 +493,12 @@ struct SettingsView: View {
                     } else {
                         ForEach(servers) { server in
                             TVSettingsNavRow(destination: ServerDetailView(server: server)) {
+                                // Only offer the "set active" radio when there's
+                                // more than one playlist — with one playlist
+                                // it's always the active one, so the circle is
+                                // noise.
                                 ServerListRow(server: server,
-                                              onSetActive: { setActiveServer(server) })
+                                              onSetActive: servers.count > 1 ? { setActiveServer(server) } : nil)
                             }
                             .contextMenu {
                                 Button { serverToEdit = server } label: {
@@ -1123,13 +1143,7 @@ struct ServerDetailView: View {
 
     // MARK: - About computed properties
 
-    private var aboutDevice: String {
-#if canImport(UIKit)
-        return UIDevice.current.model
-#else
-        return "Mac"
-#endif
-    }
+    private var aboutDevice: String { DeviceInfo.modelName }
 
     private var aboutSystem: String {
 #if canImport(UIKit)
@@ -1146,24 +1160,13 @@ struct ServerDetailView: View {
         return "\(version) (\(build))"
     }
 
-    private var aboutInstallDate: String {
-        // The app sandbox container's creation date is set when the app is first installed.
-        guard let docs  = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
-              let attrs = try? FileManager.default.attributesOfItem(atPath: docs.deletingLastPathComponent().path),
-              let date  = attrs[.creationDate] as? Date else { return "—" }
-        return date.formatted(date: .long, time: .omitted)
-    }
+    private var aboutInstallDate: String { DeviceInfo.firstInstalledText }
 
-    private var aboutUpdateDate: String {
-        // The app bundle's modification date changes when the app is updated.
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: Bundle.main.bundlePath),
-              let date  = attrs[.modificationDate] as? Date else { return "—" }
-        return date.formatted(date: .long, time: .omitted)
-    }
+    private var aboutUpdateDate: String { DeviceInfo.lastUpdatedText }
 
     private var aboutCopyText: String {
         [
-            "Aerio \(aboutVersion)",
+            "AerioTV \(aboutVersion)",
             "Device: \(aboutDevice)",
             "System: \(aboutSystem)",
             "First Installed: \(aboutInstallDate)",
@@ -1950,7 +1953,7 @@ struct NetworkSettingsView: View {
                         Text("⚠️ Wi-Fi detected but network name unavailable. Verify the \"Access WiFi Information\" capability is enabled in Xcode → Signing & Capabilities.")
                             .font(.labelSmall).foregroundColor(.statusWarning)
                     } else {
-                        Text("When connected to any of these networks, Aerio uses each server's local URL instead of its remote URL. Set each server's local URL in Settings → Playlists → [server] → Edit.")
+                        Text("When connected to any of these networks, AerioTV uses each server's local URL instead of its remote URL. Set each server's local URL in Settings → Playlists → [server] → Edit.")
                             .font(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }

@@ -1106,6 +1106,24 @@ enum TopShelfDataManager {
         TopShelfKeychain.write(array: vodEntries, key: "continueWatching")
         #endif
     }
+
+    /// Wipes every keychain item this manager writes. Called on app launch
+    /// when the user has no servers configured (fresh install, uninstall +
+    /// reinstall, or manually removed all servers) so the Top Shelf
+    /// extension stops showing stale data from a previous install.
+    ///
+    /// This is necessary because iOS/tvOS keychain items persist across
+    /// app deletions — they're tied to the app's access group, not to the
+    /// app's data container, so `delete + reinstall` does not wipe them
+    /// the way it wipes `UserDefaults` or SwiftData.
+    static func clearAll() {
+        #if os(tvOS)
+        TopShelfKeychain.delete(key: "continueWatching")
+        TopShelfKeychain.delete(key: "topChannels")
+        TopShelfKeychain.delete(key: "watchCounts")
+        debugLog("🔐 TopShelf: clearAll — wiped continueWatching, topChannels, watchCounts")
+        #endif
+    }
 }
 
 // MARK: - Shared Keychain Storage
@@ -1170,6 +1188,26 @@ enum TopShelfKeychain {
             return
         }
         debugLog("🔐 TopShelf: ❌ SecItemUpdate failed key=\(key) status=\(status) (\(secErrorMessage(status)))")
+        #endif
+    }
+
+    // MARK: Delete
+
+    /// Deletes a single keychain item by account name. Used by
+    /// `TopShelfDataManager.clearAll()` to wipe stale Top Shelf data that
+    /// would otherwise survive an app delete/reinstall.
+    static func delete(key: String) {
+        #if os(tvOS)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: key,
+            kSecAttrAccessGroup as String: accessGroup
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        if status != errSecSuccess && status != errSecItemNotFound {
+            debugLog("🔐 TopShelf: ❌ delete failed key=\(key) status=\(status) (\(secErrorMessage(status)))")
+        }
         #endif
     }
 
@@ -1305,8 +1343,6 @@ struct MainTabView: View {
     @State private var isVODDetailPushed = false
     /// Signal to VOD views to pop their navigation stack.
     @State private var vodNavPopRequested = false
-    /// Tracks whether Settings has a sub-page pushed (Appearance, Network, etc.).
-    @State private var isSettingsSubPushed = false
     #if os(tvOS)
     @State private var showExitConfirmation = false
     #endif
@@ -1506,7 +1542,7 @@ struct MainTabView: View {
                 .tag(AppTab.tv)
 
             #if os(tvOS)
-            SettingsView(selectedTab: $selectedTab, isSubPushed: $isSettingsSubPushed)
+            SettingsView(selectedTab: $selectedTab)
                 .tabItem { Label(AppTab.settings.title, systemImage: AppTab.settings.icon) }
                 .tag(AppTab.settings)
             #else
@@ -1619,11 +1655,6 @@ struct MainTabView: View {
                 debugLog("🎮 Menu pressed: VOD detail pushed → popping to browse list")
                 isVODDetailPushed = false
                 vodNavPopRequested = true
-            } else if isSettingsSubPushed {
-                // Let NavigationStack handle the pop — don't consume the Menu press.
-                // Setting the flag to false tells SettingsView to pop its nav stack.
-                debugLog("🎮 Menu pressed: Settings sub-page → popping to Settings root")
-                isSettingsSubPushed = false
             } else if selectedTab == .liveTV {
                 debugLog("🎮 Menu pressed: Live TV tab → show exit confirmation")
                 showExitConfirmation = true
@@ -1638,7 +1669,7 @@ struct MainTabView: View {
                 withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
             }
         }
-        .alert("Exit Aerio?", isPresented: $showExitConfirmation) {
+        .alert("Exit AerioTV?", isPresented: $showExitConfirmation) {
             Button("Exit", role: .destructive) {
                 nowPlaying.stop()
                 NowPlayingBridge.shared.teardown()

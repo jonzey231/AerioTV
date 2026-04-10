@@ -22,7 +22,7 @@
 		</dict>
 	</array>
 	<key>CFBundleDisplayName</key>
-	<string>Aerio</string>
+	<string>AerioTV</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -49,9 +49,9 @@
 		<true/>
 	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Aerio needs local network access to connect to your media server on your home network.</string>
+	<string>AerioTV needs local network access to connect to your media server on your home network.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Aerio uses your location to detect your WiFi network name so it can automatically switch between local and remote server URLs.</string>
+	<string>AerioTV uses your location to detect your WiFi network name so it can automatically switch between local and remote server URLs.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

@@ -48,7 +48,15 @@ final class GuideStore: ObservableObject {
     }
 
     /// Phase 0 — load persisted EPG from SwiftData. Returns true if cache was fresh enough.
-    func loadFromCache(modelContext: ModelContext, channels: [ChannelDisplayItem]) -> Bool {
+    ///
+    /// Scopes the query to the given `serverID` so EPG data from a
+    /// previously-configured server (e.g. the user deleted an Xtream Codes
+    /// playlist and added the same server back via Dispatcharr API) doesn't
+    /// leak into the guide for the current server. Without this filter,
+    /// the freshness check would pass on stale rows from a deleted server
+    /// and the network fetch would be skipped, leaving the guide empty
+    /// because the channel IDs no longer match.
+    func loadFromCache(modelContext: ModelContext, channels: [ChannelDisplayItem], serverID: String) -> Bool {
         let now = Date()
         let windowStart = now.addingTimeInterval(-3600)
         let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
@@ -56,11 +64,13 @@ final class GuideStore: ObservableObject {
         let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
 
         let descriptor = FetchDescriptor<EPGProgram>(
-            predicate: #Predicate<EPGProgram> { $0.endTime > windowStart && $0.startTime < windowEnd },
+            predicate: #Predicate<EPGProgram> {
+                $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < windowEnd
+            },
             sortBy: [SortDescriptor(\.startTime)]
         )
         guard let cached = try? modelContext.fetch(descriptor), !cached.isEmpty else {
-            debugLog("📺 GuideStore.loadFromCache: no cached programs")
+            debugLog("📺 GuideStore.loadFromCache: no cached programs for server \(serverID)")
             return false
         }
 
@@ -73,7 +83,7 @@ final class GuideStore: ObservableObject {
             result[ep.channelID, default: []].append(gp)
         }
         programs = result
-        debugLog("📺 GuideStore.loadFromCache: loaded \(cached.count) programs across \(result.count) channels")
+        debugLog("📺 GuideStore.loadFromCache: loaded \(cached.count) programs across \(result.count) channels (server \(serverID))")
 
         // Check freshness using the user's refresh interval setting.
         // Default 1440 min (24 hours) — EPG data covers days, no need to refresh hourly.
@@ -649,9 +659,12 @@ struct EPGGuideView: View {
         .task(id: channels.count) {
             guard !channels.isEmpty else { return }
             let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+            let activeServerID = activeServer?.id.uuidString ?? "unknown"
 
-            // Phase 0: load from persistent SwiftData cache
-            let cacheIsFresh = guideStore.loadFromCache(modelContext: modelContext, channels: channels)
+            // Phase 0: load from persistent SwiftData cache (scoped to active
+            // server so orphaned rows from a deleted server can't populate
+            // the guide with mismatched channel IDs).
+            let cacheIsFresh = guideStore.loadFromCache(modelContext: modelContext, channels: channels, serverID: activeServerID)
             // Phase 1: seed from current-program data on channels (fills gaps)
             guideStore.seedFromChannels(channels)
             // Seed EPGCache so List-view card expansion is instant

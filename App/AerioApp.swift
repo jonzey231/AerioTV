@@ -451,8 +451,24 @@ struct RootView: View {
                 if !hasCompletedOnboarding && !hasAnySource {
                     showOnboarding = true
                 }
+                // One-time cleanup: purge EPGProgram rows belonging to any
+                // server that no longer exists. Fixes historical damage
+                // from an earlier build where server deletion didn't
+                // cascade EPG rows — users who deleted a server type and
+                // re-added the same server via a different type would end
+                // up with orphaned EPG data that left the guide empty.
+                pruneOrphanedEPGPrograms()
                 #if os(tvOS)
                 TVLANProbe.probe(servers: servers)
+                // If the user has no server configured (fresh install,
+                // uninstall+reinstall, or manually cleared), wipe any
+                // stale Top Shelf data from a previous install. Keychain
+                // items survive app deletion on iOS/tvOS, so without this
+                // the Top Shelf keeps showing old channels/Continue
+                // Watching until the user reconfigures a server.
+                if !hasAnySource {
+                    TopShelfDataManager.clearAll()
+                }
                 // Initial Top Shelf sync for Continue Watching
                 if let all = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
                     TopShelfDataManager.syncContinueWatching(all)
@@ -524,6 +540,42 @@ struct RootView: View {
                     #endif
                 }
             }
+    }
+
+    // MARK: - Orphaned EPG Cleanup
+
+    /// One-time cleanup that deletes any `EPGProgram` rows whose `serverID`
+    /// doesn't match an existing `ServerConnection`. Runs on every launch
+    /// but is effectively a no-op after the first successful run unless
+    /// the user's SwiftData is corrupted again.
+    ///
+    /// Why this exists: in builds prior to v1.3.4, deleting a
+    /// `ServerConnection` from Settings did not cascade-delete the
+    /// `EPGProgram` rows associated with that server. Users who (for
+    /// example) deleted their Xtream Codes playlist and added the same
+    /// server back via Dispatcharr API would see an empty Live TV guide
+    /// because `loadFromCache` would find the orphaned XC rows, compute
+    /// them as "fresh" (they were recent), skip the network fetch, and
+    /// try to render a guide keyed by XC channel IDs that don't match
+    /// the new Dispatcharr channel IDs.
+    ///
+    /// v1.3.4 fixes the root cause by cascade-deleting on server removal,
+    /// AND scoping `loadFromCache` to the active server so orphaned rows
+    /// can't leak in. This function handles users who are UPGRADING from
+    /// a buggy build and still have orphans sitting in their storage.
+    private func pruneOrphanedEPGPrograms() {
+        let liveServerIDs = Set(servers.map { $0.id.uuidString })
+        let descriptor = FetchDescriptor<EPGProgram>()
+        guard let all = try? modelContext.fetch(descriptor) else { return }
+        var pruned = 0
+        for ep in all where !liveServerIDs.contains(ep.serverID) {
+            modelContext.delete(ep)
+            pruned += 1
+        }
+        if pruned > 0 {
+            try? modelContext.save()
+            debugLog("🗑️ Pruned \(pruned) orphaned EPGProgram rows (no matching ServerConnection)")
+        }
     }
 
     // MARK: - Merge Remote Servers

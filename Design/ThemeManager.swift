@@ -12,7 +12,7 @@ enum AppTheme: String, CaseIterable, Codable {
 
     var displayName: String {
         switch self {
-        case .aerio: return "Aerio"
+        case .aerio: return "AerioTV"
         case .midnight:    return "Midnight"
         case .sunset:      return "Sunset"
         case .forest:      return "Forest"
