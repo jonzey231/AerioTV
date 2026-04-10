@@ -1157,12 +1157,26 @@ private struct GuideProgramButton: View {
         prog.start > Date()
     }
 
+    /// Whether this program can be recorded (future or currently live).
+    private var isRecordable: Bool {
+        prog.end > Date()
+    }
+
+    @State private var showRecordSheet = false
+
     var body: some View {
         #if os(tvOS)
         Button { onSelect(channelItem) } label: { cellContent }
             .buttonStyle(GuideButtonStyle())
             .focused($isFocused)
             .contextMenu {
+                if isRecordable {
+                    Button {
+                        showRecordSheet = true
+                    } label: {
+                        Label(prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle")
+                    }
+                }
                 if isFutureProgram {
                     if reminderManager.hasReminder(forKey: reminderKey) {
                         Button(role: .destructive) {
@@ -1183,11 +1197,29 @@ private struct GuideProgramButton: View {
                     }
                 }
             }
+            .sheet(isPresented: $showRecordSheet) {
+                RecordProgramSheet(
+                    programTitle: prog.title,
+                    programDescription: prog.description,
+                    channelID: channelItem.id,
+                    channelName: channelItem.name,
+                    scheduledStart: prog.start,
+                    scheduledEnd: prog.end,
+                    isLive: prog.isLive
+                )
+            }
         #else
         cellContent
             .contentShape(Rectangle())
             .onTapGesture { onSelect(channelItem) }
             .contextMenu {
+                if isRecordable {
+                    Button {
+                        showRecordSheet = true
+                    } label: {
+                        Label(prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle")
+                    }
+                }
                 if isFutureProgram {
                     if reminderManager.hasReminder(forKey: reminderKey) {
                         Button(role: .destructive) {
@@ -1207,6 +1239,17 @@ private struct GuideProgramButton: View {
                         }
                     }
                 }
+            }
+            .sheet(isPresented: $showRecordSheet) {
+                RecordProgramSheet(
+                    programTitle: prog.title,
+                    programDescription: prog.description,
+                    channelID: channelItem.id,
+                    channelName: channelItem.name,
+                    scheduledStart: prog.start,
+                    scheduledEnd: prog.end,
+                    isLive: prog.isLive
+                )
             }
         #endif
     }

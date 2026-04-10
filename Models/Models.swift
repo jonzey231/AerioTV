@@ -72,6 +72,15 @@ final class ServerConnection {
     /// Comma-separated list of home WiFi SSIDs (up to 5).
     /// When connected to any of them, localURL is used instead of baseURL.
     var homeSSID: String = ""
+    /// Per-server custom User-Agent override. Only consumed for Dispatcharr
+    /// servers — set on every outbound `URLRequest` and on MPV playback so
+    /// the value shows up in Dispatcharr's admin Stats panel. Empty string
+    /// means "use the computed default from `DeviceInfo.defaultUserAgent`".
+    var customUserAgent: String = ""
+    /// Preferred destination for new recordings on this server. Only
+    /// meaningful for `.dispatcharrAPI` — XC/M3U servers ignore this and
+    /// always record locally. Stored as rawValue for SwiftData stability.
+    var defaultRecordingDestinationRaw: String = RecordingDestination.dispatcharrServer.rawValue
 
     init(
         name: String,
@@ -104,6 +113,23 @@ final class ServerConnection {
     }
 
     var supportsVOD: Bool { type.supportsVOD }
+
+    /// Effective User-Agent for this server. Falls back to the app-wide
+    /// default if the user hasn't set a per-server override.
+    var effectiveUserAgent: String {
+        let trimmed = customUserAgent.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? DeviceInfo.defaultUserAgent : trimmed
+    }
+
+    /// Default destination for new recordings on this server. XC/M3U always
+    /// record locally; Dispatcharr respects the user's saved preference.
+    var defaultRecordingDestination: RecordingDestination {
+        get {
+            guard type == .dispatcharrAPI else { return .local }
+            return RecordingDestination(rawValue: defaultRecordingDestinationRaw) ?? .dispatcharrServer
+        }
+        set { defaultRecordingDestinationRaw = newValue.rawValue }
+    }
 
     // MARK: - Keychain-backed credentials
 
@@ -149,13 +175,15 @@ final class ServerConnection {
         KeychainHelper.delete("apiKey_\(id.uuidString)", synchronizable: true)
     }
 
-    /// Auth headers for API requests. Dispatcharr servers include ApiKey + X-API-Key;
-    /// all other types just include Accept. Centralised here to avoid duplication.
+    /// Auth headers for API requests. Dispatcharr servers include ApiKey + X-API-Key
+    /// plus the User-Agent so it shows up in the admin Stats panel; all other types
+    /// just include Accept. Centralised here to avoid duplication.
     var authHeaders: [String: String] {
         switch type {
         case .dispatcharrAPI:
             let key = effectiveApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            return ["Authorization": "ApiKey \(key)", "X-API-Key": key, "Accept": "*/*"]
+            return ["Authorization": "ApiKey \(key)", "X-API-Key": key, "Accept": "*/*",
+                    "User-Agent": effectiveUserAgent]
         default:
             return ["Accept": "*/*"]
         }
@@ -337,4 +365,126 @@ final class EPGProgram {
     var durationMinutes: Int {
         Int(endTime.timeIntervalSince(startTime) / 60)
     }
+}
+
+// MARK: - DVR / Recording
+
+/// Where a recording is stored. Dispatcharr users can pick; XC/M3U users
+/// only have `.local`.
+enum RecordingDestination: String, Codable, CaseIterable {
+    case dispatcharrServer = "dispatcharr_server"
+    case local = "local"
+
+    var displayName: String {
+        switch self {
+        case .dispatcharrServer: return "Dispatcharr server"
+        case .local: return "This device"
+        }
+    }
+}
+
+/// Recording lifecycle states. Values mirror Dispatcharr's
+/// `custom_properties.status` so we can store them directly from API
+/// responses, with `cancelled` added for locally-cancelled scheduled rows.
+enum RecordingStatus: String, Codable {
+    case scheduled
+    case recording
+    case completed
+    case interrupted
+    case failed
+    case stopped
+    case cancelled
+}
+
+/// A DVR recording — either scheduled on a Dispatcharr server or captured
+/// locally via `LocalRecordingSession`. Persisted as the single source of
+/// truth for both destinations.
+@Model
+final class Recording {
+    var id: UUID
+    /// Channel the recording was scheduled from.
+    var channelID: String
+    var channelName: String
+    /// Program metadata at schedule time (frozen — EPG may change later).
+    var programTitle: String
+    var programDescription: String
+    /// Original EPG start/end before any pre/post-roll adjustment.
+    var scheduledStart: Date
+    var scheduledEnd: Date
+    /// User-chosen buffer for this recording (may differ from DVR defaults).
+    var preRollMinutes: Int
+    var postRollMinutes: Int
+    /// Destination.rawValue — stored as String so SwiftData handles enum
+    /// migrations cleanly.
+    var destinationRaw: String
+    var statusRaw: String
+    /// Absolute path inside the app's Documents (or security-scoped bookmark
+    /// resolved path) for local recordings. Nil for Dispatcharr recordings.
+    var localFilePath: String?
+    /// Dispatcharr-assigned integer recording ID. Nil for local recordings.
+    var remoteRecordingID: Int?
+    var fileSizeBytes: Int64
+    /// Which `ServerConnection` this recording belongs to (UUID string).
+    var serverID: String
+    var createdAt: Date
+    /// Populated when `status == .failed` for user-visible diagnostics.
+    var failureReason: String?
+
+    init(channelID: String,
+         channelName: String,
+         programTitle: String,
+         programDescription: String = "",
+         scheduledStart: Date,
+         scheduledEnd: Date,
+         preRollMinutes: Int = 0,
+         postRollMinutes: Int = 0,
+         destination: RecordingDestination,
+         status: RecordingStatus = .scheduled,
+         localFilePath: String? = nil,
+         remoteRecordingID: Int? = nil,
+         fileSizeBytes: Int64 = 0,
+         serverID: String,
+         failureReason: String? = nil) {
+        self.id = UUID()
+        self.channelID = channelID
+        self.channelName = channelName
+        self.programTitle = programTitle
+        self.programDescription = programDescription
+        self.scheduledStart = scheduledStart
+        self.scheduledEnd = scheduledEnd
+        self.preRollMinutes = preRollMinutes
+        self.postRollMinutes = postRollMinutes
+        self.destinationRaw = destination.rawValue
+        self.statusRaw = status.rawValue
+        self.localFilePath = localFilePath
+        self.remoteRecordingID = remoteRecordingID
+        self.fileSizeBytes = fileSizeBytes
+        self.serverID = serverID
+        self.createdAt = Date()
+        self.failureReason = failureReason
+    }
+
+    var destination: RecordingDestination {
+        get { RecordingDestination(rawValue: destinationRaw) ?? .local }
+        set { destinationRaw = newValue.rawValue }
+    }
+
+    var status: RecordingStatus {
+        get { RecordingStatus(rawValue: statusRaw) ?? .scheduled }
+        set { statusRaw = newValue.rawValue }
+    }
+
+    /// Effective recording start after applying pre-roll buffer.
+    var effectiveStart: Date {
+        scheduledStart.addingTimeInterval(-Double(preRollMinutes) * 60)
+    }
+
+    /// Effective recording end after applying post-roll buffer.
+    var effectiveEnd: Date {
+        scheduledEnd.addingTimeInterval(Double(postRollMinutes) * 60)
+    }
+
+    var isInProgress: Bool { status == .recording }
+    var isCompleted: Bool { status == .completed }
+    var isUpcoming: Bool { status == .scheduled }
 }

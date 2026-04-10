@@ -591,6 +591,19 @@ struct DispatcharrAPI {
 
     let baseURL: String
     let auth: Auth
+    /// User-Agent string sent on every request. Dispatcharr reads this from
+    /// the standard HTTP header and surfaces it in the admin Stats panel
+    /// so users can identify which device is connected. Callers with a
+    /// `ServerConnection` should pass `server.effectiveUserAgent` here;
+    /// legacy callsites that don't have a server reference fall back to
+    /// the app-wide default.
+    let userAgent: String
+
+    init(baseURL: String, auth: Auth, userAgent: String = DeviceInfo.defaultUserAgent) {
+        self.baseURL = baseURL
+        self.auth = auth
+        self.userAgent = userAgent
+    }
 
     // Shared session — reused across all calls (avoid creating a new URLSession per request).
     private static let session: URLSession = {
@@ -604,7 +617,8 @@ struct DispatcharrAPI {
     private var headers: [String: String] {
         var h: [String: String] = [
             "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Accept": "application/json",
+            "User-Agent": userAgent
         ]
         switch auth {
         case .bearer(let token):
@@ -1142,6 +1156,226 @@ struct DispatcharrAPI {
         var path = "/output/m3u"
         if let id = userID { path += "?user_id=\(id)" }
         return URL(string: baseURL + path)
+    }
+
+    // MARK: - Recordings / DVR
+    //
+    // Dispatcharr DVR maps to `apps/channels/api_urls.py` — recordings
+    // ViewSet at `/api/channels/recordings/`. Schedule with a POST, poll
+    // with a GET, stop in-flight with POST /{id}/stop/, cancel or delete
+    // with DELETE /{id}/, stream the file via GET /{id}/file/ (AllowAny,
+    // HTTP Range — safe to hand straight to MPV).
+    //
+    // **Pre/post-roll gotcha:** If the POST body includes
+    // `custom_properties.program` (a dict), Dispatcharr's serializer
+    // applies the server's *global* pre/post offset on top. When the user
+    // picks a per-recording buffer in AerioTV, we must ALREADY have
+    // adjusted `start_time`/`end_time` on the client AND omit the
+    // `program` key (we still set title/description as flat keys so the
+    // admin UI shows metadata). Callers should honor that by calling
+    // `createRecording` with `applyServerOffsets: false` when the user
+    // has chosen a custom buffer.
+
+    /// Dispatcharr-native recording object. Only the fields we actually
+    /// consume are exposed here — `custom_properties` is a free-form
+    /// JSON dict, so we parse it via JSONSerialization on a per-instance
+    /// basis rather than defining a rigid Codable shape that would
+    /// break when the server adds new keys.
+    struct Recording: Sendable {
+        let id: Int
+        let channel: Int
+        let startTime: Date
+        let endTime: Date
+        let taskID: String?
+        let status: String?
+        let filePath: String?
+        let fileName: String?
+        let programTitle: String?
+        let programDescription: String?
+
+        /// Parses a single recording out of an already-deserialized JSON
+        /// object. Returns nil if required fields are missing.
+        init?(dict: [String: Any]) {
+            guard let id = dict["id"] as? Int,
+                  let channel = dict["channel"] as? Int,
+                  let startStr = dict["start_time"] as? String,
+                  let endStr = dict["end_time"] as? String else {
+                return nil
+            }
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            let isoPlain = ISO8601DateFormatter()
+            isoPlain.formatOptions = [.withInternetDateTime]
+            func parseDate(_ s: String) -> Date? {
+                iso.date(from: s) ?? isoPlain.date(from: s)
+            }
+            guard let start = parseDate(startStr), let end = parseDate(endStr) else {
+                return nil
+            }
+            self.id = id
+            self.channel = channel
+            self.startTime = start
+            self.endTime = end
+            self.taskID = dict["task_id"] as? String
+
+            let props = dict["custom_properties"] as? [String: Any] ?? [:]
+            self.status = props["status"] as? String
+            self.filePath = props["file_path"] as? String
+            self.fileName = props["file_name"] as? String
+            if let program = props["program"] as? [String: Any] {
+                self.programTitle = program["title"] as? String
+                self.programDescription = program["description"] as? String
+            } else {
+                self.programTitle = props["title"] as? String
+                self.programDescription = props["description"] as? String
+            }
+        }
+    }
+
+    /// Schedules a new recording on the Dispatcharr server.
+    ///
+    /// - Parameters:
+    ///   - channelID: Dispatcharr integer channel ID (NOT the UUID some
+    ///     other code paths use — the DRF serializer rejects UUIDs).
+    ///   - startTime: Effective start. If `applyServerOffsets` is false
+    ///     this should already include the user's pre-roll adjustment.
+    ///   - endTime: Effective end. Same rule for post-roll.
+    ///   - title: Program title (written into `custom_properties`).
+    ///   - description: Program description.
+    ///   - applyServerOffsets: When true, the `program` subdict is sent
+    ///     and Dispatcharr applies its global pre/post offsets on top.
+    ///     When false, we flatten title/description and omit `program`
+    ///     so the server leaves our start/end alone.
+    /// - Returns: The created `Recording`.
+    func createRecording(channelID: Int,
+                         startTime: Date,
+                         endTime: Date,
+                         title: String,
+                         description: String,
+                         applyServerOffsets: Bool) async throws -> Recording {
+        let url = try buildURL(path: "/api/channels/recordings/")
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+
+        var customProps: [String: Any] = [:]
+        if applyServerOffsets {
+            // Server will read program.start_time/end_time and apply its
+            // configured DVR offsets. We pass our own start/end as the
+            // program window so the server's math lines up.
+            customProps["program"] = [
+                "title": title,
+                "description": description,
+                "start_time": iso.string(from: startTime),
+                "end_time": iso.string(from: endTime)
+            ]
+        } else {
+            // We've already adjusted start/end on the client; omit the
+            // `program` key so Dispatcharr doesn't double-apply offsets.
+            // Flatten title/description so the admin UI still shows them.
+            customProps["title"] = title
+            customProps["description"] = description
+        }
+
+        let body: [String: Any] = [
+            "channel": channelID,
+            "start_time": iso.string(from: startTime),
+            "end_time": iso.string(from: endTime),
+            "custom_properties": customProps
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try decodeRecording(from: data)
+    }
+
+    /// Lists all recordings on the server. Filter client-side on status.
+    func listRecordings() async throws -> [Recording] {
+        let url = try buildURL(path: "/api/channels/recordings/")
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try decodeRecordingArray(from: data)
+    }
+
+    /// Fetches a single recording by ID — used for polling status during
+    /// an in-progress recording.
+    func getRecording(id: Int) async throws -> Recording {
+        let url = try buildURL(path: "/api/channels/recordings/\(id)/")
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try decodeRecording(from: data)
+    }
+
+    /// Stops an in-flight recording early, keeping the partial file on
+    /// disk. If the user wants the partial gone, follow up with
+    /// `deleteRecording`.
+    func stopRecording(id: Int) async throws {
+        let url = try buildURL(path: "/api/channels/recordings/\(id)/stop/")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+    }
+
+    /// Deletes a recording. For scheduled rows this is a plain cancel;
+    /// for completed rows Dispatcharr also removes the file from disk,
+    /// so there is no "keep but unschedule" path — the file is gone
+    /// after this call.
+    func deleteRecording(id: Int) async throws {
+        let url = try buildURL(path: "/api/channels/recordings/\(id)/")
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+    }
+
+    /// Playback URL for a completed recording. The endpoint is
+    /// `AllowAny` on the server (no auth), supports HTTP Range, and
+    /// serves the raw media file — safe to hand directly to MPV.
+    func recordingPlaybackURL(id: Int) -> URL? {
+        URL(string: baseURL + "/api/channels/recordings/\(id)/file/")
+    }
+
+    private func decodeRecording(from data: Data) throws -> Recording {
+        let obj = try JSONSerialization.jsonObject(with: data)
+        guard let dict = obj as? [String: Any], let rec = Recording(dict: dict) else {
+            let snippet = String(data: data, encoding: .utf8).map { String($0.prefix(300)) } ?? "<non-utf8>"
+            DebugLogger.shared.log("DispatcharrAPI.Recording decode failed — payload: \(snippet)",
+                                   category: "Network", level: .error)
+            throw APIError.decodingError(NSError(domain: "DispatcharrAPI",
+                                                 code: -4,
+                                                 userInfo: [NSLocalizedDescriptionKey: "Malformed recording response"]))
+        }
+        return rec
+    }
+
+    private func decodeRecordingArray(from data: Data) throws -> [Recording] {
+        let obj = try JSONSerialization.jsonObject(with: data)
+        // Accept either a flat array or a paginated {results: [...]} wrapper.
+        let rawArray: [[String: Any]]
+        if let arr = obj as? [[String: Any]] {
+            rawArray = arr
+        } else if let dict = obj as? [String: Any], let arr = dict["results"] as? [[String: Any]] {
+            rawArray = arr
+        } else {
+            let snippet = String(data: data, encoding: .utf8).map { String($0.prefix(300)) } ?? "<non-utf8>"
+            DebugLogger.shared.log("DispatcharrAPI.listRecordings decode failed — payload: \(snippet)",
+                                   category: "Network", level: .error)
+            throw APIError.decodingError(NSError(domain: "DispatcharrAPI",
+                                                 code: -5,
+                                                 userInfo: [NSLocalizedDescriptionKey: "Malformed recordings list"]))
+        }
+        return rawArray.compactMap { Recording(dict: $0) }
     }
 
     // MARK: - Helpers
