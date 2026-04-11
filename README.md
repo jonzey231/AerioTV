@@ -2,9 +2,11 @@
 
 AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS (using the iPad app). It connects to Dispatcharr via API Key, Xtream Codes, and M3U playlist servers to deliver live TV, movies, and series with a full electronic program guide (EPG) when supplied by the user.
 
-[Download via Apple App Store](https://apps.apple.com/us/app/aeriotv/id6760727974) (tvOS only. Pending App Store approval for iOS and iPadOS.)
+[Download via Apple App Store](https://apps.apple.com/us/app/aeriotv/id6760727974) 
+- This will always be behind the TestFlight version.
 
-[Download via Apple TestFlight](https://testflight.apple.com/join/JfszBGQP)
+[Download via Apple TestFlight](https://testflight.apple.com/join/JfszBGQP) 
+- This version may have bugs but will alwats be the latest. 
 
 ## Features
 
