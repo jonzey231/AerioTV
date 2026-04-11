@@ -1200,7 +1200,7 @@ struct ChannelRow: View {
                             Button(action: {}) {
                                 epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
                             }
-                            .buttonStyle(.card)
+                            .buttonStyle(.plain)
                             .contextMenu {
                                 reminderMenu(for: entry)
                                 if let end = entry.endTime, end > Date() {

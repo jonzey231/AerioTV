@@ -603,6 +603,7 @@ struct EPGGuideView: View {
 
     @StateObject private var guideStore = GuideStore()
     @EnvironmentObject private var channelStore: ChannelStore
+    @EnvironmentObject private var favoritesStore: FavoritesStore
     @Environment(\.modelContext) private var modelContext
     @State private var _epgCacheIsFresh = false
 
@@ -929,7 +930,9 @@ struct EPGGuideView: View {
         return GuideProgramButton(
             prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
             leadingClip: leadingClip,
-            shortTimeFormatter: shortTimeFormatter, onSelect: onSelectChannel
+            shortTimeFormatter: shortTimeFormatter, onSelect: onSelectChannel,
+            isFavorite: favoritesStore.isFavorite(channelItem.id),
+            toggleFavorite: { favoritesStore.toggle(channelItem) }
         )
         .offset(x: x, y: 0)
     }
@@ -1083,9 +1086,8 @@ private struct GuideProgramButton: View {
     let leadingClip: CGFloat
     let shortTimeFormatter: DateFormatter
     let onSelect: (ChannelDisplayItem) -> Void
-    @EnvironmentObject private var favoritesStore: FavoritesStore
-    // Access ReminderManager directly — @ObservedObject on a singleton
-    // would invalidate every program cell whenever any reminder changes.
+    let isFavorite: Bool
+    let toggleFavorite: () -> Void
     private var reminderManager: ReminderManager { .shared }
     #if os(tvOS)
     // NOTE: @FocusState removed — was causing context menu flashing.
@@ -1169,14 +1171,13 @@ private struct GuideProgramButton: View {
     var body: some View {
         #if os(tvOS)
         Button { onSelect(channelItem) } label: { cellContent }
-            .buttonStyle(.card)
+            .buttonStyle(GuideCellButtonStyle())
             .contextMenu {
-                let isFav = favoritesStore.isFavorite(channelItem.id)
                 Button {
-                    favoritesStore.toggle(channelItem)
+                    toggleFavorite()
                 } label: {
-                    Label(isFav ? "Remove from Favorites" : "Add to Favorites",
-                          systemImage: isFav ? "star.slash" : "star.fill")
+                    Label(isFavorite ? "Remove from Favorites" : "Add to Favorites",
+                          systemImage: isFavorite ? "star.slash" : "star.fill")
                 }
                 if isRecordable {
                     Button {
@@ -1222,12 +1223,11 @@ private struct GuideProgramButton: View {
             .contentShape(Rectangle())
             .onTapGesture { onSelect(channelItem) }
             .contextMenu {
-                let isFav = favoritesStore.isFavorite(channelItem.id)
                 Button {
-                    favoritesStore.toggle(channelItem)
+                    toggleFavorite()
                 } label: {
-                    Label(isFav ? "Remove from Favorites" : "Add to Favorites",
-                          systemImage: isFav ? "star.slash" : "star.fill")
+                    Label(isFavorite ? "Remove from Favorites" : "Add to Favorites",
+                          systemImage: isFavorite ? "star.slash" : "star.fill")
                 }
                 if isRecordable {
                     Button {
@@ -1299,7 +1299,17 @@ private struct GuideEmptyRowButton: View {
                 .frame(width: width, height: rowHeight, alignment: .center)
                 .background(Color.white.opacity(0.05))
         }
-        .buttonStyle(.card)
+        .buttonStyle(GuideCellButtonStyle())
+    }
+}
+
+/// Flat button style for the EPG guide grid. Focus highlight is a simple
+/// brightness boost — no @FocusState, no @Environment(\.isFocused), no
+/// custom state that could cause re-render loops during context menu display.
+private struct GuideCellButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .brightness(configuration.isPressed ? 0.3 : 0)
     }
 }
 #endif
