@@ -1208,6 +1208,7 @@ private struct GuideProgramButton: View {
     var body: some View {
         #if os(tvOS)
         Button { onSelect(channelItem) } label: { cellContent }
+            .buttonStyle(GuideCellButtonStyle())
             .contextMenu {
                 Button {
                     toggleFavorite()
@@ -1361,9 +1362,25 @@ private struct GuideEmptyRowButton: View {
                 .frame(width: width, height: rowHeight, alignment: .center)
                 .background(Color.white.opacity(0.05))
         }
+        .buttonStyle(GuideCellButtonStyle())
     }
 }
 
+/// Custom ButtonStyle for EPG guide cells. Uses brightness for focus
+/// indication — keeps the flat grid appearance without system chrome.
+/// Context menu flashing is a known tvOS limitation.
+private struct GuideCellButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .brightness(isFocused ? 0.2 : 0)
+            .overlay(
+                Rectangle()
+                    .stroke(isFocused ? Color.white.opacity(0.6) : Color.clear, lineWidth: 3)
+            )
+    }
+}
 #endif
 
 // MARK: - iOS Horizontal Pan Gesture (UIKit bridge)
