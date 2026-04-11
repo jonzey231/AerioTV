@@ -1192,6 +1192,7 @@ struct DispatcharrAPI {
         let fileName: String?
         let programTitle: String?
         let programDescription: String?
+        let comskip: Bool
 
         /// Parses a single recording out of an already-deserialized JSON
         /// object. Returns nil if required fields are missing.
@@ -1229,6 +1230,7 @@ struct DispatcharrAPI {
                 self.programTitle = props["title"] as? String
                 self.programDescription = props["description"] as? String
             }
+            self.comskip = (props["comskip"] as? Bool) ?? false
         }
     }
 
@@ -1252,16 +1254,14 @@ struct DispatcharrAPI {
                          endTime: Date,
                          title: String,
                          description: String,
-                         applyServerOffsets: Bool) async throws -> Recording {
+                         applyServerOffsets: Bool,
+                         comskip: Bool = false) async throws -> Recording {
         let url = try buildURL(path: "/api/channels/recordings/")
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
 
         var customProps: [String: Any] = [:]
         if applyServerOffsets {
-            // Server will read program.start_time/end_time and apply its
-            // configured DVR offsets. We pass our own start/end as the
-            // program window so the server's math lines up.
             customProps["program"] = [
                 "title": title,
                 "description": description,
@@ -1269,11 +1269,11 @@ struct DispatcharrAPI {
                 "end_time": iso.string(from: endTime)
             ]
         } else {
-            // We've already adjusted start/end on the client; omit the
-            // `program` key so Dispatcharr doesn't double-apply offsets.
-            // Flatten title/description so the admin UI still shows them.
             customProps["title"] = title
             customProps["description"] = description
+        }
+        if comskip {
+            customProps["comskip"] = true
         }
 
         let body: [String: Any] = [
@@ -1334,6 +1334,17 @@ struct DispatcharrAPI {
         let url = try buildURL(path: "/api/channels/recordings/\(id)/")
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+    }
+
+    /// Triggers comskip (commercial detection/removal) on a completed
+    /// recording. Dispatcharr handles the processing server-side.
+    func applyComskip(id: Int) async throws {
+        let url = try buildURL(path: "/api/channels/recordings/\(id)/comskip/")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         let (data, response) = try await loggedData(for: request)
         try validate(response: response, data: data)

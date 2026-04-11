@@ -29,6 +29,7 @@ struct ChannelListView: View {
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @EnvironmentObject private var channelStore: ChannelStore
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.modelContext) private var modelContext
 
     @Query private var servers: [ServerConnection]
 
@@ -130,7 +131,7 @@ struct ChannelListView: View {
                        !channel.streamURLs.isEmpty {
                         debugLog("🔗 ChannelListView: warm deep link → playing \(channel.name)")
                         UserDefaults.standard.removeObject(forKey: "launchChannelID")
-                        nowPlaying.startPlaying(channel, headers: playerHeaders())
+                        playChannel(channel)
                     } else {
                         // Channels not yet loaded — leave launchChannelID set so
                         // the cold-path handler picks it up when they arrive.
@@ -143,6 +144,12 @@ struct ChannelListView: View {
                     // Pull iCloud data while the user waits for channels/EPG to load
                     // (runs concurrently, doesn't block channel startup).
                     SyncManager.shared.pullFromCloud()
+                    // Sync DVR recording statuses with Dispatcharr servers
+                    Task {
+                        await RecordingCoordinator.shared.syncWithDispatcharr(
+                            servers: Array(servers), modelContext: modelContext
+                        )
+                    }
                     // Default to guide view if the active server has EPG data.
                     // M3U without EPG → default to list view (no guide data to show).
                     let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
@@ -268,9 +275,7 @@ struct ChannelListView: View {
                         channels: filteredChannels,
                         servers: Array(servers),
                         onSelectChannel: { item in
-                            if !item.streamURLs.isEmpty {
-                                nowPlaying.startPlaying(item, headers: playerHeaders())
-                            }
+                            playChannel(item)
                         }
                     )
                     #if os(tvOS)
@@ -304,11 +309,7 @@ struct ChannelListView: View {
                     ForEach(filteredChannels) { item in
                         ChannelRow(
                             item: item,
-                            onTap: {
-                                if !item.streamURLs.isEmpty {
-                                    nowPlaying.startPlaying(item, headers: playerHeaders())
-                                }
-                            },
+                            onTap: { playChannel(item) },
                             fetchUpcoming: makeFetchUpcoming(for: item)
                         )
                         .padding(.horizontal, 24)
@@ -323,11 +324,7 @@ struct ChannelListView: View {
                 ForEach(filteredChannels) { item in
                     ChannelRow(
                         item: item,
-                        onTap: {
-                            if !item.streamURLs.isEmpty {
-                                nowPlaying.startPlaying(item, headers: playerHeaders())
-                            }
-                        },
+                        onTap: { playChannel(item) },
                         fetchUpcoming: makeFetchUpcoming(for: item)
                     )
                     .listRowBackground(Color.clear)
@@ -522,6 +519,33 @@ struct ChannelListView: View {
         return server.authHeaders
     }
 
+    /// Starts playback, dynamically resolving the stream URL using the
+    /// server's current `effectiveBaseURL` so LAN↔WAN switching works.
+    private func playChannel(_ item: ChannelDisplayItem) {
+        var resolved = item
+        if let uuid = item.streamUUID,
+           let server = channelStore.activeServer ?? servers.first(where: { $0.isActive }) ?? servers.first {
+            let base = server.effectiveBaseURL.hasSuffix("/")
+                ? String(server.effectiveBaseURL.dropLast())
+                : server.effectiveBaseURL
+            if let url = URL(string: "\(base)/proxy/ts/stream/\(uuid)") {
+                resolved = ChannelDisplayItem(
+                    id: item.id, name: item.name, number: item.number,
+                    logoURL: item.logoURL, group: item.group,
+                    categoryOrder: item.categoryOrder,
+                    streamURL: url, streamURLs: [url],
+                    tvgID: item.tvgID, streamUUID: uuid,
+                    currentProgram: item.currentProgram,
+                    currentProgramDescription: item.currentProgramDescription,
+                    currentProgramStart: item.currentProgramStart,
+                    currentProgramEnd: item.currentProgramEnd
+                )
+            }
+        }
+        guard !resolved.streamURLs.isEmpty else { return }
+        nowPlaying.startPlaying(resolved, headers: playerHeaders())
+    }
+
     // MARK: - Deep Link Handler
 
     #if os(tvOS)
@@ -535,7 +559,7 @@ struct ChannelListView: View {
               !channel.streamURLs.isEmpty else { return }
         UserDefaults.standard.removeObject(forKey: "launchChannelID")
         debugLog("🔗 ChannelListView: cold deep link → playing \(channel.name)")
-        nowPlaying.startPlaying(channel, headers: playerHeaders())
+        playChannel(channel)
     }
     #endif
 
@@ -643,6 +667,9 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     let streamURL: URL?
     let streamURLs: [URL]
     var tvgID: String? = nil
+    /// Dispatcharr stream UUID — used to dynamically construct the stream
+    /// URL at playback time so LAN↔WAN switching works correctly.
+    var streamUUID: String? = nil
     var currentProgram: String? = nil
     var currentProgramDescription: String? = nil
     var currentProgramStart: Date? = nil
@@ -672,6 +699,9 @@ struct ChannelRow: View {
     var fetchUpcoming: (() async -> [EPGEntry])? = nil
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.modelContext) private var modelContext
+    @Query private var allRecordings: [Recording]
+    @Query private var servers: [ServerConnection]
     @State private var isExpanded = false
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
@@ -697,6 +727,9 @@ struct ChannelRow: View {
     private var isWide: Bool { sizeClass == .regular }
 
     @State private var showCardMenu = false
+    #if os(iOS)
+    @State private var longPressedEntry: EPGEntry?
+    #endif
 
     var body: some View {
         VStack(spacing: 0) {
@@ -734,10 +767,95 @@ struct ChannelRow: View {
                 }
             #endif
         }
+        .sheet(isPresented: $showRecordSheet) {
+            if let entry = recordTarget {
+                RecordProgramSheet(
+                    programTitle: entry.title,
+                    programDescription: entry.description,
+                    channelID: item.id,
+                    channelName: item.name,
+                    scheduledStart: entry.startTime ?? Date(),
+                    scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
+                    isLive: (entry.startTime ?? Date()) <= Date(),
+                    streamUUID: item.streamUUID
+                )
+            }
+        }
         #if os(tvOS)
         .conditionalExitCommand(isActive: isExpanded) {
             debugLog("🎮 Back pressed: collapsing expanded card for \(item.name)")
             withAnimation(.spring(response: 0.25)) { isExpanded = false }
+        }
+        #else
+        .overlay {
+            if longPressedEntry != nil {
+                EPGRowMenuOverlay(
+                    entry: longPressedEntry!,
+                    channelName: item.name,
+                    channelLogoURL: item.logoURL,
+                    onSetReminder: {
+                        if let start = longPressedEntry?.startTime {
+                            ReminderManager.shared.scheduleReminder(
+                                programTitle: longPressedEntry!.title,
+                                channelName: item.name,
+                                startTime: start
+                            )
+                        }
+                        withAnimation(.easeOut(duration: 0.2)) { longPressedEntry = nil }
+                    },
+                    onCancelReminder: {
+                        if let start = longPressedEntry?.startTime {
+                            let key = ReminderManager.programKey(
+                                channelName: item.name,
+                                title: longPressedEntry!.title,
+                                start: start
+                            )
+                            ReminderManager.shared.cancelReminder(forKey: key)
+                        }
+                        withAnimation(.easeOut(duration: 0.2)) { longPressedEntry = nil }
+                    },
+                    onRecord: {
+                        recordTarget = longPressedEntry
+                        withAnimation(.easeOut(duration: 0.2)) { longPressedEntry = nil }
+                        // Delay sheet presentation until overlay dismisses
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                            showRecordSheet = true
+                        }
+                    },
+                    onStopRecording: {
+                        stopActiveRecording()
+                        withAnimation(.easeOut(duration: 0.2)) { longPressedEntry = nil }
+                    },
+                    onCancelRecording: {
+                        if let entry = longPressedEntry {
+                            cancelRecording(for: entry)
+                        }
+                        withAnimation(.easeOut(duration: 0.2)) { longPressedEntry = nil }
+                    },
+                    onDismiss: {
+                        withAnimation(.easeOut(duration: 0.2)) { longPressedEntry = nil }
+                    },
+                    hasReminder: {
+                        guard let start = longPressedEntry?.startTime else { return false }
+                        let key = ReminderManager.programKey(
+                            channelName: item.name,
+                            title: longPressedEntry!.title,
+                            start: start
+                        )
+                        return ReminderManager.shared.hasReminder(forKey: key)
+                    }(),
+                    hasRecording: longPressedEntry.map { hasRecording(for: $0) } ?? false,
+                    isRecordingInProgress: longPressedEntry.map { entry in
+                        guard let start = entry.startTime, let end = entry.endTime else { return false }
+                        return allRecordings.contains { rec in
+                            rec.channelName == item.name &&
+                            rec.isInProgress &&
+                            rec.scheduledStart < end && rec.scheduledEnd > start
+                        }
+                    } ?? false
+                )
+                .transition(.opacity)
+            }
         }
         #endif
     }
@@ -907,10 +1025,18 @@ struct ChannelRow: View {
             )
 
             VStack(alignment: .leading, spacing: isWide ? 4 : 2) {
-                Text(item.name)
-                    .font(isWide ? .body.weight(.medium) : .bodyMedium)
-                    .foregroundColor(.textPrimary)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(item.name)
+                        .font(isWide ? .body.weight(.medium) : .bodyMedium)
+                        .foregroundColor(.textPrimary)
+                        .lineLimit(1)
+
+                    if hasActiveRecording {
+                        Image(systemName: "record.circle.fill")
+                            .font(.system(size: isWide ? 12 : 10))
+                            .foregroundColor(.red)
+                    }
+                }
 
                 if let program = item.currentProgram, !program.isEmpty {
                     HStack(spacing: 8) {
@@ -983,12 +1109,12 @@ struct ChannelRow: View {
         .padding(.vertical, isWide ? 18 : 13)
         .padding(.horizontal, isWide ? 18 : 14)
         .contentShape(Rectangle())
-        .onTapGesture { onTap() }
-        .onLongPressGesture(minimumDuration: 0.5) {
+        .onLongPressGesture(minimumDuration: 0.2) {
             let generator = UIImpactFeedbackGenerator(style: .medium)
             generator.impactOccurred()
             showCardMenu = true
         }
+        .onTapGesture { onTap() }
         .confirmationDialog(
             item.currentProgram ?? item.name,
             isPresented: $showCardMenu,
@@ -999,17 +1125,28 @@ struct ChannelRow: View {
                 favoritesStore.toggle(item)
             }
 
-            // Record the currently-airing program
+            // Recording actions for currently-airing program
             if let program = item.currentProgram,
                let end = item.currentProgramEnd, end > Date() {
-                Button("Record from Now") {
-                    recordTarget = EPGEntry(
-                        title: program,
-                        description: item.currentProgramDescription ?? "",
-                        startTime: item.currentProgramStart,
-                        endTime: end
-                    )
-                    showRecordSheet = true
+                if hasActiveRecording {
+                    Button("Stop & Keep") {
+                        stopActiveRecording()
+                    }
+                    Button("Cancel Recording", role: .destructive) {
+                        cancelActiveRecording()
+                    }
+                } else {
+                    Button("Record from Now") {
+                        recordTarget = EPGEntry(
+                            title: program,
+                            description: item.currentProgramDescription ?? "",
+                            startTime: item.currentProgramStart,
+                            endTime: end
+                        )
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            showRecordSheet = true
+                        }
+                    }
                 }
             }
         }
@@ -1063,7 +1200,7 @@ struct ChannelRow: View {
                             Button(action: {}) {
                                 epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
                             }
-                            .buttonStyle(EPGRowButtonStyle())
+                            .buttonStyle(.card)
                             .contextMenu {
                                 reminderMenu(for: entry)
                                 if let end = entry.endTime, end > Date() {
@@ -1079,80 +1216,14 @@ struct ChannelRow: View {
                             }
                             #else
                             epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 2)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(Color.cardBackground)
-                                )
-                                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10))
-                                .contextMenu {
-                                    if let start = entry.startTime, start > Date() {
-                                        let key = ReminderManager.programKey(channelName: item.name, title: entry.title, start: start)
-                                        if ReminderManager.shared.hasReminder(forKey: key) {
-                                            Button(role: .destructive) {
-                                                ReminderManager.shared.cancelReminder(forKey: key)
-                                            } label: {
-                                                Label("Cancel Reminder", systemImage: "bell.slash")
-                                            }
-                                        } else {
-                                            Button {
-                                                ReminderManager.shared.scheduleReminder(
-                                                    programTitle: entry.title,
-                                                    channelName: item.name,
-                                                    startTime: start
-                                                )
-                                            } label: {
-                                                Label("Set Reminder", systemImage: "bell.badge")
-                                            }
-                                        }
+                                .contentShape(Rectangle())
+                                .onLongPressGesture(minimumDuration: 0.2, pressing: { _ in }, perform: {
+                                    let generator = UIImpactFeedbackGenerator(style: .medium)
+                                    generator.impactOccurred()
+                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                        longPressedEntry = entry
                                     }
-                                    if let end = entry.endTime, end > Date() {
-                                        Button {
-                                            recordTarget = entry
-                                            showRecordSheet = true
-                                        } label: {
-                                            Label("Record", systemImage: "record.circle")
-                                        }
-                                    }
-                                } preview: {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        HStack(spacing: 8) {
-                                            if let logoURL = item.logoURL {
-                                                CachedLogoImage(url: logoURL, width: 32, height: 22)
-                                            }
-                                            Text(item.name)
-                                                .font(.caption.weight(.semibold))
-                                                .foregroundColor(.textSecondary)
-                                        }
-                                        Divider()
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(entry.title)
-                                                .font(.body.weight(.semibold))
-                                                .foregroundColor(.textPrimary)
-                                            if !entry.description.isEmpty {
-                                                Text(entry.description)
-                                                    .font(.caption)
-                                                    .foregroundColor(.accentPrimary.opacity(0.85))
-                                                    .lineLimit(2)
-                                            }
-                                            if let start = entry.startTime {
-                                                HStack(spacing: 4) {
-                                                    Text(start, style: .time)
-                                                    if let end = entry.endTime {
-                                                        Text("–")
-                                                        Text(end, style: .time)
-                                                    }
-                                                }
-                                                .font(.caption)
-                                                .foregroundColor(.textTertiary)
-                                            }
-                                        }
-                                    }
-                                    .padding(14)
-                                    .frame(width: 300, alignment: .leading)
-                                    .background(Color.cardBackground)
-                                }
+                                })
                             #endif
                         }
                     }
@@ -1162,19 +1233,6 @@ struct ChannelRow: View {
                 .focusSection()
                 #endif
                 .padding(.bottom, 4)
-                .sheet(isPresented: $showRecordSheet) {
-                    if let entry = recordTarget {
-                        RecordProgramSheet(
-                            programTitle: entry.title,
-                            programDescription: entry.description,
-                            channelID: item.id,
-                            channelName: item.name,
-                            scheduledStart: entry.startTime ?? Date(),
-                            scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
-                            isLive: (entry.startTime ?? Date()) <= Date()
-                        )
-                    }
-                }
             }
         }
     }
@@ -1310,6 +1368,18 @@ struct ChannelRow: View {
                         .foregroundColor(.accentPrimary)
                         .padding(.trailing, 4)
                 }
+
+                // Record indicator for programs with scheduled recordings
+                if hasRecording(for: entry) {
+                    Image(systemName: "record.circle.fill")
+                        #if os(tvOS)
+                        .font(.system(size: 18))
+                        #else
+                        .font(.system(size: 12))
+                        #endif
+                        .foregroundColor(.red)
+                        .padding(.trailing, 4)
+                }
             }
             #if os(tvOS)
             .padding(.horizontal, 18)
@@ -1326,33 +1396,119 @@ struct ChannelRow: View {
             }
         }
     }
+
+    /// Whether this channel has any active (scheduled or recording) recording right now.
+    private var hasActiveRecording: Bool {
+        let now = Date()
+        return allRecordings.contains { rec in
+            rec.channelName == item.name &&
+            (rec.status == .recording || rec.status == .scheduled) &&
+            rec.effectiveStart <= now && rec.effectiveEnd >= now
+        }
+    }
+
+    /// Checks whether any recording matches this EPG entry by channel + time overlap.
+    private func hasRecording(for entry: EPGEntry) -> Bool {
+        guard let start = entry.startTime, let end = entry.endTime else { return false }
+        return allRecordings.contains { rec in
+            rec.channelName == item.name &&
+            rec.statusRaw != RecordingStatus.cancelled.rawValue &&
+            rec.statusRaw != RecordingStatus.failed.rawValue &&
+            rec.scheduledStart < end && rec.scheduledEnd > start
+        }
+    }
+
+    /// Returns the active recording for this channel, if any.
+    private var activeRecording: Recording? {
+        let now = Date()
+        return allRecordings.first { rec in
+            rec.channelName == item.name &&
+            (rec.status == .recording || rec.status == .scheduled) &&
+            rec.effectiveStart <= now && rec.effectiveEnd >= now
+        }
+    }
+
+    /// Stops the active recording but keeps the partial file.
+    private func stopActiveRecording() {
+        guard let rec = activeRecording else { return }
+        let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+        if rec.destination == .dispatcharrServer,
+           let server = activeServer, server.type == .dispatcharrAPI {
+            let api = DispatcharrAPI(
+                baseURL: server.effectiveBaseURL,
+                auth: .apiKey(server.effectiveApiKey),
+                userAgent: server.effectiveUserAgent
+            )
+            Task {
+                try? await RecordingCoordinator.shared.stopDispatcharrRecording(
+                    api: api, recording: rec, modelContext: modelContext
+                )
+            }
+        } else {
+            Task {
+                await RecordingCoordinator.shared.stopLocalRecording(rec, modelContext: modelContext)
+            }
+        }
+    }
+
+    /// Cancels the active recording and deletes the file.
+    private func cancelActiveRecording() {
+        guard let rec = activeRecording else { return }
+        let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+        if rec.destination == .dispatcharrServer,
+           let server = activeServer, server.type == .dispatcharrAPI {
+            let api = DispatcharrAPI(
+                baseURL: server.effectiveBaseURL,
+                auth: .apiKey(server.effectiveApiKey),
+                userAgent: server.effectiveUserAgent
+            )
+            Task {
+                try? await RecordingCoordinator.shared.deleteDispatcharrRecording(
+                    api: api, recording: rec, modelContext: modelContext
+                )
+            }
+        } else {
+            rec.statusRaw = RecordingStatus.cancelled.rawValue
+            try? modelContext.save()
+        }
+    }
+
+    /// Cancels the recording matching this EPG entry — both locally and on Dispatcharr.
+    private func cancelRecording(for entry: EPGEntry) {
+        guard let start = entry.startTime, let end = entry.endTime else { return }
+        guard let rec = allRecordings.first(where: { rec in
+            rec.channelName == item.name &&
+            rec.statusRaw != RecordingStatus.cancelled.rawValue &&
+            rec.statusRaw != RecordingStatus.failed.rawValue &&
+            rec.scheduledStart < end && rec.scheduledEnd > start
+        }) else { return }
+
+        let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+
+        if rec.destination == .dispatcharrServer,
+           let server = activeServer,
+           server.type == .dispatcharrAPI {
+            let api = DispatcharrAPI(
+                baseURL: server.effectiveBaseURL,
+                auth: .apiKey(server.effectiveApiKey),
+                userAgent: server.effectiveUserAgent
+            )
+            Task {
+                try? await RecordingCoordinator.shared.deleteDispatcharrRecording(
+                    api: api, recording: rec, modelContext: modelContext
+                )
+            }
+        } else {
+            rec.statusRaw = RecordingStatus.cancelled.rawValue
+            try? modelContext.save()
+        }
+    }
 }
 
 // MARK: - EPG Row Button Style (tvOS only)
 #if os(tvOS)
 /// Plain-looking ButtonStyle that gives each EPG row focusability
 /// without adding a visible press effect or focus ring.
-private struct EPGRowButtonStyle: ButtonStyle {
-    @Environment(\.isFocused) private var isFocused
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isFocused
-                          ? Color.accentPrimary.opacity(0.18)
-                          : configuration.isPressed
-                              ? Color.accentPrimary.opacity(0.08)
-                              : Color.clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(isFocused ? Color.accentPrimary.opacity(0.6) : Color.clear, lineWidth: 1.5)
-            )
-            .scaleEffect(isFocused ? 1.02 : 1.0)
-            .animation(.easeInOut(duration: 0.12), value: isFocused)
-    }
-}
 
 // Conditionally attaches .onExitCommand only when `isActive` is true.
 // When inactive, the modifier is not applied, so the exit event passes
@@ -1373,6 +1529,181 @@ private struct ConditionalExitCommandModifier: ViewModifier {
 extension View {
     func conditionalExitCommand(isActive: Bool, perform action: @escaping () -> Void) -> some View {
         modifier(ConditionalExitCommandModifier(isActive: isActive, action: action))
+    }
+}
+#endif
+
+// MARK: - Custom EPG Row Menu Overlay (iOS only)
+// Full-card overlay that blurs the card content and presents the selected
+// program row with action buttons. Replaces .contextMenu to keep the card
+// visible (blurred) behind the selected row.
+#if os(iOS)
+private struct EPGRowMenuOverlay: View {
+    let entry: EPGEntry
+    let channelName: String
+    let channelLogoURL: URL?
+    let onSetReminder: () -> Void
+    let onCancelReminder: () -> Void
+    let onRecord: () -> Void
+    let onStopRecording: () -> Void
+    let onCancelRecording: () -> Void
+    let onDismiss: () -> Void
+    let hasReminder: Bool
+    let hasRecording: Bool
+    let isRecordingInProgress: Bool
+
+    var body: some View {
+        ZStack {
+            // Blurred background covering the card
+            Rectangle()
+                .fill(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .onTapGesture { onDismiss() }
+
+            // Selected program card + actions
+            VStack(spacing: 12) {
+                // Program info card
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        if let logoURL = channelLogoURL {
+                            CachedLogoImage(url: logoURL, width: 30, height: 20)
+                        }
+                        Text(channelName)
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.textSecondary)
+                        Spacer()
+                    }
+
+                    Divider().background(Color.borderSubtle)
+
+                    Text(entry.title)
+                        .font(.body.weight(.semibold))
+                        .foregroundColor(.textPrimary)
+
+                    if !entry.description.isEmpty {
+                        Text(entry.description)
+                            .font(.caption)
+                            .foregroundColor(.accentPrimary.opacity(0.85))
+                            .lineLimit(2)
+                    }
+
+                    if let start = entry.startTime {
+                        HStack(spacing: 4) {
+                            Text(start, style: .time)
+                            if let end = entry.endTime {
+                                Text("–")
+                                Text(end, style: .time)
+                            }
+                        }
+                        .font(.caption)
+                        .foregroundColor(.textTertiary)
+                    }
+                }
+                .padding(14)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.cardBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.accentPrimary.opacity(0.25), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.3), radius: 12, y: 4)
+
+                // Action buttons
+                VStack(spacing: 0) {
+                    if hasReminder {
+                        menuButton(
+                            label: "Cancel Reminder",
+                            icon: "bell.slash",
+                            color: .red,
+                            isFirst: true,
+                            isLast: false,
+                            action: onCancelReminder
+                        )
+                        Divider().background(Color.borderSubtle)
+                    } else {
+                        if entry.startTime != nil, (entry.startTime ?? Date()) > Date() {
+                            menuButton(
+                                label: "Set Reminder",
+                                icon: "bell.badge",
+                                color: .accentPrimary,
+                                isFirst: true,
+                                isLast: false,
+                                action: onSetReminder
+                            )
+                            Divider().background(Color.borderSubtle)
+                        }
+                    }
+
+                    if let end = entry.endTime, end > Date() {
+                        if hasRecording {
+                            if isRecordingInProgress {
+                                menuButton(
+                                    label: "Stop & Keep",
+                                    icon: "stop.fill",
+                                    color: .orange,
+                                    isFirst: false,
+                                    isLast: false,
+                                    action: onStopRecording
+                                )
+                                Divider().background(Color.borderSubtle)
+                            }
+                            menuButton(
+                                label: "Cancel Recording",
+                                icon: "xmark.circle",
+                                color: .red,
+                                isFirst: !isRecordingInProgress && !hasReminder,
+                                isLast: true,
+                                action: onCancelRecording
+                            )
+                        } else {
+                            menuButton(
+                                label: "Record",
+                                icon: "record.circle",
+                                color: .red,
+                                isFirst: !hasReminder && entry.startTime == nil,
+                                isLast: true,
+                                action: onRecord
+                            )
+                        }
+                    }
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.cardBackground)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.accentPrimary.opacity(0.15), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.2), radius: 8, y: 2)
+            }
+            .padding(.horizontal, 16)
+        }
+    }
+
+    @ViewBuilder
+    private func menuButton(label: String, icon: String, color: Color,
+                            isFirst: Bool, isLast: Bool,
+                            action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(color)
+                    .frame(width: 22)
+                Text(label)
+                    .font(.body)
+                    .foregroundColor(.textPrimary)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 #endif
@@ -1398,7 +1729,7 @@ private struct PressableEPGRow<Row: View>: View {
             .opacity(isPressed ? 0.5 : 1.0)
             .scaleEffect(isPressed ? 0.98 : 1.0)
             .animation(.easeInOut(duration: 0.12), value: isPressed)
-            .onLongPressGesture(minimumDuration: 0.35, pressing: { pressing in
+            .onLongPressGesture(minimumDuration: 0.2, pressing: { pressing in
                 if isFuture {
                     isPressed = pressing
                 }
@@ -1433,9 +1764,7 @@ struct FavoritesView: View {
                     List {
                         ForEach(favoritesStore.favoriteItems) { item in
                             ChannelRow(item: item) {
-                                if !item.streamURLs.isEmpty {
-                                    nowPlaying.startPlaying(item, headers: playerHeaders())
-                                }
+                                playChannel(item)
                             }
                             .listRowBackground(Color.clear)
                             .listRowInsets(EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16))
@@ -1464,6 +1793,31 @@ struct FavoritesView: View {
             return ["Accept": "*/*"]
         }
         return server.authHeaders
+    }
+
+    private func playChannel(_ item: ChannelDisplayItem) {
+        var resolved = item
+        if let uuid = item.streamUUID,
+           let server = channelStore.activeServer ?? servers.first(where: { $0.isActive }) ?? servers.first {
+            let base = server.effectiveBaseURL.hasSuffix("/")
+                ? String(server.effectiveBaseURL.dropLast())
+                : server.effectiveBaseURL
+            if let url = URL(string: "\(base)/proxy/ts/stream/\(uuid)") {
+                resolved = ChannelDisplayItem(
+                    id: item.id, name: item.name, number: item.number,
+                    logoURL: item.logoURL, group: item.group,
+                    categoryOrder: item.categoryOrder,
+                    streamURL: url, streamURLs: [url],
+                    tvgID: item.tvgID, streamUUID: uuid,
+                    currentProgram: item.currentProgram,
+                    currentProgramDescription: item.currentProgramDescription,
+                    currentProgramStart: item.currentProgramStart,
+                    currentProgramEnd: item.currentProgramEnd
+                )
+            }
+        }
+        guard !resolved.streamURLs.isEmpty else { return }
+        nowPlaying.startPlaying(resolved, headers: playerHeaders())
     }
 }
 

@@ -429,6 +429,10 @@ final class Recording {
     var createdAt: Date
     /// Populated when `status == .failed` for user-visible diagnostics.
     var failureReason: String?
+    /// Whether comskip (commercial removal) has been applied to this recording.
+    var comskipCompleted: Bool
+    /// When the recording actually stopped. Nil means it ran to `effectiveEnd`.
+    var actualEndTime: Date?
 
     init(channelID: String,
          channelName: String,
@@ -444,7 +448,9 @@ final class Recording {
          remoteRecordingID: Int? = nil,
          fileSizeBytes: Int64 = 0,
          serverID: String,
-         failureReason: String? = nil) {
+         failureReason: String? = nil,
+         comskipCompleted: Bool = false,
+         actualEndTime: Date? = nil) {
         self.id = UUID()
         self.channelID = channelID
         self.channelName = channelName
@@ -462,6 +468,8 @@ final class Recording {
         self.serverID = serverID
         self.createdAt = Date()
         self.failureReason = failureReason
+        self.comskipCompleted = comskipCompleted
+        self.actualEndTime = actualEndTime
     }
 
     var destination: RecordingDestination {
@@ -484,7 +492,10 @@ final class Recording {
         scheduledEnd.addingTimeInterval(Double(postRollMinutes) * 60)
     }
 
-    var isInProgress: Bool { status == .recording }
+    var isInProgress: Bool {
+        status == .recording ||
+        (status == .scheduled && effectiveStart <= Date() && effectiveEnd > Date())
+    }
     var isCompleted: Bool { status == .completed }
-    var isUpcoming: Bool { status == .scheduled }
+    var isUpcoming: Bool { status == .scheduled && effectiveStart > Date() }
 }

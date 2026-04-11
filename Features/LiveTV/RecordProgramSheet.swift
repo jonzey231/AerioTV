@@ -17,6 +17,8 @@ struct RecordProgramSheet: View {
     let scheduledEnd: Date
     /// Whether the program is already live (disables pre-roll).
     let isLive: Bool
+    /// Dispatcharr stream UUID for resolving the stream URL (local recording).
+    var streamUUID: String? = nil
 
     @AppStorage("dvrDefaultPreRollMins") private var defaultPreRoll = 0
     @AppStorage("dvrDefaultPostRollMins") private var defaultPostRoll = 0
@@ -24,6 +26,7 @@ struct RecordProgramSheet: View {
     @State private var preRoll: Int = 0
     @State private var postRoll: Int = 0
     @State private var destination: RecordingDestination = .local
+    @State private var comskip = false
     @State private var showCustomPreRoll = false
     @State private var showCustomPostRoll = false
     @State private var customValue = 5
@@ -85,6 +88,15 @@ struct RecordProgramSheet: View {
                             Text("This device").tag(RecordingDestination.local)
                         }
                         .pickerStyle(.segmented)
+                    }
+                }
+
+                // Comskip (Dispatcharr server recordings only)
+                if isDispatcharr && destination == .dispatcharrServer {
+                    Section {
+                        Toggle("Remove commercials (Comskip)", isOn: $comskip)
+                    } footer: {
+                        Text("Automatically detect and remove commercial breaks after recording completes. Processed server-side.")
                     }
                 }
 
@@ -205,6 +217,17 @@ struct RecordProgramSheet: View {
 
     // MARK: - Helpers
 
+    /// Resolves the stream URL for local recording using the stream UUID
+    /// and the server's current effectiveBaseURL.
+    private func resolveStreamURL() -> URL? {
+        guard let uuid = streamUUID, !uuid.isEmpty,
+              let server = activeServer else { return nil }
+        let base = server.effectiveBaseURL.hasSuffix("/")
+            ? String(server.effectiveBaseURL.dropLast())
+            : server.effectiveBaseURL
+        return URL(string: "\(base)/proxy/ts/stream/\(uuid)")
+    }
+
     private var timeLabel: String {
         let df = DateFormatter()
         df.dateStyle = .medium
@@ -246,14 +269,19 @@ struct RecordProgramSheet: View {
                     api: api, recording: rec,
                     channelIntID: channelIntID,
                     applyServerOffsets: applyServerOffsets,
+                    comskip: comskip,
                     modelContext: modelContext
                 )
             }
             // Local recordings that should start now
-            // (for future programs, a scheduler will need to trigger at effectiveStart)
             if destination == .local && rec.effectiveStart <= Date() {
-                // TODO: resolve stream URL from channel
-                // await coordinator.startLocalRecording(rec, streamURL: url, modelContext: modelContext)
+                if let url = resolveStreamURL() {
+                    await coordinator.startLocalRecording(rec, streamURL: url, modelContext: modelContext)
+                } else {
+                    rec.status = .failed
+                    rec.failureReason = "Could not resolve stream URL for this channel."
+                    try? modelContext.save()
+                }
             }
         }
 

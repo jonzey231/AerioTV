@@ -49,6 +49,7 @@
 		61F895DEB15DE1F7C3EACD17 /* PlaylistModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA33B18A62A3411B6425B661 /* PlaylistModels.swift */; };
 		622B003E0D0A155E9FE7D9B7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
 		62AD11B70BF6B745FD727C8B /* AerioSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */; };
+		6308BAE1E16965A379092AE8 /* OnDemandView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CBF1B5E89BE18F8E73482B9 /* OnDemandView.swift */; };
 		65A50DB238B2354D5B81DE09 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
 		665A7DFCEC12544455827DB3 /* ReminderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 265A7DFCEC12544455827DB3 /* ReminderManager.swift */; };
 		6A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */; };
@@ -104,6 +105,7 @@
 		C02E4BB60A5E960696E8839B /* Pods-Aerio_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Aerio_iOS-acknowledgements.markdown */; };
 		C9B3A9A8801BC79552C8D496 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */; };
 		C9E28AF097D00D2A282673A5 /* AerioSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */; };
+		C9E919E28B95CE15179BBCBD /* OnDemandView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CBF1B5E89BE18F8E73482B9 /* OnDemandView.swift */; };
 		CC1234567890ABCDEF123456 /* DebugLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1234567890ABCDEF123456 /* DebugLogger.swift */; };
 		CD1234567890ABCDEF123456 /* NowPlayingBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */; };
 		CF38B25676730E71C9AD497A /* AerioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* AerioApp.swift */; };
@@ -199,6 +201,7 @@
 		875B0901B53C33B024AF597F /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AerioSplash.mp4; sourceTree = "<group>"; };
 		888E14C889CF064825B5A29E /* AerioTopShelf.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; name = AerioTopShelf.entitlements; path = TopShelfExtension/AerioTopShelf.entitlements; sourceTree = "<group>"; };
+		8CBF1B5E89BE18F8E73482B9 /* OnDemandView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OnDemandView.swift; sourceTree = "<group>"; };
 		8EEF8CE5358378E2CF3F4012 /* Pods-Aerio_iOS-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Pods-Aerio_iOS-Info.plist"; sourceTree = "<group>"; };
 		8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Aerio_iOS-acknowledgements.markdown */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "Pods-Aerio_iOS-acknowledgements.markdown"; sourceTree = "<group>"; };
 		93EBE84BDC6A8A492E3AB851 /* MobileVLCKit-xcframeworks-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "MobileVLCKit-xcframeworks-input-files.xcfilelist"; sourceTree = "<group>"; };
@@ -520,6 +523,7 @@
 				BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */,
 				D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */,
 				20C769771A1085A303FFC0F0 /* VODDetailView.swift */,
+				8CBF1B5E89BE18F8E73482B9 /* OnDemandView.swift */,
 			);
 			path = VOD;
 			sourceTree = "<group>";
@@ -837,6 +841,7 @@
 				2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */,
 				A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */,
 				07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */,
+				6308BAE1E16965A379092AE8 /* OnDemandView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -890,6 +895,7 @@
 				38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */,
 				84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */,
 				115F4DEA73DE0C5C49817C04 /* RecordProgramSheet.swift in Sources */,
+				C9E919E28B95CE15179BBCBD /* OnDemandView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

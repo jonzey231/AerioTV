@@ -203,14 +203,22 @@ struct TVShowsView: View {
             resumePosterURL = progress.posterURL
             resumeServerID = progress.serverID
             resumePositionMs = progress.positionMs
+            var resolvedURL = url
             if let sid = progress.serverID,
                let serverUUID = UUID(uuidString: sid),
                let server = servers.first(where: { $0.id == serverUUID }) {
                 resumePlayingHeaders = server.authHeaders
+                if server.type == .dispatcharrAPI,
+                   let proxyRange = urlStr.range(of: "/proxy/") {
+                    let base = server.effectiveBaseURL.hasSuffix("/")
+                        ? String(server.effectiveBaseURL.dropLast())
+                        : server.effectiveBaseURL
+                    resolvedURL = URL(string: base + String(urlStr[proxyRange.lowerBound...])) ?? url
+                }
             } else {
                 resumePlayingHeaders = dispatcharrHeaders
             }
-            resumePlayingURL = IdentifiableURL(url: url)
+            resumePlayingURL = IdentifiableURL(url: resolvedURL)
             isPlaying = true
             return
         }

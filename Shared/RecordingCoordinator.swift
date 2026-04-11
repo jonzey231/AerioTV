@@ -120,7 +120,12 @@ final class RecordingCoordinator: ObservableObject {
         let needsScope = customRecordingsDirectory != nil
         if needsScope { _ = dir.startAccessingSecurityScopedResource() }
 
-        let path = dir.appendingPathComponent("\(recording.id.uuidString).ts").path
+        let safeName = "\(recording.channelName) - \(recording.programTitle)"
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespaces)
+        let fileName = safeName.isEmpty ? recording.id.uuidString : safeName
+        let path = dir.appendingPathComponent("\(fileName).ts").path
         recording.localFilePath = path
         recording.status = .recording
         try? modelContext.save()
@@ -143,6 +148,7 @@ final class RecordingCoordinator: ObservableObject {
             }
         } catch {
             recording.status = .failed
+            recording.actualEndTime = Date()
             recording.failureReason = error.localizedDescription
             activeSessions.removeValue(forKey: recording.id)
             updateRecordingState()
@@ -157,6 +163,7 @@ final class RecordingCoordinator: ObservableObject {
 
         let written = await session.getBytesWritten()
         recording.fileSizeBytes = written
+        recording.actualEndTime = Date()
         recording.status = written > 0 ? .completed : .failed
         if written == 0 { recording.failureReason = "No data was written" }
         try? modelContext.save()
@@ -171,6 +178,7 @@ final class RecordingCoordinator: ObservableObject {
                                       recording: Recording,
                                       channelIntID: Int,
                                       applyServerOffsets: Bool,
+                                      comskip: Bool = false,
                                       modelContext: ModelContext) async throws {
         let result = try await api.createRecording(
             channelID: channelIntID,
@@ -178,7 +186,8 @@ final class RecordingCoordinator: ObservableObject {
             endTime: recording.effectiveEnd,
             title: recording.programTitle,
             description: recording.programDescription,
-            applyServerOffsets: applyServerOffsets
+            applyServerOffsets: applyServerOffsets,
+            comskip: comskip
         )
         recording.remoteRecordingID = result.id
         recording.status = RecordingStatus(rawValue: result.status ?? "scheduled") ?? .scheduled
@@ -205,6 +214,7 @@ final class RecordingCoordinator: ObservableObject {
         guard let remoteID = recording.remoteRecordingID else { return }
         try await api.stopRecording(id: remoteID)
         recording.status = .stopped
+        recording.actualEndTime = Date()
         try? modelContext.save()
     }
 
@@ -220,7 +230,12 @@ final class RecordingCoordinator: ObservableObject {
         if needsScope { _ = dir.startAccessingSecurityScopedResource() }
         defer { if needsScope { dir.stopAccessingSecurityScopedResource() } }
 
-        let destPath = dir.appendingPathComponent("\(recording.id.uuidString).ts")
+        let safeName = "\(recording.channelName) - \(recording.programTitle)"
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespaces)
+        let fileName = safeName.isEmpty ? recording.id.uuidString : safeName
+        let destPath = dir.appendingPathComponent("\(fileName).ts")
         let (tempURL, _) = try await URLSession.shared.download(from: playbackURL)
         try FileManager.default.moveItem(at: tempURL, to: destPath)
 
@@ -279,6 +294,7 @@ final class RecordingCoordinator: ObservableObject {
             if let rec = try? modelContext.fetch(descriptor).first {
                 let written = await session.getBytesWritten()
                 rec.fileSizeBytes = written
+                rec.actualEndTime = Date()
                 rec.status = .failed
                 rec.failureReason = RecordingError.appBackgrounded.localizedDescription
             }
@@ -286,5 +302,111 @@ final class RecordingCoordinator: ObservableObject {
         activeSessions.removeAll()
         updateRecordingState()
         try? modelContext.save()
+    }
+
+    // MARK: - Dispatcharr status sync
+
+    /// Full two-way sync with all Dispatcharr servers: updates statuses,
+    /// removes locally-tracked recordings deleted on the server, and
+    /// discovers server recordings not yet tracked locally.
+    func syncWithDispatcharr(servers: [ServerConnection], modelContext: ModelContext) async {
+        // Remove local recording entries whose files were deleted outside the app
+        pruneOrphanedLocalRecordings(modelContext: modelContext)
+
+        let dispatcharrServers = servers.filter { $0.type == .dispatcharrAPI }
+        guard !dispatcharrServers.isEmpty else { return }
+
+        let allLocal = (try? modelContext.fetch(FetchDescriptor<Recording>())) ?? []
+
+        for server in dispatcharrServers {
+            let serverID = server.id.uuidString
+            let api = DispatcharrAPI(
+                baseURL: server.effectiveBaseURL,
+                auth: .apiKey(server.effectiveApiKey),
+                userAgent: server.effectiveUserAgent
+            )
+
+            let remoteRecordings: [DispatcharrAPI.Recording]
+            do {
+                remoteRecordings = try await api.listRecordings()
+            } catch {
+                continue
+            }
+
+            let remoteByID = Dictionary(uniqueKeysWithValues: remoteRecordings.map { ($0.id, $0) })
+            let localForServer = allLocal.filter {
+                $0.destination == .dispatcharrServer && $0.serverID == serverID
+            }
+
+            // Update or delete existing local recordings
+            for rec in localForServer {
+                guard let remoteID = rec.remoteRecordingID else { continue }
+                if let remote = remoteByID[remoteID] {
+                    let serverStatus = Self.mapStatus(remote)
+                    if rec.status != serverStatus {
+                        rec.statusRaw = serverStatus.rawValue
+                    }
+                    rec.comskipCompleted = remote.comskip
+                } else {
+                    modelContext.delete(rec)
+                }
+            }
+
+            // Discover server recordings not tracked locally
+            let localRemoteIDs = Set(localForServer.compactMap { $0.remoteRecordingID })
+            for remote in remoteRecordings where !localRemoteIDs.contains(remote.id) {
+                let rec = Recording(
+                    channelID: String(remote.channel),
+                    channelName: "Channel \(remote.channel)",
+                    programTitle: remote.programTitle ?? "",
+                    programDescription: remote.programDescription ?? "",
+                    scheduledStart: remote.startTime,
+                    scheduledEnd: remote.endTime,
+                    preRollMinutes: 0,
+                    postRollMinutes: 0,
+                    destination: .dispatcharrServer,
+                    serverID: serverID
+                )
+                rec.remoteRecordingID = remote.id
+                rec.statusRaw = Self.mapStatus(remote).rawValue
+                rec.comskipCompleted = remote.comskip
+                modelContext.insert(rec)
+            }
+
+            try? modelContext.save()
+        }
+    }
+
+    /// Removes local recording entries whose .ts files no longer exist on disk
+    /// (e.g. the user deleted them from the Files app).
+    private func pruneOrphanedLocalRecordings(modelContext: ModelContext) {
+        let allLocal = (try? modelContext.fetch(FetchDescriptor<Recording>())) ?? []
+        let fm = FileManager.default
+        var pruned = 0
+        for rec in allLocal {
+            guard rec.destination == .local,
+                  let path = rec.localFilePath,
+                  !path.isEmpty,
+                  (rec.isCompleted || rec.status == .stopped || rec.status == .interrupted)
+            else { continue }
+            if !fm.fileExists(atPath: path) {
+                modelContext.delete(rec)
+                pruned += 1
+            }
+        }
+        if pruned > 0 { try? modelContext.save() }
+    }
+
+    private static func mapStatus(_ remote: DispatcharrAPI.Recording) -> RecordingStatus {
+        if let status = remote.status {
+            return RecordingStatus(rawValue: status) ?? .completed
+        }
+        if remote.endTime <= Date() {
+            return .completed
+        } else if remote.startTime <= Date() {
+            return .recording
+        } else {
+            return .scheduled
+        }
     }
 }

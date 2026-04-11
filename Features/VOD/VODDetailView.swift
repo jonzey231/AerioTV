@@ -246,8 +246,19 @@ struct VODDetailView: View {
         var resolvedURL = url
         if let server, server.type == .dispatcharrAPI {
             isResolvingURL = true
-            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(server.effectiveApiKey))
-            resolvedURL = (try? await api.resolveFinalURLForPlayback(url)) ?? url
+            let currentBase = server.effectiveBaseURL.hasSuffix("/")
+                ? String(server.effectiveBaseURL.dropLast())
+                : server.effectiveBaseURL
+            // Rebase the URL onto the current effectiveBaseURL so LAN↔WAN works.
+            // The stored streamURL may use a stale LAN IP; extract the path and
+            // reconstruct with the current base.
+            var rebasedURL = url
+            if let path = url.absoluteString.range(of: "/proxy/") {
+                let proxyPath = String(url.absoluteString[path.lowerBound...])
+                rebasedURL = URL(string: currentBase + proxyPath) ?? url
+            }
+            let api = DispatcharrAPI(baseURL: currentBase, auth: .apiKey(server.effectiveApiKey))
+            resolvedURL = (try? await api.resolveFinalURLForPlayback(rebasedURL)) ?? rebasedURL
             isResolvingURL = false
         }
 

@@ -5,45 +5,64 @@ import SwiftData
 
 struct MyRecordingsView: View {
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var nowPlaying: NowPlayingManager
     @Query(sort: \Recording.createdAt, order: .reverse) private var allRecordings: [Recording]
     @Query private var servers: [ServerConnection]
     @StateObject private var coordinator = RecordingCoordinator.shared
 
-    @State private var selectedSegment = 0 // 0=Scheduled, 1=Recording, 2=Completed
+    @State private var selectedSegment = 0 // 0=Scheduled, 1=Recording, 2=Completed, 3=Cancelled
     @State private var recordingToDelete: Recording?
     @State private var showDeleteConfirmation = false
     @State private var showDeleteFromServerAlert = false
     @State private var showDownloadConfirmation = false
 
     private var scheduled: [Recording] {
-        allRecordings.filter { $0.status == .scheduled }
+        let now = Date()
+        return allRecordings.filter {
+            $0.status == .scheduled && $0.effectiveStart > now
+        }
     }
 
     private var recording: [Recording] {
-        allRecordings.filter { $0.status == .recording }
+        let now = Date()
+        return allRecordings.filter {
+            $0.status == .recording ||
+            ($0.status == .scheduled && $0.effectiveStart <= now && $0.effectiveEnd > now)
+        }
     }
 
     private var completed: [Recording] {
-        allRecordings.filter { [.completed, .stopped, .interrupted, .failed, .cancelled].contains($0.status) }
+        allRecordings.filter {
+            [.completed, .stopped, .interrupted].contains($0.status) ||
+            ($0.status == .scheduled && $0.effectiveEnd <= Date())
+        }
+    }
+
+    private var cancelled: [Recording] {
+        allRecordings.filter { [.cancelled, .failed].contains($0.status) }
     }
 
     private var activeList: [Recording] {
         switch selectedSegment {
         case 0: return scheduled
         case 1: return recording
-        default: return completed
+        case 2: return completed
+        default: return cancelled
         }
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Filter", selection: $selectedSegment) {
-                Text("Scheduled (\(scheduled.count))").tag(0)
-                Text("Recording (\(recording.count))").tag(1)
-                Text("Completed (\(completed.count))").tag(2)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    segmentButton("Scheduled", count: scheduled.count, tag: 0)
+                    segmentButton("Recording", count: recording.count, tag: 1)
+                    segmentButton("Completed", count: completed.count, tag: 2)
+                    segmentButton("Cancelled", count: cancelled.count, tag: 3)
+                }
+                .padding(.horizontal)
             }
-            .pickerStyle(.segmented)
-            .padding()
+            .padding(.vertical, 8)
 
             // Quota warning toast
             if coordinator.isApproachingQuotaLimit && selectedSegment != 2 {
@@ -60,8 +79,10 @@ struct MyRecordingsView: View {
             } else {
                 List {
                     ForEach(activeList, id: \.id) { rec in
-                        RecordingRow(recording: rec)
+                        RecordingRow(recording: rec, onStop: rec.isInProgress ? { stopRecording(rec) } : nil)
                             .listRowBackground(Color.cardBackground)
+                            .contentShape(Rectangle())
+                            .onTapGesture { playIfCompleted(rec) }
                             .contextMenu {
                                 contextMenuItems(for: rec)
                             }
@@ -78,8 +99,8 @@ struct MyRecordingsView: View {
                 .background(Color.appBackground)
             }
         }
-        .background(Color.appBackground)
-        .navigationTitle("My Recordings")
+        .background(Color.appBackground.ignoresSafeArea())
+        .navigationTitle("DVR")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -107,6 +128,36 @@ struct MyRecordingsView: View {
         } message: {
             Text("Download this recording from the Dispatcharr server to your device's local storage.")
         }
+        .task {
+            await RecordingCoordinator.shared.syncWithDispatcharr(
+                servers: Array(servers), modelContext: modelContext
+            )
+        }
+    }
+
+    // MARK: - Segment Button
+
+    private func segmentButton(_ label: String, count: Int, tag: Int) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { selectedSegment = tag }
+        } label: {
+            Text("\(label) (\(count))")
+                .font(.subheadline.weight(selectedSegment == tag ? .semibold : .regular))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    Capsule().fill(selectedSegment == tag
+                        ? Color.accentPrimary.opacity(0.25)
+                        : Color.cardBackground)
+                )
+                .overlay(
+                    Capsule().stroke(selectedSegment == tag
+                        ? Color.accentPrimary.opacity(0.5)
+                        : Color.clear, lineWidth: 1)
+                )
+                .foregroundColor(selectedSegment == tag ? .accentPrimary : .textSecondary)
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Context Menu
@@ -132,6 +183,13 @@ struct MyRecordingsView: View {
                     showDownloadConfirmation = true
                 } label: {
                     Label("Save to Device", systemImage: "square.and.arrow.down")
+                }
+                if !rec.comskipCompleted {
+                    Button {
+                        runComskip(rec)
+                    } label: {
+                        Label("Remove Commercials", systemImage: "scissors")
+                    }
                 }
             }
         }
@@ -174,6 +232,14 @@ struct MyRecordingsView: View {
 
     @ViewBuilder
     private func swipeActions(for rec: Recording) -> some View {
+        if rec.isInProgress {
+            Button {
+                stopRecording(rec)
+            } label: {
+                Label("Stop & Keep", systemImage: "stop.fill")
+            }
+            .tint(.orange)
+        }
         if rec.destination == .local {
             Button(role: .destructive) {
                 recordingToDelete = rec
@@ -249,17 +315,40 @@ struct MyRecordingsView: View {
                               userAgent: server.effectiveUserAgent)
     }
 
-    private func playRecording(path: String) {
-        // TODO: Push PlayerView with local file URL
-        debugLog("▶️ Play local recording: \(path)")
+    private func playRecording(path: String, title: String = "Recording") {
+        let fileURL = URL(fileURLWithPath: path)
+        let item = ChannelDisplayItem(
+            id: "local-recording",
+            name: title,
+            number: "",
+            logoURL: nil,
+            group: "",
+            categoryOrder: 0,
+            streamURL: fileURL,
+            streamURLs: [fileURL],
+            currentProgram: nil
+        )
+        nowPlaying.startPlaying(item, headers: [:], isLive: false)
     }
 
     private func playServerRecording(_ rec: Recording) {
         guard let api = apiForRecording(rec),
               let remoteID = rec.remoteRecordingID,
-              let _ = api.recordingPlaybackURL(id: remoteID) else { return }
-        // TODO: Push PlayerView with server URL
-        debugLog("▶️ Play server recording: \(rec.remoteRecordingID ?? -1)")
+              let url = api.recordingPlaybackURL(id: remoteID) else { return }
+        let server = servers.first(where: { $0.id.uuidString == rec.serverID })
+        let headers = server?.authHeaders ?? [:]
+        let item = ChannelDisplayItem(
+            id: "server-recording-\(remoteID)",
+            name: rec.programTitle.isEmpty ? rec.channelName : rec.programTitle,
+            number: "",
+            logoURL: nil,
+            group: "",
+            categoryOrder: 0,
+            streamURL: url,
+            streamURLs: [url],
+            currentProgram: rec.channelName
+        )
+        nowPlaying.startPlaying(item, headers: headers, isLive: false)
     }
 
     private func stopRecording(_ rec: Recording) {
@@ -278,8 +367,8 @@ struct MyRecordingsView: View {
                 try? await coordinator.deleteDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
             }
         } else {
-            rec.status = .cancelled
-            try? modelContext.save()
+            // Delete the local file and remove the row
+            coordinator.deleteLocalRecording(rec, modelContext: modelContext)
         }
     }
 
@@ -291,6 +380,23 @@ struct MyRecordingsView: View {
         guard let api = apiForRecording(rec) else { return }
         Task {
             try? await coordinator.deleteDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
+        }
+    }
+
+    private func playIfCompleted(_ rec: Recording) {
+        guard rec.isCompleted || rec.status == .stopped else { return }
+        if rec.destination == .local, let path = rec.localFilePath {
+            playRecording(path: path)
+        } else if rec.destination == .dispatcharrServer, rec.remoteRecordingID != nil {
+            playServerRecording(rec)
+        }
+    }
+
+    private func runComskip(_ rec: Recording) {
+        guard let api = apiForRecording(rec),
+              let remoteID = rec.remoteRecordingID else { return }
+        Task {
+            try? await api.applyComskip(id: remoteID)
         }
     }
 
@@ -306,42 +412,66 @@ struct MyRecordingsView: View {
 
 private struct RecordingRow: View {
     let recording: Recording
+    var onStop: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(recording.programTitle.isEmpty ? "Untitled" : recording.programTitle)
+                Text(recording.channelName)
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
                 statusBadge
             }
 
-            Text(recording.channelName)
+            Text(recording.programTitle.isEmpty ? "Untitled" : recording.programTitle)
                 .font(.subheadline)
-                .foregroundColor(.secondary)
+                .foregroundColor(.accentPrimary)
                 .lineLimit(1)
 
-            HStack {
-                Text(formatDateRange(recording.scheduledStart, recording.scheduledEnd))
+            if !recording.programDescription.isEmpty {
+                Text(recording.programDescription)
                     .font(.caption)
                     .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
 
-                if recording.preRollMinutes > 0 || recording.postRollMinutes > 0 {
-                    Text("(\(bufferLabel))")
+            Text(recordingTimeLabel)
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 12) {
+                if recording.destination == .dispatcharrServer {
+                    Label("Server", systemImage: "server.rack")
                         .font(.caption2)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.accentPrimary)
+                } else {
+                    Label("Local", systemImage: "internaldrive")
+                        .font(.caption2)
+                        .foregroundColor(.green)
+                }
+
+                if recording.comskipCompleted {
+                    Label("No Commercials", systemImage: "scissors")
+                        .font(.caption2)
+                        .foregroundColor(.accentPrimary)
                 }
             }
 
-            if recording.destination == .dispatcharrServer {
-                Label("Server", systemImage: "server.rack")
-                    .font(.caption2)
-                    .foregroundColor(.accentPrimary)
-            } else {
-                Label("Local", systemImage: "internaldrive")
-                    .font(.caption2)
-                    .foregroundColor(.green)
+            if recording.isInProgress, let onStop {
+                Button(action: onStop) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 11))
+                        Text("Stop & Keep")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Color.red))
+                }
+                .buttonStyle(.plain)
             }
 
             if let reason = recording.failureReason, recording.status == .failed {
@@ -377,19 +507,30 @@ private struct RecordingRow: View {
         }
     }
 
-    private var bufferLabel: String {
-        var parts: [String] = []
-        if recording.preRollMinutes > 0 { parts.append("-\(recording.preRollMinutes)m") }
-        if recording.postRollMinutes > 0 { parts.append("+\(recording.postRollMinutes)m") }
-        return parts.joined(separator: " / ")
-    }
+    private var recordingTimeLabel: String {
+        let start = recording.effectiveStart
+        let end = recording.actualEndTime ?? recording.effectiveEnd
 
-    private func formatDateRange(_ start: Date, _ end: Date) -> String {
         let df = DateFormatter()
-        df.dateStyle = .medium
-        df.timeStyle = .short
+        df.dateFormat = "MMM d, yyyy"
         let tf = DateFormatter()
-        tf.timeStyle = .short
-        return "\(df.string(from: start)) – \(tf.string(from: end))"
+        tf.dateFormat = "h:mm a"
+
+        let duration = max(0, end.timeIntervalSince(start))
+        let durationStr: String
+        if duration < 60 {
+            durationStr = "\(Int(duration))s"
+        } else {
+            let mins = Int(duration) / 60
+            if mins >= 60 {
+                let h = mins / 60
+                let m = mins % 60
+                durationStr = m > 0 ? "\(h)h \(m)m" : "\(h)h"
+            } else {
+                durationStr = "\(mins)m"
+            }
+        }
+
+        return "\(df.string(from: start)) at \(tf.string(from: start)) - \(tf.string(from: end)) (\(durationStr))"
     }
 }

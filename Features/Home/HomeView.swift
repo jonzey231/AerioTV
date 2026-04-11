@@ -915,6 +915,7 @@ final class ChannelStore: ObservableObject {
                 categoryOrder: groupOrder.firstIndex(of: grp) ?? Int.max,
                 streamURL: urls.first, streamURLs: urls)
             item.tvgID = ch.tvgID
+            item.streamUUID = ch.uuid
             return item
         }
         items = sortChannels(items, groupOrder: groupOrder)
@@ -1271,16 +1272,18 @@ final class NowPlayingManager: ObservableObject {
     @Published var playingItem: ChannelDisplayItem? = nil
     @Published var playingHeaders: [String: String] = [:]
     @Published var isMinimized: Bool = false
+    @Published var isLive: Bool = true
 
     var isActive: Bool { playingItem != nil }
 
-    func startPlaying(_ item: ChannelDisplayItem, headers: [String: String]) {
-        debugLog("🎮 NowPlaying.startPlaying: \(item.name) (id=\(item.id)), wasMinimized=\(isMinimized), wasPlaying=\(playingItem?.name ?? "nil")")
+    func startPlaying(_ item: ChannelDisplayItem, headers: [String: String], isLive: Bool = true) {
+        debugLog("🎮 NowPlaying.startPlaying: \(item.name) (id=\(item.id)), isLive=\(isLive), wasMinimized=\(isMinimized), wasPlaying=\(playingItem?.name ?? "nil")")
         playingItem = item
         playingHeaders = headers
+        self.isLive = isLive
         isMinimized = false
         // Track watch count for Top Shelf "most watched" ranking
-        TopShelfDataManager.incrementWatchCount(for: item)
+        if isLive { TopShelfDataManager.incrementWatchCount(for: item) }
     }
 
     func minimize() {
@@ -1304,16 +1307,16 @@ final class NowPlayingManager: ObservableObject {
 enum AppTab: String, CaseIterable {
     case liveTV    = "livetv"
     case favorites = "favorites"
-    case movies    = "movies"
-    case tv        = "tv"
+    case dvr       = "dvr"
+    case onDemand  = "ondemand"
     case settings  = "settings"
 
     var title: String {
         switch self {
         case .liveTV:    return "Live TV"
         case .favorites: return "Favorites"
-        case .movies:    return "Movies"
-        case .tv:        return "Series"
+        case .dvr:       return "DVR"
+        case .onDemand:  return "On Demand"
         case .settings:  return "Settings"
         }
     }
@@ -1322,8 +1325,8 @@ enum AppTab: String, CaseIterable {
         switch self {
         case .liveTV:    return "antenna.radiowaves.left.and.right"
         case .favorites: return "star.fill"
-        case .movies:    return "film.stack"
-        case .tv:        return "tv"
+        case .dvr:       return "record.circle"
+        case .onDemand:  return "play.rectangle.on.rectangle"
         case .settings:  return "gearshape.fill"
         }
     }
@@ -1334,6 +1337,7 @@ struct MainTabView: View {
     @AppStorage("defaultTab") private var defaultTabRaw = AppTab.liveTV.rawValue
     @ObservedObject private var theme = ThemeManager.shared
     @Query private var allServers: [ServerConnection]
+    @Query private var allRecordings: [Recording]
 
     @State private var selectedTab: AppTab = .liveTV
     @State private var showSearch = false
@@ -1421,7 +1425,7 @@ struct MainTabView: View {
                         urls: item.streamURLs,
                         title: item.name,
                         headers: nowPlaying.playingHeaders,
-                        isLive: true,
+                        isLive: nowPlaying.isLive,
                         subtitle: item.currentProgram,
                         subtitleStart: item.currentProgramStart,
                         subtitleEnd: item.currentProgramEnd,
@@ -1451,7 +1455,7 @@ struct MainTabView: View {
                             urls: item.streamURLs,
                             title: item.name,
                             headers: nowPlaying.playingHeaders,
-                            isLive: true,
+                            isLive: nowPlaying.isLive,
                             subtitle: item.currentProgram,
                             subtitleStart: item.currentProgramStart,
                             subtitleEnd: item.currentProgramEnd,
@@ -1517,6 +1521,7 @@ struct MainTabView: View {
     }
 
     private var hasFavorites: Bool { !favoritesStore.favoriteItems.isEmpty }
+    private var hasRecordings: Bool { !allRecordings.isEmpty }
 
     // MARK: - Tab Content
     private var tabContentView: some View {
@@ -1533,13 +1538,17 @@ struct MainTabView: View {
                     .tag(AppTab.favorites)
             }
 
-            MoviesView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
-                .tabItem { Label(AppTab.movies.title, systemImage: AppTab.movies.icon) }
-                .tag(AppTab.movies)
+            if hasRecordings {
+                NavigationStack {
+                    MyRecordingsView()
+                }
+                .tabItem { Label(AppTab.dvr.title, systemImage: AppTab.dvr.icon) }
+                .tag(AppTab.dvr)
+            }
 
-            TVShowsView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
-                .tabItem { Label(AppTab.tv.title, systemImage: AppTab.tv.icon) }
-                .tag(AppTab.tv)
+            OnDemandView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
+                .tabItem { Label(AppTab.onDemand.title, systemImage: AppTab.onDemand.icon) }
+                .tag(AppTab.onDemand)
 
             #if os(tvOS)
             SettingsView(selectedTab: $selectedTab)
@@ -1555,6 +1564,13 @@ struct MainTabView: View {
         // If the user removes their last favorite while on the Favorites tab, redirect home.
         .onChange(of: hasFavorites) { _, nowHasFavorites in
             if !nowHasFavorites && selectedTab == .favorites {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    selectedTab = .liveTV
+                }
+            }
+        }
+        .onChange(of: hasRecordings) { _, nowHasRecordings in
+            if !nowHasRecordings && selectedTab == .dvr {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     selectedTab = .liveTV
                 }
@@ -1694,7 +1710,7 @@ struct MainTabView: View {
         // MoviesView / TVShowsView handle navigating to the specific item.
         .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
             guard let vodType = notif.userInfo?["vodType"] as? String else { return }
-            let target: AppTab = (vodType == "series") ? .tv : .movies
+            let target: AppTab = .onDemand
             debugLog("🔗 MainTabView: aerioOpenVOD(\(vodType)) → switch to \(target.rawValue) tab")
             withAnimation { selectedTab = target }
         }

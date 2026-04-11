@@ -1083,11 +1083,13 @@ private struct GuideProgramButton: View {
     let leadingClip: CGFloat
     let shortTimeFormatter: DateFormatter
     let onSelect: (ChannelDisplayItem) -> Void
+    @EnvironmentObject private var favoritesStore: FavoritesStore
     // Access ReminderManager directly — @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
     private var reminderManager: ReminderManager { .shared }
     #if os(tvOS)
-    @FocusState private var isFocused: Bool
+    // NOTE: @FocusState removed — was causing context menu flashing.
+    // Focus highlight is now handled by .focusEffect(.highlight).
     #endif
 
     private var hasReminder: Bool {
@@ -1100,23 +1102,23 @@ private struct GuideProgramButton: View {
             HStack(spacing: 4) {
                 Text(prog.title)
                     .font(.system(size: 26, weight: .semibold))
-                    .foregroundColor(isFocused ? .white : .textPrimary)
+                    .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 if hasReminder {
                     Image(systemName: "bell.fill")
                         .font(.system(size: 14))
-                        .foregroundColor(isFocused ? .white : .accentPrimary)
+                        .foregroundColor(.accentPrimary)
                 }
             }
             if !prog.description.isEmpty {
                 Text(prog.description)
                     .font(.system(size: 18))
-                    .foregroundColor(isFocused ? .white.opacity(0.8) : .textSecondary)
+                    .foregroundColor(.textSecondary)
                     .lineLimit(nil)
             }
             Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
                 .font(.system(size: 17))
-                .foregroundColor(isFocused ? .white.opacity(0.6) : .textTertiary)
+                .foregroundColor(.textTertiary)
             #else
             HStack(spacing: 4) {
                 Text(prog.title)
@@ -1167,9 +1169,15 @@ private struct GuideProgramButton: View {
     var body: some View {
         #if os(tvOS)
         Button { onSelect(channelItem) } label: { cellContent }
-            .buttonStyle(GuideButtonStyle())
-            .focused($isFocused)
+            .buttonStyle(.card)
             .contextMenu {
+                let isFav = favoritesStore.isFavorite(channelItem.id)
+                Button {
+                    favoritesStore.toggle(channelItem)
+                } label: {
+                    Label(isFav ? "Remove from Favorites" : "Add to Favorites",
+                          systemImage: isFav ? "star.slash" : "star.fill")
+                }
                 if isRecordable {
                     Button {
                         showRecordSheet = true
@@ -1205,7 +1213,8 @@ private struct GuideProgramButton: View {
                     channelName: channelItem.name,
                     scheduledStart: prog.start,
                     scheduledEnd: prog.end,
-                    isLive: prog.isLive
+                    isLive: prog.isLive,
+                    streamUUID: channelItem.streamUUID
                 )
             }
         #else
@@ -1213,6 +1222,13 @@ private struct GuideProgramButton: View {
             .contentShape(Rectangle())
             .onTapGesture { onSelect(channelItem) }
             .contextMenu {
+                let isFav = favoritesStore.isFavorite(channelItem.id)
+                Button {
+                    favoritesStore.toggle(channelItem)
+                } label: {
+                    Label(isFav ? "Remove from Favorites" : "Add to Favorites",
+                          systemImage: isFav ? "star.slash" : "star.fill")
+                }
                 if isRecordable {
                     Button {
                         showRecordSheet = true
@@ -1248,7 +1264,8 @@ private struct GuideProgramButton: View {
                     channelName: channelItem.name,
                     scheduledStart: prog.start,
                     scheduledEnd: prog.end,
-                    isLive: prog.isLive
+                    isLive: prog.isLive,
+                    streamUUID: channelItem.streamUUID
                 )
             }
         #endif
@@ -1257,9 +1274,7 @@ private struct GuideProgramButton: View {
     #if os(tvOS)
     /// Emby-style colors: focused = bright highlight, live = lighter gray, future = dark
     private var cellBackground: Color {
-        if isFocused { return Color.white.opacity(0.25) }
-        if prog.isLive { return Color.white.opacity(0.12) }
-        return Color.white.opacity(0.05)
+        prog.isLive ? Color.white.opacity(0.12) : Color.white.opacity(0.05)
     }
     #else
     private var cellBackground: Color {
@@ -1275,30 +1290,16 @@ private struct GuideEmptyRowButton: View {
     let width: CGFloat
     let rowHeight: CGFloat
     let action: () -> Void
-    @FocusState private var isFocused: Bool
 
     var body: some View {
         Button(action: action) {
             Text(label)
                 .font(.system(size: 24, weight: .medium))
-                .foregroundColor(isFocused ? .white : .textTertiary)
+                .foregroundColor(.textTertiary)
                 .frame(width: width, height: rowHeight, alignment: .center)
-                .background(isFocused ? Color.white.opacity(0.25) : Color.white.opacity(0.05))
+                .background(Color.white.opacity(0.05))
         }
-        .buttonStyle(GuideButtonStyle())
-        .focused($isFocused)
-    }
-}
-#endif
-
-// MARK: - Guide Button Style (tvOS)
-// Emby-style: NO scale on focus, just color change handled by the cell itself.
-// Prevents program blocks from overlapping when focused.
-#if os(tvOS)
-private struct GuideButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .opacity(configuration.isPressed ? 0.7 : 1.0)
+        .buttonStyle(.card)
     }
 }
 #endif
