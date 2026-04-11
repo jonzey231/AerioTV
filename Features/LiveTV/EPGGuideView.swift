@@ -605,6 +605,7 @@ struct EPGGuideView: View {
     @EnvironmentObject private var channelStore: ChannelStore
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @Environment(\.modelContext) private var modelContext
+    @Query private var allRecordings: [Recording]
     @State private var _epgCacheIsFresh = false
 
     // Time window: 4 hours (1h back + 3h forward)
@@ -927,12 +928,45 @@ struct EPGGuideView: View {
         let screenX = channelColumnWidth + horizontalOffset + x
         let leadingClip = max(0, channelColumnWidth - screenX)
 
+        let hasActive = allRecordings.contains { rec in
+            rec.channelName == channelItem.name &&
+            rec.isInProgress &&
+            rec.scheduledStart < prog.end && rec.scheduledEnd > prog.start
+        }
+        let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+
         return GuideProgramButton(
             prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
             leadingClip: leadingClip,
             shortTimeFormatter: shortTimeFormatter, onSelect: onSelectChannel,
             isFavorite: favoritesStore.isFavorite(channelItem.id),
-            toggleFavorite: { favoritesStore.toggle(channelItem) }
+            toggleFavorite: { favoritesStore.toggle(channelItem) },
+            hasActiveRecording: hasActive,
+            onStopRecording: {
+                guard let rec = allRecordings.first(where: { r in
+                    r.channelName == channelItem.name && r.isInProgress &&
+                    r.scheduledStart < prog.end && r.scheduledEnd > prog.start
+                }) else { return }
+                if rec.destination == .dispatcharrServer, let server = activeServer, server.type == .dispatcharrAPI {
+                    let api = DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(server.effectiveApiKey), userAgent: server.effectiveUserAgent)
+                    Task { try? await RecordingCoordinator.shared.stopDispatcharrRecording(api: api, recording: rec, modelContext: modelContext) }
+                } else {
+                    Task { await RecordingCoordinator.shared.stopLocalRecording(rec, modelContext: modelContext) }
+                }
+            },
+            onCancelRecording: {
+                guard let rec = allRecordings.first(where: { r in
+                    r.channelName == channelItem.name && r.isInProgress &&
+                    r.scheduledStart < prog.end && r.scheduledEnd > prog.start
+                }) else { return }
+                if rec.destination == .dispatcharrServer, let server = activeServer, server.type == .dispatcharrAPI {
+                    let api = DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(server.effectiveApiKey), userAgent: server.effectiveUserAgent)
+                    Task { try? await RecordingCoordinator.shared.deleteDispatcharrRecording(api: api, recording: rec, modelContext: modelContext) }
+                } else {
+                    rec.statusRaw = RecordingStatus.cancelled.rawValue
+                    try? modelContext.save()
+                }
+            }
         )
         .offset(x: x, y: 0)
     }
@@ -1088,6 +1122,9 @@ private struct GuideProgramButton: View {
     let onSelect: (ChannelDisplayItem) -> Void
     let isFavorite: Bool
     let toggleFavorite: () -> Void
+    let hasActiveRecording: Bool
+    let onStopRecording: () -> Void
+    let onCancelRecording: () -> Void
     private var reminderManager: ReminderManager { .shared }
     #if os(tvOS)
     // NOTE: @FocusState removed — was causing context menu flashing.
@@ -1180,10 +1217,23 @@ private struct GuideProgramButton: View {
                           systemImage: isFavorite ? "star.slash" : "star.fill")
                 }
                 if isRecordable {
-                    Button {
-                        showRecordSheet = true
-                    } label: {
-                        Label(prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle")
+                    if hasActiveRecording {
+                        Button {
+                            onStopRecording()
+                        } label: {
+                            Label("Stop & Keep", systemImage: "stop.fill")
+                        }
+                        Button(role: .destructive) {
+                            onCancelRecording()
+                        } label: {
+                            Label("Cancel Recording", systemImage: "xmark.circle")
+                        }
+                    } else {
+                        Button {
+                            showRecordSheet = true
+                        } label: {
+                            Label(prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle")
+                        }
                     }
                 }
                 if isFutureProgram {
@@ -1230,10 +1280,23 @@ private struct GuideProgramButton: View {
                           systemImage: isFavorite ? "star.slash" : "star.fill")
                 }
                 if isRecordable {
-                    Button {
-                        showRecordSheet = true
-                    } label: {
-                        Label(prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle")
+                    if hasActiveRecording {
+                        Button {
+                            onStopRecording()
+                        } label: {
+                            Label("Stop & Keep", systemImage: "stop.fill")
+                        }
+                        Button(role: .destructive) {
+                            onCancelRecording()
+                        } label: {
+                            Label("Cancel Recording", systemImage: "xmark.circle")
+                        }
+                    } else {
+                        Button {
+                            showRecordSheet = true
+                        } label: {
+                            Label(prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle")
+                        }
                     }
                 }
                 if isFutureProgram {
@@ -1303,13 +1366,16 @@ private struct GuideEmptyRowButton: View {
     }
 }
 
-/// Flat button style for the EPG guide grid. Focus highlight is a simple
-/// brightness boost — no @FocusState, no @Environment(\.isFocused), no
-/// custom state that could cause re-render loops during context menu display.
+/// Flat button style for the EPG guide grid. Focus is shown via brightness
+/// only — no conditional views, no structural changes, so context menus
+/// won't flash when focus shifts to the menu.
 private struct GuideCellButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .brightness(configuration.isPressed ? 0.3 : 0)
+            .brightness(isFocused ? 0.25 : configuration.isPressed ? 0.15 : 0)
+            .border(isFocused ? Color.white.opacity(0.5) : Color.clear, width: 2)
     }
 }
 #endif

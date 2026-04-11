@@ -160,7 +160,7 @@ struct ChannelListView: View {
                     }()
 
                     #if os(tvOS)
-                    showGuideView = hasEPG && defaultLiveTVView == "guide"
+                    showGuideView = true // tvOS always uses guide view
                     #else
                     if UIDevice.current.userInterfaceIdiom == .pad {
                         showGuideView = hasEPG && defaultLiveTVView == "guide"
@@ -209,9 +209,7 @@ struct ChannelListView: View {
                         return true
                     }()
                     #if os(tvOS)
-                    if hasEPG && defaultLiveTVView == "guide" && !showGuideView {
-                        showGuideView = true
-                    }
+                    showGuideView = true // tvOS always uses guide view
                     #else
                     if UIDevice.current.userInterfaceIdiom == .pad && hasEPG && defaultLiveTVView == "guide" && !showGuideView {
                         showGuideView = true
@@ -353,15 +351,7 @@ struct ChannelListView: View {
     private var groupFilterBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                // Guide toggle button (tvOS only — iOS uses the nav bar toolbar button)
                 #if os(tvOS)
-                TVGroupPill(
-                    group: showGuideView ? "List" : "Guide",
-                    isSelected: false,
-                    action: { withAnimation(.spring(response: 0.25)) { showGuideView.toggle() } },
-                    systemImage: showGuideView ? "list.bullet" : "calendar"
-                )
-
                 // Search toggle
                 TVGroupPill(
                     group: "",

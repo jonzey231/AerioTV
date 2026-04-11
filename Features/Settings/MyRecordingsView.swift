@@ -79,6 +79,16 @@ struct MyRecordingsView: View {
             } else {
                 List {
                     ForEach(activeList, id: \.id) { rec in
+                        #if os(tvOS)
+                        Button { playIfCompleted(rec) } label: {
+                            RecordingRow(recording: rec, onStop: rec.isInProgress ? { stopRecording(rec) } : nil)
+                        }
+                        .buttonStyle(.plain)
+                        .listRowBackground(Color.cardBackground)
+                        .contextMenu {
+                            contextMenuItems(for: rec)
+                        }
+                        #else
                         RecordingRow(recording: rec, onStop: rec.isInProgress ? { stopRecording(rec) } : nil)
                             .listRowBackground(Color.cardBackground)
                             .contentShape(Rectangle())
@@ -86,11 +96,10 @@ struct MyRecordingsView: View {
                             .contextMenu {
                                 contextMenuItems(for: rec)
                             }
-                            #if os(iOS)
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 swipeActions(for: rec)
                             }
-                            #endif
+                        #endif
                     }
                 }
                 #if os(iOS)
@@ -138,26 +147,38 @@ struct MyRecordingsView: View {
     // MARK: - Segment Button
 
     private func segmentButton(_ label: String, count: Int, tag: Int) -> some View {
-        Button {
+        let isSelected = selectedSegment == tag
+        return Button {
             withAnimation(.easeInOut(duration: 0.15)) { selectedSegment = tag }
         } label: {
             Text("\(label) (\(count))")
-                .font(.subheadline.weight(selectedSegment == tag ? .semibold : .regular))
+                #if os(tvOS)
+                .font(.system(size: 22, weight: isSelected ? .semibold : .regular))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                #else
+                .font(.subheadline.weight(isSelected ? .semibold : .regular))
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
+                #endif
                 .background(
-                    Capsule().fill(selectedSegment == tag
+                    Capsule().fill(isSelected
                         ? Color.accentPrimary.opacity(0.25)
                         : Color.cardBackground)
                 )
                 .overlay(
-                    Capsule().stroke(selectedSegment == tag
+                    Capsule().stroke(isSelected
                         ? Color.accentPrimary.opacity(0.5)
                         : Color.clear, lineWidth: 1)
                 )
-                .foregroundColor(selectedSegment == tag ? .accentPrimary : .textSecondary)
+                .foregroundColor(isSelected ? .accentPrimary : .textSecondary)
         }
+        #if os(tvOS)
         .buttonStyle(.plain)
+        .focusable()
+        #else
+        .buttonStyle(.plain)
+        #endif
     }
 
     // MARK: - Context Menu
