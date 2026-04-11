@@ -1208,7 +1208,6 @@ private struct GuideProgramButton: View {
     var body: some View {
         #if os(tvOS)
         Button { onSelect(channelItem) } label: { cellContent }
-            .buttonStyle(GuideCellButtonStyle())
             .contextMenu {
                 Button {
                     toggleFavorite()
@@ -1362,22 +1361,9 @@ private struct GuideEmptyRowButton: View {
                 .frame(width: width, height: rowHeight, alignment: .center)
                 .background(Color.white.opacity(0.05))
         }
-        .buttonStyle(GuideCellButtonStyle())
     }
 }
 
-/// Flat button style for the EPG guide grid. Focus is shown via brightness
-/// only — no conditional views, no structural changes, so context menus
-/// won't flash when focus shifts to the menu.
-private struct GuideCellButtonStyle: ButtonStyle {
-    @Environment(\.isFocused) private var isFocused
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .brightness(isFocused ? 0.25 : configuration.isPressed ? 0.15 : 0)
-            .border(isFocused ? Color.white.opacity(0.5) : Color.clear, width: 2)
-    }
-}
 #endif
 
 // MARK: - iOS Horizontal Pan Gesture (UIKit bridge)
