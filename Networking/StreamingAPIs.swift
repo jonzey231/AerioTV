@@ -627,6 +627,8 @@ struct DispatcharrAPI {
             // Dispatcharr supports either header style; sending both improves compatibility.
             h["Authorization"] = "ApiKey \(key)"
             h["X-API-Key"] = key
+            DebugLogger.shared.log("DispatcharrAPI headers: key=\(key.prefix(8))...\(key.suffix(4)) len=\(key.count) baseURL=\(baseURL)",
+                                   category: "Network", level: .info)
         }
         return h
     }
