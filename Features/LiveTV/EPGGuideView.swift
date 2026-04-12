@@ -1214,8 +1214,10 @@ private struct GuideProgramButton: View {
 
     var body: some View {
         #if os(tvOS)
-        Button { onSelect(channelItem) } label: { cellContent }
-            .buttonStyle(GuideCellButtonStyle())
+        cellContent
+            .focusable(interactions: .activate)
+            .onTapGesture { onSelect(channelItem) }
+            .hoverEffect(.highlight)
             .contextMenu {
                 Button {
                     toggleFavorite()
@@ -1362,33 +1364,17 @@ private struct GuideEmptyRowButton: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            Text(label)
-                .font(.system(size: 24, weight: .medium))
-                .foregroundColor(.textTertiary)
-                .frame(width: width, height: rowHeight, alignment: .center)
-                .background(Color.white.opacity(0.05))
-        }
-        .buttonStyle(GuideCellButtonStyle())
+        Text(label)
+            .font(.system(size: 24, weight: .medium))
+            .foregroundColor(.textTertiary)
+            .frame(width: width, height: rowHeight, alignment: .center)
+            .background(Color.white.opacity(0.05))
+            .focusable(interactions: .activate)
+            .onTapGesture { action() }
+            .hoverEffect(.highlight)
     }
 }
 
-/// ButtonStyle for EPG guide cells with focus highlight.
-/// Uses @Environment(\.isFocused) but flashing is prevented by
-/// removing @Query from the parent EPGGuideView (no reactive re-renders).
-private struct GuideCellButtonStyle: ButtonStyle {
-    @Environment(\.isFocused) private var isFocused
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .brightness(isFocused ? 0.2 : 0)
-            .overlay(
-                Rectangle()
-                    .stroke(Color.white, lineWidth: 3)
-                    .opacity(isFocused ? 0.6 : 0)
-            )
-    }
-}
 
 #endif
 
