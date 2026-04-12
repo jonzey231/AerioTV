@@ -600,10 +600,14 @@ struct EPGGuideView: View {
     let channels: [ChannelDisplayItem]
     let servers: [ServerConnection]
     let onSelectChannel: (ChannelDisplayItem) -> Void
+    /// Pre-computed favorite IDs — passed as plain data to avoid
+    /// @EnvironmentObject on EPGGuideView which causes re-renders
+    /// that make tvOS context menus flash.
+    var favoriteIDs: Set<String> = []
+    var toggleFavorite: ((ChannelDisplayItem) -> Void)?
 
     @StateObject private var guideStore = GuideStore()
     @EnvironmentObject private var channelStore: ChannelStore
-    @EnvironmentObject private var favoritesStore: FavoritesStore
     @Environment(\.modelContext) private var modelContext
 
     // Recordings are cached in @State to avoid @Query which triggers
@@ -946,8 +950,8 @@ struct EPGGuideView: View {
             prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
             leadingClip: leadingClip,
             shortTimeFormatter: shortTimeFormatter, onSelect: onSelectChannel,
-            isFavorite: favoritesStore.isFavorite(channelItem.id),
-            toggleFavorite: { favoritesStore.toggle(channelItem) },
+            isFavorite: favoriteIDs.contains(channelItem.id),
+            toggleFavorite: { toggleFavorite?(channelItem) },
             hasActiveRecording: hasActive,
             onStopRecording: {
                 guard let rec = cachedRecordings.first(where: { r in
@@ -1214,10 +1218,8 @@ private struct GuideProgramButton: View {
 
     var body: some View {
         #if os(tvOS)
-        cellContent
-            .focusable(interactions: .activate)
-            .onTapGesture { onSelect(channelItem) }
-            .hoverEffect(.highlight)
+        Button { onSelect(channelItem) } label: { cellContent }
+            .buttonStyle(GuideCellButtonStyle())
             .contextMenu {
                 Button {
                     toggleFavorite()
@@ -1364,17 +1366,33 @@ private struct GuideEmptyRowButton: View {
     let action: () -> Void
 
     var body: some View {
-        Text(label)
-            .font(.system(size: 24, weight: .medium))
-            .foregroundColor(.textTertiary)
-            .frame(width: width, height: rowHeight, alignment: .center)
-            .background(Color.white.opacity(0.05))
-            .focusable(interactions: .activate)
-            .onTapGesture { action() }
-            .hoverEffect(.highlight)
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 24, weight: .medium))
+                .foregroundColor(.textTertiary)
+                .frame(width: width, height: rowHeight, alignment: .center)
+                .background(Color.white.opacity(0.05))
+        }
+        .buttonStyle(GuideCellButtonStyle())
     }
 }
 
+/// Focus-aware ButtonStyle for EPG cells. Flashing is fixed by removing
+/// @EnvironmentObject/@Query from the parent EPGGuideView so the parent
+/// doesn't re-render while a context menu is open.
+private struct GuideCellButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .brightness(isFocused ? 0.2 : 0)
+            .overlay(
+                Rectangle()
+                    .stroke(Color.white, lineWidth: 3)
+                    .opacity(isFocused ? 0.6 : 0)
+            )
+    }
+}
 
 #endif
 

@@ -274,7 +274,9 @@ struct ChannelListView: View {
                         servers: Array(servers),
                         onSelectChannel: { item in
                             playChannel(item)
-                        }
+                        },
+                        favoriteIDs: Set(favoritesStore.favoriteItems.map(\.id)),
+                        toggleFavorite: { favoritesStore.toggle($0) }
                     )
                     #if os(tvOS)
                     .focusSection()
