@@ -605,7 +605,11 @@ struct EPGGuideView: View {
     @EnvironmentObject private var channelStore: ChannelStore
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @Environment(\.modelContext) private var modelContext
-    @Query private var allRecordings: [Recording]
+
+    // Recordings are cached in @State to avoid @Query which triggers
+    // reactive re-renders on any recording change — causing context
+    // menu flashing on tvOS.
+    @State private var cachedRecordings: [Recording] = []
     @State private var _epgCacheIsFresh = false
 
     // Time window: 4 hours (1h back + 3h forward)
@@ -658,6 +662,9 @@ struct EPGGuideView: View {
         #if os(tvOS)
         .ignoresSafeArea(.all, edges: [.leading, .trailing, .bottom])
         #endif
+        .onAppear {
+            cachedRecordings = (try? modelContext.fetch(FetchDescriptor<Recording>())) ?? []
+        }
         .task(id: channels.count) {
             guard !channels.isEmpty else { return }
             let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
@@ -928,7 +935,7 @@ struct EPGGuideView: View {
         let screenX = channelColumnWidth + horizontalOffset + x
         let leadingClip = max(0, channelColumnWidth - screenX)
 
-        let hasActive = allRecordings.contains { rec in
+        let hasActive = cachedRecordings.contains { rec in
             rec.channelName == channelItem.name &&
             rec.isInProgress &&
             rec.scheduledStart < prog.end && rec.scheduledEnd > prog.start
@@ -943,7 +950,7 @@ struct EPGGuideView: View {
             toggleFavorite: { favoritesStore.toggle(channelItem) },
             hasActiveRecording: hasActive,
             onStopRecording: {
-                guard let rec = allRecordings.first(where: { r in
+                guard let rec = cachedRecordings.first(where: { r in
                     r.channelName == channelItem.name && r.isInProgress &&
                     r.scheduledStart < prog.end && r.scheduledEnd > prog.start
                 }) else { return }
@@ -955,7 +962,7 @@ struct EPGGuideView: View {
                 }
             },
             onCancelRecording: {
-                guard let rec = allRecordings.first(where: { r in
+                guard let rec = cachedRecordings.first(where: { r in
                     r.channelName == channelItem.name && r.isInProgress &&
                     r.scheduledStart < prog.end && r.scheduledEnd > prog.start
                 }) else { return }
