@@ -493,7 +493,7 @@ struct SettingsView: View {
 
                 // MARK: Playlists
                 tvSettingsHeader("Playlists")
-                VStack(spacing: 8) {
+                VStack(spacing: 12) {
                     if servers.isEmpty {
                         HStack {
                             Spacer()
@@ -553,8 +553,8 @@ struct SettingsView: View {
                 }
 
                 // MARK: App Settings
-                tvSettingsHeader("App Settings").padding(.top, 36)
-                VStack(spacing: 8) {
+                tvSettingsHeader("App Settings").padding(.top, 48)
+                VStack(spacing: 12) {
                     TVSettingsNavButton(label: "Appearance", icon: "paintbrush.fill",
                                         iconColor: .accentPrimary, subtitle: "Theme & display options") {
                         navPath.append("appearance")
@@ -566,8 +566,8 @@ struct SettingsView: View {
                 }
 
                 // MARK: Sync
-                tvSettingsHeader("Sync").padding(.top, 36)
-                VStack(spacing: 8) {
+                tvSettingsHeader("Sync").padding(.top, 48)
+                VStack(spacing: 12) {
                     TVSettingsToggleRow(
                         icon: "icloud.fill",
                         iconColor: .accentPrimary,
@@ -596,21 +596,21 @@ struct SettingsView: View {
                 }
 
                 // MARK: DVR
-                tvSettingsHeader("DVR").padding(.top, 36)
+                tvSettingsHeader("DVR").padding(.top, 48)
                 TVSettingsNavButton(label: "DVR", icon: "record.circle",
                                     iconColor: .red, subtitle: "Recordings, buffers & storage") {
                     navPath.append("dvr-settings")
                 }
 
                 // MARK: Developer
-                tvSettingsHeader("Developer").padding(.top, 36)
+                tvSettingsHeader("Developer").padding(.top, 48)
                 TVSettingsNavButton(label: "Developer", icon: "ladybug.fill",
                                     iconColor: .accentSecondary, subtitle: "Debug logging & diagnostics") {
                     navPath.append("developer")
                 }
 
                 // MARK: About
-                tvSettingsHeader("About").padding(.top, 36)
+                tvSettingsHeader("About").padding(.top, 48)
                 VStack(spacing: 0) {
                     tvAboutRow("Device",          value: aboutDevice)
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
@@ -638,9 +638,9 @@ struct SettingsView: View {
 
     private func tvSettingsHeader(_ title: String) -> some View {
         Text(title)
-            .font(.system(size: 30, weight: .semibold))
+            .font(.system(size: 36, weight: .bold))
             .foregroundColor(.textPrimary)
-            .padding(.bottom, 12)
+            .padding(.bottom, 16)
     }
 
     private func tvAboutRow(_ label: String, value: String) -> some View {
@@ -935,9 +935,9 @@ struct SettingsRow: View {
     var subtitle: String? = nil
 
     #if os(tvOS)
-    private let iconBoxSize: CGFloat = 48
-    private let iconFontSize: CGFloat = 22
-    private let cornerRadius: CGFloat = 10
+    private let iconBoxSize: CGFloat = 56
+    private let iconFontSize: CGFloat = 26
+    private let cornerRadius: CGFloat = 12
     #else
     private let iconBoxSize: CGFloat = 32
     private let iconFontSize: CGFloat = 14
@@ -945,7 +945,7 @@ struct SettingsRow: View {
     #endif
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 18) {
             ZStack {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .fill(iconColor.opacity(0.2))
@@ -955,19 +955,27 @@ struct SettingsRow: View {
                     .foregroundColor(iconColor)
             }
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 Text(title)
+                    #if os(tvOS)
+                    .font(.system(size: 28, weight: .medium))
+                    #else
                     .font(.bodyMedium)
+                    #endif
                     .foregroundColor(.textPrimary)
                 if let subtitle {
                     Text(subtitle)
+                        #if os(tvOS)
+                        .font(.system(size: 24))
+                        #else
                         .font(.bodySmall)
+                        #endif
                         .foregroundColor(.textSecondary)
                 }
             }
         }
         #if os(tvOS)
-        .padding(.vertical, 14)
+        .padding(.vertical, 18)
         #else
         .padding(.vertical, 2)
         #endif

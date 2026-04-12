@@ -1207,7 +1207,10 @@ private struct GuideProgramButton: View {
 
     var body: some View {
         #if os(tvOS)
-        Button { onSelect(channelItem) } label: { cellContent }
+        Button { onSelect(channelItem) } label: {
+                cellContent
+                    .overlay(FocusableBorderOverlay())
+            }
             .buttonStyle(GuideCellButtonStyle())
             .contextMenu {
                 Button {
@@ -1361,25 +1364,78 @@ private struct GuideEmptyRowButton: View {
                 .foregroundColor(.textTertiary)
                 .frame(width: width, height: rowHeight, alignment: .center)
                 .background(Color.white.opacity(0.05))
+                .overlay(FocusableBorderOverlay())
         }
         .buttonStyle(GuideCellButtonStyle())
     }
 }
 
-/// Custom ButtonStyle for EPG guide cells. Focus is indicated via
-/// opacity changes only — no structural view changes (no if/else,
-/// no conditional shapes) to prevent context menu flashing.
+/// Completely inert ButtonStyle — zero focus-reactive state.
+/// Focus highlight is handled by FocusableOverlay (UIKit layer).
 private struct GuideCellButtonStyle: ButtonStyle {
-    @Environment(\.isFocused) private var isFocused
-
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .brightness(isFocused ? 0.2 : 0)
-            .overlay(
-                Rectangle()
-                    .stroke(Color.white, lineWidth: 3)
-                    .opacity(isFocused ? 0.6 : 0)
-            )
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+    }
+}
+
+/// UIKit-based focus overlay that draws a border when focused.
+/// This runs entirely in UIKit's focus system and does NOT trigger
+/// SwiftUI view re-renders, preventing context menu flashing.
+struct FocusableBorderOverlay: UIViewRepresentable {
+    func makeUIView(context: Context) -> FocusBorderView {
+        let view = FocusBorderView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        return view
+    }
+    func updateUIView(_ uiView: FocusBorderView, context: Context) {}
+}
+
+class FocusBorderView: UIView {
+    private let borderLayer = CAShapeLayer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        borderLayer.fillColor = UIColor.clear.cgColor
+        borderLayer.strokeColor = UIColor.white.withAlphaComponent(0.6).cgColor
+        borderLayer.lineWidth = 3
+        borderLayer.opacity = 0
+        layer.addSublayer(borderLayer)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        borderLayer.path = UIBezierPath(rect: bounds).cgPath
+        borderLayer.frame = bounds
+    }
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        // Check if our parent button gained or lost focus
+        let gaining = context.nextFocusedView != nil && isAncestor(context.nextFocusedView!, of: self)
+        let losing = context.previouslyFocusedView != nil && isAncestor(context.previouslyFocusedView!, of: self)
+
+        if gaining {
+            coordinator.addCoordinatedAnimations({
+                self.borderLayer.opacity = 1
+            }, completion: nil)
+        } else if losing {
+            coordinator.addCoordinatedAnimations({
+                self.borderLayer.opacity = 0
+            }, completion: nil)
+        }
+    }
+
+    /// Check if `child` is a descendant of `ancestor` (or is `ancestor` itself)
+    private func isAncestor(_ ancestor: UIView, of child: UIView) -> Bool {
+        var current: UIView? = child
+        while let view = current {
+            if view === ancestor { return true }
+            current = view.superview
+        }
+        return false
     }
 }
 #endif
