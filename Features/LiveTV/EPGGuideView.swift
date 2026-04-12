@@ -1366,9 +1366,9 @@ private struct GuideEmptyRowButton: View {
     }
 }
 
-/// Custom ButtonStyle for EPG guide cells. Uses brightness for focus
-/// indication — keeps the flat grid appearance without system chrome.
-/// Context menu flashing is a known tvOS limitation.
+/// Custom ButtonStyle for EPG guide cells. Focus is indicated via
+/// opacity changes only — no structural view changes (no if/else,
+/// no conditional shapes) to prevent context menu flashing.
 private struct GuideCellButtonStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
 
@@ -1377,7 +1377,8 @@ private struct GuideCellButtonStyle: ButtonStyle {
             .brightness(isFocused ? 0.2 : 0)
             .overlay(
                 Rectangle()
-                    .stroke(isFocused ? Color.white.opacity(0.6) : Color.clear, lineWidth: 3)
+                    .stroke(Color.white, lineWidth: 3)
+                    .opacity(isFocused ? 0.6 : 0)
             )
     }
 }
