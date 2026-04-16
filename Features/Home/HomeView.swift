@@ -1310,6 +1310,24 @@ final class NowPlayingManager: ObservableObject {
     @Published var isMinimized: Bool = false
     @Published var isLive: Bool = true
 
+    /// `true` when `PlayerSession.mode == .multiview`. In that state
+    /// `playingItem` / `playingHeaders` may still be populated (seed
+    /// channel left over from the transition from single to multiview),
+    /// but the `MultiviewStore` is authoritative — whichever tile holds
+    /// audio drives the lockscreen / remote-command surface via
+    /// `NowPlayingBridge`, and this manager's values should NOT also
+    /// reach the bridge. Set by `PlayerSession.enterMultiview(...)` /
+    /// `.exitMultiviewKeepingAudioTile()` / `.exit()`.
+    ///
+    /// This flag is the single-switch guard for the Phase 4 HomeView
+    /// branch: it tells any future "did NowPlayingManager change →
+    /// re-configure bridge" observer to stand down. Today the bridge
+    /// is written exclusively from `MPVPlayerView.Coordinator` (which
+    /// has its own `tileID` gate), so this flag is currently read-only
+    /// / documentary — but it exists so the invariant is queryable
+    /// from anywhere without having to also import `PlayerSession`.
+    @Published var configuredAsMultiviewAdapter: Bool = false
+
     var isActive: Bool { playingItem != nil }
 
     func startPlaying(_ item: ChannelDisplayItem, headers: [String: String], isLive: Bool = true) {
@@ -1320,6 +1338,10 @@ final class NowPlayingManager: ObservableObject {
         isMinimized = false
         // Track watch count for Top Shelf "most watched" ranking
         if isLive { TopShelfDataManager.incrementWatchCount(for: item) }
+        // Push into the recents FIFO so the multiview add-sheet's
+        // "Recent" section reflects actual watching behavior — not
+        // just channels the user added to multiview.
+        if isLive { RecentChannelsStore.shared.push(item) }
     }
 
     func minimize() {
@@ -1391,6 +1413,12 @@ struct MainTabView: View {
     @ObservedObject private var favoritesStore = FavoritesStore.shared
     @StateObject private var vodStore = VODStore()
     @ObservedObject private var channelStore = ChannelStore.shared
+    /// Watches `PlayerSession.shared.mode` so the inline-player slot
+    /// can mode-branch between single-stream `PlayerView` and the new
+    /// `MultiviewContainerView`. `@ObservedObject` on a singleton is
+    /// the right fit here — the session outlives any view and should
+    /// not be owned by this view.
+    @ObservedObject private var playerSession = PlayerSession.shared
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
     /// Flipped true after the first DVR reconcile completes so the
@@ -1564,10 +1592,36 @@ struct MainTabView: View {
                 .zIndex(1)
             }
 
-            // Single PlayerView kept in hierarchy for uninterrupted playback.
-            // Transitions between full-screen and mini use size/position
-            // modifiers — the player instance is never destroyed.
-            if nowPlaying.isActive, let item = nowPlaying.playingItem {
+            // Mode branch:
+            //   .multiview → MultiviewContainerView (grid + transport)
+            //   .single / .idle → existing single-stream PlayerView path
+            //
+            // When a user taps "Enter Multiview" (iPad top-bar button
+            // or tvOS options-panel row), `PlayerSession` flips mode
+            // to .multiview and MultiviewStore seeds tile 0 with the
+            // currently-playing channel (id pinned to item.id for
+            // SwiftUI identity stability). The branch below then
+            // swaps to MultiviewContainerView on the next render.
+            //
+            // `PlayerSession.exit()` flips mode back to .idle and
+            // clears the tile list — HomeView falls through to the
+            // no-playback state (Live TV guide shows).
+            //
+            // `NowPlayingManager.playingItem` is intentionally NOT
+            // nil-ed during multiview — the seed channel metadata is
+            // still the single-stream fallback for when the user
+            // exits multiview keeping the audio tile.
+            if playerSession.mode == .multiview {
+                MultiviewContainerView()
+                    .ignoresSafeArea()
+                    #if os(tvOS)
+                    .focusSection()
+                    #endif
+                    .zIndex(2)
+            } else if nowPlaying.isActive, let item = nowPlaying.playingItem {
+                // Single PlayerView kept in hierarchy for uninterrupted playback.
+                // Transitions between full-screen and mini use size/position
+                // modifiers — the player instance is never destroyed.
                 #if os(iOS)
                 GeometryReader { geo in
                     let containerH = geo.size.height

@@ -1,5 +1,100 @@
 # Changelog
 
+## v1.6.0 — 2026-04-16
+
+### New — Multiview (iPadOS and tvOS)
+
+- **Watch up to 9 live channels simultaneously.** Enter multiview from
+  any playing channel — on iPad, tap the new `rectangle.split.2x2`
+  button in the player top bar (next to AirPlay); on tvOS, open the
+  Options panel and select "Enter Multiview". The currently-playing
+  channel becomes the seed tile, and further channels are added one
+  at a time from a Favorites / Recent / All Channels picker.
+- **Dynamic grid layouts** adapt as tiles are added — 1 full, 2-across,
+  3 asymmetric (1 big + 2 stacked), 2×2, 5 asymmetric (1 big + 4
+  small), 3×2, 7 with centered bottom tile, 3×3 with bottom-center
+  gap, full 3×3. No static grid picker — just keep adding.
+- **Audio follows content, not position.** Only the most recently
+  added tile produces sound; all other tiles stay muted. Tap (iPad)
+  or Select (Siri Remote) any tile to move audio to it. The audio
+  tile is marked with a small speaker badge in the top-left corner.
+- **Drag-to-rearrange.** iPad supports long-press + drag between
+  tiles; tvOS offers a "Move Tile" action in the per-tile menu that
+  enters a relocate mode (amber ring) where the Siri Remote arrows
+  swap the tile with its physical neighbor and Select commits.
+- **Per-tile close.** iPad shows a small `×` in the top-right of each
+  tile; tvOS users long-press Select to open the per-tile menu with
+  a "Remove" action.
+- **Per-tile full-screen within grid** — promote any tile to fill the
+  grid area while the others keep decoding in the background. Menu
+  button / Esc collapses back to the grid.
+- **Per-tile audio and subtitle track menus** when the stream has
+  multiple tracks.
+- **Picture-in-Picture inside multiview (iPad).** Only the audio tile
+  continues playing in the PiP window; all other tiles pause via
+  mpv's `pause` property to conserve CPU, GPU, and network.
+  Returning to the grid resumes all tiles within a couple of seconds.
+- **Performance warning at the 5th tile.** First attempt to add a
+  5th tile surfaces a one-off "performance may degrade" confirmation;
+  thereafter the warning is throttled for 2 hours so frequent users
+  aren't nagged.
+- **Hard cap at 9 tiles** with a "max" pill in the transport bar and
+  a greyed-out Add button.
+- **Thermal watchdog.** When `ProcessInfo.thermalState` reaches
+  `.critical`, a banner appears at the top of the grid and new tile
+  additions are refused until the device cools.
+- **iPad keyboard shortcuts.** ⌘1..⌘9 move audio to tile N, ⌘N opens
+  the add sheet, ⌘F toggles fullscreen on the audio tile, ⌘W exits
+  multiview entirely.
+- **Per-tile decode-error overlay.** If mpv's failover chain
+  exhausts on a specific tile, a red "Decoder unavailable" card
+  replaces that tile's video with a Remove button — the other tiles
+  keep playing.
+- **Slim transport bar.** Bottom strip uses a flat black background
+  with a compact `N / 9` counter, `+` to add, and `×` to exit — no
+  wasted vertical space.
+- **VoiceOver labels** on every tile, badge, and transport control.
+
+### Fixed — Multiview plumbing
+
+- **Audio-session ref-counting.** A process-wide refcount wraps
+  `AVAudioSession.setActive(...)` so multiple concurrent mpv
+  coordinators (multiview tiles, or a primary player + PiP) don't
+  race on the shared session. `setActive(true)` only fires on 0→1
+  and `setActive(false)` only on N→0.
+- **Idle-timer ref-counting.** Same treatment for
+  `UIApplication.isIdleTimerDisabled` so the screen doesn't fall
+  asleep while any mpv coordinator is alive.
+- **NowPlayingBridge gating.** Only the authoritative coordinator
+  (single-stream player, or the audio tile in multiview) writes to
+  `MPNowPlayingInfoCenter` — prevents multiview tiles from
+  overwriting each other's lockscreen metadata.
+- **URL scheme allowlist** on stream resolution — only `http`,
+  `https`, `rtmp`, `rtmps`, and `rtsp` reach mpv. Defends against a
+  malicious M3U entry pointing at `file://` or other local/exotic
+  schemes.
+- **`Text(verbatim:)` hardening** on every server-controlled string
+  rendered by multiview UI (channel names in dialogs, mpv error
+  bodies, audio/subtitle track labels) so Markdown-style injection
+  like `[Click](evil://)` cannot render as a tappable link.
+- **Mode-transition audio bounce** eliminated via a 250ms refcount
+  float during `enterMultiview`, which keeps the audio session
+  active through SwiftUI's swap from single-mode PlayerView to
+  MultiviewContainerView.
+
+### Added — infrastructure
+
+- `MultiviewStore`, `MultiviewTile`, `PlayerSession`, plus
+  `MultiviewGridMath` with pure rect-shape math per N (unit-testable).
+- `AudioSessionRefCount`, `IdleTimerRefCount` serialised helpers.
+- `RecentChannelsStore` — FIFO ring (max 20) of recently-played
+  channels, persisted to UserDefaults, powers the "Recent" section
+  of the add-channel sheet.
+- Extensive `[MV-*]`-prefixed DebugLogger trace points for
+  diagnosing issues on device (filter Console by `[MV-` to isolate
+  multiview events; redaction rules ensure URLs and auth headers
+  are never logged).
+
 ## v1.5.0 — 2026-04-16
 
 ### New

@@ -164,6 +164,26 @@ struct AerioApp: App {
             WatchProgress.self,
             Recording.self
         ])
+        #if os(iOS)
+        // iPad keyboard shortcuts for the multiview grid. No-ops on
+        // tvOS (no keyboard) and on iPhone (multiview excluded). The
+        // commands are always installed but each one guards on
+        // `PlayerSession.shared.mode == .multiview` so a hotkey press
+        // during single playback or guide browsing does nothing.
+        //
+        // Shortcuts (plan Phase 7):
+        //  ⌘1..⌘9  — take audio of tile N (1-indexed)
+        //  ⌘W     — exit multiview (clean teardown, stops playback)
+        //  ⌘N     — open the add-channel sheet
+        //  ⌘F     — toggle fullscreen-in-grid on the audio tile
+        //
+        // The add-sheet and fullscreen toggle use the same store APIs
+        // as the on-screen buttons, so behavior stays consistent with
+        // tap/click.
+        .commands {
+            MultiviewCommands()
+        }
+        #endif
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:

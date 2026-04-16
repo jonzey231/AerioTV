@@ -10,6 +10,33 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
 
 ## Features
 
+**Multiview** *(new in v1.6.0, iPadOS and tvOS)*
+
+- Watch up to **9 live channels at once** in a dynamically-sized grid
+- Enter from any playing channel: tap the grid button in the player
+  top bar (iPad) or **Options → Enter Multiview** (tvOS)
+- Add channels one at a time from a Favorites / Recent / All
+  Channels picker — the grid re-lays out automatically
+- Layouts adapt to tile count: 1, 2, 3 asymmetric, 2×2, 5 asymmetric,
+  3×2, 7 centered, 3×3 with center gap, full 3×3
+- **Only the most recently added stream plays audio**; every other
+  tile stays muted with a small speaker badge marking the audio tile
+- Tap any tile (iPad) or click Select (Siri Remote) to move audio
+  focus to that tile
+- **Drag-to-rearrange** tiles (iPad long-press + drag; tvOS "Move
+  Tile" menu action with Siri Remote arrow swaps)
+- Per-tile `×` close button on iPad; per-tile Remove / Audio Track /
+  Subtitle Track / Full-Screen menu via long-press
+- **Picture-in-Picture from multiview (iPad)** — only the audio tile
+  continues in PiP; all other tiles pause to conserve resources
+- **Performance warning at the 5th tile** with a 2-hour throttle;
+  hard cap at 9 tiles
+- **Thermal watchdog** — stops new tile additions when the device
+  reaches `.critical` thermal state
+- **iPad keyboard shortcuts**: ⌘1..⌘9 take audio of tile N, ⌘N open
+  add sheet, ⌘F toggle fullscreen on the audio tile, ⌘W exit
+- iPhone excluded — screen too narrow for a usable grid
+
 **Live TV**
 
 - Stream live channels with MPV-powered, GPU-accelerated playback

@@ -27,6 +27,20 @@
 		23CF3BDA1A62692EC1141F06 /* AerioTopShelf.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 980F01E6377A91F10236C4D5 /* AerioTopShelf.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2527936283FB11BD5201E1DA /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
 		27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
+		B1C2D3E4F5A67890ACE00001 /* AudioSessionRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */; };
+		B1C2D3E4F5A67890ACE00004 /* IdleTimerRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */; };
+		B1C2D3E4F5A67890ACE00007 /* PlayerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */; };
+		B1C2D3E4F5A67890ACE0000A /* MultiviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */; };
+		B1C2D3E4F5A67890ACE0000D /* MultiviewStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */; };
+		B1C2D3E4F5A67890ACE00011 /* MultiviewGridMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */; };
+		B1C2D3E4F5A67890ACE00014 /* MultiviewLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */; };
+		B1C2D3E4F5A67890ACE00017 /* MultiviewTransportBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */; };
+		B1C2D3E4F5A67890ACE0001A /* MultiviewTileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */; };
+		B1C2D3E4F5A67890ACE0001D /* MultiviewContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */; };
+		B1C2D3E4F5A67890ACE00020 /* RecentChannelsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */; };
+		B1C2D3E4F5A67890ACE00023 /* CompactChannelRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */; };
+		B1C2D3E4F5A67890ACE00026 /* AddToMultiviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */; };
+		B1C2D3E4F5A67890ACE00029 /* MultiviewCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */; };
 		A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		294AE2B45D4A82E38B1D09C4 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
 		29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */; };
@@ -77,6 +91,20 @@
 		87062C2D2515CB8999B9C4E6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5806A5B948B604B451A5F5C7 /* Assets.xcassets */; };
 		8AC25DFB7121C1AEBCE36729 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */; };
 		8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
+		B1C2D3E4F5A67890ACE00002 /* AudioSessionRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */; };
+		B1C2D3E4F5A67890ACE00005 /* IdleTimerRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */; };
+		B1C2D3E4F5A67890ACE00008 /* PlayerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */; };
+		B1C2D3E4F5A67890ACE0000B /* MultiviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */; };
+		B1C2D3E4F5A67890ACE0000E /* MultiviewStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */; };
+		B1C2D3E4F5A67890ACE00012 /* MultiviewGridMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */; };
+		B1C2D3E4F5A67890ACE00015 /* MultiviewLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */; };
+		B1C2D3E4F5A67890ACE00018 /* MultiviewTransportBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */; };
+		B1C2D3E4F5A67890ACE0001B /* MultiviewTileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */; };
+		B1C2D3E4F5A67890ACE0001E /* MultiviewContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */; };
+		B1C2D3E4F5A67890ACE00021 /* RecentChannelsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */; };
+		B1C2D3E4F5A67890ACE00024 /* CompactChannelRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */; };
+		B1C2D3E4F5A67890ACE00027 /* AddToMultiviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */; };
+		B1C2D3E4F5A67890ACE0002A /* MultiviewCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */; };
 		A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		8CF1E8A8912F0A98110ABF07 /* Pods-Aerio_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */; };
 		8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
@@ -244,6 +272,20 @@
 		E71FA151241E7264059B0E3A /* Pods-Aerio_iOS-frameworks-Debug-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Debug-input-files.xcfilelist"; sourceTree = "<group>"; };
 		EA33B18A62A3411B6425B661 /* PlaylistModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistModels.swift; sourceTree = "<group>"; };
 		EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecordingCoordinator.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSessionRefCount.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = IdleTimerRefCount.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlayerSession.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewTile.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewStore.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewGridMath.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewLayoutView.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewTransportBar.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewTileView.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewContainerView.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecentChannelsStore.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CompactChannelRow.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AddToMultiviewSheet.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewCommands.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TVPressGesture.swift; sourceTree = "<group>"; };
 		F249D5C39D90BC11107F3420 /* Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist"; sourceTree = "<group>"; };
 		F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConnectionViewModel.swift; sourceTree = "<group>"; };
@@ -311,6 +353,7 @@
 			children = (
 				D790E242FC19FAB9A2C4F61C /* Home */,
 				2E9487FE5F10365DAD5FCB23 /* LiveTV */,
+				B1C2D3E4F5A67890ACE00010 /* Multiview */,
 				57D7DAFC5BB3E2B9267A64B6 /* Onboarding */,
 				9F48CE336638568BB86DBFEA /* Search */,
 				C649153244EE1ED5FDBD86C0 /* Settings */,
@@ -566,6 +609,23 @@
 			path = Home;
 			sourceTree = "<group>";
 		};
+		B1C2D3E4F5A67890ACE00010 /* Multiview */ = {
+			isa = PBXGroup;
+			children = (
+				B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */,
+				B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */,
+				B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */,
+				B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */,
+				B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */,
+				B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */,
+				B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */,
+				B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */,
+				B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */,
+				B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */,
+			);
+			path = Multiview;
+			sourceTree = "<group>";
+		};
 		D7ACC20911B79B2CA659255A /* TopShelfExtension */ = {
 			isa = PBXGroup;
 			children = (
@@ -602,6 +662,10 @@
 				B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */,
 				EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */,
 				A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */,
+				B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */,
+				B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */,
+				B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */,
+				B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -843,6 +907,20 @@
 				29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */,
 				27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */,
 				A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */,
+				B1C2D3E4F5A67890ACE00001 /* AudioSessionRefCount.swift in Sources */,
+				B1C2D3E4F5A67890ACE00004 /* IdleTimerRefCount.swift in Sources */,
+				B1C2D3E4F5A67890ACE00007 /* PlayerSession.swift in Sources */,
+				B1C2D3E4F5A67890ACE0000A /* MultiviewTile.swift in Sources */,
+				B1C2D3E4F5A67890ACE0000D /* MultiviewStore.swift in Sources */,
+				B1C2D3E4F5A67890ACE00011 /* MultiviewGridMath.swift in Sources */,
+				B1C2D3E4F5A67890ACE00014 /* MultiviewLayoutView.swift in Sources */,
+				B1C2D3E4F5A67890ACE00017 /* MultiviewTransportBar.swift in Sources */,
+				B1C2D3E4F5A67890ACE0001A /* MultiviewTileView.swift in Sources */,
+				B1C2D3E4F5A67890ACE0001D /* MultiviewContainerView.swift in Sources */,
+				B1C2D3E4F5A67890ACE00020 /* RecentChannelsStore.swift in Sources */,
+				B1C2D3E4F5A67890ACE00023 /* CompactChannelRow.swift in Sources */,
+				B1C2D3E4F5A67890ACE00026 /* AddToMultiviewSheet.swift in Sources */,
+				B1C2D3E4F5A67890ACE00029 /* MultiviewCommands.swift in Sources */,
 				2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */,
 				A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */,
 				07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */,
@@ -898,6 +976,20 @@
 				D50E5DFBD9787AC5568AD17A /* LocalRecordingSession.swift in Sources */,
 				8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */,
 				A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */,
+				B1C2D3E4F5A67890ACE00002 /* AudioSessionRefCount.swift in Sources */,
+				B1C2D3E4F5A67890ACE00005 /* IdleTimerRefCount.swift in Sources */,
+				B1C2D3E4F5A67890ACE00008 /* PlayerSession.swift in Sources */,
+				B1C2D3E4F5A67890ACE0000B /* MultiviewTile.swift in Sources */,
+				B1C2D3E4F5A67890ACE0000E /* MultiviewStore.swift in Sources */,
+				B1C2D3E4F5A67890ACE00012 /* MultiviewGridMath.swift in Sources */,
+				B1C2D3E4F5A67890ACE00015 /* MultiviewLayoutView.swift in Sources */,
+				B1C2D3E4F5A67890ACE00018 /* MultiviewTransportBar.swift in Sources */,
+				B1C2D3E4F5A67890ACE0001B /* MultiviewTileView.swift in Sources */,
+				B1C2D3E4F5A67890ACE0001E /* MultiviewContainerView.swift in Sources */,
+				B1C2D3E4F5A67890ACE00021 /* RecentChannelsStore.swift in Sources */,
+				B1C2D3E4F5A67890ACE00024 /* CompactChannelRow.swift in Sources */,
+				B1C2D3E4F5A67890ACE00027 /* AddToMultiviewSheet.swift in Sources */,
+				B1C2D3E4F5A67890ACE0002A /* MultiviewCommands.swift in Sources */,
 				38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */,
 				84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */,
 				115F4DEA73DE0C5C49817C04 /* RecordProgramSheet.swift in Sources */,
@@ -931,7 +1023,7 @@
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = NO;
 				CODE_SIGN_ENTITLEMENTS = TopShelfExtension/AerioTopShelf.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -941,7 +1033,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.5.0;
+				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio.TopShelf;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -960,7 +1052,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
 				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
 				CODE_SIGN_ENTITLEMENTS = Aerio_tvOS.entitlements;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = AerioTV;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";
@@ -985,7 +1077,7 @@
 				CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES;
 				CODE_SIGN_ENTITLEMENTS = SupportingFiles/Aerio.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = AerioTV;
@@ -995,7 +1087,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.5.0;
+				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio;
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1011,7 +1103,7 @@
 				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = NO;
 				CODE_SIGN_ENTITLEMENTS = TopShelfExtension/AerioTopShelf.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = NO;
@@ -1021,7 +1113,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.5.0;
+				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio.TopShelf;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1069,7 +1161,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 47DTJ3Q67T;
@@ -1090,7 +1182,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.5.0;
+				MARKETING_VERSION = 1.6.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1112,7 +1204,7 @@
 				CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION = YES;
 				CODE_SIGN_ENTITLEMENTS = SupportingFiles/Aerio.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = 47DTJ3Q67T;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = AerioTV;
@@ -1122,7 +1214,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.5.0;
+				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio;
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1167,7 +1259,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 47DTJ3Q67T;
@@ -1191,7 +1283,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.5.0;
+				MARKETING_VERSION = 1.6.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1212,7 +1304,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
 				ASSETCATALOG_COMPILER_LAUNCHIMAGE_NAME = LaunchImage;
 				CODE_SIGN_ENTITLEMENTS = Aerio_tvOS.entitlements;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				INFOPLIST_FILE = SupportingFiles/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = AerioTV;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.video";

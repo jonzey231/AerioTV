@@ -75,11 +75,43 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     var progressStore: PlayerProgressStore
     var logStore: AttemptLogStore
     let onFatalError: @MainActor @Sendable (String) -> Void
+    /// Identity of this coordinator when used as a multiview tile.
+    /// `nil` means single-stream mode (the default) — the Coordinator
+    /// behaves exactly like it did before multiview existed and
+    /// unconditionally drives `NowPlayingBridge`.
+    ///
+    /// When non-nil, the Coordinator only drives `NowPlayingBridge`
+    /// when `PlayerSession.mode == .multiview` AND
+    /// `MultiviewStore.audioTileID == self.tileID`. Non-audio tiles
+    /// stay quiet on the lockscreen + remote command surface.
+    var tileID: String? = nil
+
+    /// Multiview: `true` when this tile currently owns audio. Drives
+    /// the mpv `mute` property — `false` sends `mute=1`, `true` sends
+    /// `mute=0`. In single-stream mode (tileID == nil) we ignore this
+    /// field; single mode is always audio-active by construction.
+    ///
+    /// SwiftUI feeds a new value via `updateUIViewController` whenever
+    /// `MultiviewStore.audioTileID` changes — the Coordinator tracks
+    /// the last-applied value and skips redundant mpv calls.
+    var isAudioActive: Bool = true
+
+    /// Multiview + PiP: `true` when this tile should pause itself
+    /// (non-audio tiles while PiP is active) via the mpv `pause`
+    /// property. Ignored in single-stream mode.
+    ///
+    /// The PiP window always hosts the current audio tile; the other
+    /// tiles freeze on their last decoded frame while PiP is active,
+    /// saving network + GPU, and resume when PiP ends.
+    var shouldPause: Bool = false
 
     func makeCoordinator() -> Coordinator {
         let c = Coordinator(urls: urls, headers: headers, isLive: isLive,
                             progressStore: progressStore, logStore: logStore,
-                            onFatalError: onFatalError)
+                            onFatalError: onFatalError,
+                            tileID: tileID,
+                            initialIsAudioActive: isAudioActive,
+                            initialShouldPause: shouldPause)
         c.nowPlayingTitle = nowPlayingTitle
         c.nowPlayingSubtitle = nowPlayingSubtitle
         c.nowPlayingArtworkURL = nowPlayingArtworkURL
@@ -87,20 +119,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     }
 
     func makeUIViewController(context: Context) -> MPVPlayerViewController {
-        // Configure audio session
-        do {
-            #if os(iOS)
-            try AVAudioSession.sharedInstance().setCategory(
-                .playback, mode: .moviePlayback,
-                options: [.allowAirPlay, .allowBluetoothA2DP]
-            )
-            #else
-            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
-            #endif
-            try AVAudioSession.sharedInstance().setActive(true)
-        } catch {
-            logStore.append("⚠️ AudioSession: \(error)")
-        }
+        // Audio session: route through the process-wide refcount so N
+        // concurrent Coordinators (single + PiP, or multiview) don't
+        // race on setActive. The first coordinator's increment handles
+        // setCategory + setActive(true); subsequent increments no-op;
+        // decrements are matched at teardown. The refcount itself
+        // swallows session errors with an NSLog (matches the old
+        // behavior at this site — session activation can fail in
+        // odd backgrounding states and we let mpv try anyway).
+        AudioSessionRefCount.increment()
 
         let vc = MPVPlayerViewController()
         vc.coordinator = context.coordinator
@@ -124,7 +151,26 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: MPVPlayerViewController, context: Context) {
-        // Layout handled by viewDidLayoutSubviews
+        // Layout handled by viewDidLayoutSubviews.
+        //
+        // IMPORTANT: single-stream mode (tileID == nil) MUST NOT
+        // touch mpv's `mute` or `pause` properties from here. Those
+        // are driven by the user's on-screen controls + the mpv
+        // event stream — any write from SwiftUI's update pass is a
+        // potential race against mpv's initialization sequence (mpv
+        // is created on the render queue; our writes dispatch via
+        // mpvQueue — safe at steady state, but startup ordering is
+        // fragile and not worth the risk for a mode that has no
+        // multiview logic anyway).
+        //
+        // Multiview tiles (tileID != nil) DO need these property
+        // writes because that's how audio-focus + PiP-pause are
+        // implemented. The applyXxxIfChanged helpers idempotency-
+        // guard against spurious SwiftUI updates.
+        if tileID != nil {
+            context.coordinator.applyAudioFocusIfChanged(isAudioActive)
+            context.coordinator.applyPauseIfChanged(shouldPause)
+        }
     }
 
     static func dismantleUIViewController(_ uiViewController: MPVPlayerViewController, coordinator: Coordinator) {
@@ -148,6 +194,117 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         var nowPlayingSubtitle: String?
         var nowPlayingArtworkURL: URL?
         private var nowPlayingConfigured = false
+
+        // Multiview tile identity. `nil` = single-stream mode — this
+        // coordinator unconditionally drives NowPlayingBridge. Non-nil
+        // = one tile in a multiview grid; the coordinator only drives
+        // the bridge when it's the audio tile. See
+        // `shouldDriveNowPlayingBridge()` for the gating rule.
+        //
+        // `let` so Swift 6 strict-concurrency doesn't flag the
+        // cross-actor read (init on MainActor via `makeCoordinator`,
+        // read on MainActor via `shouldDriveNowPlayingBridge`). If
+        // SwiftUI rebinds the representable with a different tileID
+        // (e.g. tile reorder), the tile's `.id(...)` modifier forces
+        // SwiftUI to build a fresh coordinator — so treating this as
+        // immutable-per-coordinator-lifetime matches the model.
+        let tileID: String?
+
+        /// Bridge-ownership gate for multiview. Returns `true` when
+        /// this coordinator is allowed to write `MPNowPlayingInfoCenter`
+        /// + install `MPRemoteCommandCenter` handlers, `false` when it
+        /// should stay silent because another coordinator (the audio
+        /// tile) is authoritative. In single-stream mode (tileID == nil)
+        /// this is always `true` — preserves pre-multiview behavior.
+        ///
+        /// The check is run on MainActor because `PlayerSession` and
+        /// `MultiviewStore` are both `@MainActor`-isolated.
+        @MainActor
+        fileprivate func shouldDriveNowPlayingBridge() -> Bool {
+            // Single-mode coordinator — always authoritative.
+            guard let tileID else { return true }
+            // Multiview coordinator — only the audio tile drives the
+            // bridge. If the session somehow isn't in .multiview mode
+            // (race during teardown, or coordinator lingers post-exit),
+            // stay quiet. The single-mode coordinator (if any) will
+            // pick up the bridge as it takes over.
+            guard PlayerSession.shared.mode == .multiview else { return false }
+            return MultiviewStore.shared.audioTileID == tileID
+        }
+
+        // MARK: - Multiview property application
+
+        /// Initial state captured at Coordinator init — used by
+        /// `setupMPV()` to set the `mute` / `pause` options BEFORE
+        /// `mpv_initialize` so the first frame already has the right
+        /// audio-focus and pause state. Without this, a non-audio
+        /// tile created during multiview-entry would briefly play
+        /// sound between mpv_initialize and the first SwiftUI
+        /// updateUIViewController pass applying `mute=yes`.
+        private let initialIsAudioActive: Bool
+        private let initialShouldPause: Bool
+
+        /// Last value we wrote to mpv's `mute` property (via the
+        /// `applyAudioFocus` path). Seeded with the initial value in
+        /// `init` so the first `updateUIViewController` is a no-op —
+        /// `setupMPV` already applied the initial mute state as an
+        /// option. Only genuine runtime transitions (audio tile
+        /// change) flip mpv's mute at runtime.
+        private var lastAppliedAudioFocus: Bool?
+
+        /// Last value we wrote to mpv's `pause` property through the
+        /// multiview PiP path. Parallel to `lastAppliedAudioFocus`.
+        /// We intentionally do NOT consult the normal pause-observer
+        /// state here — pausing from PiP is orthogonal to the user's
+        /// play/pause button, and we want to drive the pause property
+        /// back off on PiP-exit regardless of the last event the
+        /// observer saw.
+        private var lastAppliedPause: Bool?
+
+        /// Called from `updateUIViewController`. Sends `mute=0` when
+        /// the tile becomes audio-active, `mute=1` otherwise. No-op
+        /// when the incoming value matches the last applied.
+        @MainActor
+        fileprivate func applyAudioFocusIfChanged(_ isActive: Bool) {
+            guard lastAppliedAudioFocus != isActive else { return }
+            lastAppliedAudioFocus = isActive
+            DebugLogger.shared.log(
+                "[MV-Audio] mpv mute=\(!isActive) tile=\(tileID ?? "single")",
+                category: "MPV-STREAM", level: .info
+            )
+            setMPVFlag(property: "mute", value: !isActive)
+        }
+
+        /// Called from `updateUIViewController`. Sends `pause=1` to
+        /// freeze the tile (used by non-audio tiles while PiP is
+        /// engaged on the audio tile) or `pause=0` to resume.
+        ///
+        /// This is a mpv-property toggle, not a re-seed. A paused
+        /// live stream's decoder holds the last frame and resumes
+        /// within ~1-2 seconds when pause goes back to 0 — no
+        /// buffering penalty, no network re-handshake.
+        @MainActor
+        fileprivate func applyPauseIfChanged(_ paused: Bool) {
+            guard lastAppliedPause != paused else { return }
+            lastAppliedPause = paused
+            DebugLogger.shared.log(
+                "[MV-PiP] mpv pause=\(paused) tile=\(tileID ?? "single")",
+                category: "MPV-STREAM", level: .info
+            )
+            setMPVFlag(property: "pause", value: paused)
+        }
+
+        /// Shared mpvQueue hop for boolean mpv properties. Guards
+        /// both the hop target (self/mpv weak-capture) and the
+        /// shutdown flag so teardown-races resolve silently. Caller
+        /// must already have applied its own last-value debounce.
+        private func setMPVFlag(property: String, value: Bool) {
+            mpvQueue.async { [weak self] in
+                guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                var flag: Int32 = value ? 1 : 0
+                mpv_set_property(mpv, property, MPV_FORMAT_FLAG, &flag)
+            }
+        }
 
         // mpv handles
         private var mpv: OpaquePointer?
@@ -220,13 +377,27 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         init(urls: [URL], headers: [String: String], isLive: Bool,
              progressStore: PlayerProgressStore,
              logStore: AttemptLogStore,
-             onFatalError: @escaping @MainActor @Sendable (String) -> Void) {
+             onFatalError: @escaping @MainActor @Sendable (String) -> Void,
+             tileID: String? = nil,
+             initialIsAudioActive: Bool = true,
+             initialShouldPause: Bool = false) {
             self.urls = urls
             self.headers = headers
             self.isLive = isLive
             self.progressStore = progressStore
             self.logStore = logStore
             self.onFatalError = onFatalError
+            self.tileID = tileID
+            self.initialIsAudioActive = initialIsAudioActive
+            self.initialShouldPause = initialShouldPause
+            // Seed the `lastApplied*` debounce with the initial
+            // values — setupMPV applies them via mpv_set_option
+            // BEFORE mpv_initialize, so there's no need for
+            // updateUIViewController to re-issue them afterwards.
+            // (Subsequent state changes via the Representable still
+            // go through applyXxxIfChanged and flip mpv properties.)
+            self.lastAppliedAudioFocus = initialIsAudioActive
+            self.lastAppliedPause = initialShouldPause
             super.init()
 
             // Toggle play/pause
@@ -714,12 +885,35 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
             }
 
-            Task { @MainActor in NowPlayingBridge.shared.teardown() }
-
-            DispatchQueue.main.async {
-                UIApplication.shared.isIdleTimerDisabled = false
-                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            // Only the coordinator that currently owns the bridge
+            // tears it down. In multiview, if an ordinary (non-audio)
+            // tile is dismantled, its coordinator must NOT call
+            // teardown — otherwise it nukes the audio tile's
+            // lockscreen info. Single-mode (tileID == nil) and audio
+            // tiles both satisfy `shouldDriveNowPlayingBridge()` and
+            // correctly tear down.
+            Task { @MainActor [weak self] in
+                guard let self, self.shouldDriveNowPlayingBridge() else { return }
+                NowPlayingBridge.shared.teardown()
             }
+
+            // Release our claim on the idle timer + audio session. If
+            // this is the last active coordinator (single-mode stop,
+            // or the final tile of a multiview teardown), the refcount
+            // drops to 0 and restores the idle timer + deactivates the
+            // audio session. Otherwise it's a no-op.
+            //
+            // `AudioSessionRefCount` is NOT @MainActor — it's
+            // internally serialised on a private dispatch queue, so we
+            // call it synchronously to keep its inc/dec pair tightly
+            // correlated with coordinator lifetime. Routing it through
+            // `Task { @MainActor }` added a window where the new
+            // coordinator's increment could race the old coordinator's
+            // decrement across actor hops. The idle-timer refcount
+            // still needs @MainActor because UIApplication is main-
+            // thread-only — that one stays in the Task wrapper.
+            AudioSessionRefCount.decrement()
+            Task { @MainActor in IdleTimerRefCount.decrement() }
         }
 
         // MARK: - mpv Setup (runs on mpvQueue)
@@ -770,6 +964,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Live: 0.5s for fast channel start (cache-pause disabled after playback-restart anyway).
             // VOD: 2s for smooth resume-after-seek.
             checkError(mpv_set_option_string(mpv, "cache-pause-wait", isLive ? "0.5" : "2"))
+
+            // Multiview tiles: set initial `mute` / `pause` as mpv
+            // options (not runtime properties) so the first decoded
+            // frame already has the right audio-focus + pause state.
+            // Without this, a brand-new non-audio tile briefly
+            // plays sound between mpv_initialize() and the first
+            // SwiftUI updateUIViewController → applyAudioFocusIfChanged
+            // cycle — audible as a bleep of overlapping audio every
+            // time the user adds a tile.
+            //
+            // For single-mode (tileID == nil) these options are
+            // tile defaults (initialIsAudioActive=true, initialShouldPause=false)
+            // which happen to match mpv's own defaults — safe no-ops.
+            if !initialIsAudioActive {
+                checkError(mpv_set_option_string(mpv, "mute", "yes"))
+            }
+            if initialShouldPause {
+                checkError(mpv_set_option_string(mpv, "pause", "yes"))
+            }
 
             #if DEBUG
             print("[MPV-DIAG] setupMPV: options set, calling mpv_initialize...")
@@ -1162,8 +1375,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
                 #endif
 
-                // Prevent screensaver/idle timer during playback
-                DispatchQueue.main.async { UIApplication.shared.isIdleTimerDisabled = true }
+                // Prevent screensaver/idle timer during playback. Route
+                // through the refcount helper so N concurrent multiview
+                // tiles each claim the idle timer exactly once and the
+                // timer only flips when the last coordinator stops.
+                // Wrapped in Task { @MainActor } because this event
+                // handler runs on the mpv event queue and
+                // IdleTimerRefCount is @MainActor-isolated.
+                Task { @MainActor in IdleTimerRefCount.increment() }
             }
 
             let ps = progressStore
@@ -1197,7 +1416,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         guard idle == 0 else { return }
 
                         self.nowPlayingConfigured = true
-                        Task { @MainActor in
+                        Task { @MainActor [weak self] in
+                            // Gate on bridge ownership. A non-audio
+                            // multiview tile still reaches this path
+                            // (every coordinator's stability check
+                            // fires after 2s) but must NOT publish
+                            // now-playing info — the audio tile owns
+                            // the lockscreen. `nowPlayingConfigured`
+                            // stays `true` either way so we don't
+                            // rearm the 2s timer.
+                            guard let self, self.shouldDriveNowPlayingBridge() else { return }
                             NowPlayingBridge.shared.configure(
                                 title: title,
                                 subtitle: sub,
@@ -1296,7 +1524,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         logStore.append("ℹ️ MPV state: paused")
                         var timePos: Double = 0
                         mpv_get_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &timePos)
-                        Task { @MainActor in NowPlayingBridge.shared.updateElapsed(timePos, rate: 0.0) }
+                        Task { @MainActor [weak self] in
+                            guard let self, self.shouldDriveNowPlayingBridge() else { return }
+                            NowPlayingBridge.shared.updateElapsed(timePos, rate: 0.0)
+                        }
                     }
                 }
 
@@ -1510,9 +1741,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             DebugLogger.shared.log("memory=\(String(format: "%.1f", memMB))MB thermal=\(thermal)",
                                     category: "MPV-Perf", level: .perf)
 
-            // Update Now Playing elapsed time
+            // Update Now Playing elapsed time — only the authoritative
+            // coordinator (single-mode, or the current audio tile in
+            // multiview) writes; non-audio tiles stay quiet to avoid
+            // thrashing MPNowPlayingInfoCenter on every stats tick.
             let rate: Float = isPlaying ? 1.0 : 0.0
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
+                guard let self, self.shouldDriveNowPlayingBridge() else { return }
                 NowPlayingBridge.shared.updateElapsed(timeSec, rate: rate)
             }
         }
@@ -1839,6 +2074,40 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         ) {
             debugLog("🖼️ PiP: starting")
             DispatchQueue.main.async { self.progressStore.isPiPActive = true }
+            // Multiview: tell the store PiP has engaged so non-audio
+            // tiles can pause themselves. Only the audio tile can
+            // start PiP (PiP button is only exposed on the audio
+            // tile's controls), so if we got here with tileID != nil
+            // we ARE the audio tile. `MultiviewStore.isPiPActive` is
+            // @MainActor so we hop through a Task.
+            //
+            // Defensive: only write when we're still a live tile in
+            // the store. Between coordinator dismantle and this
+            // delegate firing, `PlayerSession.exit()` may have run
+            // `MultiviewStore.reset()` — in that case the tile is
+            // gone and the store's isPiPActive is already false;
+            // writing `true` here would leak the flag into the next
+            // multiview session.
+            let myTileID = tileID
+            if myTileID != nil {
+                Task { @MainActor in
+                    guard let id = myTileID,
+                          // Also gate on mode — a tile's id pinning to
+                          // `item.id` means the same id CAN exist in a
+                          // brand-new multiview session. Without the
+                          // mode check, a late-firing PiP delegate
+                          // could set `isPiPActive = true` on a new
+                          // session that never actually engaged PiP.
+                          PlayerSession.shared.mode == .multiview,
+                          MultiviewStore.shared.tiles.contains(where: { $0.id == id })
+                    else { return }
+                    MultiviewStore.shared.isPiPActive = true
+                    DebugLogger.shared.log(
+                        "[MV-PiP] engaged by audio tile=\(id)",
+                        category: "Playback", level: .info
+                    )
+                }
+            }
         }
 
         func pictureInPictureControllerDidStopPictureInPicture(
@@ -1846,6 +2115,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         ) {
             debugLog("🖼️ PiP: stopped")
             DispatchQueue.main.async { self.progressStore.isPiPActive = false }
+            // Stopping is always safe — clearing the flag when the
+            // store's already been reset is a no-op. Still gate on
+            // tileID so single-stream PiP doesn't touch the
+            // multiview store at all.
+            let myTileID = tileID
+            if let myTileID {
+                Task { @MainActor in
+                    MultiviewStore.shared.isPiPActive = false
+                    DebugLogger.shared.log(
+                        "[MV-PiP] ended tile=\(myTileID)",
+                        category: "Playback", level: .info
+                    )
+                }
+            }
         }
     }
 }

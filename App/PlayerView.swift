@@ -832,6 +832,19 @@ private struct PlayerRootView: View {
                             onDismiss: {
                                 withAnimation(.easeInOut(duration: 0.15)) { showTVOptions = false }
                                 scheduleControlsHide()
+                            },
+                            onEnterMultiview: {
+                                // Seed + flip via the shared helper
+                                // (iPad top-bar button uses the same
+                                // path). HomeView's mode-branch
+                                // swaps this PlayerView out for
+                                // `MultiviewContainerView` on the
+                                // next update pass. `Self` refers to
+                                // `PlayerRootView`, the enclosing
+                                // type — the helper lives here, not
+                                // on `PlayerView` which is a thin
+                                // wrapper above.
+                                Self.enterMultiviewFromCurrent()
                             }
                         )
                         .focusSection()
@@ -1092,6 +1105,13 @@ private struct PlayerRootView: View {
                         #endif
 
                         #if os(iOS)
+                        // Multiview — iPad only. Screen is too narrow
+                        // on iPhone for a usable 2×2 grid, let alone
+                        // 3×3 (see plan's iPhone out-of-scope note).
+                        if UIDevice.current.userInterfaceIdiom == .pad {
+                            multiviewEntryButton
+                        }
+
                         // AirPlay — always visible (system routing control)
                         ZStack {
                             Circle()
@@ -1127,6 +1147,51 @@ private struct PlayerRootView: View {
     }
 
     // MARK: - Player Overflow Menu (ellipsis)
+
+    /// Shared entry path used by both the iPad top-bar button and the
+    /// tvOS options-panel row. Pulls the seed channel off
+    /// `NowPlayingManager` (source of truth for what PlayerView is
+    /// currently rendering) and the server off `ChannelStore` (the
+    /// active connection the user picked). Defensive: refuses to
+    /// enter if either prerequisite is missing, to avoid flipping
+    /// `PlayerSession.mode` into a broken state with no way to add
+    /// tiles (the add sheet needs the server too).
+    @MainActor
+    static func enterMultiviewFromCurrent() {
+        guard let item = NowPlayingManager.shared.playingItem else { return }
+        guard let server = ChannelStore.shared.activeServer else { return }
+        PlayerSession.shared.enterMultiview(seeding: item, server: server)
+    }
+
+    /// iPad-only multiview entry button. Mirrors the AirPlay button's
+    /// 52×52 ultraThinMaterial chrome so the iPad top bar has three
+    /// matching circular buttons (overflow / multiview / AirPlay).
+    /// On tap: seed `MultiviewStore.tiles[0]` with the currently-
+    /// playing channel (pinning `tile.id == item.id` for coordinator-
+    /// reuse per the plan) and flip `PlayerSession.mode = .multiview`.
+    /// HomeView's mode branch then swaps this PlayerView out for
+    /// `MultiviewContainerView`.
+    #if os(iOS)
+    private var multiviewEntryButton: some View {
+        Button {
+            Self.enterMultiviewFromCurrent()
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+                Image(systemName: "rectangle.split.2x2")
+                    .font(.system(size: 20, weight: .regular))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 52, height: 52)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Enter multiview")
+        .accessibilityHint("Watch multiple channels simultaneously in a grid")
+    }
+    #endif
 
     private var playerOverflowMenu: some View {
         PlayerOverflowMenu(
@@ -1753,6 +1818,12 @@ struct TVPlayerOptionsPanel: View {
     var setSubtitleTrack: ((Int) -> Void)?
     var setSpeed: ((Double) -> Void)?
     var onDismiss: (() -> Void)?
+    /// Fires when the user picks "Enter Multiview" from the panel.
+    /// The caller is responsible for seeding + flipping the
+    /// `PlayerSession` mode; the panel just reports the intent and
+    /// dismisses itself. v1 only shows the option during live-TV
+    /// playback (the panel is already gated on that upstream).
+    var onEnterMultiview: (() -> Void)?
 
     /// Internal focus state — the first item gets focus when the panel appears.
     @FocusState private var panelFocus: String?
@@ -1764,6 +1835,9 @@ struct TVPlayerOptionsPanel: View {
                 subtitleSection
                 if !isLive { speedSection }
                 sleepTimerSection
+                if isLive, onEnterMultiview != nil {
+                    multiviewSection
+                }
                 streamInfoButton
             }
             .padding(20)
@@ -1836,6 +1910,19 @@ struct TVPlayerOptionsPanel: View {
             optionRow(text: "\(mins) minutes", isSelected: false) {
                 sleepTimerEnd = Date().addingTimeInterval(Double(mins) * 60); onDismiss?()
             }
+        }
+    }
+
+    /// Multiview entry row. Only rendered for live streams when the
+    /// outer view provided an `onEnterMultiview` closure (i.e. from
+    /// HomeView's live-TV mount path). Tapping fires the closure +
+    /// dismisses the panel; HomeView's mode branch swaps in
+    /// `MultiviewContainerView` on the next render pass.
+    @ViewBuilder private var multiviewSection: some View {
+        sectionHeader("Multiview")
+        optionRow(text: "Enter Multiview", isSelected: false) {
+            onEnterMultiview?()
+            onDismiss?()
         }
     }
 
