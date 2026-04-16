@@ -24,7 +24,21 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
 - Grid and list views on tvOS and iPad, list view on iPhone
 - Program data cached locally and configurable from 6 hours to full available window
 - Channels without guide data still selectable from the grid
-- Long-press future programs to set reminders or (coming soon) schedule recordings
+- Long-press future programs to set reminders or schedule recordings
+
+**DVR Recording** *(new in v1.5.0)*
+
+- Schedule live or upcoming programs to record from the Live TV guide
+- **Dispatcharr server-side recording** — continues even when AerioTV is closed; ideal for unattended recordings and recordings that need to survive app background / device sleep
+- **Local recording on this device** — records straight to `Documents/Recordings` (or a user-chosen folder on iOS) for XC, M3U, and Dispatcharr users
+- Per-recording **pre-roll** (start early) and **post-roll** (end late) buffers: None / 5 / 10 / 15 / 30 / 60 min or a custom value, to catch overruns in live sports and news
+- Optional **Remove Commercials (Comskip)** — toggle at schedule time, or trigger post-recording from the DVR tab's context menu. Processes server-side on Dispatcharr
+- **DVR tab** appears automatically when there's at least one recording (local or on the server), with Scheduled / Recording / Completed segments and live status updates
+- **Auto-discovery** — recordings scheduled from the Dispatcharr web UI (or another device) appear in AerioTV's DVR tab within ~2 minutes
+- **Download server recordings** — long-press a completed Dispatcharr recording → Save to Device
+- **Local storage quota** with live usage bar (1–200 GB, default 10 GB) and low-storage warnings
+- **iOS Files app access** — local recordings browsable and exportable under "On My iPhone → AerioTV"
+- Keep-device-awake toggle so a local recording isn't interrupted by display sleep
 
 **Movies and Series**
 

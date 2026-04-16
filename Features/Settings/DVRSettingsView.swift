@@ -39,6 +39,51 @@ struct DVRSettingsView: View {
     }
 
     var body: some View {
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            #if os(tvOS)
+            tvOSBody
+            #else
+            iOSBody
+            #endif
+        }
+        .navigationTitle("DVR")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .alert("Delete All Local Recordings?", isPresented: $showClearConfirmation) {
+            Button("Delete", role: .destructive) { clearAllLocalRecordings() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will permanently remove all locally stored recordings from this device. Server-side recordings are not affected.")
+        }
+        .sheet(isPresented: $showCustomPreRoll) {
+            customBufferSheet(title: "Custom Pre-Roll", value: $customPreRollValue) {
+                defaultPreRoll = customPreRollValue
+            }
+        }
+        .sheet(isPresented: $showCustomPostRoll) {
+            customBufferSheet(title: "Custom Post-Roll", value: $customPostRollValue) {
+                defaultPostRoll = customPostRollValue
+            }
+        }
+        #if os(iOS)
+        .sheet(isPresented: $showFolderPicker) {
+            FolderPickerView { url in
+                guard url.startAccessingSecurityScopedResource() else { return }
+                defer { url.stopAccessingSecurityScopedResource() }
+                if let bookmark = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                    UserDefaults.standard.set(bookmark, forKey: "dvrCustomFolderBookmark")
+                }
+            }
+        }
+        #endif
+    }
+
+    // MARK: - iOS Body
+
+    #if os(iOS)
+    private var iOSBody: some View {
         List {
             // MARK: - Default Buffers
             Section {
@@ -86,24 +131,14 @@ struct DVRSettingsView: View {
                         Text(formatGB(mb: maxStorageMB))
                             .foregroundColor(.secondary)
                     }
-                    #if os(iOS)
                     Slider(value: Binding(
                         get: { Double(maxStorageMB) / 1024.0 },
                         set: { maxStorageMB = Int($0 * 1024.0) }
                     ), in: 1...200, step: 1) {
                         Text("Max storage")
                     }
-                    #else
-                    // tvOS: use +/- buttons instead of slider
-                    HStack {
-                        Button("-") { if maxStorageMB > 1024 { maxStorageMB -= 1024 } }
-                        Spacer()
-                        Button("+") { if maxStorageMB < 204_800 { maxStorageMB += 1024 } }
-                    }
-                    #endif
                 }
 
-                // Usage bar
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("Used")
@@ -161,11 +196,9 @@ struct DVRSettingsView: View {
                             .truncationMode(.middle)
                     }
 
-                    #if os(iOS)
                     Button("Choose custom folder…") {
                         showFolderPicker = true
                     }
-                    #endif
                 } header: {
                     Text("Storage Location")
                         .sectionHeaderStyle()
@@ -196,45 +229,204 @@ struct DVRSettingsView: View {
             }
             .listRowBackground(Color.cardBackground)
         }
-        #if os(iOS)
         .scrollContentBackground(.hidden)
-        #endif
-        .background(Color.appBackground)
-        .navigationTitle("DVR")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
-        .alert("Delete All Local Recordings?", isPresented: $showClearConfirmation) {
-            Button("Delete", role: .destructive) { clearAllLocalRecordings() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will permanently remove all locally stored recordings from this device. Server-side recordings are not affected.")
-        }
-        .sheet(isPresented: $showCustomPreRoll) {
-            customBufferSheet(title: "Custom Pre-Roll", value: $customPreRollValue) {
-                defaultPreRoll = customPreRollValue
-            }
-        }
-        .sheet(isPresented: $showCustomPostRoll) {
-            customBufferSheet(title: "Custom Post-Roll", value: $customPostRollValue) {
-                defaultPostRoll = customPostRollValue
-            }
-        }
-        #if os(iOS)
-        .sheet(isPresented: $showFolderPicker) {
-            FolderPickerView { url in
-                guard url.startAccessingSecurityScopedResource() else { return }
-                defer { url.stopAccessingSecurityScopedResource() }
-                if let bookmark = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-                    UserDefaults.standard.set(bookmark, forKey: "dvrCustomFolderBookmark")
+    }
+    #endif
+
+    // MARK: - tvOS Body
+    // Uses the shared TVSettings* components (TVSettingsSelectionRow,
+    // TVSettingsToggleRow, TVSettingsActionRow, TVSettingsNavRow) so focus
+    // highlight matches the rest of the tvOS Settings UI uniformly.
+    #if os(tvOS)
+    private var tvOSBody: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 32) {
+                tvSection("Start Early (Pre-Roll)") {
+                    ForEach([0, 5, 10, 15, 30], id: \.self) { mins in
+                        TVSettingsSelectionRow(
+                            label: mins == 0 ? "None" : "\(mins) minutes",
+                            isSelected: defaultPreRoll == mins,
+                            action: { defaultPreRoll = mins }
+                        )
+                    }
+                    TVSettingsActionRow(
+                        icon: "slider.horizontal.3",
+                        label: "Custom…",
+                        isAccent: ![0, 5, 10, 15, 30].contains(defaultPreRoll),
+                        action: {
+                            customPreRollValue = defaultPreRoll > 0 ? defaultPreRoll : 5
+                            showCustomPreRoll = true
+                        }
+                    )
+                }
+
+                tvSection("End Late (Post-Roll)") {
+                    ForEach([0, 5, 10, 15, 30, 60], id: \.self) { mins in
+                        TVSettingsSelectionRow(
+                            label: mins == 0 ? "None" : "\(mins) minutes",
+                            isSelected: defaultPostRoll == mins,
+                            action: { defaultPostRoll = mins }
+                        )
+                    }
+                    TVSettingsActionRow(
+                        icon: "slider.horizontal.3",
+                        label: "Custom…",
+                        isAccent: ![0, 5, 10, 15, 30, 60].contains(defaultPostRoll),
+                        action: {
+                            customPostRollValue = defaultPostRoll > 0 ? defaultPostRoll : 5
+                            showCustomPostRoll = true
+                        }
+                    )
+                }
+
+                if isDispatcharr, let server = activeServer {
+                    tvSection("Recording Destination") {
+                        TVSettingsSelectionRow(
+                            icon: "server.rack",
+                            label: "Dispatcharr server",
+                            subtitle: "Keeps recording even when AerioTV is closed",
+                            isSelected: server.defaultRecordingDestination == .dispatcharrServer,
+                            action: {
+                                server.defaultRecordingDestination = .dispatcharrServer
+                                try? modelContext.save()
+                            }
+                        )
+                        TVSettingsSelectionRow(
+                            icon: "internaldrive",
+                            label: "This device",
+                            subtitle: "Requires AerioTV to remain open",
+                            isSelected: server.defaultRecordingDestination == .local,
+                            action: {
+                                server.defaultRecordingDestination = .local
+                                try? modelContext.save()
+                            }
+                        )
+                    }
+                }
+
+                tvSection("Local Storage") {
+                    tvStorageCard
+                }
+
+                tvSection("Behavior") {
+                    TVSettingsToggleRow(
+                        icon: "bolt.fill",
+                        iconColor: .yellow,
+                        title: "Keep Device Awake",
+                        subtitle: "Prevents sleep during local recording",
+                        isOn: $keepAwake
+                    ) { _ in }
+                }
+
+                tvSection("Recordings") {
+                    TVSettingsNavRow(destination: MyRecordingsView()) {
+                        SettingsRow(icon: "film.stack", iconColor: .red,
+                                    title: "My Recordings",
+                                    subtitle: "\(recordingCount) recordings")
+                    }
+                }
+
+                tvSection("Danger Zone") {
+                    TVSettingsActionRow(
+                        icon: "trash.fill",
+                        label: "Delete All Local Recordings",
+                        isDestructive: true,
+                        action: { showClearConfirmation = true }
+                    )
                 }
             }
+            .padding(48)
         }
-        #endif
     }
+
+    private var tvStorageCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Maximum")
+                    .font(.system(size: 26, weight: .medium))
+                    .foregroundColor(.textPrimary)
+                Spacer()
+                HStack(spacing: 24) {
+                    Button { if maxStorageMB > 1024 { maxStorageMB -= 1024 } } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .font(.system(size: 36))
+                            .foregroundColor(.accentPrimary)
+                    }
+                    .buttonStyle(TVNoHighlightButtonStyle())
+                    Text(formatGB(mb: maxStorageMB))
+                        .font(.system(size: 28, weight: .semibold))
+                        .foregroundColor(.textPrimary)
+                        .frame(minWidth: 110)
+                    Button { if maxStorageMB < 204_800 { maxStorageMB += 1024 } } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 36))
+                            .foregroundColor(.accentPrimary)
+                    }
+                    .buttonStyle(TVNoHighlightButtonStyle())
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Used")
+                        .font(.system(size: 22))
+                        .foregroundColor(.textSecondary)
+                    Spacer()
+                    Text(formatBytes(coordinator.localUsageBytes) + " of " + formatGB(mb: maxStorageMB))
+                        .font(.system(size: 22))
+                        .foregroundColor(.textSecondary)
+                }
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.secondary.opacity(0.2))
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(usageColor)
+                            .frame(width: max(0, geo.size.width * CGFloat(coordinator.localUsageFraction)))
+                    }
+                }
+                .frame(height: 12)
+            }
+
+            if coordinator.isApproachingQuotaLimit {
+                Label {
+                    Text("Storage is running low. Future recordings may not complete if the limit is reached.")
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.yellow)
+                }
+                .font(.system(size: 22))
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.cardBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.accentPrimary.opacity(0.10), lineWidth: 1)
+                )
+        )
+    }
+
+    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title.uppercased())
+                .font(.system(size: 22, weight: .bold))
+                .foregroundColor(.textTertiary)
+                .tracking(1)
+                .padding(.leading, 20)
+            VStack(alignment: .leading, spacing: 8) {
+                content()
+            }
+        }
+    }
+    #endif
 
     // MARK: - Helpers
 
+    #if os(iOS)
     @ViewBuilder
     private func bufferPicker(label: String, selection: Binding<Int>,
                               options: [Int], customAction: @escaping () -> Void) -> some View {
@@ -255,6 +447,7 @@ struct DVRSettingsView: View {
             }
         }
     }
+    #endif
 
     @ViewBuilder
     private func customBufferSheet(title: String, value: Binding<Int>,

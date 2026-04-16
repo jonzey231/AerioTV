@@ -817,14 +817,19 @@ final class SyncManager: ObservableObject {
                 return
             }
 
-            await MainActor.run {
-                let mgr = SyncManager.shared
-                mgr.doMerge(servers: servers, isInitial: false)
-                mgr.doApplyPreferences(prefs: prefs)
-                mgr.mergeRemoteWatchProgress(wp)
-                mgr.mergeRemoteReminders(reminders)
-                debugLog("🔵 SyncManager.pullFromCloud: merge complete")
-            }
+            // Hop to MainActor for EACH merge step separately so the
+            // main runloop can drain any queued UI work between them.
+            // A single `MainActor.run { ... }` block that did all four
+            // merges back-to-back showed up as a ~1.8s main-thread
+            // hang on app launch; splitting gives the runloop room to
+            // pump events (channel-fetch completion callbacks,
+            // SwiftUI re-renders, etc.) between the SwiftData-heavy
+            // watch-progress upsert and the reminder merge.
+            await MainActor.run { SyncManager.shared.doMerge(servers: servers, isInitial: false) }
+            await MainActor.run { SyncManager.shared.doApplyPreferences(prefs: prefs) }
+            await MainActor.run { SyncManager.shared.mergeRemoteWatchProgress(wp) }
+            await MainActor.run { SyncManager.shared.mergeRemoteReminders(reminders) }
+            await MainActor.run { debugLog("🔵 SyncManager.pullFromCloud: merge complete") }
         }
     }
 

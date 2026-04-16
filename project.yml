@@ -13,7 +13,7 @@ settings:
     SWIFT_VERSION: "6.0"
     ENABLE_BITCODE: "NO"
     SUPPORTS_MACCATALYST: "YES"
-    MARKETING_VERSION: "1.2.2"
+    MARKETING_VERSION: "1.5.0"
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_USER_SCRIPT_SANDBOXING: "NO"
     DEVELOPMENT_TEAM: ""   # Fill in your Team ID from Xcode Signing settings
@@ -42,7 +42,7 @@ targets:
       properties:
         CFBundleDisplayName: Dispatcharr
         CFBundleIdentifier: app.molinete.Dispatcharr
-        CFBundleShortVersionString: "1.2.2"
+        CFBundleShortVersionString: "1.5.0"
         CFBundleVersion: "1"
         UILaunchScreen:
           UIColorName: ""
@@ -81,7 +81,7 @@ targets:
       properties:
         CFBundleDisplayName: AerioTopShelf
         CFBundleIdentifier: app.molinete.Dispatcharr.TopShelf
-        CFBundleShortVersionString: "1.2.2"
+        CFBundleShortVersionString: "1.5.0"
         CFBundleVersion: "1"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.tv-top-shelf

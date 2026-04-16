@@ -37,12 +37,14 @@ struct MyRecordingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Picker("Filter", selection: $selectedSegment) {
-                Text("Scheduled (\(scheduled.count))").tag(0)
-                Text("Recording (\(recording.count))").tag(1)
-                Text("Completed (\(completed.count))").tag(2)
+            // Same pill selector on both platforms. On tvOS the pills
+            // are focusable; on iOS they're plain tap buttons.
+            HStack(spacing: 12) {
+                segmentButton("Scheduled", count: scheduled.count, tag: 0)
+                segmentButton("Recording", count: recording.count, tag: 1)
+                segmentButton("Completed", count: completed.count, tag: 2)
+                Spacer()
             }
-            .pickerStyle(.segmented)
             .padding()
 
             // Quota warning toast
@@ -58,6 +60,29 @@ struct MyRecordingsView: View {
             if activeList.isEmpty {
                 emptyState
             } else {
+                #if os(tvOS)
+                // tvOS: List + Button + .buttonStyle(.plain) still paints the
+                // giant system white focus halo. Replace with ScrollView +
+                // LazyVStack + TVRecordingRow, which uses the same subtle
+                // focus treatment (accent stroke + scale bump) as the rest
+                // of the tvOS UI. Context menu comes through as a
+                // .confirmationDialog triggered by .onLongPressGesture —
+                // same pattern used in the EPG guide.
+                ScrollView {
+                    LazyVStack(spacing: 14) {
+                        ForEach(activeList, id: \.id) { rec in
+                            TVRecordingRow(
+                                recording: rec,
+                                onSelect: { playIfCompleted(rec) },
+                                menu: { contextMenuItems(for: rec) }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 40)
+                    .padding(.vertical, 20)
+                }
+                .background(Color.appBackground)
+                #else
                 List {
                     ForEach(activeList, id: \.id) { rec in
                         RecordingRow(recording: rec)
@@ -65,17 +90,16 @@ struct MyRecordingsView: View {
                             .contextMenu {
                                 contextMenuItems(for: rec)
                             }
-                            #if os(iOS)
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 swipeActions(for: rec)
                             }
-                            #endif
                     }
                 }
                 #if os(iOS)
                 .scrollContentBackground(.hidden)
                 #endif
                 .background(Color.appBackground)
+                #endif
             }
         }
         .background(Color.appBackground)
@@ -107,6 +131,58 @@ struct MyRecordingsView: View {
         } message: {
             Text("Download this recording from the Dispatcharr server to your device's local storage.")
         }
+        // Pull Dispatcharr server state whenever the view shows, then
+        // keep it honest on a 30s tick while visible. SwiftUI cancels the
+        // task on view disappear so we don't burn network on inactive
+        // tabs.
+        .task {
+            await reconcileAll()
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+                if Task.isCancelled { break }
+                await reconcileAll()
+            }
+        }
+    }
+
+    // MARK: - Reconcile
+
+    /// Walks every distinct Dispatcharr `serverID` that appears in the
+    /// local recording list and asks the coordinator to reconcile each.
+    /// Handles the multi-server case (rare but supported).
+    private func reconcileAll() async {
+        let dispatcharrServerIDs = Set(
+            allRecordings
+                .filter { $0.destination == .dispatcharrServer }
+                .map { $0.serverID }
+        )
+        for sid in dispatcharrServerIDs {
+            guard let server = servers.first(where: { $0.id.uuidString == sid }),
+                  server.type == .dispatcharrAPI else { continue }
+            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                     auth: .apiKey(server.effectiveApiKey),
+                                     userAgent: server.effectiveUserAgent)
+            await coordinator.reconcileDispatcharrRecordings(
+                api: api,
+                serverID: sid,
+                modelContext: modelContext
+            )
+        }
+    }
+
+    // MARK: - Segment Button (shared iOS + tvOS)
+
+    /// Pill-style segment selector used by both iOS and tvOS. Matches
+    /// the Live TV group filter bar / On Demand tab pills so every
+    /// in-tab segment selector in the app has identical styling.
+    private func segmentButton(_ label: String, count: Int, tag: Int) -> some View {
+        DVRSegmentPill(
+            label: "\(label) (\(count))",
+            isSelected: selectedSegment == tag,
+            action: {
+                withAnimation(.easeInOut(duration: 0.15)) { selectedSegment = tag }
+            }
+        )
     }
 
     // MARK: - Context Menu
@@ -132,6 +208,15 @@ struct MyRecordingsView: View {
                     showDownloadConfirmation = true
                 } label: {
                     Label("Save to Device", systemImage: "square.and.arrow.down")
+                }
+                // Post-recording comskip: offers to run commercial
+                // detection/removal on the server even if the user
+                // didn't toggle it at schedule time. The server
+                // handles idempotency so repeated taps are safe.
+                Button {
+                    runComskip(rec)
+                } label: {
+                    Label("Remove Commercials", systemImage: "scissors")
                 }
             }
         }
@@ -249,6 +334,18 @@ struct MyRecordingsView: View {
                               userAgent: server.effectiveUserAgent)
     }
 
+    /// tvOS-only: tapping a completed row plays it without requiring the
+    /// context menu. In-progress/scheduled rows do nothing on tap —
+    /// interaction goes through the context menu (Stop / Cancel).
+    private func playIfCompleted(_ rec: Recording) {
+        guard rec.isCompleted || rec.status == .stopped else { return }
+        if rec.destination == .local, let path = rec.localFilePath {
+            playRecording(path: path)
+        } else if rec.destination == .dispatcharrServer, rec.remoteRecordingID != nil {
+            playServerRecording(rec)
+        }
+    }
+
     private func playRecording(path: String) {
         // TODO: Push PlayerView with local file URL
         debugLog("▶️ Play local recording: \(path)")
@@ -298,6 +395,22 @@ struct MyRecordingsView: View {
         guard let api = apiForRecording(rec) else { return }
         Task {
             try? await coordinator.downloadDispatcharrRecording(api: api, recording: rec, modelContext: modelContext)
+        }
+    }
+
+    /// Queues server-side comskip (commercial detection/removal) on a
+    /// completed Dispatcharr recording. Fire-and-forget — the server
+    /// processes in the background and updates its own state.
+    private func runComskip(_ rec: Recording) {
+        guard let api = apiForRecording(rec),
+              let remoteID = rec.remoteRecordingID else { return }
+        Task {
+            do {
+                try await api.applyComskip(id: remoteID)
+                debugLog("✂️ Queued comskip for recording \(remoteID)")
+            } catch {
+                debugLog("⚠️ applyComskip failed for \(remoteID): \(error)")
+            }
         }
     }
 }
@@ -393,3 +506,137 @@ private struct RecordingRow: View {
         return "\(df.string(from: start)) – \(tf.string(from: end))"
     }
 }
+
+// MARK: - tvOS Recording Row
+
+#if os(tvOS)
+/// Focusable DVR recording cell for the tvOS ScrollView. Mirrors the
+/// rest of the tvOS UI's focus treatment (coloured stroke + small scale
+/// bump on focus) instead of the giant white halo that List + Button
+/// produced. Long-press opens a confirmationDialog of the same menu
+/// items that iOS shows as a .contextMenu — the dialog avoids the
+/// flashing / rebuilding issues that .contextMenu has on tvOS.
+private struct TVRecordingRow<Menu: View>: View {
+    let recording: Recording
+    let onSelect: () -> Void
+    @ViewBuilder let menu: () -> Menu
+
+    // @State (not @FocusState): TVPressOverlay's transparent UIKit
+    // overlay owns focus on tvOS; it reports focus changes back
+    // through this binding via onFocusChange.
+    @State private var isFocused: Bool = false
+    @State private var showCtxDialog = false
+
+    var body: some View {
+        RecordingRow(recording: recording)
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Color.cardBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(isFocused ? Color.accentPrimary : Color.clear, lineWidth: 3)
+            )
+            .scaleEffect(isFocused ? 1.02 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+            .overlay(
+                TVPressOverlay(
+                    minimumPressDuration: 0.35,
+                    isFocused: $isFocused,
+                    onTap: { onSelect() },
+                    onLongPress: { showCtxDialog = true }
+                )
+            )
+            .confirmationDialog(
+                recording.programTitle.isEmpty ? "Recording" : recording.programTitle,
+                isPresented: $showCtxDialog,
+                titleVisibility: .visible
+            ) {
+                menu()
+            }
+    }
+}
+#endif
+
+// MARK: - Segment Pill (shared iOS + tvOS)
+
+/// Pill-style tab selector used by both the DVR tab (Scheduled /
+/// Recording / Completed) and the On Demand tab (Movies / Series) so
+/// every top-level in-tab segment selector in the app looks the same.
+///
+/// Rendering goes through a custom `ButtonStyle` that reads
+/// `@Environment(\.isFocused)` directly — this is the only way on tvOS
+/// to get the pill's custom focus treatment (accent stroke + scale)
+/// WITHOUT the default system white halo and WITHOUT triggering the
+/// `_UIReplicantView as a subview of UIHostingController.view`
+/// warning that bare `.focusable() + .onTapGesture` produces.
+///
+/// Non-private so OnDemandView and other Settings/DVR callers can
+/// reuse it.
+struct DVRSegmentPill: View {
+    let label: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+        }
+        .buttonStyle(DVRSegmentPillButtonStyle(isSelected: isSelected))
+    }
+}
+
+// MARK: tvOS pill style — focusable, custom stroke, scale bump
+
+#if os(tvOS)
+private struct DVRSegmentPillButtonStyle: ButtonStyle {
+    let isSelected: Bool
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        let focused = isFocused
+        return configuration.label
+            .font(.system(size: 22, weight: .medium))
+            .foregroundColor(
+                isSelected ? .appBackground
+                           : (focused ? .white : .textSecondary)
+            )
+            .padding(.horizontal, 26)
+            .padding(.vertical, 13)
+            .background(
+                Capsule()
+                    .fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(focused && !isSelected ? Color.accentPrimary : Color.clear, lineWidth: 2)
+            )
+            .scaleEffect(focused ? 1.05 : 1.0)
+            .opacity(focused ? 1.0 : (isSelected ? 1.0 : 0.85))
+            .animation(.easeInOut(duration: 0.15), value: focused)
+    }
+}
+#endif
+
+// MARK: iOS pill style — plain tappable capsule, no focus state
+
+#if os(iOS)
+private struct DVRSegmentPillButtonStyle: ButtonStyle {
+    let isSelected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 15, weight: .medium))
+            .foregroundColor(isSelected ? .appBackground : .textSecondary)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 8)
+            .background(
+                Capsule()
+                    .fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
+            )
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+    }
+}
+#endif

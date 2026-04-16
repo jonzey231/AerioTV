@@ -668,7 +668,10 @@ struct SettingsView: View {
 /// instead of the system white row highlight.
 /// NavigationLink row with teal card highlight on focus.
 /// Uses .plain buttonStyle so the tvOS focus engine registers the link as focusable.
-private struct TVSettingsNavRow<Destination: View, Content: View>: View {
+///
+/// Internal (not private) so DVR / Developer / Appearance settings pages
+/// can reuse the same focus treatment for uniform tvOS UI.
+struct TVSettingsNavRow<Destination: View, Content: View>: View {
     let destination: Destination
     let content: Content
     @FocusState private var isFocused: Bool
@@ -696,7 +699,7 @@ private struct TVSettingsNavRow<Destination: View, Content: View>: View {
 
 /// Button-based nav row that pushes onto a NavigationPath instead of using NavigationLink.
 /// This ensures the TabView's .onExitCommand can properly manage back navigation.
-private struct TVSettingsNavButton: View {
+struct TVSettingsNavButton: View {
     let label: String
     let icon: String
     let iconColor: Color
@@ -722,22 +725,35 @@ private struct TVSettingsNavButton: View {
 
 /// Plain action row (Add Playlist, Copy to Clipboard, etc.)
 /// with the same teal card highlight on focus.
-private struct TVSettingsActionRow: View {
+struct TVSettingsActionRow: View {
     let icon: String
     let label: String
     var isAccent: Bool = false
+    var isDestructive: Bool = false
     let action: () -> Void
     @FocusState private var isFocused: Bool
+
+    private var tint: Color {
+        if isDestructive { return .red }
+        if isAccent { return .accentPrimary }
+        return .textPrimary
+    }
+
+    private var iconTint: Color {
+        if isDestructive { return .red }
+        if isAccent { return .accentPrimary }
+        return .textSecondary
+    }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 16) {
                 Image(systemName: icon)
                     .font(.system(size: 26))
-                    .foregroundColor(isAccent ? .accentPrimary : .textSecondary)
+                    .foregroundColor(iconTint)
                 Text(label)
                     .font(.system(size: 26, weight: .medium))
-                    .foregroundColor(isAccent ? .accentPrimary : .textPrimary)
+                    .foregroundColor(tint)
                 Spacer()
             }
             .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
@@ -750,6 +766,85 @@ private struct TVSettingsActionRow: View {
         .focused($isFocused)
         .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Selection row for "pick one of many" settings lists (Color Theme,
+/// Default Tab, buffer pickers, etc.) — shows an accent checkmark on
+/// the selected option and uses the same teal card highlight on focus.
+/// Supports an optional icon, leading badge (e.g. theme swatch), and
+/// subtitle.
+struct TVSettingsSelectionRow<Leading: View>: View {
+    let label: String
+    var subtitle: String? = nil
+    let isSelected: Bool
+    let action: () -> Void
+    @ViewBuilder let leading: () -> Leading
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                leading()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label)
+                        .font(.system(size: 26, weight: .medium))
+                        .foregroundColor(.textPrimary)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 20))
+                            .foregroundColor(.textSecondary)
+                    }
+                }
+                Spacer()
+                if isSelected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(.accentPrimary)
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 6)
+            .background(tvSettingsCardBG(isFocused))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+extension TVSettingsSelectionRow where Leading == EmptyView {
+    init(label: String, subtitle: String? = nil,
+         isSelected: Bool, action: @escaping () -> Void) {
+        self.label = label
+        self.subtitle = subtitle
+        self.isSelected = isSelected
+        self.action = action
+        self.leading = { EmptyView() }
+    }
+}
+
+/// Convenience initializer that takes a leading SF Symbol string instead
+/// of a custom view (covers the common case).
+extension TVSettingsSelectionRow where Leading == AnyView {
+    init(icon: String, iconColor: Color = .accentPrimary,
+         label: String, subtitle: String? = nil,
+         isSelected: Bool, action: @escaping () -> Void) {
+        self.label = label
+        self.subtitle = subtitle
+        self.isSelected = isSelected
+        self.action = action
+        self.leading = {
+            AnyView(
+                Image(systemName: icon)
+                    .font(.system(size: 22))
+                    .foregroundColor(iconColor)
+                    .frame(width: 32)
+            )
+        }
     }
 }
 
@@ -799,7 +894,8 @@ struct TVSettingsToggleRow: View {
 }
 
 /// Teal-tinted card background shared by all tvOS settings row components.
-private func tvSettingsCardBG(_ focused: Bool) -> some View {
+/// Internal so DVR / Developer / Appearance settings pages can reuse it.
+func tvSettingsCardBG(_ focused: Bool) -> some View {
     RoundedRectangle(cornerRadius: 12, style: .continuous)
         .fill(focused ? Color.accentPrimary.opacity(0.18) : Color.cardBackground)
         .overlay {
@@ -1799,7 +1895,103 @@ struct NetworkSettingsView: View {
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
-            List {
+            #if os(tvOS)
+            tvOSBody
+            #else
+            iOSBody
+            #endif
+        }
+        .navigationTitle("Network")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #else
+        .toolbar(.hidden, for: .navigationBar)
+        #endif
+        .toolbarBackground(Color.appBackground, for: .navigationBar)
+        #if os(iOS)
+        .task {
+            NetworkMonitor.shared.refresh(force: true)
+            let stored = UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? ""
+            let parsed = stored.split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            ssidEntries = parsed.isEmpty ? [""] : parsed
+        }
+        #endif
+    }
+
+    // MARK: - tvOS Body
+    // Uses the shared TVSettings* components so focus highlights match
+    // Appearance / DVR / Developer / top-level Settings uniformly. The
+    // previous implementation was a bare List + Button rows which on
+    // tvOS only rendered the default thin system focus ring.
+    #if os(tvOS)
+    private var tvOSBody: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 32) {
+                tvSection("Request Timeout") {
+                    ForEach([5, 10, 15, 30, 60], id: \.self) { secs in
+                        TVSettingsSelectionRow(
+                            label: "\(secs) seconds",
+                            isSelected: Int(networkTimeout) == secs,
+                            action: { networkTimeout = Double(secs) }
+                        )
+                    }
+                }
+
+                tvSection("Buffer Size") {
+                    ForEach(bufferOptions) { opt in
+                        TVSettingsSelectionRow(
+                            label: opt.label,
+                            subtitle: opt.detail,
+                            isSelected: streamBufferSize == opt.id,
+                            action: { streamBufferSize = opt.id }
+                        )
+                    }
+                }
+
+                tvSection("EPG Window") {
+                    let options: [(label: String, hours: Int)] = [
+                        ("6 hours",  6),
+                        ("12 hours", 12),
+                        ("24 hours", 24),
+                        ("36 hours", 36),
+                        ("48 hours", 48),
+                        ("72 hours", 72),
+                        ("All available", 0),
+                    ]
+                    ForEach(options, id: \.hours) { opt in
+                        TVSettingsSelectionRow(
+                            label: opt.label,
+                            isSelected: epgWindowHours == opt.hours,
+                            action: { epgWindowHours = opt.hours }
+                        )
+                    }
+                }
+            }
+            .padding(48)
+        }
+    }
+
+    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title.uppercased())
+                .font(.system(size: 22, weight: .bold))
+                .foregroundColor(.textTertiary)
+                .tracking(1)
+                .padding(.leading, 20)
+            VStack(alignment: .leading, spacing: 8) {
+                content()
+            }
+        }
+    }
+    #endif
+
+    // MARK: - iOS Body
+
+    #if os(iOS)
+    private var iOSBody: some View {
+        List {
                 // MARK: Connection
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
@@ -1812,17 +2004,13 @@ struct NetworkSettingsView: View {
                                 .font(.monoSmall)
                                 .foregroundColor(theme.accent)
                         }
-                        #if os(iOS)
                         Slider(value: $networkTimeout, in: 5...60, step: 5)
                             .tint(theme.accent)
-                        #endif
                     }
                     .listRowBackground(Color.cardBackground)
 
-                    #if os(iOS)
                     Stepper("Max Retries: \(maxRetries)", value: $maxRetries, in: 0...10)
                         .listRowBackground(Color.cardBackground)
-                    #endif
                 } header: {
                     Text("Connection").sectionHeaderStyle()
                 } footer: {
@@ -2110,31 +2298,10 @@ struct NetworkSettingsView: View {
                     }
                 }
             }
-            #if os(iOS)
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
-            #else
-            .listStyle(.plain)
-            #endif
-        }
-        .navigationTitle("Network")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #else
-        .toolbar(.hidden, for: .navigationBar)
-        #endif
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
-        #if os(iOS)
-        .task {
-            NetworkMonitor.shared.refresh(force: true)
-            let stored = UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? ""
-            let parsed = stored.split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            ssidEntries = parsed.isEmpty ? [""] : parsed
-        }
-        #endif
     }
+    #endif
 
     private func intervalLabel(_ mins: Int) -> String {
         if mins < 60 { return "\(mins) minutes" }

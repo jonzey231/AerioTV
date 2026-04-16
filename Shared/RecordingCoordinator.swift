@@ -171,6 +171,7 @@ final class RecordingCoordinator: ObservableObject {
                                       recording: Recording,
                                       channelIntID: Int,
                                       applyServerOffsets: Bool,
+                                      comskip: Bool = false,
                                       modelContext: ModelContext) async throws {
         let result = try await api.createRecording(
             channelID: channelIntID,
@@ -178,7 +179,8 @@ final class RecordingCoordinator: ObservableObject {
             endTime: recording.effectiveEnd,
             title: recording.programTitle,
             description: recording.programDescription,
-            applyServerOffsets: applyServerOffsets
+            applyServerOffsets: applyServerOffsets,
+            comskip: comskip
         )
         recording.remoteRecordingID = result.id
         recording.status = RecordingStatus(rawValue: result.status ?? "scheduled") ?? .scheduled
@@ -230,6 +232,106 @@ final class RecordingCoordinator: ObservableObject {
         try? modelContext.save()
 
         debugLog("⬇️ Downloaded Dispatcharr recording \(remoteID) → \(destPath.path)")
+    }
+
+    // MARK: - Dispatcharr reconcile
+
+    /// Reconciles local SwiftData `Recording` rows for a single Dispatcharr
+    /// server against the server's authoritative recording list. Keeps the
+    /// local DVR tab honest as the server transitions rows through
+    /// scheduled → recording → completed and as users delete recordings
+    /// from the Dispatcharr web UI.
+    ///
+    /// - Status: when the server's `custom_properties.status` differs from
+    ///   our local `statusRaw`, adopt the server's value.
+    /// - Pruning: if a local row has a `remoteRecordingID` but the server
+    ///   no longer reports it, delete the local row — the user removed it
+    ///   elsewhere, so it has no business lingering in our UI.
+    /// - Safety: rows with `remoteRecordingID == nil` (still mid-schedule)
+    ///   are left alone. Rows for other servers are untouched.
+    /// - Import: remote recordings that don't have a matching local row
+    ///   (e.g. scheduled on the Dispatcharr web UI, or a row on a fresh
+    ///   install) are imported as new local `Recording` entries. Without
+    ///   this the DVR tab — which is gated on `hasRecordings` in
+    ///   SwiftData — would stay hidden even when the server has
+    ///   recordings, making them unreachable from the app.
+    /// - Failures: network errors are swallowed with a debug log; this is
+    ///   called on every MyRecordingsView appear + refresh tick, so we
+    ///   don't want to surface transient connectivity hiccups as errors.
+    @discardableResult
+    func reconcileDispatcharrRecordings(api: DispatcharrAPI,
+                                        serverID: String,
+                                        modelContext: ModelContext) async -> Bool {
+        let remote: [DispatcharrAPI.Recording]
+        do {
+            remote = try await api.listRecordings()
+        } catch {
+            debugLog("⚠️ DVR reconcile: listRecordings failed for server \(serverID): \(error)")
+            return false
+        }
+
+        // Build id → remote map once; per-local lookup is O(1).
+        var remoteByID: [Int: DispatcharrAPI.Recording] = [:]
+        remoteByID.reserveCapacity(remote.count)
+        for r in remote { remoteByID[r.id] = r }
+
+        // Fetch all recordings; filter in-memory to avoid SwiftData
+        // #Predicate quirks around the raw String destinationRaw/statusRaw.
+        let fetch = FetchDescriptor<Recording>()
+        guard let allLocals = try? modelContext.fetch(fetch) else { return false }
+        let mine = allLocals.filter {
+            $0.serverID == serverID && $0.destinationRaw == RecordingDestination.dispatcharrServer.rawValue
+        }
+
+        var didMutate = false
+        var knownRemoteIDs = Set<Int>()
+        for local in mine {
+            guard let rid = local.remoteRecordingID else {
+                // Still being scheduled on the server — do not prune.
+                continue
+            }
+            knownRemoteIDs.insert(rid)
+            if let r = remoteByID[rid] {
+                let newStatus = RecordingStatus(rawValue: r.status ?? "scheduled") ?? .scheduled
+                if local.status != newStatus {
+                    local.status = newStatus
+                    didMutate = true
+                }
+            } else {
+                debugLog("🧹 DVR reconcile: server \(serverID) dropped remoteID \(rid) — deleting local row")
+                modelContext.delete(local)
+                didMutate = true
+            }
+        }
+
+        // Import any server recording we don't have a local row for yet.
+        // This is the only path that lights up the DVR tab for a user who
+        // scheduled on the Dispatcharr web UI or reinstalled the app.
+        for r in remote where !knownRemoteIDs.contains(r.id) {
+            let status = RecordingStatus(rawValue: r.status ?? "scheduled") ?? .scheduled
+            let rec = Recording(
+                channelID: String(r.channel),
+                channelName: "",  // Filled in lazily via the channel store; safe to leave empty.
+                programTitle: r.programTitle ?? "",
+                programDescription: r.programDescription ?? "",
+                scheduledStart: r.startTime,
+                scheduledEnd: r.endTime,
+                preRollMinutes: 0,
+                postRollMinutes: 0,
+                destination: .dispatcharrServer,
+                status: status,
+                remoteRecordingID: r.id,
+                serverID: serverID
+            )
+            modelContext.insert(rec)
+            didMutate = true
+            debugLog("📥 DVR reconcile: imported remote recording \(r.id) (\(r.programTitle ?? "—")) from server \(serverID)")
+        }
+
+        if didMutate {
+            try? modelContext.save()
+        }
+        return didMutate
     }
 
     // MARK: - Delete local recording

@@ -21,8 +21,61 @@ struct DeveloperSettingsView: View {
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
+            #if os(tvOS)
+            tvOSBody
+            #else
+            iOSBody
+            #endif
+        }
+        .navigationTitle("Developer")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.large)
+        #else
+        .toolbar(.hidden, for: .navigationBar)
+        #endif
+        .toolbarBackground(Color.appBackground, for: .navigationBar)
 
-            List {
+        // MARK: - Enable Confirmation
+        .alert("Enable Debug Logging?", isPresented: $showEnableConfirmation) {
+            Button("Enable Logging", role: .none) {
+                debugLoggingEnabled = true
+                logger.enable()
+                refreshLogSize()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("AerioTV will write detailed diagnostic logs to a file on your device.\n\nThis includes network requests, playback events, and error details. The file is only accessible from this device via the Files app or the share button below.\n\nLogging has a minor impact on performance and storage. You can disable it at any time.")
+        }
+
+        // MARK: - Disable Confirmation
+        .alert("Disable Debug Logging?", isPresented: $showDisableConfirmation) {
+            Button("Disable", role: .destructive) {
+                logger.disable()
+                debugLoggingEnabled = false
+                refreshLogSize()
+            }
+            Button("Keep Logging", role: .cancel) {}
+        } message: {
+            Text("The existing log file will be kept. You can share or clear it at any time.")
+        }
+
+        // MARK: - Clear Confirmation
+        .confirmationDialog("Clear Log File?", isPresented: $showClearConfirmation, titleVisibility: .visible) {
+            Button("Clear Logs", role: .destructive) {
+                logger.clearLogs()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { refreshLogSize() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes the current aerio_debug_logs.txt. This cannot be undone.")
+        }
+    }
+
+    // MARK: - iOS Body
+
+    #if os(iOS)
+    private var iOSBody: some View {
+        List {
 
                 // MARK: - Debug Logging Toggle
                 Section {
@@ -198,56 +251,175 @@ struct DeveloperSettingsView: View {
                 #endif
 
             }
-            #if os(iOS)
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
-            #else
-            .listStyle(.plain)
-            #endif
-        }
-        .navigationTitle("Developer")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.large)
-        #else
-        .toolbar(.hidden, for: .navigationBar)
-        #endif
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
+    }
+    #endif
 
-        // MARK: - Enable Confirmation
-        .alert("Enable Debug Logging?", isPresented: $showEnableConfirmation) {
-            Button("Enable Logging", role: .none) {
-                debugLoggingEnabled = true
-                logger.enable()
-                refreshLogSize()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("AerioTV will write detailed diagnostic logs to a file on your device.\n\nThis includes network requests, playback events, and error details. The file is only accessible from this device via the Files app or the share button below.\n\nLogging has a minor impact on performance and storage. You can disable it at any time.")
-        }
+    // MARK: - tvOS Body
+    // Uses the shared TVSettings* components so focus highlights match the
+    // rest of the tvOS UI. iOS-only rows (Share Log File via
+    // UIActivityViewController) are omitted — the log file can still be
+    // retrieved via the companion iOS/iPad app or Files app sharing.
+    #if os(tvOS)
+    private var tvOSBody: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 32) {
+                tvSection("Logging") {
+                    TVSettingsToggleRow(
+                        icon: debugLoggingEnabled ? "ladybug.fill" : "ladybug",
+                        iconColor: debugLoggingEnabled ? .accentPrimary : .textSecondary,
+                        title: "Debug Logging",
+                        subtitle: debugLoggingEnabled
+                            ? "Active — writing to aerio_debug_logs.txt"
+                            : "Off — no data is collected",
+                        isOn: Binding(
+                            get: { debugLoggingEnabled },
+                            set: { newValue in
+                                if newValue {
+                                    showEnableConfirmation = true
+                                } else {
+                                    showDisableConfirmation = true
+                                }
+                            }
+                        )
+                    ) { _ in }
+                }
 
-        // MARK: - Disable Confirmation
-        .alert("Disable Debug Logging?", isPresented: $showDisableConfirmation) {
-            Button("Disable", role: .destructive) {
-                logger.disable()
-                debugLoggingEnabled = false
-                refreshLogSize()
-            }
-            Button("Keep Logging", role: .cancel) {}
-        } message: {
-            Text("The existing log file will be kept. You can share or clear it at any time.")
-        }
+                if debugLoggingEnabled || (logger.logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
+                    tvSection("Log File") {
+                        tvLogSizeCard
+                            .task { refreshLogSize() }
 
-        // MARK: - Clear Confirmation
-        .confirmationDialog("Clear Log File?", isPresented: $showClearConfirmation, titleVisibility: .visible) {
-            Button("Clear Logs", role: .destructive) {
-                logger.clearLogs()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { refreshLogSize() }
+                        if let url = logger.logFileURL,
+                           FileManager.default.fileExists(atPath: url.path) {
+                            TVSettingsActionRow(
+                                icon: "doc.text.magnifyingglass",
+                                label: "View Log File",
+                                isAccent: true,
+                                action: { showLogViewer = true }
+                            )
+                            .sheet(isPresented: $showLogViewer) {
+                                LogViewerView(url: url)
+                            }
+                        }
+
+                        TVSettingsActionRow(
+                            icon: "trash",
+                            label: "Clear Log File",
+                            isDestructive: true,
+                            action: { showClearConfirmation = true }
+                        )
+                    }
+                }
+
+                tvSection("What's Captured") {
+                    tvLogCategoryCard
+                }
             }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This permanently deletes the current aerio_debug_logs.txt. This cannot be undone.")
+            .padding(48)
         }
     }
+
+    private var tvLogSizeCard: some View {
+        HStack(spacing: 16) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 28))
+                .foregroundColor(.textSecondary)
+                .frame(width: 36)
+            Text("Log File Size")
+                .font(.system(size: 26, weight: .medium))
+                .foregroundColor(.textPrimary)
+            Spacer()
+            Text(logSize)
+                .font(.system(size: 24, design: .monospaced))
+                .foregroundColor(.textTertiary)
+        }
+        .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.cardBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.accentPrimary.opacity(0.10), lineWidth: 1)
+                )
+        )
+    }
+
+    private var tvLogCategoryCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            tvLogCategory(icon: "network",
+                          title: "Network",
+                          detail: "All API requests — URL, method, status code, duration, payload size")
+            tvLogCategory(icon: "play.rectangle.fill",
+                          title: "Playback",
+                          detail: "Stream URLs loaded, player state transitions, DVR mode, failover attempts")
+            tvLogCategory(icon: "calendar",
+                          title: "EPG",
+                          detail: "Current program fetches, upcoming program loads, decode errors")
+            tvLogCategory(icon: "antenna.radiowaves.left.and.right",
+                          title: "Channels",
+                          detail: "Channel list loads, server type, item counts, timing")
+            tvLogCategory(icon: "app.badge",
+                          title: "Lifecycle",
+                          detail: "App foreground/background, launch, scene transitions")
+            tvLogCategory(icon: "exclamationmark.triangle.fill",
+                          title: "Errors",
+                          detail: "Caught exceptions with full context, source file and line number")
+            tvLogCategory(icon: "gauge.with.dots.needle.67percent",
+                          title: "Performance",
+                          detail: "Timed operations — parse time, load time, memory at session start")
+
+            Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
+                .font(.system(size: 20))
+                .foregroundColor(.textTertiary)
+                .padding(.top, 8)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.cardBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.accentPrimary.opacity(0.10), lineWidth: 1)
+                )
+        )
+    }
+
+    private func tvLogCategory(icon: String, title: String, detail: String) -> some View {
+        HStack(alignment: .top, spacing: 16) {
+            Image(systemName: icon)
+                .font(.system(size: 22, weight: .medium))
+                .foregroundColor(.accentSecondary)
+                .frame(width: 32)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundColor(.textPrimary)
+                Text(detail)
+                    .font(.system(size: 20))
+                    .foregroundColor(.textSecondary)
+            }
+        }
+    }
+
+    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title.uppercased())
+                .font(.system(size: 22, weight: .bold))
+                .foregroundColor(.textTertiary)
+                .tracking(1)
+                .padding(.leading, 20)
+            VStack(alignment: .leading, spacing: 8) {
+                content()
+            }
+        }
+    }
+    #endif
 
     // MARK: - Helpers
 

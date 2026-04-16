@@ -587,30 +587,60 @@ final class ChannelStore: ObservableObject {
         isEPGLoading = true
         defer { isEPGLoading = false }
 
-        let now = Date()
-
         switch type {
         case .dispatcharrAPI:
             // Dispatcharr: one bulk call via /api/epg/grid/ — all channels, -1h to +24h
             do {
                 let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
                 let programs = try await dAPI.getEPGGrid()
-                // Group by tvgID and populate EPGCache
-                var byTvgID: [String: [EPGEntry]] = [:]
-                for p in programs {
-                    guard let start = p.startTime?.toDate(), let end = p.endTime?.toDate(),
-                          end > now else { continue }
-                    let key = p.tvgID ?? (p.channel.map { "ch_\($0)" } ?? "")
-                    guard !key.isEmpty else { continue }
-                    let entry = EPGEntry(title: p.title, description: p.description, startTime: start, endTime: end)
-                    byTvgID[key, default: []].append(entry)
-                }
-                // Sort each channel's programs by start time and cache them
-                for (tvgID, entries) in byTvgID {
-                    let sorted = entries.sorted { ($0.startTime ?? .distantPast) < ($1.startTime ?? .distantPast) }
-                    await EPGCache.shared.set(sorted, for: "d_\(baseURL)_\(tvgID)")
-                }
-                debugLog("📺 Bulk EPG loaded: \(programs.count) programs across \(byTvgID.count) channels")
+
+                // Everything below (dictionary build, ~7k-item sort,
+                // cache writes, fallback loop) used to run on the
+                // MainActor here and produced a ~560 ms hang while
+                // the user was staring at the Loading Guide screen.
+                // Offload all of it to a detached task. The channels
+                // snapshot is captured by value so the task doesn't
+                // reach back into the MainActor-isolated store.
+                let channelSnapshot = self.channels
+                let base = baseURL
+                await Task.detached(priority: .utility) {
+                    let now = Date()
+
+                    // Group by tvgID
+                    var byTvgID: [String: [EPGEntry]] = [:]
+                    for p in programs {
+                        guard let start = p.startTime?.toDate(), let end = p.endTime?.toDate(),
+                              end > now else { continue }
+                        let key = p.tvgID ?? (p.channel.map { "ch_\($0)" } ?? "")
+                        guard !key.isEmpty else { continue }
+                        let entry = EPGEntry(title: p.title, description: p.description, startTime: start, endTime: end)
+                        byTvgID[key, default: []].append(entry)
+                    }
+                    // Sort each channel's programs then cache them
+                    for (tvgID, entries) in byTvgID {
+                        let sorted = entries.sorted { ($0.startTime ?? .distantPast) < ($1.startTime ?? .distantPast) }
+                        await EPGCache.shared.set(sorted, for: "d_\(base)_\(tvgID)")
+                    }
+                    debugLog("📺 Bulk EPG loaded: \(programs.count) programs across \(byTvgID.count) channels")
+
+                    // Populate empty-array fallbacks for channels the
+                    // bulk didn't cover, so per-card expansion can't
+                    // trigger post-loading network fetches. Uses the
+                    // same cache-key scheme ChannelListView's
+                    // makeFetchUpcoming expects: "d_<base>_<tvgID or channelID>".
+                    var filledFallbacks = 0
+                    for channel in channelSnapshot {
+                        let tvgID = channel.tvgID ?? ""
+                        let keyPart = tvgID.isEmpty ? channel.id : tvgID
+                        let cacheKey = "d_\(base)_\(keyPart)"
+                        if await EPGCache.shared.get(cacheKey) == nil {
+                            await EPGCache.shared.set([], for: cacheKey)
+                            filledFallbacks += 1
+                        }
+                    }
+                    debugLog("📺 Bulk EPG: filled \(filledFallbacks) empty fallbacks so no post-loading network fetches fire")
+                }.value
+
                 // Refresh Top Shelf with updated program info
                 TopShelfDataManager.syncTopChannels(channels: self.channels)
             } catch {
@@ -950,9 +980,12 @@ final class FavoritesStore: ObservableObject {
     @Published private(set) var favoriteItems: [ChannelDisplayItem] = []
     private var favoriteIDs: Set<String>
 
-    /// App Group suite name — shared with the Top Shelf extension.
+    /// App Group suite name — retained for reference / historical reasons.
+    /// We no longer write to `UserDefaults(suiteName:)` on tvOS because
+    /// the sandbox denies writes to every app-group container with EPERM
+    /// on this project's Apple TV — see `TopShelfDataManager` doc below.
+    /// The value writes go through `TopShelfKeychain` instead.
     static let appGroupID = "group.app.molinete.aerio.topshelf"
-    private var sharedDefaults: UserDefaults? { UserDefaults(suiteName: Self.appGroupID) }
 
     init() {
         let saved = UserDefaults.standard.stringArray(forKey: "favoriteChannelIDs") ?? []
@@ -981,10 +1014,14 @@ final class FavoritesStore: ObservableObject {
         syncToSharedDefaults()
     }
 
-    /// Writes favorite channel info to shared UserDefaults for the Top Shelf extension.
+    /// Writes favorite channel info to shared storage for the Top Shelf
+    /// extension. Uses `TopShelfKeychain` (same as `topChannels` and
+    /// `continueWatching`) rather than `UserDefaults(suiteName:)` because
+    /// the tvOS sandbox denies app-group container writes with EPERM on
+    /// this project, which also triggered a noisy CFPrefsPlistSource
+    /// cfprefsd warning on launch.
     private func syncToSharedDefaults() {
         #if os(tvOS)
-        guard let shared = sharedDefaults else { return }
         let entries: [[String: String]] = favoriteItems.map { item in
             var entry: [String: String] = [
                 "id": item.id,
@@ -994,7 +1031,7 @@ final class FavoritesStore: ObservableObject {
             if let logo = item.logoURL?.absoluteString { entry["logoURL"] = logo }
             return entry
         }
-        shared.set(entries, forKey: "topShelfFavorites")
+        TopShelfKeychain.write(array: entries, key: "favorites")
         #endif
     }
 }
@@ -1271,16 +1308,18 @@ final class NowPlayingManager: ObservableObject {
     @Published var playingItem: ChannelDisplayItem? = nil
     @Published var playingHeaders: [String: String] = [:]
     @Published var isMinimized: Bool = false
+    @Published var isLive: Bool = true
 
     var isActive: Bool { playingItem != nil }
 
-    func startPlaying(_ item: ChannelDisplayItem, headers: [String: String]) {
-        debugLog("🎮 NowPlaying.startPlaying: \(item.name) (id=\(item.id)), wasMinimized=\(isMinimized), wasPlaying=\(playingItem?.name ?? "nil")")
+    func startPlaying(_ item: ChannelDisplayItem, headers: [String: String], isLive: Bool = true) {
+        debugLog("🎮 NowPlaying.startPlaying: \(item.name) (id=\(item.id)), isLive=\(isLive), wasMinimized=\(isMinimized), wasPlaying=\(playingItem?.name ?? "nil")")
         playingItem = item
         playingHeaders = headers
+        self.isLive = isLive
         isMinimized = false
         // Track watch count for Top Shelf "most watched" ranking
-        TopShelfDataManager.incrementWatchCount(for: item)
+        if isLive { TopShelfDataManager.incrementWatchCount(for: item) }
     }
 
     func minimize() {
@@ -1304,16 +1343,16 @@ final class NowPlayingManager: ObservableObject {
 enum AppTab: String, CaseIterable {
     case liveTV    = "livetv"
     case favorites = "favorites"
-    case movies    = "movies"
-    case tv        = "tv"
+    case dvr       = "dvr"
+    case onDemand  = "ondemand"
     case settings  = "settings"
 
     var title: String {
         switch self {
         case .liveTV:    return "Live TV"
         case .favorites: return "Favorites"
-        case .movies:    return "Movies"
-        case .tv:        return "Series"
+        case .dvr:       return "DVR"
+        case .onDemand:  return "On Demand"
         case .settings:  return "Settings"
         }
     }
@@ -1322,8 +1361,8 @@ enum AppTab: String, CaseIterable {
         switch self {
         case .liveTV:    return "antenna.radiowaves.left.and.right"
         case .favorites: return "star.fill"
-        case .movies:    return "film.stack"
-        case .tv:        return "tv"
+        case .dvr:       return "record.circle"
+        case .onDemand:  return "play.rectangle.on.rectangle"
         case .settings:  return "gearshape.fill"
         }
     }
@@ -1333,7 +1372,9 @@ enum AppTab: String, CaseIterable {
 struct MainTabView: View {
     @AppStorage("defaultTab") private var defaultTabRaw = AppTab.liveTV.rawValue
     @ObservedObject private var theme = ThemeManager.shared
+    @Environment(\.modelContext) private var modelContext
     @Query private var allServers: [ServerConnection]
+    @Query private var allRecordings: [Recording]
 
     @State private var selectedTab: AppTab = .liveTV
     @State private var showSearch = false
@@ -1352,6 +1393,11 @@ struct MainTabView: View {
     @ObservedObject private var channelStore = ChannelStore.shared
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
+    /// Flipped true after the first DVR reconcile completes so the
+    /// initial loading screen knows it can dismiss. Only gates the
+    /// dismiss when a Dispatcharr server is configured — other server
+    /// types skip this wait entirely.
+    @State private var didInitialDVRReconcile = false
 
     init() {
         debugLog("🔶🔶 MainTabView.init() — NEW INSTANCE CREATED, thread=\(Thread.current)")
@@ -1372,6 +1418,114 @@ struct MainTabView: View {
         allServers.map { "\($0.id.uuidString)|\($0.baseURL)|\($0.isActive ? "1" : "0")" }
             .sorted()
             .joined(separator: ",")
+    }
+
+    /// Restart the DVR reconcile loop whenever the set of Dispatcharr
+    /// servers (or their identity) changes. The loop itself polls
+    /// every 2 minutes internally.
+    private var dvrReconcileKey: String {
+        allServers
+            .filter { $0.type == .dispatcharrAPI }
+            .map { "\($0.id.uuidString)" }
+            .sorted()
+            .joined(separator: ",")
+    }
+
+    /// Walks every Dispatcharr server, asks the coordinator to
+    /// reconcile its server-side recordings against local SwiftData
+    /// rows (status sync + prune + orphan import). Fires from a
+    /// tab-bar-level .task so the DVR tab can light up even when the
+    /// user hasn't navigated to it yet — `hasRecordings` reads
+    /// SwiftData, which the reconciler writes into.
+    private func reconcileAllDispatcharrRecordings() async {
+        let dispatcharrServers = allServers.filter { $0.type == .dispatcharrAPI }
+        guard !dispatcharrServers.isEmpty else { return }
+        for server in dispatcharrServers {
+            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                     auth: .apiKey(server.effectiveApiKey),
+                                     userAgent: server.effectiveUserAgent)
+            await RecordingCoordinator.shared.reconcileDispatcharrRecordings(
+                api: api,
+                serverID: server.id.uuidString,
+                modelContext: modelContext
+            )
+        }
+    }
+
+    // MARK: - Initial Loading Screen State
+
+    /// True when the active server list contains a Dispatcharr server
+    /// — only those require a DVR reconcile before the loading
+    /// screen can dismiss. Other server types ignore the DVR gate.
+    private var needsInitialDVRSync: Bool {
+        allServers.contains { $0.type == .dispatcharrAPI }
+    }
+
+    /// Hashable digest that flips whenever ANY of the initial sync
+    /// signals change (channels, EPG, VOD movies, VOD series, DVR
+    /// reconcile). `.onChange(of: initialSyncKey)` listens to it and
+    /// calls `tryDismissInitialLoading()` each time.
+    private var initialSyncKey: String {
+        let channelsDone = !channelStore.isLoading && !channelStore.channels.isEmpty
+        let epgDone      = !channelStore.isEPGLoading
+        let vodDone      = !vodStore.isLoadingMovies && !vodStore.isLoadingSeries
+        let dvrDone      = didInitialDVRReconcile || !needsInitialDVRSync
+        return "\(channelsDone)|\(epgDone)|\(vodDone)|\(dvrDone)"
+    }
+
+    /// Dynamic status string displayed on the Loading Guide screen so
+    /// the user knows which phase is in flight. Evaluated top-down in
+    /// roughly the order the phases complete.
+    private var initialLoadingStatusText: String {
+        if channelStore.isLoading || channelStore.channels.isEmpty {
+            return "Loading channels"
+        }
+        if channelStore.isEPGLoading {
+            return "Downloading program guide"
+        }
+        if vodStore.isLoadingMovies || vodStore.isLoadingSeries {
+            return "Loading movies & series"
+        }
+        if needsInitialDVRSync && !didInitialDVRReconcile {
+            return "Syncing recordings"
+        }
+        return "Finishing up"
+    }
+
+    /// Show the initial sync loading screen when we have a server
+    /// list to load from AND channels haven't populated yet. Called
+    /// both on `onAppear` (normal launches) and on `onChange` of the
+    /// server count (iCloud-sync onboarding, where servers arrive
+    /// after MainTabView has already appeared).
+    ///
+    /// Skipped when:
+    /// - The screen is already showing (avoid a second `.fullScreenCover`).
+    /// - No servers are configured (we can't sync anything).
+    /// - Channels are already populated (a normal warm reopen where
+    ///   the ChannelStore is already hydrated; nothing new to show).
+    private func tryShowInitialLoading() {
+        guard !showInitialEPGLoading else { return }
+        guard !allServers.isEmpty else { return }
+        guard channelStore.channels.isEmpty else { return }
+        showInitialEPGLoading = true
+        debugLog("🔶 Initial sync starting — showing loading screen (servers=\(allServers.count))")
+    }
+
+    /// Called whenever `initialSyncKey` changes. Dismisses the
+    /// Loading Guide screen only when every initial sync signal is
+    /// finished, so the user lands in fully-loaded List / Guide
+    /// views instead of a half-populated app.
+    private func tryDismissInitialLoading() {
+        guard showInitialEPGLoading else { return }
+        guard !channelStore.isLoading, !channelStore.channels.isEmpty else { return }
+        guard !channelStore.isEPGLoading else { return }
+        guard !vodStore.isLoadingMovies, !vodStore.isLoadingSeries else { return }
+        if needsInitialDVRSync && !didInitialDVRReconcile { return }
+
+        withAnimation(.easeOut(duration: 0.4)) {
+            showInitialEPGLoading = false
+        }
+        debugLog("🔶 Initial sync complete — dismissing loading screen")
     }
     /// Shared drag offset — MiniPlayerBar writes it, PlayerView reads it to slide in from below.
     @State private var miniPlayerDragOffset: CGFloat = 0
@@ -1421,7 +1575,7 @@ struct MainTabView: View {
                         urls: item.streamURLs,
                         title: item.name,
                         headers: nowPlaying.playingHeaders,
-                        isLive: true,
+                        isLive: nowPlaying.isLive,
                         subtitle: item.currentProgram,
                         subtitleStart: item.currentProgramStart,
                         subtitleEnd: item.currentProgramEnd,
@@ -1451,7 +1605,7 @@ struct MainTabView: View {
                             urls: item.streamURLs,
                             title: item.name,
                             headers: nowPlaying.playingHeaders,
-                            isLive: true,
+                            isLive: nowPlaying.isLive,
                             subtitle: item.currentProgram,
                             subtitleStart: item.currentProgramStart,
                             subtitleEnd: item.currentProgramEnd,
@@ -1517,6 +1671,7 @@ struct MainTabView: View {
     }
 
     private var hasFavorites: Bool { !favoritesStore.favoriteItems.isEmpty }
+    private var hasRecordings: Bool { !allRecordings.isEmpty }
 
     // MARK: - Tab Content
     private var tabContentView: some View {
@@ -1533,13 +1688,19 @@ struct MainTabView: View {
                     .tag(AppTab.favorites)
             }
 
-            MoviesView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
-                .tabItem { Label(AppTab.movies.title, systemImage: AppTab.movies.icon) }
-                .tag(AppTab.movies)
+            // DVR tab only exists while the user has at least one recording
+            // (local or server-side). Animates in/out as recordings are added/removed.
+            if hasRecordings {
+                NavigationStack {
+                    MyRecordingsView()
+                }
+                .tabItem { Label(AppTab.dvr.title, systemImage: AppTab.dvr.icon) }
+                .tag(AppTab.dvr)
+            }
 
-            TVShowsView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
-                .tabItem { Label(AppTab.tv.title, systemImage: AppTab.tv.icon) }
-                .tag(AppTab.tv)
+            OnDemandView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
+                .tabItem { Label(AppTab.onDemand.title, systemImage: AppTab.onDemand.icon) }
+                .tag(AppTab.onDemand)
 
             #if os(tvOS)
             SettingsView(selectedTab: $selectedTab)
@@ -1560,6 +1721,14 @@ struct MainTabView: View {
                 }
             }
         }
+        // If the user deletes their last recording while on the DVR tab, redirect home.
+        .onChange(of: hasRecordings) { _, nowHasRecordings in
+            if !nowHasRecordings && selectedTab == .dvr {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    selectedTab = .liveTV
+                }
+            }
+        }
         .onAppear {
             debugLog("🔶 MainTabView.onAppear: allServers=\(allServers.count), selectedTab=\(selectedTab), thread=\(Thread.current)")
             if UserDefaults.standard.bool(forKey: "launchOnLiveTV") {
@@ -1570,30 +1739,27 @@ struct MainTabView: View {
                 selectedTab = AppTab(rawValue: defaultTabRaw) ?? .liveTV
             }
             configureTabBarAppearance()
-            // Show EPG loading screen only if the active server has EPG data to load.
-            // M3U without EPG URL has nothing to fetch — skip the loading screen.
-            let activeServer = allServers.first(where: { $0.isActive }) ?? allServers.first
-            let hasEPG: Bool = {
-                guard let s = activeServer else { return false }
-                if s.type == .m3uPlaylist { return !s.epgURL.isEmpty }
-                return true  // Dispatcharr and Xtream always have EPG
-            }()
-            if hasEPG {
-                showInitialEPGLoading = true
-            }
+            tryShowInitialLoading()
             debugLog("🔶 MainTabView.onAppear: done")
         }
-        // Dismiss EPG loading screen once EPG finishes downloading
-        .onChange(of: channelStore.isEPGLoading) { _, loading in
-            if !loading && showInitialEPGLoading && !channelStore.channels.isEmpty {
-                withAnimation(.easeOut(duration: 0.4)) {
-                    showInitialEPGLoading = false
-                }
-                debugLog("🔶 EPG download complete — dismissing loading screen")
-            }
+        // Also re-evaluate the loading screen whenever the server list
+        // transitions (e.g. iCloud sync imports servers after MainTabView
+        // has already appeared — without this observer the loading
+        // screen would never show for an iCloud-onboarded device and
+        // the user would land on Live TV before channels/EPG/VOD/DVR
+        // had finished syncing).
+        .onChange(of: allServers.count) { _, _ in
+            tryShowInitialLoading()
         }
+        // Hold the initial loading screen until channels + EPG + VOD
+        // + first DVR reconcile are ALL finished. The user previously
+        // complained about landing in List/Guide views while VOD was
+        // still loading and DVR hadn't synced — this keeps the
+        // on-screen state honest. The key is a Hashable digest of
+        // every signal; onChange fires each time any of them flip.
+        .onChange(of: initialSyncKey) { _, _ in tryDismissInitialLoading() }
         .fullScreenCover(isPresented: $showInitialEPGLoading) {
-            InitialEPGLoadingView()
+            InitialEPGLoadingView(statusText: initialLoadingStatusText)
                 .interactiveDismissDisabled()
         }
         // Pre-fetch VOD data whenever the VOD server list changes.
@@ -1620,6 +1786,24 @@ struct MainTabView: View {
             }
             if !channelStore.channels.isEmpty {
                 await channelStore.loadAllEPG()
+            }
+        }
+        // DVR reconcile at tab-bar level so the DVR tab lights up as
+        // soon as a Dispatcharr server reports a recording — even if
+        // the user scheduled it from the web UI (no local row to
+        // trigger MyRecordingsView.task). Runs once on server change,
+        // then every 2 minutes while the app is foregrounded. This is
+        // cheap: a single GET /api/channels/recordings/ per server.
+        .task(id: dvrReconcileKey) {
+            // Run one reconcile immediately so the initial loading
+            // screen can dismiss as soon as it completes. Then enter
+            // the polling loop (every 2 minutes while foregrounded).
+            await reconcileAllDispatcharrRecordings()
+            didInitialDVRReconcile = true
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(120))
+                if Task.isCancelled { break }
+                await reconcileAllDispatcharrRecordings()
             }
         }
         // Global search — hidden during active playback
@@ -1690,11 +1874,11 @@ struct MainTabView: View {
             debugLog("🔗 MainTabView: aerioOpenChannel → switch to Live TV tab")
             withAnimation { selectedTab = .liveTV }
         }
-        // Top Shelf deep link for a VOD item → switch to the matching tab.
-        // MoviesView / TVShowsView handle navigating to the specific item.
+        // Top Shelf deep link for a VOD item → switch to On Demand tab.
+        // OnDemandView handles the Movies/Series segment switch internally.
         .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
             guard let vodType = notif.userInfo?["vodType"] as? String else { return }
-            let target: AppTab = (vodType == "series") ? .tv : .movies
+            let target: AppTab = .onDemand
             debugLog("🔗 MainTabView: aerioOpenVOD(\(vodType)) → switch to \(target.rawValue) tab")
             withAnimation { selectedTab = target }
         }
@@ -1882,9 +2066,15 @@ struct MiniPlayerBar: View {
 #endif
 
 // MARK: - Initial EPG Loading View
-/// Full-screen loading view shown on first install while EPG data downloads.
-/// Dismissed automatically once the download completes.
+/// Full-screen loading view shown while initial channels + EPG + VOD
+/// + DVR data syncs. Dismissed automatically once every phase is
+/// finished so the user never lands in a half-populated List / Guide.
 struct InitialEPGLoadingView: View {
+    /// Current phase, e.g. "Loading channels", "Downloading program
+    /// guide", "Loading movies & series", "Syncing recordings". The
+    /// parent (MainTabView) computes this from the live store flags.
+    let statusText: String
+
     @ObservedObject private var theme = ThemeManager.shared
     @State private var dots = ""
     @State private var timer: Timer?
@@ -1899,14 +2089,15 @@ struct InitialEPGLoadingView: View {
                     .font(.system(size: 64))
                     .foregroundColor(theme.accent)
 
-                Text("Loading Guide")
+                Text("Setting Up")
                     .font(.system(size: 28, weight: .bold))
                     .foregroundColor(.textPrimary)
 
-                Text("Downloading program guide\(dots)")
+                Text("\(statusText)\(dots)")
                     .font(.system(size: 18))
                     .foregroundColor(.textSecondary)
-                    .frame(width: 350, alignment: .center)
+                    .frame(width: 400, alignment: .center)
+                    .animation(.easeInOut(duration: 0.2), value: statusText)
 
                 ProgressView()
                     .progressViewStyle(.circular)

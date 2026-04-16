@@ -1,5 +1,83 @@
 # Changelog
 
+## v1.5.0 — 2026-04-16
+
+### New
+
+- **Commercial skip (Comskip).** Dispatcharr server-side users can enable
+  commercial detection and removal when scheduling a recording. The toggle
+  appears in the Record sheet whenever the destination is
+  "Dispatcharr server"; processing runs on the server after the
+  recording completes. Also exposes a new `applyComskip(id:)` API call
+  for triggering it on existing recordings.
+- **DVR auto-discovery.** Recordings scheduled from the Dispatcharr web
+  UI (or from another device) now appear in AerioTV's DVR tab
+  automatically. A reconciliation loop runs every 2 minutes at the
+  tab-bar level, so the DVR tab lights up without the user having to
+  open it first.
+- **Recordings accessible via Files app (iOS).** Local recordings can
+  now be browsed and exported from the iOS Files app under
+  "On My iPhone → AerioTV".
+- **Refreshed app icon** across all 15 sizes to match the current
+  AerioTV branding.
+
+### Fixed — iOS
+
+- Long-pressing a channel card in the list view and selecting "Record
+  from Now" now actually presents the record sheet. The presenter was
+  previously scoped to the expanded guide panel only, so the sheet
+  silently refused to appear when the card was collapsed.
+
+### Fixed — tvOS (major UI overhaul)
+
+- **Long-press in Guide / DVR / upcoming-schedule rows now fires
+  precisely at 0.35s** via a new UIKit-backed press detector
+  (`Shared/TVPressGesture.swift`). SwiftUI's `LongPressGesture` on tvOS
+  fires on press release rather than at `minimumDuration`, which made
+  the press feel sluggish at every threshold value.
+- **Context-menu flash on EPG program cells and channel rows**
+  replaced with a stable `.confirmationDialog` path. Rebuilding the
+  `UIMenu` every time the cell re-rendered was causing a visible
+  flash on each update.
+- **Record sheet rebuilt for tvOS.** Presents via `.fullScreenCover`
+  instead of the cramped centred `.sheet` modal, with a custom layout
+  of pill buttons (Off / On, None / 5 min / 10 min / …) instead of
+  the default Form rows whose oversized white focus halos obscured
+  neighbouring controls.
+- **DVR tab visuals unified.** Recording rows use the subtle accent-
+  stroke + scale-bump focus treatment that matches the Live TV group
+  filter bar and the rest of the app — no more system white halo.
+- **Settings pages unified.** Network, DVR, Developer, and Appearance
+  rewritten on top of the shared `TVSettings*` components
+  (`TVSettingsNavRow`, `TVSettingsSelectionRow`, `TVSettingsToggleRow`,
+  `TVSettingsActionRow`, `tvSettingsCardBG`). Focus treatment is now
+  consistent across every Settings sub-page.
+- **Guide-only on tvOS.** The Live TV tab always opens the Guide view;
+  the List view is no longer offered.
+- **CFBundleVersion warning resolved.** tvOS app's
+  `CURRENT_PROJECT_VERSION` bumped to match the Top Shelf extension.
+- **Console warning** `"Adding '_UIReplicantView' as a subview of
+  UIHostingController.view is not supported"` resolved by wrapping
+  the focusable press-detector UIView in a plain container.
+
+### Notes
+
+- New shared UIKit helper `Shared/TVPressGesture.swift` (`TVPressOverlay`,
+  `PressCatcherView`) added to both the iOS and tvOS target sources in
+  `Aerio.xcodeproj/project.pbxproj`.
+- `DispatcharrAPI.Recording` gains a `comskip: Bool` field.
+- `RecordingCoordinator.scheduleDispatcharrRecording(...)` and
+  `DispatcharrAPI.createRecording(...)` each gain a
+  `comskip: Bool = false` parameter.
+- `reconcileDispatcharrRecordings(api:serverID:modelContext:)` now
+  imports orphan remote recordings as new local rows (previously it
+  only synced status or pruned deleted rows).
+- All `TVSettings*` row components and `tvSettingsCardBG(_:)` promoted
+  from `private` to internal so DVR / Developer / Appearance /
+  Network Settings can share them.
+
+---
+
 ## v1.4.0 — 2026-04-10
 
 ### New — DVR Recording

@@ -153,7 +153,8 @@ struct ChannelListView: View {
                     }()
 
                     #if os(tvOS)
-                    showGuideView = hasEPG && defaultLiveTVView == "guide"
+                    // tvOS always uses Guide view — list view is not offered.
+                    showGuideView = true
                     #else
                     if UIDevice.current.userInterfaceIdiom == .pad {
                         showGuideView = hasEPG && defaultLiveTVView == "guide"
@@ -202,9 +203,8 @@ struct ChannelListView: View {
                         return true
                     }()
                     #if os(tvOS)
-                    if hasEPG && defaultLiveTVView == "guide" && !showGuideView {
-                        showGuideView = true
-                    }
+                    // tvOS always uses Guide view.
+                    if !showGuideView { showGuideView = true }
                     #else
                     if UIDevice.current.userInterfaceIdiom == .pad && hasEPG && defaultLiveTVView == "guide" && !showGuideView {
                         showGuideView = true
@@ -680,6 +680,10 @@ struct ChannelRow: View {
     @State private var recordTarget: EPGEntry?
     @State private var showRecordSheet = false
     #if os(tvOS)
+    /// tvOS uses onLongPressGesture + confirmationDialog instead of
+    /// .contextMenu on upcoming-program rows (.contextMenu flashes the
+    /// row highlight on tvOS each time SwiftUI rebuilds the UIMenu).
+    @State private var ctxDialogEntry: EPGEntry?
     /// Tracks which part of the row has focus.
     /// Navigation: D-pad LEFT → star, D-pad RIGHT → expand/guide.
     @FocusState private var mainFocused: Bool
@@ -738,6 +742,38 @@ struct ChannelRow: View {
         .conditionalExitCommand(isActive: isExpanded) {
             debugLog("🎮 Back pressed: collapsing expanded card for \(item.name)")
             withAnimation(.spring(response: 0.25)) { isExpanded = false }
+        }
+        // tvOS: .fullScreenCover because .sheet presents a cramped
+        // centered modal on tvOS that clips the record form.
+        .fullScreenCover(isPresented: $showRecordSheet) {
+            if let entry = recordTarget {
+                RecordProgramSheet(
+                    programTitle: entry.title,
+                    programDescription: entry.description,
+                    channelID: item.id,
+                    channelName: item.name,
+                    scheduledStart: entry.startTime ?? Date(),
+                    scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
+                    isLive: (entry.startTime ?? Date()) <= Date()
+                )
+            }
+        }
+        #else
+        // iOS: attach at the outer body so this works whether the card
+        // is collapsed (long-press dialog trigger) or expanded (tap on
+        // an upcoming-schedule row trigger).
+        .sheet(isPresented: $showRecordSheet) {
+            if let entry = recordTarget {
+                RecordProgramSheet(
+                    programTitle: entry.title,
+                    programDescription: entry.description,
+                    channelID: item.id,
+                    channelName: item.name,
+                    scheduledStart: entry.startTime ?? Date(),
+                    scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
+                    isLive: (entry.startTime ?? Date()) <= Date()
+                )
+            }
         }
         #endif
     }
@@ -1060,23 +1096,16 @@ struct ChannelRow: View {
                     VStack(spacing: 0) {
                         ForEach(futurePrograms) { entry in
                             #if os(tvOS)
-                            Button(action: {}) {
-                                epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
-                            }
-                            .buttonStyle(EPGRowButtonStyle())
-                            .contextMenu {
-                                reminderMenu(for: entry)
-                                if let end = entry.endTime, end > Date() {
-                                    let isLive = (entry.startTime ?? Date()) <= Date()
-                                    Button {
-                                        recordTarget = entry
-                                        showRecordSheet = true
-                                    } label: {
-                                        Label(isLive ? "Record from Now" : "Record",
-                                              systemImage: "record.circle")
-                                    }
-                                }
-                            }
+                            // UIKit-backed overlay because SwiftUI's tvOS
+                            // long-press fires on release, not at threshold
+                            // (see Shared/TVPressGesture.swift).
+                            epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
+                                .overlay(
+                                    TVPressOverlay(
+                                        minimumPressDuration: 0.35,
+                                        onLongPress: { ctxDialogEntry = entry }
+                                    )
+                                )
                             #else
                             epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
                                 .padding(.horizontal, 4)
@@ -1162,19 +1191,54 @@ struct ChannelRow: View {
                 .focusSection()
                 #endif
                 .padding(.bottom, 4)
-                .sheet(isPresented: $showRecordSheet) {
-                    if let entry = recordTarget {
-                        RecordProgramSheet(
-                            programTitle: entry.title,
-                            programDescription: entry.description,
-                            channelID: item.id,
-                            channelName: item.name,
-                            scheduledStart: entry.startTime ?? Date(),
-                            scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
-                            isLive: (entry.startTime ?? Date()) <= Date()
-                        )
+                // NOTE: The `.sheet` / `.fullScreenCover` that presents
+                // RecordProgramSheet used to live here, but on iOS the
+                // user can also trigger it from the channel card's
+                // long-press confirmationDialog — which fires even when
+                // the card is collapsed (no guidePanel in hierarchy).
+                // Moved to the outer body so the presenter is always
+                // mounted whenever the channel card is visible.
+                #if os(tvOS)
+                .confirmationDialog(
+                    ctxDialogEntry?.title ?? "",
+                    isPresented: Binding(
+                        get: { ctxDialogEntry != nil },
+                        set: { if !$0 { ctxDialogEntry = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    if let entry = ctxDialogEntry {
+                        if let end = entry.endTime, end > Date() {
+                            let isLive = (entry.startTime ?? Date()) <= Date()
+                            Button(isLive ? "Record from Now" : "Record") {
+                                recordTarget = entry
+                                showRecordSheet = true
+                            }
+                        }
+                        if let start = entry.startTime, start > Date() {
+                            let key = ReminderManager.programKey(
+                                channelName: item.name,
+                                title: entry.title,
+                                start: start
+                            )
+                            if ReminderManager.shared.hasReminder(forKey: key) {
+                                Button("Cancel Reminder", role: .destructive) {
+                                    ReminderManager.shared.cancelReminder(forKey: key)
+                                }
+                            } else {
+                                Button("Set Reminder") {
+                                    ReminderManager.shared.scheduleReminder(
+                                        programTitle: entry.title,
+                                        channelName: item.name,
+                                        startTime: start
+                                    )
+                                }
+                            }
+                        }
+                        Button("Cancel", role: .cancel) {}
                     }
                 }
+                #endif
             }
         }
     }
@@ -1528,40 +1592,52 @@ struct MarqueeText: View {
 // Each pill owns its own @FocusState so it can apply a scale+glow effect
 // instead of the system's default white focus ring.
 #if os(tvOS)
+/// tvOS group filter pill. Uses Button + ButtonStyle (not bare
+/// .focusable + .onTapGesture) to avoid the `_UIReplicantView`
+/// warning UIKit prints when a focus replicant is inserted into
+/// SwiftUI's UIHostingController.view.
 private struct TVGroupPill: View {
     let group: String
     let isSelected: Bool
     let action: () -> Void
     var systemImage: String? = nil
 
-    @FocusState private var isFocused: Bool
-
     var body: some View {
-        HStack(spacing: 6) {
-            if let img = systemImage {
-                Image(systemName: img)
-                    .font(.system(size: 18, weight: .medium))
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let img = systemImage {
+                    Image(systemName: img)
+                        .font(.system(size: 18, weight: .medium))
+                }
+                Text(group)
+                    .font(.system(size: 22, weight: .medium))
             }
-            Text(group)
-                .font(.system(size: 22, weight: .medium))
         }
-        .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
-        .padding(.horizontal, 26)
-        .padding(.vertical, 13)
-        .background(
-            Capsule()
-                .fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
-        )
-        .overlay(
-            Capsule()
-                .stroke(isFocused && !isSelected ? Color.accentPrimary : Color.clear, lineWidth: 2)
-        )
-        .scaleEffect(isFocused ? 1.05 : 1.0)
-        .opacity(isFocused ? 1.0 : (isSelected ? 1.0 : 0.85))
-        .animation(.easeInOut(duration: 0.15), value: isFocused)
-        .focusable(interactions: .activate)
-        .focused($isFocused)
-        .onTapGesture { action() }
+        .buttonStyle(TVGroupPillButtonStyle(isSelected: isSelected))
+    }
+}
+
+private struct TVGroupPillButtonStyle: ButtonStyle {
+    let isSelected: Bool
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        let focused = isFocused
+        return configuration.label
+            .foregroundColor(isSelected ? .appBackground : (focused ? .white : .textSecondary))
+            .padding(.horizontal, 26)
+            .padding(.vertical, 13)
+            .background(
+                Capsule()
+                    .fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(focused && !isSelected ? Color.accentPrimary : Color.clear, lineWidth: 2)
+            )
+            .scaleEffect(focused ? 1.05 : 1.0)
+            .opacity(focused ? 1.0 : (isSelected ? 1.0 : 0.85))
+            .animation(.easeInOut(duration: 0.15), value: focused)
     }
 }
 

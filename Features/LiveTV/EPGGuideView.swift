@@ -1087,7 +1087,10 @@ private struct GuideProgramButton: View {
     // would invalidate every program cell whenever any reminder changes.
     private var reminderManager: ReminderManager { .shared }
     #if os(tvOS)
-    @FocusState private var isFocused: Bool
+    // @State (not @FocusState) because a transparent UIKit overlay
+    // (TVPressOverlay) is what actually owns focus on tvOS now; it
+    // pushes focus changes back into this binding via onFocusChange.
+    @State private var isFocused: Bool = false
     #endif
 
     private var hasReminder: Bool {
@@ -1163,41 +1166,69 @@ private struct GuideProgramButton: View {
     }
 
     @State private var showRecordSheet = false
+    #if os(tvOS)
+    // tvOS uses a confirmationDialog instead of .contextMenu because SwiftUI's
+    // .contextMenu on tvOS rebuilds its UIMenu items every time the backing
+    // cell re-renders, which visibly flashes the highlighted item. The dialog
+    // route is a self-contained modal that is not re-evaluated from cell
+    // updates, so the highlight stays stable.
+    @State private var showCtxDialog = false
+    #endif
 
     var body: some View {
         #if os(tvOS)
-        Button { onSelect(channelItem) } label: { cellContent }
-            .buttonStyle(GuideButtonStyle())
-            .focused($isFocused)
-            .contextMenu {
+        // NOTE: On tvOS, wrapping the cell in a SwiftUI Button makes the
+        // Siri Remote's select-click fire the primary action on release,
+        // which swallows .onLongPressGesture — the user reported
+        // long-press simply played the channel. Using .focusable() +
+        // .onTapGesture + .onLongPressGesture gives us both gestures
+        // without the Button eating the press event.
+        // SwiftUI's tvOS long-press APIs all fire on press release or
+        // are marked unavailable (see Shared/TVPressGesture.swift for
+        // the audit). `TVPressOverlay` is a transparent, focusable UIKit
+        // overlay whose `pressesBegan` starts a Timer that fires
+        // `onLongPress` at exactly 0.35s while still pressed, and whose
+        // `pressesEnded` fires `onTap` if the timer hadn't fired yet.
+        // The overlay preserves SwiftUI layout because it does not wrap
+        // or reparent `cellContent`.
+        cellContent
+            .overlay(
+                TVPressOverlay(
+                    minimumPressDuration: 0.35,
+                    isFocused: $isFocused,
+                    onTap: { onSelect(channelItem) },
+                    onLongPress: { showCtxDialog = true }
+                )
+            )
+            .confirmationDialog(prog.title,
+                                isPresented: $showCtxDialog,
+                                titleVisibility: .visible) {
                 if isRecordable {
-                    Button {
+                    Button(prog.isLive ? "Record from Now" : "Record") {
                         showRecordSheet = true
-                    } label: {
-                        Label(prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle")
                     }
                 }
                 if isFutureProgram {
                     if reminderManager.hasReminder(forKey: reminderKey) {
-                        Button(role: .destructive) {
+                        Button("Cancel Reminder", role: .destructive) {
                             reminderManager.cancelReminder(forKey: reminderKey)
-                        } label: {
-                            Label("Cancel Reminder", systemImage: "bell.slash")
                         }
                     } else {
-                        Button {
+                        Button("Set Reminder") {
                             reminderManager.scheduleReminder(
                                 programTitle: prog.title,
                                 channelName: channelItem.name,
                                 startTime: prog.start
                             )
-                        } label: {
-                            Label("Set Reminder", systemImage: "bell")
                         }
                     }
                 }
             }
-            .sheet(isPresented: $showRecordSheet) {
+            // tvOS: .sheet presents a small centred modal that cramps the
+            // Form rows and clips focus halos. Use .fullScreenCover so the
+            // record form gets real estate comparable to the rest of the
+            // app's tvOS UI.
+            .fullScreenCover(isPresented: $showRecordSheet) {
                 RecordProgramSheet(
                     programTitle: prog.title,
                     programDescription: prog.description,

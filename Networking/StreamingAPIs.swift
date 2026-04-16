@@ -1192,6 +1192,7 @@ struct DispatcharrAPI {
         let fileName: String?
         let programTitle: String?
         let programDescription: String?
+        let comskip: Bool
 
         /// Parses a single recording out of an already-deserialized JSON
         /// object. Returns nil if required fields are missing.
@@ -1229,6 +1230,7 @@ struct DispatcharrAPI {
                 self.programTitle = props["title"] as? String
                 self.programDescription = props["description"] as? String
             }
+            self.comskip = (props["comskip"] as? Bool) ?? false
         }
     }
 
@@ -1252,7 +1254,8 @@ struct DispatcharrAPI {
                          endTime: Date,
                          title: String,
                          description: String,
-                         applyServerOffsets: Bool) async throws -> Recording {
+                         applyServerOffsets: Bool,
+                         comskip: Bool = false) async throws -> Recording {
         let url = try buildURL(path: "/api/channels/recordings/")
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime]
@@ -1274,6 +1277,9 @@ struct DispatcharrAPI {
             // Flatten title/description so the admin UI still shows them.
             customProps["title"] = title
             customProps["description"] = description
+        }
+        if comskip {
+            customProps["comskip"] = true
         }
 
         let body: [String: Any] = [
@@ -1334,6 +1340,17 @@ struct DispatcharrAPI {
         let url = try buildURL(path: "/api/channels/recordings/\(id)/")
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+    }
+
+    /// Triggers comskip (commercial detection/removal) on a completed
+    /// recording. Dispatcharr handles the processing server-side.
+    func applyComskip(id: Int) async throws {
+        let url = try buildURL(path: "/api/channels/recordings/\(id)/comskip/")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         let (data, response) = try await loggedData(for: request)
         try validate(response: response, data: data)

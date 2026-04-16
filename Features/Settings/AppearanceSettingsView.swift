@@ -26,6 +26,11 @@ struct AppearanceSettingsView: View {
     }
 
     // MARK: - tvOS Body
+    // Every row uses one of the shared TVSettings* components so focus
+    // highlight (accent-tinted card + stroke + scale bump) matches the
+    // rest of the tvOS UI uniformly. Previously rows used only
+    // TVNoHighlightButtonStyle without the card background, so focus
+    // was almost invisible inside a section.
     #if os(tvOS)
     private var tvOSBody: some View {
         ScrollView {
@@ -33,46 +38,43 @@ struct AppearanceSettingsView: View {
                 // Default Tab
                 tvAppearanceSection("Default Landing Tab") {
                     ForEach(AppTab.allCases, id: \.self) { tab in
-                        tvOptionRow(icon: tab.icon, label: tab.title,
-                                    isSelected: defaultTabRaw == tab.rawValue) {
-                            defaultTabRaw = tab.rawValue
-                        }
+                        TVSettingsSelectionRow(
+                            icon: tab.icon,
+                            iconColor: theme.accent,
+                            label: tab.title,
+                            isSelected: defaultTabRaw == tab.rawValue,
+                            action: { defaultTabRaw = tab.rawValue }
+                        )
                     }
                 }
 
                 // Default Live TV View
                 tvAppearanceSection("Default Live TV View") {
                     ForEach(["list", "guide"], id: \.self) { option in
-                        tvOptionRow(icon: option == "list" ? "list.bullet" : "calendar",
-                                    label: option == "list" ? "List" : "Guide",
-                                    isSelected: defaultLiveTVView == option) {
-                            defaultLiveTVView = option
-                        }
+                        TVSettingsSelectionRow(
+                            icon: option == "list" ? "list.bullet" : "calendar",
+                            iconColor: theme.accent,
+                            label: option == "list" ? "List" : "Guide",
+                            isSelected: defaultLiveTVView == option,
+                            action: { defaultLiveTVView = option }
+                        )
                     }
                 }
 
                 // Color Theme
                 tvAppearanceSection("Color Theme") {
                     ForEach(AppTheme.allCases, id: \.self) { t in
-                        Button { theme.setTheme(t) } label: {
-                            HStack(spacing: 14) {
+                        TVSettingsSelectionRow(
+                            label: t.displayName,
+                            isSelected: theme.selectedTheme == t,
+                            action: { theme.setTheme(t) },
+                            leading: {
                                 Circle()
                                     .fill(t.accentPrimary)
                                     .frame(width: 28, height: 28)
                                     .overlay(Circle().stroke(Color.borderMedium, lineWidth: 1))
-                                Text(t.displayName)
-                                    .font(.system(size: 28, weight: .medium))
-                                    .foregroundColor(.textPrimary)
-                                Spacer()
-                                if theme.selectedTheme == t {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 22, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
                             }
-                            .padding(.vertical, 6)
-                        }
-                        .buttonStyle(TVNoHighlightButtonStyle())
+                        )
                     }
 
                     // Custom accent toggle
@@ -103,77 +105,46 @@ struct AppearanceSettingsView: View {
                                         .fill(Color.elevatedBackground)
                                 )
                         }
+                        .padding(.horizontal, 20)
                     }
                 }
 
                 // Liquid Glass
                 tvAppearanceSection("Glass Effect") {
                     ForEach(LiquidGlassStyle.allCases, id: \.self) { style in
-                        tvOptionRow(label: style.displayName,
-                                    subtitle: liquidGlassDescription(style),
-                                    isSelected: theme.liquidGlassStyle == style) {
-                            theme.setLiquidGlassStyle(style)
-                        }
+                        TVSettingsSelectionRow(
+                            label: style.displayName,
+                            subtitle: liquidGlassDescription(style),
+                            isSelected: theme.liquidGlassStyle == style,
+                            action: { theme.setLiquidGlassStyle(style) }
+                        )
                     }
                 }
 
                 // Preview
                 tvAppearanceSection("Preview") {
                     swatchPreview
+                        .padding(.horizontal, 20)
                 }
             }
             .padding(48)
         }
     }
 
+    /// tvOS section header + grouped content. Rows inside already supply
+    /// their own card background via `tvSettingsCardBG`, so the section
+    /// wrapper only provides a section title — no outer card.
     private func tvAppearanceSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(title.uppercased())
                 .font(.system(size: 22, weight: .bold))
                 .foregroundColor(.textTertiary)
                 .tracking(1)
-            VStack(alignment: .leading, spacing: 12) {
+                .padding(.leading, 20)
+            VStack(alignment: .leading, spacing: 8) {
                 content()
             }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.cardBackground)
-            )
         }
-    }
-
-    private func tvOptionRow(icon: String? = nil, label: String, subtitle: String? = nil,
-                              isSelected: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                if let icon {
-                    Image(systemName: icon)
-                        .font(.system(size: 22))
-                        .foregroundColor(theme.accent)
-                        .frame(width: 32)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(label)
-                        .font(.system(size: 28, weight: .medium))
-                        .foregroundColor(.textPrimary)
-                    if let subtitle {
-                        Text(subtitle)
-                            .font(.system(size: 20))
-                            .foregroundColor(.textSecondary)
-                    }
-                }
-                Spacer()
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(theme.accent)
-                }
-            }
-            .padding(.vertical, 6)
-        }
-        .buttonStyle(TVNoHighlightButtonStyle())
     }
     #endif
 

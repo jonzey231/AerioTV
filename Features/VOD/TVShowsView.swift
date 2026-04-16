@@ -85,7 +85,10 @@ struct TVShowsView: View {
                 VODDetailView(item: item, isPlaying: $isPlaying)
             }
             #if os(iOS)
-            .navigationTitle("Series")
+            // No .navigationTitle on iOS — OnDemandView hosts the
+            // Movies / Series pill selector above this view and the
+            // pills serve as the section identifier. A title here
+            // would duplicate the header.
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
