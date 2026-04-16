@@ -35,7 +35,6 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
   reaches `.critical` thermal state
 - **iPad keyboard shortcuts**: ⌘1..⌘9 take audio of tile N, ⌘N open
   add sheet, ⌘F toggle fullscreen on the audio tile, ⌘W exit
-- iPhone excluded — screen too narrow for a usable grid
 
 **Live TV**
 
