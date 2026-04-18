@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.6.2 — 2026-04-18
+
+### Fixed
+
+- **EPG prefetch no longer hammers the server on the guide grid
+  view.** The per-row prefetch path in `EPGGuideView`
+  (`prefetchIfNeeded`, fired from every guide row's `.onAppear`)
+  was bypassing the cache populated by the bulk
+  `/api/epg/grid/` request and firing one redundant per-channel
+  `/api/epg/programs/?tvg_id=X` request per row. On a Dispatcharr
+  host with 150 channels, opening the guide once produced a
+  single bulk call followed by ~150 API-key-authenticated
+  per-channel calls in parallel. The fix adds a memory-cache
+  check at the top of `prefetchIfNeeded`: if the channel already
+  has any program ending more than 30 minutes in the future, the
+  network call is skipped and the channel is marked as fetched
+  so it won't re-check on subsequent `.onAppear`s. Net effect:
+  Dispatcharr guide mounts drop from `1 + channelCount` requests
+  to `1`. Channels with no tvg_id match still fall through to
+  the existing per-row fetch. Applies equally to Xtream Codes
+  (per-channel prefetch now also skips after the initial batched
+  bulk pass). Only the guide view was affected — `ChannelListView`
+  already had cache-aware prefetch via `EPGCache.shared.get` and
+  is unchanged. Issue surfaced most visibly when running the iPad
+  app on macOS because macOS defaults to the guide grid rather
+  than the list view that iPhone users see.
+
 ## v1.6.1 — 2026-04-18
 
 ### New — Unified Playback

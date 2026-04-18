@@ -441,6 +441,27 @@ final class GuideStore: ObservableObject {
     /// (and the next ~20) if not already loaded.
     func prefetchIfNeeded(channel: ChannelDisplayItem, servers: [ServerConnection]) {
         guard !fetchedChannelIDs.contains(channel.id) else { return }
+
+        // Skip the per-channel network fetch when we already have
+        // upcoming program data for this channel from the bulk
+        // fetch. Dispatcharr's `fetchDispatcharr` populates this
+        // map for every tvg_id-matched channel in a single
+        // `/api/epg/grid/` request, and Xtream's `fetchXtream`
+        // does the same via its first batched pass. Without this
+        // gate, every guide row's `.onAppear` was firing a
+        // redundant `/api/epg/programs/?tvg_id=X` request on top
+        // of the bulk response — Dispatcharr hosts with 100+
+        // channels were seeing the guide mount produce 100+
+        // simultaneous API-keyed requests (reported in the wild
+        // against v1.6.0 / v1.6.1). Still mark the channel as
+        // fetched so we don't re-check on every subsequent
+        // `.onAppear` as the user scrolls back into the row.
+        let futureThreshold = Date().addingTimeInterval(30 * 60) // 30 min
+        let hasUpcoming = (programs[channel.id] ?? []).contains { $0.end > futureThreshold }
+        if hasUpcoming {
+            fetchedChannelIDs.insert(channel.id)
+            return
+        }
         fetchedChannelIDs.insert(channel.id)
 
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else { return }
