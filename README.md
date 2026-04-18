@@ -166,7 +166,7 @@ Sideload using your preferred method using the .ipa from [Releases](https://gith
 2. **Xtream Codes** — Provider URL + username & password authentication.
 3. **M3U Playlist** — Direct URL + optional XMLTV EPG.
 
-## Requirements
+## Requirements for Development
 
 - Xcode 15 or later
 - iOS 18.0+, iPadOS 18.0+, tvOS 18.0+, macOS 15.0+ (using the iPad app)
