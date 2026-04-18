@@ -447,7 +447,7 @@
 
 ### Rebrand
 - App display name, Info.plist usage strings, and all user-visible copy updated
-  to **AerioTV** (previously a mix of "Aerio" / "Dispatcharr").
+  to **AerioTV** (previously a mix of "Aerio").
 - About screen now shows accurate device model, last updated date, and first
   install date via a new `DeviceInfo` helper (previously hard-coded/placeholder).
 
