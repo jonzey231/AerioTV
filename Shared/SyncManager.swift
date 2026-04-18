@@ -875,4 +875,20 @@ extension Notification.Name {
     /// Posted when a VOD deep link is opened.
     /// userInfo["vodID"] and userInfo["vodType"] ("movie" or "episode").
     static let aerioOpenVOD = Notification.Name("aerioOpenVOD")
+    /// Posted by HomeView's tvOS Menu-button handler when the user is
+    /// already on the Live-TV tab with nothing playing. The channel
+    /// list listens for this and scrolls to the first row — same UX
+    /// vocabulary as Apple's TV / Music apps where Menu on a long
+    /// list means "take me back to the top".
+    static let guideScrollToTop = Notification.Name("guideScrollToTop")
+    /// Posted when the tvOS single-stream player is minimized to the
+    /// corner. The guide (ChannelListView / EPGGuideView) listens
+    /// and programmatically moves its own `@FocusState` to the
+    /// first channel row, because the tvOS focus engine does NOT
+    /// release focus from a SwiftUI Button that becomes
+    /// `.focusable(false)` on an ancestor's state change — the
+    /// focus stays trapped in the corner unless something else
+    /// explicitly claims it. This notification is that explicit
+    /// claim. Body has no userInfo.
+    static let forceGuideFocus = Notification.Name("forceGuideFocus")
 }

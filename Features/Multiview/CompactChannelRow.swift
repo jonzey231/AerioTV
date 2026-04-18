@@ -25,23 +25,16 @@ struct CompactChannelRow: View {
 
     var body: some View {
         Button(action: onAdd) {
-            HStack(spacing: 12) {
+            HStack(spacing: rowSpacing) {
                 logo
-                VStack(alignment: .leading, spacing: 2) {
-                    // `verbatim:` for server-controlled strings —
-                    // matches the Phase 3 hardening on
-                    // MultiviewTileView's error overlay. `SwiftUI.Text`
-                    // does NOT apply Markdown to a non-literal `String`
-                    // today, but this is defensive against a future
-                    // SwiftUI change that might (and the intent is
-                    // clearer at the call site).
+                VStack(alignment: .leading, spacing: 4) {
                     Text(verbatim: item.name)
-                        .font(.headline)
+                        .font(titleFont)
                         .lineLimit(1)
                         .foregroundStyle(.primary)
                     if let prog = item.currentProgram, !prog.isEmpty {
                         Text(verbatim: prog)
-                            .font(.caption)
+                            .font(subtitleFont)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -49,14 +42,82 @@ struct CompactChannelRow: View {
                 Spacer(minLength: 8)
                 trailing
             }
-            .padding(.vertical, 8)
-            .padding(.horizontal, 12)
+            .padding(.vertical, rowVPadding)
+            .padding(.horizontal, rowHPadding)
             .contentShape(Rectangle())
             .opacity(rowOpacity)
         }
+        #if os(tvOS)
+        // tvOS: use the app's standard no-halo style so the whole
+        // row gets the same scale-up focus cue as Settings rows —
+        // consistent with the rest of the tvOS app.
+        .buttonStyle(TVNoHighlightButtonStyle())
+        #else
         .buttonStyle(.plain)
+        #endif
         .disabled(isDisabled || isAlreadyAdded)
         .accessibilityLabel(a11yLabel)
+    }
+
+    // MARK: - Platform sizing
+
+    /// tvOS uses significantly larger rows (read from a couch, D-pad
+    /// nav) — bigger logo, larger type, more padding. iPad stays
+    /// compact so the sheet's detent heights don't explode.
+    private var logoSize: CGFloat {
+        #if os(tvOS)
+        return 72
+        #else
+        return 42
+        #endif
+    }
+
+    private var rowSpacing: CGFloat {
+        #if os(tvOS)
+        return 20
+        #else
+        return 12
+        #endif
+    }
+
+    private var rowVPadding: CGFloat {
+        #if os(tvOS)
+        return 14
+        #else
+        return 8
+        #endif
+    }
+
+    private var rowHPadding: CGFloat {
+        #if os(tvOS)
+        return 20
+        #else
+        return 12
+        #endif
+    }
+
+    private var titleFont: Font {
+        #if os(tvOS)
+        return .system(size: 26, weight: .semibold)
+        #else
+        return .headline
+        #endif
+    }
+
+    private var subtitleFont: Font {
+        #if os(tvOS)
+        return .system(size: 20, weight: .regular)
+        #else
+        return .caption
+        #endif
+    }
+
+    private var trailingIconSize: CGFloat {
+        #if os(tvOS)
+        return 30
+        #else
+        return 22
+        #endif
     }
 
     // MARK: - Subviews
@@ -72,16 +133,16 @@ struct CompactChannelRow: View {
                     logoPlaceholder
                 }
             }
-            .frame(width: 42, height: 42)
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .frame(width: logoSize, height: logoSize)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         } else {
             logoPlaceholder
-                .frame(width: 42, height: 42)
+                .frame(width: logoSize, height: logoSize)
         }
     }
 
     private var logoPlaceholder: some View {
-        RoundedRectangle(cornerRadius: 6, style: .continuous)
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
             .fill(Color.secondary.opacity(0.15))
             .overlay(
                 Image(systemName: "tv")
@@ -93,14 +154,17 @@ struct CompactChannelRow: View {
     private var trailing: some View {
         if isAlreadyAdded {
             Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: trailingIconSize))
                 .foregroundStyle(.green)
                 .accessibilityLabel("Already added")
         } else if isDisabled {
             Image(systemName: "hand.raised.slash")
+                .font(.system(size: trailingIconSize))
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Cannot add — limit reached")
         } else {
             Image(systemName: "plus.circle")
+                .font(.system(size: trailingIconSize))
                 .foregroundStyle(Color.accentPrimary)
         }
     }

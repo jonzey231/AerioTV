@@ -35,10 +35,21 @@ enum AudioSessionRefCount {
     /// Increment the count. If this raises the count from 0 to 1,
     /// activates the shared `AVAudioSession`. Otherwise no-op.
     /// Safe to call from any thread.
-    static func increment() {
+    ///
+    /// `caller` is an optional string attributing the call to a
+    /// specific tile / entry-point. Gets logged verbatim. Pass
+    /// something short and stable — e.g. `"tile=ABC"` or
+    /// `"enterMultiview-float"` — so the log trail tells us
+    /// exactly which path raised the refcount when we're debugging
+    /// audio-session deadlocks or the "2nd tile won't open"
+    /// puzzle.
+    static func increment(caller: String = "unknown") {
         queue.sync {
+            let before = count
             count += 1
-            guard count == 1 else { return }
+            let after = count
+            NSLog("[MV-Audio] refcount inc \(before)→\(after) caller=\(caller)")
+            guard after == 1 else { return }
             do {
                 #if os(iOS)
                 try AVAudioSession.sharedInstance().setCategory(
@@ -52,7 +63,7 @@ enum AudioSessionRefCount {
                 try AVAudioSession.sharedInstance().setActive(true)
                 // Landed 0→1 — good entry-point to attribute audio
                 // regressions (wrong category, deactivation bounce).
-                NSLog("[MV-Audio] session activated (refcount 0→1)")
+                NSLog("[MV-Audio] session activated (refcount 0→1) caller=\(caller)")
             } catch {
                 // Intentionally swallowed — this mirrors the existing
                 // inline behavior in MPVPlayerView.swift:91-102. The
@@ -67,20 +78,23 @@ enum AudioSessionRefCount {
     /// deactivates the shared `AVAudioSession` (with notify-others so
     /// any paused apps can resume). Otherwise no-op. Safe to call
     /// from any thread. Never drops below 0.
-    static func decrement() {
+    static func decrement(caller: String = "unknown") {
         queue.sync {
             guard count > 0 else {
-                NSLog("AudioSessionRefCount.decrement: over-decrement (count already 0)")
+                NSLog("[MV-Audio] refcount over-decrement (count already 0) caller=\(caller)")
                 return
             }
+            let before = count
             count -= 1
-            guard count == 0 else { return }
+            let after = count
+            NSLog("[MV-Audio] refcount dec \(before)→\(after) caller=\(caller)")
+            guard after == 0 else { return }
             do {
                 try AVAudioSession.sharedInstance().setActive(
                     false,
                     options: .notifyOthersOnDeactivation
                 )
-                NSLog("[MV-Audio] session deactivated (refcount →0)")
+                NSLog("[MV-Audio] session deactivated (refcount →0) caller=\(caller)")
             } catch {
                 // Same tolerance as increment — log and move on.
                 NSLog("AudioSessionRefCount.decrement: setActive(false) failed: \(error)")

@@ -342,6 +342,16 @@ private struct PlayerRootView: View {
     @State private var streamInfoPosition: CGPoint?
     #endif
 
+    /// Channel-picker presentation. The `+` button in the top bar
+    /// (iPad) / "Add Stream" row in the options panel (tvOS) sets
+    /// this to `true`. Presenting from PlayerView — *not* from
+    /// MultiviewContainerView after a mode flip — keeps the current
+    /// stream playing under the sheet. The picker commits the mode
+    /// transition on pick, so the user never sees the "original
+    /// channel stops" mid-transition stall that the previous design
+    /// produced.
+    @State private var showAddStreamSheet = false
+
     #if os(tvOS)
     /// tvOS Player Options overlay (shown via gear icon or long-press Select).
     @State private var showTVOptions = false
@@ -549,6 +559,29 @@ private struct PlayerRootView: View {
         .onAppear {
             scheduleControlsHide()
         }
+        // Add-stream picker. Presented on top of the live PlayerView
+        // — deliberate: the current stream keeps playing under it, so
+        // cancelling the picker leaves the user exactly where they
+        // were. The sheet commits the multiview transition only if
+        // the user actually picks a channel; that commit is the one
+        // moment when `PlayerSession.mode` flips, the PlayerView
+        // unmounts, and MultiviewContainerView takes over with both
+        // tiles already requested.
+        #if os(iOS)
+        .sheet(isPresented: $showAddStreamSheet) {
+            AddToMultiviewSheet(isPresented: $showAddStreamSheet)
+                .presentationDetents([.fraction(0.45), .large])
+                .presentationDragIndicator(.visible)
+        }
+        #else
+        // tvOS uses `fullScreenCover` for the same reason the
+        // multiview-container version does — SwiftUI's default sheet
+        // on tvOS renders as a small centred modal that crops titles
+        // and crams the channel rows unreadably.
+        .fullScreenCover(isPresented: $showAddStreamSheet) {
+            AddToMultiviewSheet(isPresented: $showAddStreamSheet)
+        }
+        #endif
         .onChange(of: progressStore.isPaused) { _, isPaused in
             if isPaused {
                 controlsHideTask?.cancel()
@@ -834,17 +867,22 @@ private struct PlayerRootView: View {
                                 scheduleControlsHide()
                             },
                             onEnterMultiview: {
-                                // Seed + flip via the shared helper
-                                // (iPad top-bar button uses the same
-                                // path). HomeView's mode-branch
-                                // swaps this PlayerView out for
-                                // `MultiviewContainerView` on the
-                                // next update pass. `Self` refers to
-                                // `PlayerRootView`, the enclosing
-                                // type — the helper lives here, not
-                                // on `PlayerView` which is a thin
-                                // wrapper above.
-                                Self.enterMultiviewFromCurrent()
+                                // Open the channel picker on top of
+                                // the currently-playing stream. The
+                                // sheet itself commits the multiview
+                                // transition in `commitAdd` when the
+                                // user picks a channel; until then,
+                                // nothing about the current playback
+                                // path changes — the user sees a
+                                // picker, the live stream continues
+                                // under it. Previously this closure
+                                // called `enterMultiviewFromCurrent`
+                                // which tore down the playing MPV at
+                                // tap time; on tvOS that produced a
+                                // 1.5-6s UI stall during which the
+                                // sheet sometimes failed to present
+                                // at all.
+                                showAddStreamSheet = true
                             }
                         )
                         .focusSection()
@@ -922,17 +960,25 @@ private struct PlayerRootView: View {
                 let fraction = total > 0 ? min(1, max(0, elapsed / total)) : 0
                 let remaining = max(0, end.timeIntervalSince(now))
 
-                // Progress bar
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(Color.white.opacity(0.2))
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(Color.accentPrimary)
-                            .frame(width: geo.size.width * fraction)
+                // Progress bar + (tvOS) leading play/pause indicator.
+                // The indicator is NON-FOCUSABLE on tvOS — Siri
+                // Remote's hardware Play/Pause button drives the
+                // actual toggle; this is purely visual feedback.
+                HStack(spacing: 12) {
+                    #if os(tvOS)
+                    tvPlayPauseIndicator
+                    #endif
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(Color.white.opacity(0.2))
+                            RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                .fill(Color.accentPrimary)
+                                .frame(width: geo.size.width * fraction)
+                        }
                     }
+                    .frame(height: 6)
                 }
-                .frame(height: 6)
 
                 // Time remaining
                 HStack {
@@ -964,7 +1010,13 @@ private struct PlayerRootView: View {
     private var vodControlsSection: some View {
         VStack(spacing: 8) {
             #if os(tvOS)
-            tvScrubberBar
+            // tvOS: small play/pause indicator left of the scrubber
+            // (mirrors the live-progress variant). Non-focusable;
+            // hardware Play/Pause button drives the toggle.
+            HStack(spacing: 12) {
+                tvPlayPauseIndicator
+                tvScrubberBar
+            }
             #else
             scrubberBar
             #endif
@@ -1105,11 +1157,14 @@ private struct PlayerRootView: View {
                         #endif
 
                         #if os(iOS)
-                        // Multiview — iPad only. Screen is too narrow
-                        // on iPhone for a usable 2×2 grid, let alone
-                        // 3×3 (see plan's iPhone out-of-scope note).
+                        // "+" add-stream button — iPad only. Screen is
+                        // too narrow on iPhone for a usable 2×2 grid,
+                        // let alone 3×3 (see plan's iPhone out-of-scope
+                        // note). Tapping opens the channel picker,
+                        // which on pick seeds tile 0 with the current
+                        // channel + adds the picked one as tile 1.
                         if UIDevice.current.userInterfaceIdiom == .pad {
-                            multiviewEntryButton
+                            addStreamButton
                         }
 
                         // AirPlay — always visible (system routing control)
@@ -1141,55 +1196,59 @@ private struct PlayerRootView: View {
                 bottomControls
             }
 
-            // Center play/pause button
+            // Center play/pause button — iOS / iPadOS only. tvOS
+            // users press Play/Pause on the Siri Remote (hardware
+            // button); the on-screen play/pause state is surfaced as
+            // a small indicator next to the timeline instead, which
+            // keeps the center of the video unobstructed.
+            #if !os(tvOS)
             centerPlayPauseButton
+            #endif
         }
     }
 
     // MARK: - Player Overflow Menu (ellipsis)
 
-    /// Shared entry path used by both the iPad top-bar button and the
-    /// tvOS options-panel row. Pulls the seed channel off
-    /// `NowPlayingManager` (source of truth for what PlayerView is
-    /// currently rendering) and the server off `ChannelStore` (the
-    /// active connection the user picked). Defensive: refuses to
-    /// enter if either prerequisite is missing, to avoid flipping
-    /// `PlayerSession.mode` into a broken state with no way to add
-    /// tiles (the add sheet needs the server too).
-    @MainActor
-    static func enterMultiviewFromCurrent() {
-        guard let item = NowPlayingManager.shared.playingItem else { return }
-        guard let server = ChannelStore.shared.activeServer else { return }
-        PlayerSession.shared.enterMultiview(seeding: item, server: server)
-    }
-
-    /// iPad-only multiview entry button. Mirrors the AirPlay button's
-    /// 52×52 ultraThinMaterial chrome so the iPad top bar has three
-    /// matching circular buttons (overflow / multiview / AirPlay).
-    /// On tap: seed `MultiviewStore.tiles[0]` with the currently-
-    /// playing channel (pinning `tile.id == item.id` for coordinator-
-    /// reuse per the plan) and flip `PlayerSession.mode = .multiview`.
-    /// HomeView's mode branch then swaps this PlayerView out for
-    /// `MultiviewContainerView`.
+    /// iPad-only `+` button. Mirrors the AirPlay button's 52×52
+    /// ultraThinMaterial chrome so the iPad top bar has three
+    /// matching circular buttons (overflow / `+` / AirPlay).
+    ///
+    /// Presents `AddToMultiviewSheet` **on top of the live PlayerView**
+    /// — crucially without touching `PlayerSession.mode`. The current
+    /// stream keeps playing behind the sheet. Only when the user
+    /// commits (picks a channel) does the sheet call
+    /// `PlayerSession.enterMultiview(...)` to seed tile 0 and flip
+    /// into multiview. That's where the view swap happens — after
+    /// the user has made a deliberate choice, not at button-tap.
+    ///
+    /// The earlier design flipped mode on tap + relied on a pending
+    /// flag to auto-open the picker from the newly-mounted
+    /// `MultiviewContainerView`; observed on-device it torched the
+    /// live MPV instance twice (PlayerView's teardown + the seed
+    /// tile's cold-start), stalled the main thread 1.5-6s, and the
+    /// picker sometimes never presented because SwiftUI was still
+    /// churning on the view swap. Keeping the sheet owned by
+    /// PlayerView avoids all of that — the sheet is just an overlay
+    /// on an otherwise-untouched view tree.
     #if os(iOS)
-    private var multiviewEntryButton: some View {
+    private var addStreamButton: some View {
         Button {
-            Self.enterMultiviewFromCurrent()
+            showAddStreamSheet = true
         } label: {
             ZStack {
                 Circle()
                     .fill(.ultraThinMaterial)
                     .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
                     .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
-                Image(systemName: "rectangle.split.2x2")
-                    .font(.system(size: 20, weight: .regular))
+                Image(systemName: "plus")
+                    .font(.system(size: 22, weight: .semibold))
                     .foregroundStyle(.white)
             }
             .frame(width: 52, height: 52)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Enter multiview")
-        .accessibilityHint("Watch multiple channels simultaneously in a grid")
+        .accessibilityLabel("Add stream")
+        .accessibilityHint("Pick another channel to watch alongside this one")
     }
     #endif
 
@@ -1482,6 +1541,35 @@ private struct PlayerRootView: View {
         state = .playing
         scheduleControlsHide()
     }
+
+    /// Compact, NON-INTERACTIVE play/pause state indicator for tvOS.
+    ///
+    /// Rendered inline with the timeline (left of the progress bar /
+    /// scrubber) so the user has a clear visual of whether playback
+    /// is currently running. It deliberately does NOT accept focus:
+    /// the Siri Remote's hardware Play/Pause button fires
+    /// `playPauseTapped` via `TVRemoteInputView` → `togglePauseAction`
+    /// and the user doesn't need a focusable on-screen equivalent.
+    /// Omitting it from the focus chain also keeps the focus engine
+    /// from requiring an extra left-then-right D-pad step to reach
+    /// the scrubber.
+    ///
+    /// The icon matches current state (not the action): `pause.fill`
+    /// while paused, `play.fill` while playing. Read it as "the
+    /// stream is currently X".
+    #if os(tvOS)
+    private var tvPlayPauseIndicator: some View {
+        Image(systemName: progressStore.isPaused ? "pause.fill" : "play.fill")
+            .font(.system(size: 18, weight: .semibold))
+            .foregroundColor(.white)
+            .frame(width: 36, height: 36)
+            .background(.ultraThinMaterial, in: Circle())
+            .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(progressStore.isPaused ? "Paused" : "Playing")
+            .animation(.easeInOut(duration: 0.15), value: progressStore.isPaused)
+    }
+    #endif
 
     private var centerPlayPauseButton: some View {
         Button {
@@ -1825,12 +1913,18 @@ struct TVPlayerOptionsPanel: View {
     /// playback (the panel is already gated on that upstream).
     var onEnterMultiview: (() -> Void)?
 
-    /// Internal focus state — the first item gets focus when the panel appears.
-    @FocusState private var panelFocus: String?
+    /// Focus tracking for every pill in the panel. Each pill binds to
+    /// a unique string id via `.focused($focusedID, equals:)`; the
+    /// `optionPill` helper reads `focusedID == id` to drive the
+    /// accent-stroke highlight. A single @FocusState avoids the
+    /// per-item state proliferation a multi-state approach would
+    /// need, and gives us a sane "first pill focused on appear"
+    /// behavior via `firstFocusableID`.
+    @FocusState private var focusedID: String?
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 audioSection
                 subtitleSection
                 if !isLive { speedSection }
@@ -1838,13 +1932,13 @@ struct TVPlayerOptionsPanel: View {
                 if isLive, onEnterMultiview != nil {
                     multiviewSection
                 }
-                streamInfoButton
+                streamInfoSection
             }
             .padding(20)
         }
         .focusEffectDisabled()
-        .frame(width: 420)
-        .frame(maxHeight: 500)
+        .frame(width: 460)
+        .frame(maxHeight: 560)
         .background(Color.black.opacity(0.92), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -1852,21 +1946,48 @@ struct TVPlayerOptionsPanel: View {
         )
         .shadow(color: .black.opacity(0.6), radius: 16, y: 6)
         .onAppear {
-            // Explicitly set focus to the first item after the panel is laid out
+            // Land focus on the first rendered pill after a tick so
+            // the focus engine has finished laying out the buttons.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                panelFocus = "first"
+                focusedID = firstFocusableID
             }
         }
+    }
+
+    /// Decides which pill is the default-focused one on appear,
+    /// walking the same order the body renders: audio → subtitles →
+    /// speed (VOD) → sleep timer → multiview → stream-info. Lands
+    /// on a real id so the `@FocusState` binding takes.
+    private var firstFocusableID: String {
+        if audioTracks.count > 1, let first = audioTracks.first {
+            return "audio-\(first.id)"
+        }
+        if !subtitleTracks.isEmpty {
+            return "sub-0"  // "Off" pill
+        }
+        if !isLive, let firstSpeed = PlayerProgressStore.speedOptions.first {
+            return "speed-\(firstSpeed)"
+        }
+        if sleepTimerEnd != nil {
+            return "sleep-cancel"
+        }
+        return "sleep-30"
     }
 
     // MARK: - Sections
 
     @ViewBuilder private var audioSection: some View {
         if audioTracks.count > 1 {
-            sectionHeader("Audio Track")
-            ForEach(audioTracks) { track in
-                optionRow(text: track.displayName, isSelected: track.id == currentAudioTrackID) {
-                    setAudioTrack?(track.id); onDismiss?()
+            VStack(alignment: .leading, spacing: 6) {
+                sectionHeader("Audio Track")
+                ForEach(audioTracks) { track in
+                    optionPill(
+                        id: "audio-\(track.id)",
+                        text: track.displayName,
+                        isSelected: track.id == currentAudioTrackID
+                    ) {
+                        setAudioTrack?(track.id); onDismiss?()
+                    }
                 }
             }
         }
@@ -1874,71 +1995,103 @@ struct TVPlayerOptionsPanel: View {
 
     @ViewBuilder private var subtitleSection: some View {
         if !subtitleTracks.isEmpty {
-            sectionHeader("Subtitles")
-            optionRow(text: "Off", isSelected: currentSubtitleTrackID == 0) {
-                setSubtitleTrack?(0); onDismiss?()
-            }
-            ForEach(subtitleTracks) { track in
-                optionRow(text: track.displayName, isSelected: track.id == currentSubtitleTrackID) {
-                    setSubtitleTrack?(track.id); onDismiss?()
+            VStack(alignment: .leading, spacing: 6) {
+                sectionHeader("Subtitles")
+                optionPill(id: "sub-0", text: "Off", isSelected: currentSubtitleTrackID == 0) {
+                    setSubtitleTrack?(0); onDismiss?()
+                }
+                ForEach(subtitleTracks) { track in
+                    optionPill(
+                        id: "sub-\(track.id)",
+                        text: track.displayName,
+                        isSelected: track.id == currentSubtitleTrackID
+                    ) {
+                        setSubtitleTrack?(track.id); onDismiss?()
+                    }
                 }
             }
         }
     }
 
     @ViewBuilder private var speedSection: some View {
-        sectionHeader("Speed")
-        ForEach(PlayerProgressStore.speedOptions, id: \.self) { spd in
-            let selected = spd == speed
-            optionRow(
-                text: spd == 1.0 ? "Normal" : "\(String(format: "%g", spd))x",
-                isSelected: selected
-            ) {
-                setSpeed?(spd); onDismiss?()
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Speed")
+            ForEach(PlayerProgressStore.speedOptions, id: \.self) { spd in
+                let selected = spd == speed
+                optionPill(
+                    id: "speed-\(spd)",
+                    text: spd == 1.0 ? "Normal" : "\(String(format: "%g", spd))x",
+                    isSelected: selected
+                ) {
+                    setSpeed?(spd); onDismiss?()
+                }
             }
         }
     }
 
     @ViewBuilder private var sleepTimerSection: some View {
-        sectionHeader("Sleep Timer")
-        if sleepTimerEnd != nil {
-            optionRow(text: "Cancel Timer", isSelected: false) {
-                sleepTimerEnd = nil; onDismiss?()
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Sleep Timer")
+            if sleepTimerEnd != nil {
+                optionPill(id: "sleep-cancel", text: "Cancel Timer", isSelected: false) {
+                    sleepTimerEnd = nil; onDismiss?()
+                }
             }
-        }
-        ForEach([30, 60, 90, 120], id: \.self) { mins in
-            optionRow(text: "\(mins) minutes", isSelected: false) {
-                sleepTimerEnd = Date().addingTimeInterval(Double(mins) * 60); onDismiss?()
+            ForEach([30, 60, 90, 120], id: \.self) { mins in
+                optionPill(
+                    id: "sleep-\(mins)",
+                    text: "\(mins) minutes",
+                    isSelected: false
+                ) {
+                    sleepTimerEnd = Date().addingTimeInterval(Double(mins) * 60); onDismiss?()
+                }
             }
         }
     }
 
-    /// Multiview entry row. Only rendered for live streams when the
+    /// "Add Stream" row. Only rendered for live streams when the
     /// outer view provided an `onEnterMultiview` closure (i.e. from
-    /// HomeView's live-TV mount path). Tapping fires the closure +
-    /// dismisses the panel; HomeView's mode branch swaps in
-    /// `MultiviewContainerView` on the next render pass.
+    /// HomeView's live-TV mount path). Named "Add Stream" — not
+    /// "Enter Multiview" — because user feedback was that the
+    /// mode-switch framing felt jarring. Tapping fires the closure
+    /// (which flips `PlayerRootView`'s `showAddStreamSheet` state)
+    /// and dismisses the panel. The sheet presents on top of the
+    /// still-playing PlayerView; only when the user picks a channel
+    /// does the sheet call `PlayerSession.enterMultiview(seeding:server:)`
+    /// and transition to the grid. Browsing the picker does NOT
+    /// interrupt playback.
     @ViewBuilder private var multiviewSection: some View {
-        sectionHeader("Multiview")
-        optionRow(text: "Enter Multiview", isSelected: false) {
-            onEnterMultiview?()
-            onDismiss?()
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Add Stream")
+            optionPill(
+                id: "multiview-enter",
+                text: "Add Another Channel…",
+                systemImage: "plus.rectangle.on.rectangle",
+                isSelected: false
+            ) {
+                onEnterMultiview?()
+                onDismiss?()
+            }
         }
     }
 
-    private var streamInfoButton: some View {
-        Button { showStreamInfo.toggle(); onDismiss?() } label: {
-            HStack(spacing: 6) {
-                Image(systemName: showStreamInfo ? "info.circle.fill" : "info.circle").font(.system(size: 15))
-                Text(showStreamInfo ? "Hide Stream Info" : "Stream Info").font(.system(size: 15, weight: .medium))
+    /// Stream Info lives in its own section but uses the same pill
+    /// chrome as every other row — just with a leading info icon and
+    /// the title swapping based on the current toggle state. Unified
+    /// so the whole panel reads as one consistent focusable list.
+    @ViewBuilder private var streamInfoSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Diagnostics")
+            optionPill(
+                id: "stream-info",
+                text: showStreamInfo ? "Hide Stream Info" : "Stream Info",
+                systemImage: showStreamInfo ? "info.circle.fill" : "info.circle",
+                isSelected: showStreamInfo
+            ) {
+                showStreamInfo.toggle()
+                onDismiss?()
             }
-            .foregroundColor(.white.opacity(0.8))
-            .padding(.horizontal, 14).padding(.vertical, 6)
-            .background(Color.white.opacity(0.1), in: Capsule())
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .focusEffectDisabled()
-        .focused($panelFocus, equals: "first")
     }
 
     private func sectionHeader(_ title: String) -> some View {
@@ -1948,25 +2101,99 @@ struct TVPlayerOptionsPanel: View {
             .textCase(.uppercase)
     }
 
-    private func optionRow(text: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+    /// Pill-shaped focusable option. Visual states:
+    ///
+    /// - **Default**: subtle white fill, hairline white stroke
+    /// - **Selected** (checkmark, e.g. current audio track): deeper
+    ///   white fill + bolder text + accent checkmark on the right
+    /// - **Focused** (tvOS focus engine): `accentPrimary` 22% fill,
+    ///   `accentPrimary` 70% stroke at 2.5pt. Matches the focus
+    ///   chrome of `tvSettingsCardBG` so the panel feels like the
+    ///   rest of the app.
+    ///
+    /// Why `TVNoHighlightButtonStyle` + an inner label that reads
+    /// `@Environment(\.isFocused)`: plain `.buttonStyle(.plain)`
+    /// does NOT remove tvOS's system focus halo — it only strips
+    /// the default button presentation. The halo stacks on top of
+    /// our custom accent chrome, producing a bright white outline
+    /// around the pill (user-reported). `TVNoHighlightButtonStyle`
+    /// explicitly suppresses the halo AND provides a subtle scale
+    /// + brightness focus cue; our label reads
+    /// `@Environment(\.isFocused)` (populated by that style) to
+    /// drive the accent fill + stroke. One focus signal, no
+    /// double-highlight.
+    ///
+    /// `systemImage` is optional — nil by default. Passed non-nil
+    /// for the Stream Info row which needs a leading icon.
+    private func optionPill(
+        id: String,
+        text: String,
+        systemImage: String? = nil,
+        isSelected: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
-            HStack {
-                Text(text)
-                    .font(.system(size: 17, weight: isSelected ? .semibold : .regular))
-                    .foregroundColor(.white)
-                Spacer()
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(.accentPrimary)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(isSelected ? Color.white.opacity(0.08) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+            OptionPillLabel(
+                text: text,
+                systemImage: systemImage,
+                isSelected: isSelected
+            )
         }
         .buttonStyle(TVNoHighlightButtonStyle())
         .focusEffectDisabled()
+        .focused($focusedID, equals: id)
+    }
+}
+
+/// Inner label for `optionPill` — rendered inside the Button so it
+/// picks up `@Environment(\.isFocused)` populated by the button
+/// style. Drives accent fill + stroke based on focus; checkmark
+/// for selected state inverts color when the pill is focused so
+/// it stays readable over the accent-tinted background.
+private struct OptionPillLabel: View {
+    let text: String
+    let systemImage: String?
+    let isSelected: Bool
+
+    @Environment(\.isFocused) private var isFocused
+
+    var body: some View {
+        HStack(spacing: 10) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+            }
+            Text(text)
+                .font(.system(size: 17, weight: isSelected ? .semibold : .regular))
+                .foregroundColor(.white)
+            Spacer()
+            if isSelected {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(isFocused ? .white : Color.accentPrimary)
+            }
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Capsule().fill(pillFill)
+        )
+        .overlay(
+            Capsule().stroke(
+                isFocused ? Color.accentPrimary.opacity(0.70) : Color.white.opacity(0.08),
+                lineWidth: isFocused ? 2.5 : 1
+            )
+        )
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+
+    /// Fill-color precedence: focused > selected > default.
+    private var pillFill: Color {
+        if isFocused { return Color.accentPrimary.opacity(0.22) }
+        if isSelected { return Color.white.opacity(0.10) }
+        return Color.white.opacity(0.04)
     }
 }
 #endif

@@ -13,7 +13,7 @@ Sideload using your preferred method using the .ipa from [Releases](https://gith
 
 ## Features
 
-**Multiview** *(new in v1.6.0, iPadOS and tvOS)*
+**Multiview** *(new in v1.6.0; unified playback engine in v1.6.1)*
 
 - Watch up to **9 live channels at once** in a dynamically-sized grid
 - Enter from any playing channel: tap the grid button in the player
@@ -26,10 +26,14 @@ Sideload using your preferred method using the .ipa from [Releases](https://gith
   tile stays muted with a small speaker badge marking the audio tile
 - Tap any tile (iPad) or click Select (Siri Remote) to move audio
   focus to that tile
-- **Drag-to-rearrange** tiles (iPad long-press + drag; tvOS "Move
-  Tile" menu action with Siri Remote arrow swaps)
-- Per-tile `×` close button on iPad; per-tile Remove / Audio Track /
-  Subtitle Track / Full-Screen menu via long-press
+- **Rearrange tiles** via a dedicated Move Mode. On iPad, long-press
+  a tile → "Move Tile" → tap any other tile to swap positions, or
+  tap the source tile again to cancel. On tvOS, long-press Select
+  → "Move Tile" → the Siri Remote arrows swap with the physical
+  neighbor and Select commits.
+- **Long-press menu** on every tile with Make Audio / Full-Screen
+  in Grid / Audio Track / Subtitle Track / Move Tile / Remove
+  actions, shared between iPad and tvOS
 - **Picture-in-Picture from multiview (iPad)** — only the audio tile
   continues in PiP; all other tiles pause to conserve resources
 - **Performance warning at the 5th tile** with a 2-hour throttle;

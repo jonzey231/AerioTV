@@ -11,11 +11,21 @@ struct OnDemandView: View {
 
     @State private var segment = 0 // 0 = Movies, 1 = Series
 
+    #if os(iOS)
+    /// Used (together with `UIDevice.userInterfaceIdiom`) to detect
+    /// "full-width iPad" vs. "iPhone-or-Split-View-iPad" so we only
+    /// apply the iPadOS 18 floating-TabView top-padding fix when a
+    /// floating TabView is actually present. Compact width = bottom
+    /// tab bar, no padding needed.
+    @Environment(\.horizontalSizeClass) private var hSize
+    #endif
+
     /// Pill pair used as the "Movies / Series" segment selector on
-    /// both platforms. Layout varies: tvOS centres them above the grid
-    /// as a custom header; iOS injects them into the inner view's
-    /// navigation bar via a `principal` toolbar item so they take the
-    /// place of the old "Movies" / "Series" title.
+    /// both platforms. On both tvOS and iOS/iPadOS the pills sit
+    /// above the inner media grid as a plain VStack child — this
+    /// keeps them clear of iPadOS 18+'s floating TabView capsule,
+    /// which overlapped the pills when they were attached via
+    /// `.safeAreaInset(edge: .top)` on MoviesView/TVShowsView.
     private var pillRow: some View {
         HStack(spacing: 12) {
             DVRSegmentPill(
@@ -59,6 +69,14 @@ struct OnDemandView: View {
                 .padding(.top, 24)
                 .padding(.bottom, 20)
                 .focusSection()
+                #else
+                // iOS / iPadOS: pill row renders above the inner
+                // NavigationStack (matching tvOS's layout). The row
+                // itself does the work of dodging iPadOS 18+'s
+                // floating TabView capsule — see `iOSPillHeader`'s
+                // `extraTopPadding` for the 72pt kick that pushes
+                // the pills below the floating bar when present.
+                iOSPillHeader
                 #endif
 
                 if segment == 0 {
@@ -68,18 +86,6 @@ struct OnDemandView: View {
                         isDetailPushed: $isDetailPushed,
                         popRequested: $popRequested
                     )
-                    #if os(iOS)
-                    // iOS: pin the pill row as a safe-area inset at
-                    // the TOP of the Movies grid's scroll view. It
-                    // sits below the nav bar + `.searchable` search
-                    // bar (which live inside MoviesView's
-                    // NavigationStack) and above the scroll content,
-                    // in the app's blue content area — not stuck up
-                    // in the nav bar's black chrome.
-                    .safeAreaInset(edge: .top, spacing: 0) {
-                        iOSPillHeader
-                    }
-                    #endif
                 } else {
                     TVShowsView(
                         vodStore: vodStore,
@@ -87,20 +93,29 @@ struct OnDemandView: View {
                         isDetailPushed: $isDetailPushed,
                         popRequested: $popRequested
                     )
-                    #if os(iOS)
-                    .safeAreaInset(edge: .top, spacing: 0) {
-                        iOSPillHeader
-                    }
-                    #endif
                 }
             }
         }
     }
 
     #if os(iOS)
-    /// Header rendered inside the search-bar-aware safe-area inset on
-    /// iOS so the pill row sits on `Color.appBackground` below the
-    /// nav bar + `.searchable` drawer.
+    /// Pill row rendered above the inner NavigationStack. Explicit
+    /// `Color.appBackground` matches the surrounding blue so the row
+    /// reads as part of the app content, not the TabView's chrome.
+    ///
+    /// iPad needs extra top padding because iPadOS 18+'s floating
+    /// TabView capsule does NOT consume top safe area — content
+    /// placed at the view's safe-area top still ends up visually
+    /// behind the floating capsule (see
+    /// `https://developer.apple.com/documentation/swiftui/tabview`
+    /// changelog for iOS 18). `72pt` is tuned to clear the floating
+    /// bar's ~54pt capsule height plus an 18pt breathing gap, and
+    /// works in both portrait and landscape. iPhone keeps zero
+    /// extra padding because its TabView lives at the bottom —
+    /// top of content is just below the status bar, no collision.
+    /// Split View on iPad drops to `.compact` horizontalSizeClass
+    /// which (per Apple) falls back to a bottom tab bar, so we
+    /// cross-check with the size class too.
     private var iOSPillHeader: some View {
         HStack {
             Spacer()
@@ -108,8 +123,16 @@ struct OnDemandView: View {
             Spacer()
         }
         .padding(.horizontal)
-        .padding(.vertical, 10)
+        .padding(.top, extraTopPadding)
+        .padding(.bottom, 10)
         .background(Color.appBackground)
+    }
+
+    private var extraTopPadding: CGFloat {
+        if UIDevice.current.userInterfaceIdiom == .pad && hSize == .regular {
+            return 72
+        }
+        return 10
     }
     #endif
 }

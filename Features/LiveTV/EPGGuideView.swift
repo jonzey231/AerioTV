@@ -605,10 +605,40 @@ struct EPGGuideView: View {
     @EnvironmentObject private var channelStore: ChannelStore
     @Environment(\.modelContext) private var modelContext
     @State private var _epgCacheIsFresh = false
+    #if os(tvOS)
+    /// Programmatic focus target for a channel row's left-hand cell.
+    /// Normally nil (focus engine drives navigation).
+    @FocusState private var focusedChannelID: String?
+    /// Programmatic focus target for a specific program cell. Used
+    /// by `.forceGuideFocus` to land focus on the currently-playing
+    /// program of the first channel after the single-stream player
+    /// minimizes — without this, tvOS's spatial search from the
+    /// top-right mini position lands on a program 2–3 hours in the
+    /// future (because that's what's directly below the mini).
+    /// Setting this to a program's id claims focus on that cell.
+    @FocusState private var focusedProgramID: String?
+    #endif
 
-    // Time window: 4 hours (1h back + 3h forward)
+    // Time window: 1h back + user-configured hours forward.
+    //
+    // `hoursForward` reads `epgWindowHours` from Settings → "EPG
+    // Window" (see SettingsView.swift: options are 6/12/24/36/48/72
+    // and "All available" = 0). The same `raw > 0 ? raw : 36`
+    // formula is used by the EPG *fetch* layer in three places in
+    // this file (effectiveWindowHours), so rendering matches the
+    // data actually downloaded.
+    //
+    // Before this was a computed property the grid was hardcoded to
+    // 3h forward regardless of the Settings picker — users saw
+    // only ~2.5 hours ahead and horizontal scroll felt broken
+    // because there was nothing left to scroll to. The computed
+    // form also means toggling Settings live updates the grid on
+    // the next render without any observer plumbing.
     private let hoursBack: TimeInterval = 1
-    private let hoursForward: TimeInterval = 3
+    private var hoursForward: TimeInterval {
+        let raw = UserDefaults.standard.integer(forKey: "epgWindowHours")
+        return TimeInterval(raw > 0 ? raw : 36)
+    }
     private var windowStart: Date { Date().addingTimeInterval(-hoursBack * 3600) }
     private var windowEnd: Date { Date().addingTimeInterval(hoursForward * 3600) }
     private var totalDuration: TimeInterval { (hoursBack + hoursForward) * 3600 }
@@ -704,11 +734,19 @@ struct EPGGuideView: View {
     // Manual horizontal offset — only changes when user explicitly scrolls (drag/swipe).
     // Focus changes do NOT cause horizontal movement.
     // Initial value positions "now" at the left edge of the visible area.
-    // Initial value positions "now" at the left edge of the visible area.
     #if os(tvOS)
     @State private var horizontalOffset: CGFloat = -600  // -(hoursBack=1 * pixelsPerHour=600)
     #else
     @State private var horizontalOffset: CGFloat = -360  // -(hoursBack=1 * pixelsPerHour=360)
+    #endif
+
+    /// Captured `horizontalOffset` at the start of an active drag
+    /// gesture. `DragGesture.Value.translation` is cumulative from
+    /// the gesture's start, so we need a baseline to add it to.
+    /// `nil` = no drag in progress; any callback sets it on first
+    /// frame and clears it on `.onEnded`.
+    #if os(iOS)
+    @State private var dragBaselineOffset: CGFloat? = nil
     #endif
 
     /// Maximum the user can scroll right (negative = content shifts left).
@@ -724,9 +762,22 @@ struct EPGGuideView: View {
     // so focus changes never cause horizontal jumps.
     private var guideContent: some View {
         GeometryReader { geo in
+            // `ScrollViewReader` so the Menu-button handler on tvOS
+            // (see HomeView → posts `.guideScrollToTop`) can jump the
+            // guide back to the first channel. The `Color.clear`
+            // anchor with `.id("guide.top")` lives inside the Section
+            // content (above the ForEach) so it scrolls normally —
+            // it's not the pinned header, which wouldn't be a valid
+            // scroll target anyway. `.scrollTo(..., anchor: .top)`
+            // positions the anchor just below the pinned time header,
+            // which is exactly where the first channel row belongs.
+            ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: rowGap, pinnedViews: [.sectionHeaders]) {
                     Section {
+                        Color.clear
+                            .frame(height: 0)
+                            .id("guide.top")
                         ForEach(channels) { channel in
                             guideRow(for: channel, screenWidth: geo.size.width)
                         }
@@ -764,12 +815,48 @@ struct EPGGuideView: View {
             .onAppear { visibleProgramWidth = geo.size.width - channelColumnWidth }
             .onChange(of: geo.size.width) { _, w in visibleProgramWidth = w - channelColumnWidth }
             #if os(iOS)
-            .overlay {
-                HorizontalPanGestureView(
-                    offset: $horizontalOffset,
-                    minOffset: maxHorizontalOffset
-                )
-            }
+            // Horizontal drag for scrubbing the guide timeline.
+            // Uses `.simultaneousGesture` so it coexists with the
+            // outer `ScrollView(.vertical)`'s internal pan — the
+            // earlier approach (`HorizontalPanGestureView`, a
+            // `PassthroughView` + `UIPanGestureRecognizer` overlay)
+            // had been silently broken on iPad: `PassthroughView`'s
+            // `hitTest` returned nil on every touch, which in turn
+            // prevented UIKit from routing touches to the attached
+            // pan recognizer. The bug was invisible when
+            // `hoursForward` was hardcoded to 3 because there was
+            // almost nothing to scroll to, but became obvious once
+            // the grid grew to 36+ hours via the Settings picker.
+            //
+            // We keep `abs(width) > abs(height)` filtering so a
+            // primarily-vertical drag (row scrolling) doesn't steal
+            // the horizontal offset, and `.simultaneousGesture`
+            // explicitly tells SwiftUI not to race this against
+            // ScrollView's own pan — both fire in parallel.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 10)
+                    .onChanged { value in
+                        if dragBaselineOffset == nil {
+                            dragBaselineOffset = horizontalOffset
+                        }
+                        guard let base = dragBaselineOffset else { return }
+                        guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                        let target = base + value.translation.width
+                        horizontalOffset = min(0, max(maxHorizontalOffset, target))
+                    }
+                    .onEnded { value in
+                        let base = dragBaselineOffset ?? horizontalOffset
+                        // `predictedEndTranslation` gives us flick
+                        // momentum — iOS's built-in projection based
+                        // on the release velocity — so fast swipes
+                        // keep gliding instead of stopping dead.
+                        let projected = base + value.predictedEndTranslation.width
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            horizontalOffset = min(0, max(maxHorizontalOffset, projected))
+                        }
+                        dragBaselineOffset = nil
+                    }
+            )
             #endif
             #if os(tvOS)
             .onMoveCommand { direction in
@@ -787,6 +874,53 @@ struct EPGGuideView: View {
                 }
             }
             #endif
+            .onReceive(
+                NotificationCenter.default.publisher(for: .guideScrollToTop)
+            ) { _ in
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    proxy.scrollTo("guide.top", anchor: .top)
+                }
+            }
+            #if os(tvOS)
+            .onReceive(
+                NotificationCenter.default.publisher(for: .forceGuideFocus)
+            ) { _ in
+                // Claim focus on the first channel's CURRENTLY
+                // PLAYING program cell. Without this, tvOS's spatial
+                // search from the top-right mini position lands on a
+                // program cell directly below the mini — which
+                // visually maps to ~2 hours in the future because
+                // that's the time column under the mini's x-position.
+                // Putting focus on the "now" program lets the first
+                // D-pad down from the user land on the next
+                // channel's "now" program (spatially aligned in the
+                // same time column), which is the natural EPG nav.
+                guard let firstChannel = channels.first else { return }
+                let now = Date()
+                let firstChannelPrograms = guideStore.programs[firstChannel.id] ?? []
+                let livePrograms = firstChannelPrograms.filter {
+                    $0.start <= now && $0.end > now
+                }
+                Task { @MainActor in
+                    // 50ms is empirical: long enough to beat the
+                    // focus pass tvOS runs when the mini-player
+                    // transition lands, short enough to feel
+                    // instant.
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                    if let live = livePrograms.first {
+                        focusedProgramID = live.id
+                    } else {
+                        // No EPG data for the first channel (or the
+                        // current time falls in a gap). Fall back to
+                        // the channel cell on the left — always
+                        // focusable, user can D-pad right to find a
+                        // program.
+                        focusedChannelID = firstChannel.id
+                    }
+                }
+            }
+            #endif
+            } // ScrollViewReader
         }
     }
 
@@ -809,6 +943,15 @@ struct EPGGuideView: View {
                     Rectangle().fill(Color.accentPrimary.opacity(0.2)).frame(width: 1)
                 }
                 .zIndex(0.5) // above unfocused programs (zIndex 0), below focused (zIndex 1)
+                #if os(tvOS)
+                // Bind the channel cell (which contains a focusable
+                // `GuideChannelButton` on tvOS) to the row-level
+                // focus state. Normally left nil — used by the
+                // `.forceGuideFocus` notification handler on the
+                // outer ScrollView to claim focus from a minimized
+                // mini player.
+                .focused($focusedChannelID, equals: channel.id)
+                #endif
         }
         .frame(width: screenWidth, height: rowHeight, alignment: .leading)
         #if os(tvOS)
@@ -932,6 +1075,14 @@ struct EPGGuideView: View {
             shortTimeFormatter: shortTimeFormatter, onSelect: onSelectChannel
         )
         .offset(x: x, y: 0)
+        #if os(tvOS)
+        // External focus-claim hook so `.forceGuideFocus` (fired on
+        // mini-player minimize) can land focus on a specific program
+        // cell — used to put focus on the currently-playing program
+        // of the first channel. Normally the binding is nil and the
+        // focus engine drives navigation naturally.
+        .focused($focusedProgramID, equals: prog.id)
+        #endif
     }
 
     // MARK: - Time Indicator Line
@@ -1334,84 +1485,13 @@ private struct GuideButtonStyle: ButtonStyle {
 }
 #endif
 
-// MARK: - iOS Horizontal Pan Gesture (UIKit bridge)
-// SwiftUI's DragGesture doesn't coexist with ScrollView's UIScrollView pan recognizer.
-// This UIViewRepresentable adds a UIPanGestureRecognizer that only fires for horizontal
-// pans and is configured to work simultaneously with the scroll view.
-#if os(iOS)
-private struct HorizontalPanGestureView: UIViewRepresentable {
-    @Binding var offset: CGFloat
-    let minOffset: CGFloat
-
-    func makeUIView(context: Context) -> PassthroughView {
-        let view = PassthroughView()
-        view.backgroundColor = .clear
-        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        let pan = UIPanGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.handlePan))
-        pan.delegate = context.coordinator
-        view.addGestureRecognizer(pan)
-        return view
-    }
-
-    func updateUIView(_ uiView: PassthroughView, context: Context) {
-        context.coordinator.minOffset = minOffset
-    }
-
-    /// UIView that passes through all touches to views behind it,
-    /// while still allowing its gesture recognizers to fire.
-    final class PassthroughView: UIView {
-        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-            // Return nil so touches pass through to the ScrollView underneath.
-            // The pan gesture recognizer still fires because it's attached to this view
-            // and UIKit evaluates gesture recognizers before hitTest routing.
-            return nil
-        }
-    }
-
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(offset: $offset, minOffset: minOffset)
-    }
-
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        @Binding var offset: CGFloat
-        var minOffset: CGFloat
-        private var startOffset: CGFloat = 0
-
-        init(offset: Binding<CGFloat>, minOffset: CGFloat) {
-            _offset = offset
-            self.minOffset = minOffset
-        }
-
-        @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
-            let translation = gesture.translation(in: gesture.view)
-            switch gesture.state {
-            case .began:
-                startOffset = offset
-            case .changed:
-                offset = min(0, max(minOffset, startOffset + translation.x))
-            case .ended, .cancelled:
-                let velocity = gesture.velocity(in: gesture.view).x
-                let projected = offset + velocity * 0.15
-                withAnimation(.easeOut(duration: 0.25)) {
-                    offset = min(0, max(minOffset, projected))
-                }
-            default: break
-            }
-        }
-
-        // Only begin for primarily horizontal pans.
-        func gestureRecognizerShouldBegin(_ gesture: UIGestureRecognizer) -> Bool {
-            guard let pan = gesture as? UIPanGestureRecognizer else { return false }
-            let velocity = pan.velocity(in: pan.view)
-            return abs(velocity.x) > abs(velocity.y)
-        }
-
-        // Allow ScrollView's vertical scroll to work simultaneously.
-        func gestureRecognizer(
-            _ gestureRecognizer: UIGestureRecognizer,
-            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
-        ) -> Bool { true }
-    }
-}
-#endif
+// NOTE: `HorizontalPanGestureView` + `PassthroughView` were
+// removed in favour of `.simultaneousGesture(DragGesture())`
+// attached to the ScrollView (see `guideContent` above). The
+// UIKit bridge claimed to "evaluate gesture recognizers before
+// hitTest routing," but on iPad that's simply not true — UIKit
+// only considers gesture recognizers whose attached view hit-
+// tests to the touch, and the `PassthroughView`'s `hitTest`
+// unconditionally returned nil. The gesture therefore never
+// fired, which only became visible once the guide grid was
+// wide enough to actually require horizontal scrolling.

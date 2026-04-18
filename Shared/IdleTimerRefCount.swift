@@ -25,8 +25,15 @@ enum IdleTimerRefCount {
     // MARK: - Public API
 
     /// Increment. On 0→1 sets `isIdleTimerDisabled = true`.
-    static func increment() {
+    ///
+    /// `caller` is a short string for log-trail attribution (e.g.
+    /// `"tile=ABC"`). Every call logs its count transition so we
+    /// can tell at a glance whether the idle timer is bouncing in
+    /// step with tile adds / removes.
+    static func increment(caller: String = "unknown") {
+        let before = count
         count += 1
+        NSLog("[IdleTimer] refcount inc \(before)→\(count) caller=\(caller)")
         if count == 1 {
             UIApplication.shared.isIdleTimerDisabled = true
         }
@@ -34,12 +41,14 @@ enum IdleTimerRefCount {
 
     /// Decrement. On 1→0 sets `isIdleTimerDisabled = false`.
     /// Clamped at 0.
-    static func decrement() {
+    static func decrement(caller: String = "unknown") {
         guard count > 0 else {
-            NSLog("IdleTimerRefCount.decrement: over-decrement (count already 0)")
+            NSLog("[IdleTimer] refcount over-decrement (count already 0) caller=\(caller)")
             return
         }
+        let before = count
         count -= 1
+        NSLog("[IdleTimer] refcount dec \(before)→\(count) caller=\(caller)")
         if count == 0 {
             UIApplication.shared.isIdleTimerDisabled = false
         }

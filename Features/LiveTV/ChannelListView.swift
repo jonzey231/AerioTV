@@ -43,6 +43,14 @@ struct ChannelListView: View {
     @State private var showGuideView = false
     #if os(tvOS)
     @State private var showSearchField = false
+    /// tvOS guide focus target. Normally `nil` so the focus engine
+    /// handles D-pad navigation naturally; programmatically set to
+    /// a channel id in response to `.forceGuideFocus` (posted when
+    /// the single-stream player minimizes to the corner) so focus
+    /// lands on an actual guide row instead of staying trapped in
+    /// the disabled mini player. Cleared back to nil immediately
+    /// after the claim so subsequent D-pad navigation isn't pinned.
+    @FocusState private var focusedGuideRowID: String?
     #endif
 
     private let hiddenGroupsKey = "hiddenChannelGroups"
@@ -130,7 +138,7 @@ struct ChannelListView: View {
                        !channel.streamURLs.isEmpty {
                         debugLog("🔗 ChannelListView: warm deep link → playing \(channel.name)")
                         UserDefaults.standard.removeObject(forKey: "launchChannelID")
-                        nowPlaying.startPlaying(channel, headers: playerHeaders())
+                        startPlayback(channel)
                     } else {
                         // Channels not yet loaded — leave launchChannelID set so
                         // the cold-path handler picks it up when they arrive.
@@ -268,9 +276,7 @@ struct ChannelListView: View {
                         channels: filteredChannels,
                         servers: Array(servers),
                         onSelectChannel: { item in
-                            if !item.streamURLs.isEmpty {
-                                nowPlaying.startPlaying(item, headers: playerHeaders())
-                            }
+                            startPlayback(item)
                         }
                     )
                     #if os(tvOS)
@@ -299,35 +305,71 @@ struct ChannelListView: View {
             #if os(tvOS)
             // On tvOS, List draws a white highlight over any focused row —
             // ScrollView + LazyVStack gives us full visual control.
-            ScrollView {
-                LazyVStack(spacing: 6) {
-                    ForEach(filteredChannels) { item in
-                        ChannelRow(
-                            item: item,
-                            onTap: {
-                                if !item.streamURLs.isEmpty {
-                                    nowPlaying.startPlaying(item, headers: playerHeaders())
-                                }
-                            },
-                            fetchUpcoming: makeFetchUpcoming(for: item)
-                        )
-                        .padding(.horizontal, 24)
+            //
+            // Wrapped in `ScrollViewReader` so a Menu-button press on
+            // the Live-TV tab (posted via `.guideScrollToTop` from
+            // HomeView) can jump the list back to the first channel.
+            // Matches Apple's TV / Music "Menu = back to top" pattern
+            // for long lists.
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 6) {
+                        // Invisible top anchor so we always have a
+                        // scroll target even if the filtered list is
+                        // empty or still loading.
+                        Color.clear
+                            .frame(height: 0)
+                            .id("guide.top")
+
+                        ForEach(filteredChannels) { item in
+                            ChannelRow(
+                                item: item,
+                                onTap: { startPlayback(item) },
+                                fetchUpcoming: makeFetchUpcoming(for: item)
+                            )
+                            .padding(.horizontal, 24)
+                            // Bind each row to `focusedGuideRowID`.
+                            // Normally the focus engine drives the
+                            // binding (D-pad moves focus among
+                            // rows). Programmatically set in the
+                            // `.forceGuideFocus` handler below to
+                            // yank focus from a minimized mini
+                            // player.
+                            .focused($focusedGuideRowID, equals: item.id)
+                        }
+                    }
+                    .padding(.vertical, 8)
+                }
+                .background(Color.appBackground)
+                .focusSection()
+                .onReceive(
+                    NotificationCenter.default.publisher(for: .guideScrollToTop)
+                ) { _ in
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        proxy.scrollTo("guide.top", anchor: .top)
                     }
                 }
-                .padding(.vertical, 8)
+                .onReceive(
+                    NotificationCenter.default.publisher(for: .forceGuideFocus)
+                ) { _ in
+                    // Claim focus on the first visible channel.
+                    // `Task.yield()` gives tvOS's own focus pass a
+                    // frame to complete before our write lands —
+                    // otherwise our programmatic set can be
+                    // overridden by the engine's default handling.
+                    guard let firstID = filteredChannels.first?.id else { return }
+                    Task { @MainActor in
+                        await Task.yield()
+                        focusedGuideRowID = firstID
+                    }
+                }
             }
-            .background(Color.appBackground)
-            .focusSection()
             #else
             List {
                 ForEach(filteredChannels) { item in
                     ChannelRow(
                         item: item,
-                        onTap: {
-                            if !item.streamURLs.isEmpty {
-                                nowPlaying.startPlaying(item, headers: playerHeaders())
-                            }
-                        },
+                        onTap: { startPlayback(item) },
                         fetchUpcoming: makeFetchUpcoming(for: item)
                     )
                     .listRowBackground(Color.clear)
@@ -522,6 +564,32 @@ struct ChannelListView: View {
         return server.authHeaders
     }
 
+    // MARK: - Playback entry helper (Phase B)
+
+    /// Unified entry point for channel taps / deep-links / EPG picks.
+    /// Routes through the new `PlayerSession.begin(...)` API when the
+    /// `"playback.unified"` feature flag is on; falls back to the
+    /// legacy `NowPlayingManager.startPlaying(...)` path otherwise.
+    ///
+    /// Both paths get the same guard (`!streamURLs.isEmpty`) so the
+    /// call sites can just be `startPlayback(item)`. The server
+    /// lookup mirrors `playerHeaders()` so header semantics are
+    /// identical across both paths.
+    ///
+    /// Phase D deletes the flag-gate and this helper keeps calling
+    /// `begin(...)` directly.
+    private func startPlayback(_ item: ChannelDisplayItem) {
+        guard !item.streamURLs.isEmpty else { return }
+        if PlaybackFeatureFlags.useUnifiedPlayback {
+            let server = channelStore.activeServer
+                ?? servers.first(where: { $0.isActive })
+                ?? servers.first
+            _ = PlayerSession.shared.begin(item: item, server: server)
+        } else {
+            nowPlaying.startPlaying(item, headers: playerHeaders())
+        }
+    }
+
     // MARK: - Deep Link Handler
 
     #if os(tvOS)
@@ -535,7 +603,7 @@ struct ChannelListView: View {
               !channel.streamURLs.isEmpty else { return }
         UserDefaults.standard.removeObject(forKey: "launchChannelID")
         debugLog("🔗 ChannelListView: cold deep link → playing \(channel.name)")
-        nowPlaying.startPlaying(channel, headers: playerHeaders())
+        startPlayback(channel)
     }
     #endif
 
@@ -1497,9 +1565,7 @@ struct FavoritesView: View {
                     List {
                         ForEach(favoritesStore.favoriteItems) { item in
                             ChannelRow(item: item) {
-                                if !item.streamURLs.isEmpty {
-                                    nowPlaying.startPlaying(item, headers: playerHeaders())
-                                }
+                                startPlayback(item)
                             }
                             .listRowBackground(Color.clear)
                             .listRowInsets(EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16))
@@ -1528,6 +1594,24 @@ struct FavoritesView: View {
             return ["Accept": "*/*"]
         }
         return server.authHeaders
+    }
+
+    /// Same `startPlayback(_:)` helper as on `ChannelListView` — see
+    /// its doc comment for rationale. Duplicated here because
+    /// `FavoritesView` is a separate struct with its own
+    /// `playerHeaders()` / `nowPlaying` / `channelStore` environment
+    /// objects; a shared extension would require relocating these
+    /// properties into a protocol.
+    private func startPlayback(_ item: ChannelDisplayItem) {
+        guard !item.streamURLs.isEmpty else { return }
+        if PlaybackFeatureFlags.useUnifiedPlayback {
+            let server = channelStore.activeServer
+                ?? servers.first(where: { $0.isActive })
+                ?? servers.first
+            _ = PlayerSession.shared.begin(item: item, server: server)
+        } else {
+            nowPlaying.startPlaying(item, headers: playerHeaders())
+        }
     }
 }
 

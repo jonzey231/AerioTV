@@ -1,5 +1,133 @@
 # Changelog
 
+## v1.6.1 — 2026-04-18
+
+### New — Unified Playback
+
+- **One playback path for single-stream and multiview.** Single-stream
+  is now `tiles.count == 1` inside the same container used for
+  multiview. Tapping `+` to add a second stream no longer unmounts
+  the player and rebuilds a fresh mpv handle; the existing stream
+  keeps decoding while the new tile comes up. Eliminates the 1.5–6s
+  main-thread stall that previously happened on the N=1→N=2 swap
+  (worst case on tvOS with thermal state `.serious`) along with the
+  memory doubling that followed.
+- **tvOS Mini Player restored on the unified path.** Press Menu
+  twice during single-stream playback to shrink to a 400×225 corner
+  window. The stream keeps playing; D-pad navigates the guide
+  underneath; Play/Pause expands back to full-screen; Menu on the
+  guide stops playback cleanly.
+- **iPad Move Mode for tile rearrangement.** Long-press a tile →
+  "Move Tile" → orange ring appears + banner prompts for a target
+  → tap another tile to swap, or tap the source tile again to
+  cancel. Replaces the drag-and-drop gesture, which was silently
+  starving the long-press context menu on iPad via UIKit's
+  `UIDragInteraction` requireToFail relationships.
+- **Record from the player chrome.** A dedicated Record button in
+  the chrome overlay presents the DVR schedule sheet pre-populated
+  with the audio tile's currently airing program. Available on
+  iPad and tvOS chrome.
+- **Focus indicator redesign on tvOS multiview.** Focused tiles now
+  show a center speaker icon plus a channel-name pill instead of
+  the previous ring + big scale combination. The audio tile is
+  always highlighted; other tiles highlight on focus. Reads more
+  clearly on the living-room couch and no longer fights the system
+  focus halo.
+- **Double-press Select for fullscreen-in-grid on tvOS.** One
+  Select takes audio on that tile (existing behaviour). Two
+  presses within 400ms promote the tile to fill the grid area
+  while every other tile freezes. Menu collapses back to the grid.
+- **Menu on the Live-TV tab scrolls the guide to top** when there's
+  nothing playing — same for the EPG grid view. Previously Menu on
+  an idle Live-TV tab did nothing.
+
+### Fixed — Performance and Stability
+
+- **Cold-launch first-channel latency.** `MPVLibraryWarmup` creates
+  and destroys a throwaway mpv handle during app startup, and the
+  EAGL context is pre-warmed in the same pass. Tap-to-first-frame
+  on a freshly launched process dropped from ~2.1s to comparable-to-
+  warm times on LAN. Instrumented via `[MPV-WARMUP]` log lines.
+- **503 / `MPV_ERROR_LOADING_FAILED` retry storm** when opening
+  multiview with multiple channels from the same origin. Each tile
+  now retries with exponential backoff plus jitter so nine
+  concurrent tile initializations don't line up and stampede the
+  upstream.
+- **Unpause snaps to the live edge.** Live streams that had been
+  paused (e.g. while the channel picker was open) now issue a
+  `loadfile replace` on resume instead of continuing from the
+  frozen position. Matches user expectation for live TV.
+- **Spurious "Decoder unavailable" overlays eliminated.**
+  `MPV_END_FILE_REASON_STOP` from our own reload (the live-edge
+  snap above) was being caught by the premature-EOF path and
+  triggering a retry cascade that ended in `onFatalError`. Now
+  guarded at the top of `handleEndFile`.
+- **2×2 multiview right-swap now lands on the bottom-right tile**
+  instead of the top-right. `MultiviewGridMath.physicalNeighbor`
+  uses a strict >1pt perpendicular overlap check so tiles that
+  only share an edge don't register as overlapping.
+- **Audio focus indicator at N=9** was regressing to no visible
+  feedback. Root cause was `.focusable(Bool)` on the tile Button
+  disrupting `@Environment(\.isFocused)` propagation into
+  `MultiviewTileButtonStyle`. Modifier removed; focus reads through
+  correctly across all grid sizes.
+- **iPad player chrome clearance from the status-bar clock.** The
+  top bar now applies 48pt of top padding. `.safeAreaPadding` and
+  `.safeAreaInset` both returned zero insets because the parent
+  `MultiviewContainerView` calls `.ignoresSafeArea()` at mount,
+  zeroing safe-area values for descendants.
+- **Per-tile `×` close removed on iPad.** The inline button was too
+  easy to hit during audio-focus taps; Remove is now a long-press
+  menu action instead, matching tvOS.
+- **Menu-button double-press correctly exits the mini-player** and
+  fully stops the session. Previously the mini path could leave a
+  decoding mpv handle behind because the `.disabled` gate on the
+  tab content view blocked focus from escaping to the guide.
+
+### Fixed — Guide and Navigation
+
+- **EPG grid now respects the "EPG Window" Settings picker** on all
+  platforms. The grid had been hardcoded to 3 hours forward
+  regardless of what the user selected; it now reads the same
+  `epgWindowHours` UserDefault that the EPG fetch layer uses, so
+  36/48/72/All picks show the full range.
+- **Horizontal scroll restored on the iPad EPG grid.** The previous
+  UIKit pan-gesture bridge (`HorizontalPanGestureView` with a
+  passthrough view returning `nil` from `hitTest`) had been
+  silently broken — UIKit only routes touches to gesture
+  recognizers whose attached view hit-tests to the touch. Replaced
+  with a SwiftUI `.simultaneousGesture(DragGesture())` that
+  coexists correctly with the outer vertical `ScrollView`.
+- **On Demand Movies/Series pill no longer overlaps the iPadOS 18
+  floating TabView capsule.** The pill row used to be attached via
+  `.safeAreaInset(edge: .top)` on the inner MoviesView, which
+  placed it behind the translucent floating tab bar on iPad. It's
+  now a VStack sibling of the media grid with a size-class-aware
+  72pt top padding that only applies on full-width iPad.
+- **iPad long-press context menu on multiview tiles fires reliably.**
+  The coexisting `.onDrag` installed a `UIDragInteraction` whose
+  built-in long-press recognizer was winning the gesture race. Drag
+  removed; a dedicated Move Mode action replaces it (see above).
+
+### Developer experience
+
+- **Live Apple TV log capture** via `Scripts/capture-appletv-logs.sh`.
+  Pipes `xcrun devicectl device process launch --console` stdout to
+  `~/Library/Logs/AppleTV-Aerio.log` through a `script(1)` PTY wrap
+  so `--console` actually captures app stdio. Preserves the Xcode
+  Cmd+R workflow unchanged.
+- **Per-phase mpv timing** emitted as `[MPV-PHASE]` and `[MV-TIMING]`
+  log lines. Covers `mpv_create`, `mpv_initialize`, EAGL context
+  creation, render-context creation, and post-init property apply
+  times. Paired with a one-line per-tile summary including process
+  RSS, fd count, thermal state, and low-power-mode flag.
+- **Playback Engine toggle** in Developer Settings. Unified
+  Playback is now the default; the legacy PlayerView path remains
+  as an opt-in fallback for testing.
+- **`PlaybackDiagnostics`**, **`ProcessMetrics`**, and
+  **`RemoteInputLogger`** utility modules added for ongoing freeze
+  / resource-pressure / focus-event observation.
+
 ## v1.6.0 — 2026-04-16
 
 ### New — Multiview (iPadOS and tvOS)

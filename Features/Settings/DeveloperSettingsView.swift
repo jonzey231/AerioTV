@@ -8,6 +8,17 @@ import UIKit
 
 struct DeveloperSettingsView: View {
     @AppStorage("debugLoggingEnabled") private var debugLoggingEnabled = false
+
+    /// Mirrors `PlaybackFeatureFlags.useUnifiedPlayback`. The toggle
+    /// routes every playback entry point (guide tap, favorites,
+    /// CarPlay, deep-link, add-sheet) through `PlayerSession.begin(...)`
+    /// which mounts `MultiviewContainerView` from the first tile
+    /// instead of the legacy `PlayerView`. **Default `true`** as of
+    /// Phase D — the unified view is now the canonical path. Users
+    /// who hit a unified-path regression can flip this off for the
+    /// legacy `PlayerView` fallback while we chase the bug.
+    @AppStorage("playback.unified") private var unifiedPlayback = true
+
     @Query private var servers: [ServerConnection]
 
     @State private var showEnableConfirmation = false
@@ -127,6 +138,54 @@ struct DeveloperSettingsView: View {
                         .sectionHeaderStyle()
                 } footer: {
                     Text("When enabled, detailed logs are written to a file in On My iPhone › AerioTV. Logs include network requests, playback events, EPG activity, errors, and app lifecycle events. No personally identifiable information is collected.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                        .padding(.top, 4)
+                }
+                #if os(iOS)
+                .listSectionSeparator(.hidden)
+                #endif
+
+                // MARK: - Unified Playback (experimental)
+                Section {
+                    HStack(spacing: 14) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(unifiedPlayback
+                                      ? Color.accentPrimary.opacity(0.18)
+                                      : Color.elevatedBackground)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: unifiedPlayback
+                                  ? "rectangle.stack.fill"
+                                  : "rectangle.stack")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(unifiedPlayback ? .accentPrimary : .textSecondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Unified Playback")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Text(unifiedPlayback
+                                 ? "On — default. Every channel runs in the multiview container."
+                                 : "Off — legacy PlayerView fallback")
+                                .font(.labelSmall)
+                                .foregroundColor(unifiedPlayback ? .accentPrimary : .textTertiary)
+                        }
+
+                        Spacer()
+
+                        Toggle("", isOn: $unifiedPlayback)
+                            .labelsHidden()
+                            .tint(.accentPrimary)
+                    }
+                    .padding(.vertical, 4)
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Playback Engine")
+                        .sectionHeaderStyle()
+                } footer: {
+                    Text("Unified Playback is the default shipping path — a single tile mounts MultiviewContainerView from the first frame, so adding a second stream is seamless (no view-swap, no re-setup). Disable only if you hit a unified-path regression; the legacy PlayerView remains available as a fallback for the single-stream case but does not support tvOS multiview or the new mini-player UX. Only affects live playback; VOD always uses the legacy path. Restart playback for the change to take effect.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.top, 4)
@@ -283,6 +342,18 @@ struct DeveloperSettingsView: View {
                                 }
                             }
                         )
+                    ) { _ in }
+                }
+
+                tvSection("Experimental") {
+                    TVSettingsToggleRow(
+                        icon: unifiedPlayback ? "rectangle.stack.fill" : "rectangle.stack",
+                        iconColor: unifiedPlayback ? .accentPrimary : .textSecondary,
+                        title: "Unified Playback",
+                        subtitle: unifiedPlayback
+                            ? "On — every channel runs in the multiview container"
+                            : "Off — legacy single-stream PlayerView",
+                        isOn: $unifiedPlayback
                     ) { _ in }
                 }
 

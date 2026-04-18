@@ -1406,9 +1406,6 @@ struct MainTabView: View {
     @State private var isVODDetailPushed = false
     /// Signal to VOD views to pop their navigation stack.
     @State private var vodNavPopRequested = false
-    #if os(tvOS)
-    @State private var showExitConfirmation = false
-    #endif
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
     @ObservedObject private var favoritesStore = FavoritesStore.shared
     @StateObject private var vodStore = VODStore()
@@ -1419,6 +1416,13 @@ struct MainTabView: View {
     /// the right fit here — the session outlives any view and should
     /// not be owned by this view.
     @ObservedObject private var playerSession = PlayerSession.shared
+    /// Watched so the `.multiview` branch can distinguish N=1 (the
+    /// unified single-stream path) from N≥2. At N=1 on iOS we restore
+    /// the 1.6.0 swipe-down-to-minimize + mini-player behaviour that
+    /// the legacy `PlayerView` path used to own — the unified
+    /// `MultiviewContainerView` is the rendering surface now, but
+    /// collapsing it behaves like a single stream at N=1.
+    @ObservedObject private var multiviewStore = MultiviewStore.shared
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
     /// Flipped true after the first DVR reconcile completes so the
@@ -1565,6 +1569,31 @@ struct MainTabView: View {
     var body: some View {
         ZStack {
             tabContentView
+                #if os(tvOS)
+                // While multiview is active, disable the entire tab
+                // hierarchy so tvOS's focus engine can't land on guide
+                // rows / tab-bar items behind the MultiviewContainer.
+                // Without this, users reported hearing D-pad scrolling
+                // sounds with no visible focus (focus was on hidden
+                // guide cards) and Menu bubbling past multiview's
+                // `.onExitCommand` to the app-exit prompt.
+                //
+                // EXCEPTION: when the unified N=1 player has been
+                // minimized to the corner, the guide IS expected to
+                // receive focus (so the user can D-pad through
+                // channels, pick a new one, or press Menu to stop
+                // playback). Without this carve-out the guide stays
+                // `.disabled`, which renders every focus-release
+                // attempt inside the mini inert — focus has nowhere
+                // legal to go. This is the "missing piece" that made
+                // `.focusable(false)`, `@FocusState` claims, and
+                // `.forceGuideFocus` notifications silently fail for
+                // the mini-player UX.
+                .disabled(
+                    playerSession.mode == .multiview
+                    && !(multiviewStore.tiles.count == 1 && nowPlaying.isMinimized)
+                )
+                #endif
 
             // Background activity indicator — top left
             if isAnyBackgroundWork, !nowPlaying.isActive || nowPlaying.isMinimized {
@@ -1612,12 +1641,77 @@ struct MainTabView: View {
             // still the single-stream fallback for when the user
             // exits multiview keeping the audio tile.
             if playerSession.mode == .multiview {
+                #if os(tvOS)
+                // At N=1 under unified playback, restore the 1.6.0
+                // tvOS mini-player UX: double-press Menu shrinks the
+                // full-screen player down to a 400×225 corner box so
+                // the guide shows through behind. A third Menu press
+                // stops playback entirely (handled by HomeView's
+                // `.onExitCommand` below). Playback continues without
+                // interruption because MultiviewContainerView is
+                // never unmounted; only its frame / position change.
+                //
+                // At N≥2 (real multiview) the mini state is ignored —
+                // the mini-player concept doesn't generalise to a
+                // grid, and the exit path there is the normal
+                // "Exit Multiview?" confirmation.
+                let isSoleStream = multiviewStore.tiles.count == 1
+                let minimized = isSoleStream && nowPlaying.isMinimized
+                GeometryReader { geo in
+                    let miniW: CGFloat = 400
+                    let miniH: CGFloat = 225
+                    ZStack(alignment: .topTrailing) {
+                        MultiviewContainerView()
+                            .frame(
+                                width: minimized ? miniW : geo.size.width,
+                                height: minimized ? miniH : geo.size.height
+                            )
+                            .clipShape(RoundedRectangle(
+                                cornerRadius: minimized ? 12 : 0,
+                                style: .continuous
+                            ))
+                            .shadow(
+                                color: minimized ? .black.opacity(0.6) : .clear,
+                                radius: 20, y: 8
+                            )
+                            // Hit-testing off so remote taps don't
+                            // land on the mini. Focus-release is
+                            // handled inside `MultiviewTileView`
+                            // (the tile's Button reads
+                            // `nowPlaying.isMinimized` and flips its
+                            // own `.focusable(false)` — `.disabled`
+                            // on the wrapper also suppresses
+                            // `.onPlayPauseCommand` at the container
+                            // level, which is why we don't use it
+                            // here.
+                            .allowsHitTesting(!minimized)
+                            .padding(.trailing, minimized ? 40 : 0)
+                            .padding(.top, minimized ? 40 : 0)
+                    }
+                    .frame(
+                        width: geo.size.width,
+                        height: geo.size.height,
+                        alignment: minimized ? .topTrailing : .center
+                    )
+                    .animation(.spring(response: 0.35), value: minimized)
+                }
+                .ignoresSafeArea()
+                .zIndex(2)
+                // Intentionally NO outer `.focusSection()` here.
+                // MultiviewContainerView already has a focusSection
+                // on its internal grid, which traps focus between
+                // tiles while full-screen. When we shrink to the
+                // 400×225 corner, we WANT focus to escape to the
+                // guide behind (the channel list / EPG grid) so the
+                // user can D-pad through channels. An outer
+                // focusSection here would trap focus inside the
+                // corner player even with hit-testing off, which is
+                // exactly the bug the mini UX needs to avoid.
+                #else
                 MultiviewContainerView()
                     .ignoresSafeArea()
-                    #if os(tvOS)
-                    .focusSection()
-                    #endif
                     .zIndex(2)
+                #endif
             } else if nowPlaying.isActive, let item = nowPlaying.playingItem {
                 // Single PlayerView kept in hierarchy for uninterrupted playback.
                 // Transitions between full-screen and mini use size/position
@@ -1709,9 +1803,19 @@ struct MainTabView: View {
         #if os(tvOS)
         // When mini player is active, pressing Menu stops it.
         // When no mini player, Menu navigates normally (tab switch, etc.)
+        //
+        // Under unified playback the mini is N=1 multiview-mode
+        // playback shrunk to a corner; fully stopping it requires
+        // `PlayerSession.shared.stop()` (which resets
+        // `MultiviewStore`, tears down the mpv handle, and flips mode
+        // back to `.idle`). Calling `nowPlaying.stop()` alone only
+        // clears the lockscreen entry and leaves the container still
+        // rendering. `PlayerSession.stop()` works for the legacy path
+        // too — it reduces to `NowPlayingManager.stop()` when there
+        // are no tiles to reset.
         .onExitCommand {
             if nowPlaying.isMinimized {
-                nowPlaying.stop()
+                PlayerSession.shared.stop()
             }
         }
         #endif
@@ -1884,8 +1988,14 @@ struct MainTabView: View {
                 debugLog("🎮 Menu pressed: full-screen player → minimize to corner")
                 withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() }
             } else if nowPlaying.isActive && nowPlaying.isMinimized {
+                // Under unified playback, the mini is N=1 multiview
+                // collapsed to a corner. Fully stopping requires
+                // `PlayerSession.shared.stop()` — it tears down
+                // MultiviewStore + mpv + flips mode to `.idle`.
+                // `nowPlaying.stop()` alone only clears lockscreen
+                // metadata and leaves the container rendering.
                 debugLog("🎮 Menu pressed: mini player → stop playback")
-                nowPlaying.stop()
+                PlayerSession.shared.stop()
             } else if isVODDetailPushed {
                 // Pop the VOD detail view back to the browse list.
                 // We must do this programmatically because .onExitCommand consumes
@@ -1894,8 +2004,14 @@ struct MainTabView: View {
                 isVODDetailPushed = false
                 vodNavPopRequested = true
             } else if selectedTab == .liveTV {
-                debugLog("🎮 Menu pressed: Live TV tab → show exit confirmation")
-                showExitConfirmation = true
+                // Menu on the guide (nothing playing, no mini) =
+                // "take me back to the top of the list". Matches the
+                // Apple TV / Music convention for long lists. Posted
+                // as a notification so ChannelListView can scroll its
+                // internal ScrollViewReader without HomeView having
+                // to hold a binding through the tab view hierarchy.
+                debugLog("🎮 Menu pressed: Live TV tab → scroll guide to top")
+                NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
             } else {
                 debugLog("🎮 Menu pressed: \(selectedTab.rawValue) tab → switch to Live TV")
                 selectedTab = .liveTV
@@ -1906,14 +2022,6 @@ struct MainTabView: View {
                 debugLog("🎮 Play/Pause pressed: expand mini player to full screen")
                 withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
             }
-        }
-        .alert("Exit AerioTV?", isPresented: $showExitConfirmation) {
-            Button("Exit", role: .destructive) {
-                nowPlaying.stop()
-                NowPlayingBridge.shared.teardown()
-                exit(0)
-            }
-            Button("Cancel", role: .cancel) {}
         }
         .onReceive(NotificationCenter.default.publisher(for: .stopPlaybackForBackground)) { _ in
             if nowPlaying.isActive {

@@ -107,6 +107,14 @@ struct AerioApp: App {
                     #if DEBUG
                     MainThreadWatchdog.shared.start()
                     #endif
+                    // Playback diagnostics — memory-warning subscriber
+                    // logs a snapshot of tile state + process metrics
+                    // when iOS sends a pressure notification. Runs in
+                    // both DEBUG and release so feedback reports have
+                    // the same signal as developer loops.
+                    #if canImport(UIKit)
+                    PlaybackDiagnostics.installMemoryWarningHook()
+                    #endif
                 }
                 #if os(tvOS)
                 .onOpenURL { url in
@@ -384,6 +392,7 @@ private class LocationDelegate: NSObject, CLLocationManagerDelegate {
 enum TVLANProbe {
     /// Probes each server's localURL. If ANY responds within 2s, sets tvosLANDetected = true.
     static func probe(servers: [ServerConnection]) {
+        let serversWithoutLocal = servers.filter { $0.localURL.isEmpty }.count
         let candidates = servers.compactMap { s -> URL? in
             guard !s.localURL.isEmpty else { return nil }
             var url = s.localURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -392,27 +401,46 @@ enum TVLANProbe {
             return URL(string: url)
         }
         guard !candidates.isEmpty else {
+            // No `localURL` configured on any server. `effectiveBaseURL`
+            // will always return the external URL — this is a CONFIG
+            // issue, not a network issue. Log visibly so the user can
+            // see why their Ethernet-connected Apple TV is going
+            // through WAN even when the server is on the LAN.
             UserDefaults.standard.set(false, forKey: "tvosLANDetected")
+            print("📡 tvOS LAN probe: SKIPPED — no local URL configured on any server (\(serversWithoutLocal) server(s) missing `localURL`). Set Settings → Server → Local URL to enable LAN routing.")
             return
         }
+        print("📡 tvOS LAN probe: starting — \(candidates.count) candidate local URL(s), \(serversWithoutLocal) server(s) without local URL")
         Task {
             var detected = false
+            var attemptedLog: [String] = []
             for baseURL in candidates {
-                // Quick HEAD request with short timeout
-                var request = URLRequest(url: baseURL, timeoutInterval: 2.0)
+                // Quick HEAD request with short timeout. Bumped
+                // from 2s → 3s because some home routers respond
+                // slowly to the first connection to a host the ARP
+                // table doesn't know yet (observed on Ubiquiti
+                // setups when the TV just came off standby).
+                var request = URLRequest(url: baseURL, timeoutInterval: 3.0)
                 request.httpMethod = "HEAD"
                 do {
+                    let start = Date()
                     let (_, response) = try await URLSession.shared.data(for: request)
+                    let ms = Int(Date().timeIntervalSince(start) * 1000)
                     if let http = response as? HTTPURLResponse, http.statusCode < 500 {
+                        attemptedLog.append("\(baseURL.host ?? baseURL.absoluteString)=\(http.statusCode)/\(ms)ms ✓")
                         detected = true
                         break
+                    } else if let http = response as? HTTPURLResponse {
+                        attemptedLog.append("\(baseURL.host ?? baseURL.absoluteString)=\(http.statusCode)/\(ms)ms ✗")
                     }
                 } catch {
-                    // Unreachable — try next
+                    // Short error tag — `.timedOut`, `.cannotConnectToHost`, etc.
+                    let nsErr = error as NSError
+                    attemptedLog.append("\(baseURL.host ?? baseURL.absoluteString)=err(\(nsErr.code))")
                 }
             }
             UserDefaults.standard.set(detected, forKey: "tvosLANDetected")
-            debugLog("📡 tvOS LAN probe: detected=\(detected) (checked \(candidates.count) local URLs)")
+            print("📡 tvOS LAN probe: detected=\(detected) results=[\(attemptedLog.joined(separator: ", "))]. LAN routing \(detected ? "ENABLED — streams will use local URL" : "DISABLED — streams will use external URL")")
         }
     }
 }
@@ -474,6 +502,29 @@ struct RootView: View {
             }
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")
+
+                // Kick off libmpv one-time process-wide init on a
+                // background queue. The 2 s `mpv_initialize` cost
+                // that used to hit the user on their first channel
+                // tap happens here instead, while the splash /
+                // channel list is already loading. By the time the
+                // user picks a channel, libmpv is warm and
+                // `setupMPV` falls into the cheap ~15 ms fast path.
+                // Idempotent; safe to call on every render pass.
+                // Guarded by `canImport(Libmpv)` because the whole
+                // MPV subsystem (and this enum's declaration) lives
+                // inside that conditional in MPVPlayerView.swift.
+                #if canImport(Libmpv)
+                MPVLibraryWarmup.warmUp()
+                #endif
+
+                // DEBUG-only: log every Siri Remote button press / dpad
+                // movement with a `[REMOTE]` prefix so the devicectl
+                // --console log capture can stream remote-input events
+                // alongside app lifecycle + MPV timing. No-op on iOS
+                // and in release builds.
+                RemoteInputLogger.install()
+
                 // Share model context with WatchProgressManager for VOD resume tracking
                 WatchProgressManager.modelContext = modelContext
                 if !hasCompletedOnboarding && !hasAnySource {

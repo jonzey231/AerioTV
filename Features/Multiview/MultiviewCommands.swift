@@ -73,7 +73,9 @@ struct MultiviewCommands: Commands {
     private func exitMultiview() {
         guard PlayerSession.shared.mode == .multiview else { return }
         DebugLogger.shared.log("[MV-Cmd] ⌘W exitMultiview", category: "Playback", level: .info)
-        PlayerSession.shared.exit()
+        // ⌘W behaves like the on-screen Exit button: fall back to
+        // single-stream playback of the audio tile's channel.
+        PlayerSession.shared.exitMultiviewKeepingAudioTile()
     }
 
     @MainActor

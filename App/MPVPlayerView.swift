@@ -8,6 +8,133 @@ import CoreVideo
 import CoreMedia  // For CMSampleBuffer
 import OpenGLES
 
+// MARK: - libmpv global init warm-up
+//
+// Observation from `[MV-TIMING]` logs on Apple TV 4K (3rd gen):
+//
+//   tile=155      setup_ms=2267   ← first mpv instance in the process
+//   tile=91E248E9 setup_ms=16     ← second
+//   tile=304D83DA setup_ms=9
+//   tile=920687C5 setup_ms=16     ← every subsequent one ≤20 ms
+//
+// The 2.2 s cost on the first `mpv_create + mpv_initialize` pair is
+// libmpv's process-wide one-time init: ffmpeg codec table
+// registration, filter chain setup, stream protocol registration,
+// libass font resolver bootstrap, etc. The 17th mpv instance is
+// cheap; the 1st is expensive.
+//
+// `MPVLibraryWarmup.warmUp()` creates and immediately destroys one
+// mpv handle on a background queue during app launch. The handle
+// does nothing visible — no window, no file loaded — but the
+// `mpv_initialize` call triggers all the one-time process-wide
+// init. By the time the user's first tap hits `Coordinator.setupMPV`,
+// the cheap fast-path is already active and `mpv_initialize`
+// returns in ~5–20 ms.
+//
+// Idempotent, fire-and-forget. If the user's first tap races the
+// warm-up, the tap proceeds on its own (pays full 2 s) and the
+// warm-up's `mpv_terminate_destroy` lands harmlessly on its own
+// instance.
+enum MPVLibraryWarmup {
+    /// `nonisolated(unsafe)` because the flag is only flipped once
+    /// (false → true) and the check is a benign race — worst case,
+    /// two warm-ups run concurrently and one wastes a few ms of CPU.
+    private nonisolated(unsafe) static var hasStarted = false
+    private nonisolated(unsafe) static var isComplete = false
+
+    /// Trigger libmpv process-wide init on a background queue.
+    /// Safe to call from any thread, as many times as you want —
+    /// only the first call does anything.
+    static func warmUp() {
+        guard !hasStarted else { return }
+        hasStarted = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            doWarmUp()
+        }
+    }
+
+    /// `true` once the background warm-up has completed. Diagnostics
+    /// only — callers never need to wait on this.
+    static var completed: Bool { isComplete }
+
+    private static func doWarmUp() {
+        let totalStart = Date()
+
+        // ── Phase 1: libmpv ────────────────────────────────────────
+        let mpvStart = Date()
+        guard let mpv = mpv_create() else {
+            #if DEBUG
+            print("[MPV-WARMUP] mpv_create failed — warm-up skipped")
+            #endif
+            return
+        }
+
+        // Match `Coordinator.setupMPV()` generic options as closely
+        // as possible without hitting per-stream config. The goal
+        // is to trigger the same libmpv init codepath real
+        // playback uses: videotoolbox hwdec registration, libmpv
+        // vo init, fast-profile filter chain load.
+        mpv_set_option_string(mpv, "vo", "libmpv")
+        mpv_set_option_string(mpv, "profile", "fast")
+        #if !targetEnvironment(simulator)
+        mpv_set_option_string(mpv, "hwdec", "videotoolbox")
+        #endif
+
+        let initResult = mpv_initialize(mpv)
+
+        // Destroy immediately — we don't need the handle, just the
+        // side effects of initialize. `terminate_destroy` is
+        // synchronous; no event-loop stragglers.
+        mpv_terminate_destroy(mpv)
+        let mpvMs = Int(Date().timeIntervalSince(mpvStart) * 1000)
+
+        // ── Phase 2: OpenGL ES driver ──────────────────────────────
+        // On a fresh app install, the FIRST `EAGLContext(api:)` call
+        // in the process pays a ~2 s one-time cost while tvOS pages
+        // the OpenGL ES driver in from disk. Per-phase timing inside
+        // `setupMPV` confirmed this: cold first tile shows
+        // `EAGLContext_create: 2053ms`, subsequent tiles ~11 ms.
+        //
+        // The fix is the same pattern as the mpv warm-up: create a
+        // throwaway EAGLContext + texture cache during launch, discard
+        // immediately, let the driver load amortise during idle
+        // startup time instead of during the user's first channel
+        // tap. Subsequent real EAGLContext creations in
+        // `Coordinator.setupMPV` hit the warm path.
+        //
+        // Simulator skips — the simulator GLES path uses a different
+        // software renderer that doesn't share this cost and the
+        // CVOpenGLESTextureCacheCreate call is a no-op there.
+        let eaglStart = Date()
+        #if !targetEnvironment(simulator)
+        if let ctx = EAGLContext(api: .openGLES3) ?? EAGLContext(api: .openGLES2) {
+            EAGLContext.setCurrent(ctx)
+            var cache: CVOpenGLESTextureCache?
+            CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, nil, ctx, nil, &cache)
+            // `cache` retained through scope end then released —
+            // we just need the first-time driver allocation to
+            // happen. The real cache is built per-Coordinator.
+            _ = cache
+            EAGLContext.setCurrent(nil)
+        }
+        #endif
+        let eaglMs = Int(Date().timeIntervalSince(eaglStart) * 1000)
+
+        isComplete = true
+
+        #if DEBUG
+        let totalMs = Int(Date().timeIntervalSince(totalStart) * 1000)
+        if initResult < 0 {
+            let err = String(cString: mpv_error_string(initResult))
+            print("[MPV-WARMUP] done in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms) — initialize returned error: \(err)")
+        } else {
+            print("[MPV-WARMUP] process-wide init complete in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms) — first channel tap will hit the warm path")
+        }
+        #endif
+    }
+}
+
 // MARK: - MPV Player View Controller (OpenGL ES render → AVSampleBufferDisplayLayer → PiP)
 
 class MPVPlayerViewController: UIViewController {
@@ -18,8 +145,41 @@ class MPVPlayerViewController: UIViewController {
     let sampleBufferLayer = AVSampleBufferDisplayLayer()
 
     #if os(iOS)
-    /// PiP controller — initialized after view loads.
+    /// PiP controller — created lazily on first request via
+    /// `ensurePiPController()`. Nil until the user taps the PiP
+    /// toggle on the audio tile's chrome.
+    ///
+    /// Previously this was eagerly initialized in `viewDidLoad`.
+    /// That meant every multiview tile (up to 9) o mojpaid the cost of
+    /// an `AVPictureInPictureController` allocation + delegate
+    /// table wiring + the `ContentSource` `sampleBufferDisplayLayer`
+    /// binding, even though only the audio tile is ever PiP-eligible.
+    /// With 9 tiles that's 9× the AVF state for one user-triggered
+    /// feature. Lazy creation keeps the cost to 0 for non-audio
+    /// tiles and 1 for the one tile that ever needs it.
     var pipController: AVPictureInPictureController?
+
+    /// Build the PiP controller against the already-attached
+    /// `sampleBufferDisplayLayer`, or return the cached instance.
+    /// Returns `nil` on platforms / devices where PiP isn't
+    /// supported (e.g. iPhone in some locales / older simulators).
+    /// Safe to call from any thread that can touch UIKit; in
+    /// practice it's only called from the `togglePiPAction` closure
+    /// which already runs on the main actor.
+    @discardableResult
+    func ensurePiPController() -> AVPictureInPictureController? {
+        if let existing = pipController { return existing }
+        guard AVPictureInPictureController.isPictureInPictureSupported(),
+              let coordinator else { return nil }
+        let contentSource = AVPictureInPictureController.ContentSource(
+            sampleBufferDisplayLayer: sampleBufferLayer,
+            playbackDelegate: coordinator
+        )
+        let pip = AVPictureInPictureController(contentSource: contentSource)
+        pip.delegate = coordinator
+        pipController = pip
+        return pip
+    }
     #endif
 
     override func viewDidLoad() {
@@ -32,17 +192,8 @@ class MPVPlayerViewController: UIViewController {
         sampleBufferLayer.frame = view.bounds
         view.layer.addSublayer(sampleBufferLayer)
 
-        #if os(iOS)
-        if AVPictureInPictureController.isPictureInPictureSupported(),
-           let coordinator {
-            let contentSource = AVPictureInPictureController.ContentSource(
-                sampleBufferDisplayLayer: sampleBufferLayer,
-                playbackDelegate: coordinator
-            )
-            pipController = AVPictureInPictureController(contentSource: contentSource)
-            pipController?.delegate = coordinator
-        }
-        #endif
+        // PiP controller is NOT created here — see `ensurePiPController()`
+        // above for the lazy-init rationale.
 
         #if DEBUG
         print("[MPV-DIAG] viewDidLoad: frame=\(view.frame), inWindow=\(view.window != nil)")
@@ -132,11 +283,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         let vc = MPVPlayerViewController()
         vc.coordinator = context.coordinator
 
-        // Wire up PiP toggle (iOS only)
+        // Wire up PiP toggle (iOS only). `ensurePiPController()` is
+        // the lazy-init path — on first tap the controller is built
+        // against the already-attached `sampleBufferLayer`, cached,
+        // and returned. Subsequent taps hit the cached instance.
+        // Tiles that never tap PiP never pay the allocation cost.
         #if os(iOS)
         let coord = context.coordinator
         coord.progressStore.togglePiPAction = { [weak vc, weak coord] in
-            guard let pip = vc?.pipController else { return }
+            guard let pip = vc?.ensurePiPController() else { return }
             if pip.isPictureInPictureActive {
                 pip.stopPictureInPicture()
                 DispatchQueue.main.async { coord?.progressStore.isPiPActive = false }
@@ -210,6 +365,28 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // immutable-per-coordinator-lifetime matches the model.
         let tileID: String?
 
+        /// Human-readable log tag for this coordinator's stream.
+        /// Shape: `[tile=<short-id> <channel-name>]`, e.g.
+        /// `[tile=744 NBC Sports NOW]`. Used as a prefix on every
+        /// per-stream log line (frame diagnostics, stats ticks,
+        /// layer failures, mpv warnings) so when 9 streams are
+        /// playing their log lines can be filtered and grouped by
+        /// channel instead of having to decode opaque UUIDs.
+        ///
+        /// - Single-stream mode (tileID == nil): returns the
+        ///   channel name alone wrapped in `[tile=single <name>]`.
+        /// - Multiview: uses the first 6 chars of the UUID so the
+        ///   tag stays compact on busy logs. The channel name is
+        ///   set by SwiftUI via the representable's
+        ///   `nowPlayingTitle` and may update if SwiftUI rebinds,
+        ///   so we read it at each log site rather than caching.
+        var streamTag: String {
+            let id = tileID ?? "single"
+            let shortID = id.count > 8 ? String(id.prefix(8)) : id
+            let name = nowPlayingTitle.isEmpty ? "?" : nowPlayingTitle
+            return "[tile=\(shortID) \(name)]"
+        }
+
         /// Bridge-ownership gate for multiview. Returns `true` when
         /// this coordinator is allowed to write `MPNowPlayingInfoCenter`
         /// + install `MPRemoteCommandCenter` handlers, `false` when it
@@ -269,10 +446,35 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             guard lastAppliedAudioFocus != isActive else { return }
             lastAppliedAudioFocus = isActive
             DebugLogger.shared.log(
-                "[MV-Audio] mpv mute=\(!isActive) tile=\(tileID ?? "single")",
+                "[MV-Audio] mpv audio=\(isActive ? "on" : "off") tile=\(tileID ?? "single")",
                 category: "MPV-STREAM", level: .info
             )
-            setMPVFlag(property: "mute", value: !isActive)
+            // Two-layer silence for non-audio tiles:
+            //   - `aid=no`  : disable audio track entirely. mpv
+            //                 stops decoding audio and closes the
+            //                 AudioUnit. This is the fix for
+            //                 "Audio device underrun" spam across
+            //                 N concurrent muted tiles — each
+            //                 muted tile was still opening its own
+            //                 AO and fighting the shared
+            //                 AVAudioSession, producing periodic
+            //                 underruns that cascaded into 2-7s
+            //                 video stalls.
+            //   - `mute=yes`: belt-and-suspenders in case the aid
+            //                 change races an in-flight audio
+            //                 packet. Keeping both ensures the
+            //                 user never hears a non-audio tile
+            //                 even during the 50ms switchover.
+            //
+            // On audio-focus ACQUIRE we do the inverse: aid=auto
+            // (re-runs mpv's track selection so the preferred
+            // audio track plays) + mute=no.
+            mpvQueue.async { [weak self] in
+                guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                mpv_set_property_string(mpv, "aid", isActive ? "auto" : "no")
+                var flag: Int32 = isActive ? 0 : 1
+                mpv_set_property(mpv, "mute", MPV_FORMAT_FLAG, &flag)
+            }
         }
 
         /// Called from `updateUIViewController`. Sends `pause=1` to
@@ -285,6 +487,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// buffering penalty, no network re-handshake.
         @MainActor
         fileprivate func applyPauseIfChanged(_ paused: Bool) {
+            // Debounced on BOTH transitions. A previous revision
+            // tried to "always re-assert pause=false" as a defensive
+            // fix for the "add-tile pauses the original channel"
+            // bug, but that flooded `mpvQueue` with redundant
+            // property writes during the 2nd-tile startup window,
+            // which correlated 1:1 with user-reported
+            // `stream-open` / `MPV_ERROR_LOADING_FAILED` when
+            // adding multiview tiles (mpv's load pipeline is
+            // asynchronous and sensitive to command ordering during
+            // initialize→loadfile).
+            //
+            // If a real external-pause problem resurfaces, handle it
+            // at the specific trigger (audio-session interruption
+            // observer, tile-add event) rather than flooding the
+            // property loop.
+            let wasPaused = lastAppliedPause == true
             guard lastAppliedPause != paused else { return }
             lastAppliedPause = paused
             DebugLogger.shared.log(
@@ -292,6 +510,37 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 category: "MPV-STREAM", level: .info
             )
             setMPVFlag(property: "pause", value: paused)
+
+            // LIVE stream unpause → jump to live edge by reloading
+            // the URL. Without this, resuming after a pause (e.g.
+            // user opened the add-sheet to add another tile; every
+            // existing tile paused; sheet closed; tiles resumed)
+            // plays from the buffered-but-stale pause position,
+            // leaving the tile N seconds behind live. User
+            // explicitly requested that existing streams snap back
+            // to LIVE when the add-sheet closes. `loadfile ... replace`
+            // reconnects the stream cleanly at the current live
+            // position; mpv's cache flushes and playback resumes
+            // from the fresh connection point.
+            //
+            // Gated on `wasPaused && !paused && isLive`:
+            //   - Skip on first paused=false (wasPaused=false, no
+            //     prior pause to recover from).
+            //   - Skip on paused=true (we're pausing, not resuming).
+            //   - Skip on VOD (seeking to live makes no sense for
+            //     a fixed-duration stream; resume-from-pause IS
+            //     the correct VOD behaviour).
+            if wasPaused && !paused && isLive, !urls.isEmpty {
+                let url = urls[currentIndex]
+                #if DEBUG
+                print("[MPV-DIAG] \(streamTag) unpause → reload live stream (snap to live edge)")
+                #endif
+                logStore.append("↻ MPV: unpause live → snap to live edge")
+                mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                    self.mpvCommand(mpv, ["loadfile", url.absoluteString, "replace"])
+                }
+            }
         }
 
         /// Shared mpvQueue hop for boolean mpv properties. Guards
@@ -337,6 +586,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var playbackStartTime: Date?
         private var sameURLRetryCount = 0
         private let maxSameURLRetries = 3
+        /// Retry counter for `MPV_ERROR_LOADING_FAILED` (error -13).
+        /// Typically fired when the Dispatcharr proxy returns HTTP 503
+        /// under concurrent-tile-load pressure (9 tiles hit the server
+        /// simultaneously and some get throttled). Before this counter
+        /// existed the tile would show "Decoder unavailable" permanently
+        /// even though expanding to full-screen — a single request —
+        /// would succeed. Now we retry up to 3 times with exponential
+        /// backoff + random jitter (so 9 tiles don't all retry at the
+        /// same wall-clock moment and trigger the same thundering-herd
+        /// 503 again). Reset on every playback-restart (successful
+        /// start of a new stream).
+        private var loadFailureRetryCount = 0
+        private let maxLoadFailureRetries = 3
         private var isShuttingDown = false
         private var hwdecFallbackApplied = false  // Prevents repeated fallback attempts for 10-bit streams
 
@@ -544,6 +806,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             anyAttemptStarted = false
             hasPerformedWarmupRetry = false
             sameURLRetryCount = 0
+            loadFailureRetryCount = 0
             isShuttingDown = false
             playbackEnded = false
             // Reset diagnostics
@@ -559,10 +822,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // MARK: - Renderer Setup
 
-        /// Called from viewDidLoad. Stores layer reference. Pixel buffers deferred to handleResize.
+        /// Called from viewDidLoad. Stores the sample-buffer layer
+        /// reference AND kicks off `start()` on the render queue so
+        /// mpv's ~2 s init (mostly one-time process-wide work — see
+        /// `MPVLibraryWarmup`) runs in parallel with SwiftUI's
+        /// first layout pass (~100-300 ms on a complex grid) rather
+        /// than serially after it.
+        ///
+        /// Pixel-buffer sizing + FBO creation still wait for
+        /// `handleResize` (triggered by `viewDidLayoutSubviews`)
+        /// because that's when the real `CGSize` becomes available.
+        /// `setupFBO` dispatches to the same serial `renderQueue`
+        /// as `start()`, so FIFO ordering guarantees
+        /// `setupMPV` completes before `setupFBO` runs — no change
+        /// in correctness, we just pull the trigger earlier.
         @MainActor
         func setupRenderer(layer: CALayer) {
             self.sampleBufferLayer = layer.sublayers?.compactMap { $0 as? AVSampleBufferDisplayLayer }.first
+            kickstartIfNeeded()
+        }
+
+        /// Dispatch `start()` on the render queue exactly once.
+        /// Idempotent — safe to call from both `setupRenderer`
+        /// (early) and `handleResize` (late) so a Coordinator that
+        /// somehow misses the early path still starts.
+        private func kickstartIfNeeded() {
+            guard !mpvStarted else { return }
+            mpvStarted = true
+            renderQueue.async { [weak self] in
+                self?.start()
+            }
         }
 
         private var mpvStarted = false
@@ -692,13 +981,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             renderWidth = w
             renderHeight = h
 
-            // Start mpv on render thread if first time (creates EAGLContext + textureCache)
-            if !mpvStarted {
-                mpvStarted = true
-                renderQueue.async { [weak self] in
-                    self?.start()
-                }
-            }
+            // Backstop — `setupRenderer` already called this at
+            // viewDidLoad time, but if something skipped that path
+            // we still need mpv to start. Idempotent.
+            kickstartIfNeeded()
 
             // Create OpenGL FBO backed by IOSurface CVPixelBuffer.
             // Dispatched to renderQueue so it (a) doesn't block the main thread
@@ -806,19 +1092,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let expectedIntervalMs = fps > 0 ? 1000.0 / fps : 33.3
 
             // ── Per-frame diagnostics ──
+            // DEBUG-only, with tight frame caps. This block previously
+            // printed every frame for the first 120 frames (~4 seconds
+            // of playback at 30fps), which on Apple TV 4K with 2
+            // concurrent tiles meant ~60 print()s per second during
+            // startup — enough allocation churn to visibly stutter the
+            // UI and audio on thermally-throttled hardware. Now:
+            //   - Gated on #if DEBUG so release builds do zero work.
+            //   - First-frame ramp cut from 120 → 30 (1 second, enough
+            //     to catch pipeline warm-up anomalies).
+            //   - Anomaly prints remain (unbounded) because those are
+            //     the diagnostic signal we actually care about when
+            //     investigating lag.
+            #if DEBUG
             let isAnomaly = intervalMs > 0 && (
                 intervalMs > expectedIntervalMs * 2.0 ||
                 intervalMs < expectedIntervalMs * 0.3 ||
                 !layerReady || layerStatus == .failed || !enqueued
             )
 
-            if totalFrameCount <= 120 || isAnomaly {
+            if totalFrameCount <= 30 || isAnomaly {
                 let tag = isAnomaly ? "⚠️" : "🎞️"
-                print("\(tag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) pts=\(String(format: "%.3f", CMTimeGetSeconds(presentationTime)))s ready=\(layerReady) enqueued=\(enqueued) status=\(layerStatus == .failed ? "FAILED" : "ok")")
+                // `streamTag` up front so log consumers can filter /
+                // group per channel (e.g. `grep "NBC Sports"` to see
+                // just that tile's frame history).
+                print("\(tag) \(streamTag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) pts=\(String(format: "%.3f", CMTimeGetSeconds(presentationTime)))s ready=\(layerReady) enqueued=\(enqueued) status=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
+            #endif
 
             if layerStatus == .failed, let err = sampleBufferLayer?.sampleBufferRenderer.error {
-                print("🔴 [LAYER FAILED] \(err.localizedDescription)")
+                print("🔴 \(streamTag) [LAYER FAILED] \(err.localizedDescription)")
             }
 
             // Periodic summary every 300 frames
@@ -832,7 +1135,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let variance = frameIntervals.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / Double(frameIntervals.count)
                     return sqrt(variance)
                 }()
-                print("📊 [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
+                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
 
             lastEnqueueTime = enqueueTime
@@ -922,9 +1225,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             setupStartTime = Date()
             #if DEBUG
             print("[MPV-DIAG] setupMPV: creating mpv instance...")
+            // Per-phase timing markers. Each checkpoint logs the
+            // delta since the previous one, so we can pinpoint which
+            // phase is eating the ~2s first-tile cost. `phaseStart`
+            // resets at each checkpoint.
+            let setupT0 = Date()
+            var phaseStart = setupT0
+            func markPhase(_ name: String) {
+                let now = Date()
+                let ms = Int(now.timeIntervalSince(phaseStart) * 1000)
+                let totalMs = Int(now.timeIntervalSince(setupT0) * 1000)
+                print("[MPV-PHASE] \(streamTag) \(name): \(ms)ms (total=\(totalMs)ms)")
+                phaseStart = now
+            }
             #endif
 
             mpv = mpv_create()
+            #if DEBUG
+            markPhase("mpv_create")
+            #endif
             guard let mpv else {
                 logStore.append("✗ MPV: failed to create instance")
                 let callback = onFatalError
@@ -936,6 +1255,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // Request error-level logs in release builds so we can detect
             // GL interop failures (10-bit HEVC) and fall back dynamically.
+            //
+            // DEBUG builds default to `warn` — enough to catch real
+            // issues without flooding the log. A previous iteration
+            // raised several subsystems (ffmpeg, stream, stream_lavf,
+            // http, demux, tls) to `info` while diagnosing a
+            // `MPV_ERROR_LOADING_FAILED` bug; that's resolved and
+            // the info-level noise was costing main-thread time on
+            // a thermally-throttled Apple TV (dozens of mpv-event
+            // callbacks per second routing through DebugLogger +
+            // print). If another HTTP/TLS investigation comes up,
+            // re-enable selectively at that point — don't leave
+            // info-level on for everyone permanently.
             #if DEBUG
             checkError(mpv_request_log_messages(mpv, "warn"))
             #else
@@ -957,13 +1288,105 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Decoded frames stay on GPU — the OpenGL render API maps them as textures
             // for zero-copy color conversion, scaling, and OSD.
             checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
-            checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "600"))  // Live MPEG-TS joins mid-GOP without SPS/PPS — VT errors until keyframe arrives
+            // Allow up to 90 consecutive VT decode failures before
+            // falling back to software. Live MPEG-TS streams join
+            // mid-GOP without SPS/PPS so VT errors until the next
+            // keyframe — at 30fps, 90 frames covers a ~3s GOP, which
+            // is the upper bound for well-behaved broadcast streams.
+            // Dropped from the previous 600 because that was
+            // effectively "never fallback" (20 seconds of dropped
+            // frames at 30fps) and meant a genuinely VT-incompatible
+            // stream would burn CPU on doomed attempts for 20
+            // seconds before giving up. 90 is a better ceiling that
+            // still covers real mid-GOP joins. The explicit
+            // videotoolbox-copy retry in the log-message handler
+            // (below, ~line 1338) is a secondary safety net for
+            // "Initializing texture for hardware decoding failed".
+            checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "90"))
+            // Cap libavcodec decode threads. Matters only on the
+            // software-decode fallback path (hardware VT decode
+            // doesn't use lavc threads). With 2–4 concurrent tiles
+            // on a 6-core Apple TV 4K, letting lavc's default
+            // auto-detect spawn one-thread-per-core per tile
+            // oversubscribes the CPU and is observable as audio
+            // underruns + UI lag. Pinning each tile's SW fallback
+            // to a single thread keeps the total thread count
+            // bounded at (tile count + 1 demuxer + 1 audio) ≈ 6
+            // on the 9-tile ceiling. Hardware decode is unaffected.
+            checkError(mpv_set_option_string(mpv, "vd-lavc-threads", "1"))
             #endif
 
             // Initial buffer before playback starts:
-            // Live: 0.5s for fast channel start (cache-pause disabled after playback-restart anyway).
-            // VOD: 2s for smooth resume-after-seek.
-            checkError(mpv_set_option_string(mpv, "cache-pause-wait", isLive ? "0.5" : "2"))
+            // Live: 0 — start decoding the instant any data arrives.
+            //        Previously 0.5s, which was a guaranteed 500ms
+            //        floor on every channel tap's first frame. mpv
+            //        still waits for the first decodable keyframe
+            //        (so you don't get garbled output) but won't add
+            //        a synthetic buffer delay on top.
+            // VOD:  2s for smooth resume-after-seek.
+            checkError(mpv_set_option_string(mpv, "cache-pause-wait", isLive ? "0" : "2"))
+
+            // ────────────────────────────────────────────────────────
+            // Startup-speed options. These collectively shave ~1-2s
+            // off "tap → first frame" on live MPEG-TS streams.
+            //
+            // `audio-wait-open=no`: don't block video first-frame on
+            // the audio output being open. On iOS the AudioUnit AO
+            // adds 100-400ms during channel changes; decoupling
+            // video from that wait is a straight win.
+            //
+            // `initial-audio-sync=no`: don't hold video back to
+            // align with the first audio frame. For live TS with no
+            // duration metadata this alignment is ~100-300ms of pure
+            // delay with no user-visible benefit.
+            //
+            // `vd-lavc-fast=yes` + `vd-lavc-skiploopfilter=nonref`:
+            // when SW decode is active (fallback path), skip the
+            // deblocking loop filter on non-reference frames and
+            // enable speed-over-quality codec flags. No-op for VT
+            // hwdec; matters when VT fails mid-GOP.
+            //
+            // `stream-lavf-o=reconnect=...`: libavformat-level HTTP
+            // reconnect for mid-stream drops. Not a first-frame win
+            // but critical for retry behavior on intermittent
+            // network — faster recovery instead of burning the
+            // 5-second premature-end retry path.
+            //
+            // `network-timeout=10`: explicit 10s timeout so a
+            // genuinely-dead host fails over to the next URL in the
+            // fallback list within 10s instead of mpv's 60s default.
+            // `audio-wait-open=no` — REMOVED. This option was
+            // rejected by MPVKit's bundled mpv build (the
+            // `setOption` diagnostic wrapper logged it as
+            // `option "audio-wait-open"="no" rejected`). In theory
+            // it shaves 100-400ms off first frame on iOS by not
+            // blocking video on AudioUnit open, but it's not
+            // available on this libmpv version so adding it was a
+            // silent no-op at best and potentially a side-effect
+            // failure at worst. Leaving the intent here as a
+            // reminder in case a future MPVKit bump brings it in.
+            setOption(mpv, "initial-audio-sync", "no")
+            setOption(mpv, "vd-lavc-fast", "yes")
+            setOption(mpv, "vd-lavc-skiploopfilter", "nonref")
+            setOption(
+                mpv,
+                "stream-lavf-o",
+                "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2"
+            )
+            // `network-timeout=30` — raised from 10s. The tighter
+            // timeout triggered `tls: IO error: Operation timed out`
+            // on a user's WAN route when their LAN probe hadn't
+            // completed in time and the app fell back to the
+            // external FQDN. TLS handshake + HTTP headers over a
+            // cold WAN route can genuinely take more than 10s on a
+            // first hit (cert fetch, OCSP, CDN cold-start). 30s
+            // matches mpv's default and is permissive enough for
+            // cold starts while still failing over faster than
+            // mpv's `stream-lavf-o=reconnect_delay_max` reconnect
+            // storm (which is 2s per attempt). Retry behaviour on
+            // a truly dead host is unchanged — URL-list failover
+            // still fires within 30s.
+            setOption(mpv, "network-timeout", "30")
 
             // Multiview tiles: set initial `mute` / `pause` as mpv
             // options (not runtime properties) so the first decoded
@@ -977,15 +1400,70 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // For single-mode (tileID == nil) these options are
             // tile defaults (initialIsAudioActive=true, initialShouldPause=false)
             // which happen to match mpv's own defaults — safe no-ops.
+            //
+            // Non-audio tiles: set `aid=no` so mpv never even
+            // opens an AudioUnit for them. Previously we used
+            // `mute=yes` which is audible-silence but the AO
+            // stays open and competes with every other tile's
+            // AO on the shared AVAudioSession — that contention
+            // is what produced the "Audio device underrun"
+            // storms with 9 concurrent tiles, which then
+            // cascaded into 2-7s video-frame stalls. `aid=no`
+            // eliminates the AO entirely. `mute=yes` is kept as
+            // belt-and-suspenders against any audio packet that
+            // slips through between mpv_create and mpv_initialize.
             if !initialIsAudioActive {
+                setOption(mpv, "aid", "no")
                 checkError(mpv_set_option_string(mpv, "mute", "yes"))
             }
             if initialShouldPause {
                 checkError(mpv_set_option_string(mpv, "pause", "yes"))
             }
 
+            // HTTP headers for the stream — set as PRE-INIT options
+            // so they're baked into mpv's config before any
+            // `loadfile` can run. These are also re-asserted
+            // post-init below (~line 1183) as properties; mpv
+            // accepts them at both stages. Belt-and-braces.
+            //
+            // Why both? For multiview, the 2nd+ tile spins up while
+            // the 1st tile's mpv is already running on a different
+            // queue. We observed `MPV_ERROR_LOADING_FAILED` on
+            // added tiles that disappeared once headers were
+            // committed pre-init — the load pipeline is async and
+            // appears to race with post-init property writes if
+            // the first loadfile enqueue beats them to mpvQueue.
+            // Pre-init is guaranteed to be in-config before
+            // mpv_initialize returns.
+            if let ua = headers["User-Agent"], !ua.isEmpty {
+                checkError(mpv_set_option_string(mpv, "user-agent", ua))
+            }
+            let preInitCustomHeaders = headers.filter {
+                $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame
+            }
+            if !preInitCustomHeaders.isEmpty {
+                let headerList = preInitCustomHeaders
+                    .map { "\($0.key): \($0.value)" }
+                    .joined(separator: "\r\n")
+                checkError(mpv_set_option_string(mpv, "http-header-fields", headerList))
+            }
+
             #if DEBUG
+            markPhase("pre_init_options")
             print("[MPV-DIAG] setupMPV: options set, calling mpv_initialize...")
+            // Header forensics — log each key + value length so we can
+            // confirm what mpv actually sees per tile (and catch the
+            // case where a 2nd tile's headers get mangled / cleared).
+            // Values are NEVER logged — API keys live in there.
+            let uaLen = headers["User-Agent"]?.count ?? 0
+            let uaPreview = headers["User-Agent"]?.prefix(40) ?? "none"
+            print("[MPV-DIAG]   hdr UA=\(uaPreview) (\(uaLen)b)")
+            for (k, v) in preInitCustomHeaders.sorted(by: { $0.key < $1.key }) {
+                let lenBytes = v.utf8.count
+                print("[MPV-DIAG]   hdr \(k)=<redacted> (\(lenBytes)b)")
+            }
+            print("[MPV-DIAG]   tile=\(tileID ?? "single") urls=\(urls.count) first_url_len=\(urls.first?.absoluteString.count ?? 0)")
+            print("[MPV-DIAG]   \(ProcessMetrics.summaryLine())")
             #endif
 
             // ── Initialize ──
@@ -1011,12 +1489,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             let initMs = Date().timeIntervalSince(initStart) * 1000
             print("[MPV-DIAG] setupMPV: mpv_initialize succeeded ✓ (\(String(format: "%.0f", initMs))ms)")
+            markPhase("mpv_initialize")
             #endif
 
             // ── Post-init: create OpenGL ES render context ──
 
             // EAGLContext for GPU-accelerated mpv rendering
             eaglContext = EAGLContext(api: .openGLES3) ?? EAGLContext(api: .openGLES2)
+            #if DEBUG
+            markPhase("EAGLContext_create")
+            #endif
             guard let glCtx = eaglContext else {
                 logStore.append("✗ MPV: failed to create EAGLContext")
                 let callback = onFatalError
@@ -1024,11 +1506,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 return
             }
             EAGLContext.setCurrent(glCtx)
+            #if DEBUG
+            markPhase("EAGLContext_setCurrent")
+            #endif
 
             // Texture cache for zero-copy CVPixelBuffer ↔ GL texture sharing
             var cache: CVOpenGLESTextureCache?
             CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, nil, glCtx, nil, &cache)
             textureCache = cache
+            #if DEBUG
+            markPhase("CVOpenGLESTextureCacheCreate")
+            #endif
 
             // OpenGL render API — GPU handles color conversion, scaling, OSD.
             // get_proc_address resolves GL function pointers from the loaded OpenGLES.framework.
@@ -1049,6 +1537,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 ]
                 return mpv_render_context_create(&mpvGL, mpv, &renderParams)
             }
+            #if DEBUG
+            markPhase("mpv_render_context_create")
+            #endif
 
             if renderCreateResult < 0 {
                 let errStr = String(cString: mpv_error_string(renderCreateResult))
@@ -1074,6 +1565,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let coord = Unmanaged<MPVPlayerViewRepresentable.Coordinator>.fromOpaque(ctx).takeUnretainedValue()
                 coord.scheduleRender()
             }, Unmanaged.passUnretained(self).toOpaque())
+            #if DEBUG
+            markPhase("render_update_callback")
+            #endif
 
             // ── Post-init: property observers + wakeup callback ──
 
@@ -1092,6 +1586,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let coordinator = Unmanaged<Coordinator>.fromOpaque(ctx).takeUnretainedValue()
                 coordinator.readEvents()
             }, coordPointer)
+            #if DEBUG
+            markPhase("observe_properties+wakeup")
+            #endif
 
             // ── Post-init: runtime options ──
 
@@ -1104,7 +1601,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     default:       return 1_500
                     }
                 }()
-                let ms = isLive ? max(userPrefMs, 5_000) : userPrefMs
+                // tvOS tends to report `.serious` thermal state more
+                // often than iPad (Apple TV 4K's passive cooling
+                // doesn't recover as fast), and thermally-throttled
+                // CPU/GPU means the audio output ringbuffer is more
+                // likely to drain before mpv's decoder catches up.
+                // Raise the live-stream minimum from 5s → 10s on
+                // tvOS to absorb those hitches — each audio-device
+                // underrun that DOES occur freezes video for 1-4s,
+                // so the extra 5s of buffer is worth the slightly
+                // longer initial startup.
+                #if os(tvOS)
+                let liveMinMs = 10_000
+                #else
+                let liveMinMs = 5_000
+                #endif
+                let ms = isLive ? max(userPrefMs, liveMinMs) : userPrefMs
                 return Double(ms) / 1000.0
             }()
 
@@ -1122,6 +1634,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 mpv_set_property_string(mpv, "demuxer-donate-buffer", "no")
                 mpv_set_property_string(mpv, "demuxer-lavf-probe-info", "nostreams")
                 mpv_set_property_string(mpv, "demuxer-lavf-analyzeduration", "0")
+                // Smaller probesize — MPEG-TS's codec identity is
+                // obvious from the first ~32KB of PAT/PMT/PES
+                // headers. mpv/ffmpeg's default probesize is 5MB
+                // which for live TS means reading 200-500ms of data
+                // before committing to a demuxer/decoder. 32KB is
+                // ~2-4 TS packets worth of probing — enough to
+                // identify codec, cheap to read from the stream.
+                // Live-only; VOD keeps the larger default for mkv/
+                // mp4 moov-parsing correctness.
+                mpv_set_property_string(mpv, "demuxer-lavf-probesize", "32768")
+                mpv_set_property_string(mpv, "probesize", "32768")
             } else {
                 // VOD: larger buffer for seek-back
                 mpv_set_property_string(mpv, "demuxer-max-bytes", "50MiB")
@@ -1130,7 +1653,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             mpv_set_property_string(mpv, "framedrop", "decoder+vo")
             mpv_set_property_string(mpv, "video-sync", "audio")
+            // Audio output ringbuffer. Larger = more slack between
+            // "decoder hiccup" and "audio device underrun → mpv
+            // pauses everything for 1-4s". tvOS defaults to 2.5s
+            // because Apple TV 4K ships in passive-cooled enclosures
+            // that stay in `.serious` thermal state for minutes
+            // after any load, and the throttled CPU starves the
+            // audio pipeline at the existing 1.5s buffer. iPad
+            // keeps 1.5s — it hasn't shown the same underrun
+            // cadence and a larger audio buffer trades A-V sync
+            // latency for resilience (don't pay it if we don't
+            // need to).
+            #if os(tvOS)
+            mpv_set_property_string(mpv, "audio-buffer", "2.5")
+            #else
             mpv_set_property_string(mpv, "audio-buffer", "1.5")
+            #endif
             // Correct A-V sync for live TS streams — drop late video frames
             // rather than letting the video queue grow unbounded.
             mpv_set_property_string(mpv, "hr-seek-framedrop", "yes")
@@ -1143,13 +1681,56 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let headerList = customHeaders.map { "\($0.key): \($0.value)" }.joined(separator: "\r\n")
                 mpv_set_property_string(mpv, "http-header-fields", headerList)
             }
+            #if DEBUG
+            markPhase("post_init_properties")
+            #endif
 
+            // `totalSetupMs` is needed by BOTH the DEBUG-only diag
+            // prints AND the always-on `[MV-TIMING]` DebugLogger
+            // line below, so it has to live outside the `#if DEBUG`
+            // block — otherwise release builds fail to compile with
+            // "Cannot find 'totalSetupMs' in scope" at the
+            // `[MV-TIMING]` usage site. `setupStartTime` itself is
+            // unconditional (declared at line ~616, assigned
+            // ~1225), so this read is safe in all configurations.
+            let totalSetupMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
             #if DEBUG
             let cacheStr = String(format: "%.1f", cachingSecs)
-            let totalSetupMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
             print("[MPV-DIAG] ✓ mpv fully initialized: vo=libmpv (OpenGL ES render), hwdec=videotoolbox (requested)")
             print("[MPV-DIAG]   cache=\(cacheStr)s, readahead=\(cacheStr)s, isLive=\(isLive), setup_time=\(String(format: "%.0f", totalSetupMs))ms")
             #endif
+
+            // ── Per-tile timeline summary ──
+            // One dense line per tile setup, surfaced in both DEBUG
+            // print *and* DebugLogger so it survives in release
+            // crash/feedback reports. Collected fields:
+            //   tile         — which tile (or "single")
+            //   setup_ms     — mpv_create → here
+            //   headers      — count of HTTP headers committed (UA +
+            //                  Authorization/X-API-Key/Accept for
+            //                  Dispatcharr; UA-only for XC/M3U)
+            //   cache_s      — demuxer-readahead-secs
+            //   rss_mb/fd/thermal — process-wide resource snapshot
+            //                       AT tile-setup-complete. The
+            //                       delta across N tile adds is
+            //                       the real signal for whether
+            //                       the 2nd-tile open failure is a
+            //                       FD starvation, memory
+            //                       pressure, or thermal trip.
+            let totalSetupMsInt = Int(totalSetupMs)
+            let headerCount = headers.count
+            let cacheSecs = String(format: "%.1f", cachingSecs)
+            let timelineLine =
+                "[MV-TIMING] tile=\(tileID ?? "single") " +
+                "setup_ms=\(totalSetupMsInt) " +
+                "headers=\(headerCount) " +
+                "cache_s=\(cacheSecs) " +
+                "isLive=\(isLive) " +
+                ProcessMetrics.summaryLine()
+            #if DEBUG
+            print(timelineLine)
+            #endif
+            DebugLogger.shared.log(timelineLine, category: "MPV-STREAM", level: .info)
         }
 
         // MARK: - Playback
@@ -1215,9 +1796,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                 self.mpvCommand(mpv, ["seek", String(format: "%.1f", timePos), "absolute", "exact"])
                             }
                             #if DEBUG
+                            // Filter out expected recovery-phase noise
+                            // that doesn't represent an actionable
+                            // problem. All of these fire repeatedly
+                            // during the normal MPEG-TS mid-GOP join
+                            // sequence and settle on their own once
+                            // the first keyframe + SPS/PPS arrives,
+                            // or are per-frame decoder hiccups that
+                            // `hwdec-software-fallback=90` already
+                            // handles by switching to SW decode when
+                            // they become persistent. Logging each
+                            // one created thousands of log lines per
+                            // tile-startup and drowned the actually-
+                            // useful STREAM-SUMMARY / FRAME SUMMARY
+                            // lines that surface real issues. Error-
+                            // level mpv output is still captured
+                            // verbatim when it isn't one of these
+                            // known-expected messages.
+                            if Self.isNoisyRecoveryMessage(text) {
+                                break
+                            }
                             let prefix = msg.pointee.prefix.map { String(cString: $0) } ?? "?"
                             let level = msg.pointee.level.map { String(cString: $0) } ?? "?"
-                            print("[\(self.logTimestamp)] [MPV-LOG] [\(prefix)] \(level): \(text)", terminator: "")
+                            // Tag mpv-internal log lines (cplayer warn,
+                            // ffmpeg error, etc.) with this stream's
+                            // identifier so "Audio device underrun"
+                            // and "A/V desync" can be attributed to a
+                            // specific tile rather than leaving us
+                            // guessing which of N concurrent streams
+                            // is misbehaving.
+                            print("[\(self.logTimestamp)] \(self.streamTag) [MPV-LOG] [\(prefix)] \(level): \(text)", terminator: "")
                             #endif
                         }
                         break
@@ -1248,6 +1856,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         if self.isLive, let mpv = self.mpv {
                             mpv_set_property_string(mpv, "cache-pause", "no")
                         }
+                        // Clear the load-failure retry budget now that
+                        // playback has actually started. If the stream
+                        // later drops with LOADING_FAILED, the user
+                        // gets a fresh 3 retries instead of inheriting
+                        // a stale counter from a prior mid-session
+                        // 503 storm.
+                        self.loadFailureRetryCount = 0
                         // Populate audio/subtitle track lists for the UI
                         self.queryTracks()
                         // Update render buffer to match video's native dimensions.
@@ -1299,9 +1914,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             mpv_get_property(mpv, "demuxer-cache-duration", MPV_FORMAT_DOUBLE, &cacheDur)
                             var avsync: Double = 0
                             mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsync)
-                            print("[MPV-DIAG] Event: playback-restart — cache=\(String(format: "%.2f", cacheDur))s, avsync=\(String(format: "%.4f", avsync))s")
-                            print("[MPV-STREAM] video=\(info.videoCodec) \(info.width)×\(info.height) \(info.pixelFormat), hwdec=\(info.hwdec)")
-                            print("[MPV-STREAM] audio=\(info.audioCodec) \(info.sampleRate)Hz \(info.channels)ch")
+                            let t = self.streamTag
+                            print("\(t) [MPV-DIAG] Event: playback-restart — cache=\(String(format: "%.2f", cacheDur))s, avsync=\(String(format: "%.4f", avsync))s")
+                            print("\(t) [MPV-STREAM] video=\(info.videoCodec) \(info.width)×\(info.height) \(info.pixelFormat), hwdec=\(info.hwdec)")
+                            print("\(t) [MPV-STREAM] audio=\(info.audioCodec) \(info.sampleRate)Hz \(info.channels)ch")
                             #endif
                         }
                         break
@@ -1346,7 +1962,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
                 #if DEBUG
                 let totalStartMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
-                print("[MPV-DIAG]   ↳ First frame rendered (total time from setup: \(String(format: "%.0f", totalStartMs))ms)")
+                print("\(streamTag) [MPV-DIAG]   ↳ First frame rendered (total time from setup: \(String(format: "%.0f", totalStartMs))ms)")
 
                 // Dump stream & cache info at first frame
                 if let mpv {
@@ -1369,9 +1985,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     mpv_get_property(mpv, "audio-params/channel-count", MPV_FORMAT_INT64, &channels)
                     let fileFormat = getMPVString(mpv, "file-format") ?? "?"
 
-                    print("[MPV-STREAM] format=\(fileFormat), video=\(videoCodec) \(videoW)×\(videoH) \(videoFormat), hwdec=\(hwdecCurrent)")
-                    print("[MPV-STREAM] audio=\(audioCodec) \(sampleRate)Hz \(channels)ch \(audioParams)")
-                    print("[MPV-STREAM] cache_at_start=\(String(format: "%.2f", cacheDur))s, paused_for_cache=\(pauseForCache != 0)")
+                    let t = streamTag
+                    print("\(t) [MPV-STREAM] format=\(fileFormat), video=\(videoCodec) \(videoW)×\(videoH) \(videoFormat), hwdec=\(hwdecCurrent)")
+                    print("\(t) [MPV-STREAM] audio=\(audioCodec) \(sampleRate)Hz \(channels)ch \(audioParams)")
+                    print("\(t) [MPV-STREAM] cache_at_start=\(String(format: "%.2f", cacheDur))s, paused_for_cache=\(pauseForCache != 0)")
                 }
                 #endif
 
@@ -1456,10 +2073,71 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             print("[MPV-DIAG] State: end-file (reason=\(reason), error=\(endFile.error))")
             #endif
 
+            // `MPV_END_FILE_REASON_STOP` fires when WE intentionally
+            // stopped the current playback — e.g. our own
+            // `loadfile replace` issued by `applyPauseIfChanged` to
+            // snap live streams to the live edge on unpause. Do NOT
+            // treat this as a failure. Before this guard existed,
+            // the STOP event fell through to the EOF branch below,
+            // which read `elapsed < 0.5s` as "instant end" or
+            // `elapsed < 5s` as "premature end" and triggered a
+            // retry storm — stacking mpv commands, flooding the
+            // proxy, and eventually firing `onFatalError` which
+            // painted the red "Decoder unavailable" overlay over
+            // a stream that was actually playing correctly after
+            // the reload. The fresh loadfile's own lifecycle
+            // (start-file → first-frame → playback-restart) is
+            // what continues playback; this end-file is just the
+            // bookkeeping noise from the handoff.
+            if reason == MPV_END_FILE_REASON_STOP {
+                #if DEBUG
+                print("[MPV-DIAG] end-file STOP (intentional — no retry)")
+                #endif
+                return
+            }
+
             if reason == MPV_END_FILE_REASON_ERROR {
                 let errStr = String(cString: mpv_error_string(endFile.error))
                 logStore.append("✗ MPV error: \(errStr)")
                 DebugLogger.shared.logPlayback(event: "error: \(errStr)")
+
+                // Loading-failed specific retry: when Dispatcharr (or
+                // the upstream proxy) returns 503 under concurrent
+                // tile-load pressure, mpv reports
+                // `MPV_ERROR_LOADING_FAILED` (-13). Before this retry
+                // existed, the tile would show "Decoder unavailable"
+                // permanently even though the stream was fine — proven
+                // by the fact that expanding a failed tile to
+                // full-screen (a single request) always worked. We
+                // retry up to 3 times with exponential backoff plus
+                // random jitter so 9 tiles hitting 503 at the same
+                // moment don't all retry at the same wall-clock tick
+                // and trigger the same thundering-herd problem again.
+                let isLoadingFailed = endFile.error == MPV_ERROR_LOADING_FAILED.rawValue
+                if isLoadingFailed && loadFailureRetryCount < maxLoadFailureRetries {
+                    loadFailureRetryCount += 1
+                    let retryNum = loadFailureRetryCount
+                    let maxR = maxLoadFailureRetries
+                    // Exponential backoff: 1s, 2s, 4s. Add 0–600ms of
+                    // random jitter per tile so concurrent retries
+                    // don't line up on the same wall-clock moment.
+                    let baseDelay = pow(2.0, Double(retryNum - 1))
+                    let jitter = Double.random(in: 0...0.6)
+                    let delay = baseDelay + jitter
+                    logStore.append(
+                        "⏳ MPV: load failed (503?) — retry \(retryNum)/\(maxR) in \(String(format: "%.1f", delay))s"
+                    )
+                    #if DEBUG
+                    print("[MPV-DIAG] \(streamTag) LOADING_FAILED — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s")
+                    #endif
+                    let retryURL = urls[currentIndex]
+                    DispatchQueue.global(qos: .userInitiated)
+                        .asyncAfter(deadline: .now() + delay) { [weak self] in
+                            self?.play(url: retryURL)
+                        }
+                    return
+                }
+
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     self?.failoverOrError("Playback error: \(errStr)")
                 }
@@ -1714,31 +2392,46 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             let ts = logTimestamp
             let ms = Int32(timeSec * 1000)
-            print("[\(ts)] [MPV-DIAG] time=\(ms)ms isPlaying=\(isPlaying) callbacks/\(isLive ? 15 : 5)s=\(timeChangeCount)")
-            print("[\(ts)] [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: \(String(format: "%.1f", estimatedFPS))/\(String(format: "%.1f", displayFPS))disp, hwdec=\(hwdecCurrent)")
-            print("[\(ts)] [MPV-FRAME] render: \(String(format: "%.1f", avgRenderMs))ms avg / \(String(format: "%.1f", maxRenderMs))ms max, interval: \(String(format: "%.1f", avgInterval))ms avg [\(String(format: "%.1f", minInterval))-\(String(format: "%.1f", maxInterval))ms], jitter: \(String(format: "%.2f", jitterMs))ms, late: \(lateFrames)/\(frameCount), layer: \(layerStatus)")
-            print("[\(ts)] [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(demuxerBytes / 1024)KB/s, paused_for_cache: \(pausedForCache != 0)")
-            print("[\(ts)] [MPV-AUDIO] avsync: \(String(format: "%.4f", avsync))s, audio_pts: \(String(format: "%.2f", audioPts))s, underruns: \(audioUnderrunCount), buf_events: \(bufferEventCount), buf_time: \(String(format: "%.1f", totalBufferingDuration))s")
+            // `streamTag` prefix on every diagnostic line so logs
+            // from N concurrent tiles can be filtered by channel.
+            // Example: `grep "NBC Sports" logs.txt | grep jitter`
+            // gives you that one stream's jitter timeline.
+            let t = streamTag
+            print("[\(ts)] \(t) [MPV-DIAG] time=\(ms)ms isPlaying=\(isPlaying) callbacks/\(isLive ? 15 : 5)s=\(timeChangeCount)")
+            print("[\(ts)] \(t) [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: \(String(format: "%.1f", estimatedFPS))/\(String(format: "%.1f", displayFPS))disp, hwdec=\(hwdecCurrent)")
+            print("[\(ts)] \(t) [MPV-FRAME] render: \(String(format: "%.1f", avgRenderMs))ms avg / \(String(format: "%.1f", maxRenderMs))ms max, interval: \(String(format: "%.1f", avgInterval))ms avg [\(String(format: "%.1f", minInterval))-\(String(format: "%.1f", maxInterval))ms], jitter: \(String(format: "%.2f", jitterMs))ms, late: \(lateFrames)/\(frameCount), layer: \(layerStatus)")
+            print("[\(ts)] \(t) [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(demuxerBytes / 1024)KB/s, paused_for_cache: \(pausedForCache != 0)")
+            print("[\(ts)] \(t) [MPV-AUDIO] avsync: \(String(format: "%.4f", avsync))s, audio_pts: \(String(format: "%.2f", audioPts))s, underruns: \(audioUnderrunCount), buf_events: \(bufferEventCount), buf_time: \(String(format: "%.1f", totalBufferingDuration))s")
+            // One-line per-stream summary — the "tl;dr" that's
+            // easiest to grep when scanning 9 concurrent tiles'
+            // logs. Mirrors the key numbers from the verbose lines
+            // above so `grep STREAM-SUMMARY` gives a quick overview.
+            print("[\(ts)] \(t) [STREAM-SUMMARY] fps=\(String(format: "%.1f", estimatedFPS)) interval=\(String(format: "%.1f", avgInterval))ms jitter=\(String(format: "%.1f", jitterMs))ms late=\(lateFrames)/\(frameCount) vo_drops=+\(deltaVideoDrops) dec_drops=+\(deltaDecoderDrops) underruns=\(audioUnderrunCount) avsync=\(String(format: "%.3f", avsync))s cache=\(String(format: "%.1f", cacheDuration))s hwdec=\(hwdecCurrent) layer=\(layerStatus)")
             #endif
 
             DebugLogger.shared.log(
                 "vo_drops=+\(deltaVideoDrops) dec_drops=+\(deltaDecoderDrops) cache=\(String(format: "%.1f", cacheDuration))s fps=\(String(format: "%.1f", estimatedFPS)) bufEvents=\(bufferEventCount) bufTime=\(String(format: "%.1f", totalBufferingDuration))s underruns=\(audioUnderrunCount)",
                 category: "MPV-Perf", level: .perf)
 
-            // Memory + thermal state
-            var taskInfo = mach_task_basic_info()
-            var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size) / 4
-            let kr = withUnsafeMutablePointer(to: &taskInfo) {
-                $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
-                    task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
-                }
-            }
-            let memMB = kr == KERN_SUCCESS ? Double(taskInfo.resident_size) / (1024 * 1024) : -1
-            let thermal = ProcessInfo.processInfo.thermalState.rawValue
+            // Process-wide resource snapshot, tagged with this tile's
+            // ID so the stats from multiple concurrent tiles can be
+            // disambiguated in the log stream. `ProcessMetrics` uses
+            // `task_vm_info_data_t.phys_footprint` (the same counter
+            // Xcode's memory graph uses) instead of `resident_size`,
+            // which undercounts IOSurface-backed textures on iOS/tvOS
+            // — critical when we're trying to tell whether the 2nd
+            // tile's `Failed to open` is a memory-pressure symptom.
+            //
+            // FD count is the real new signal: each live mpv tile
+            // holds ~5-7 FDs, and the iOS/tvOS default soft limit is
+            // 256. If tiles 1-4 drive FDs past ~200 and tile 5 fails
+            // to open its socket, the number will say so plainly.
+            let metricsLine = ProcessMetrics.summaryLine()
+            let tile = tileID ?? "single"
             #if DEBUG
-            print("[\(ts)] [MPV-PERF] memory: \(String(format: "%.1f", memMB))MB, thermal: \(thermal)")
+            print("[\(ts)] [MPV-PERF] tile=\(tile) \(metricsLine)")
             #endif
-            DebugLogger.shared.log("memory=\(String(format: "%.1f", memMB))MB thermal=\(thermal)",
+            DebugLogger.shared.log("tile=\(tile) \(metricsLine)",
                                     category: "MPV-Perf", level: .perf)
 
             // Update Now Playing elapsed time — only the authoritative
@@ -1803,6 +2496,73 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             return f
         }()
         private var logTimestamp: String { Self.logDateFormatter.string(from: Date()) }
+
+        /// Substrings that identify mpv log lines which are
+        /// expected-and-recoverable noise during normal playback,
+        /// not actionable problems. We filter these from the DEBUG
+        /// log stream so useful signal (STREAM-SUMMARY, FRAME
+        /// SUMMARY, real failures) isn't drowned by decoder spam.
+        ///
+        /// Taxonomy of what's in here:
+        ///   - `non-existing SPS/PPS`, `no frame!`, `non-existing
+        ///     SPS ... referenced in buffering period` — MPEG-TS
+        ///     mid-GOP join; mpv recovers on the next keyframe.
+        ///   - `Error while decoding frame (hardware decoding)`,
+        ///     `hardware accelerator failed to decode picture`,
+        ///     `vt decoder cb: output image buffer is null` — VT
+        ///     per-frame hiccups under N-way concurrent decode
+        ///     pressure; `hwdec-software-fallback=90` catches
+        ///     persistent cases and switches the tile to SW decode.
+        ///   - `Invalid video timestamp`, `Invalid audio PTS`,
+        ///     `Reset playback due to audio timestamp reset` —
+        ///     MPEG-TS packet-loss recovery, mpv resyncs on its own.
+        ///   - `Audio/Video desynchronisation detected!` and the
+        ///     multi-line "Possible reasons include..." block that
+        ///     follows — fires once per playback-restart while mpv
+        ///     resyncs its A/V clock.
+        ///   - `Increasing reorder buffer` — routine h264 decoder
+        ///     buffer-size adjustment message.
+        ///   - `mpegts: Packet corrupt` — single-packet drop
+        ///     recovery, the demuxer skips the bad packet and
+        ///     continues.
+        ///   - `co located POCs unavailable` — h264 POC reference
+        ///     missing after mid-GOP join.
+        ///
+        /// `Audio device underrun detected` is deliberately NOT
+        /// here — we do want to see those, they're the one audio
+        /// signal that actually matters. The `audioUnderrunCount`
+        /// increment above still fires regardless of this filter.
+        private static let noisyRecoverySubstrings: [String] = [
+            "non-existing SPS",
+            "non-existing PPS",
+            "no frame!",
+            "Error while decoding frame",
+            "hardware accelerator failed to decode picture",
+            "vt decoder cb: output image buffer is null",
+            "Invalid video timestamp",
+            "Invalid audio PTS",
+            "Reset playback due to audio timestamp reset",
+            "Audio/Video desynchronisation detected",
+            "Possible reasons include too slow",
+            "position will not match to the video",
+            "Consider trying `--profile=fast`",
+            "Increasing reorder buffer",
+            "mpegts: Packet corrupt",
+            "co located POCs unavailable",
+            "No frame decoded?"
+        ]
+
+        private static func isNoisyRecoveryMessage(_ text: String) -> Bool {
+            for needle in noisyRecoverySubstrings where text.contains(needle) {
+                return true
+            }
+            // Also filter standalone blank `warn:` lines — mpv's
+            // cplayer module emits a blank warn line around every
+            // multi-line warning (sandwich markers). Dropping the
+            // bread along with the filling.
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty
+        }
 
         /// Convert CVPixelBuffer to CMSampleBuffer for AVSampleBufferDisplayLayer.
         private static func makeSampleBuffer(
@@ -2010,6 +2770,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 print("[MPV-ERR] \(String(cString: mpv_error_string(status)))")
                 #endif
             }
+        }
+
+        /// Wrapper around `mpv_set_option_string` that logs the
+        /// failing option name + value when mpv rejects it. The bare
+        /// `checkError(mpv_set_option_string(...))` path only logs
+        /// "error setting option" with no context — when stacked
+        /// against 20+ option calls in `setupMPV()` that turns an
+        /// actionable diagnostic into a coin flip. Use this helper
+        /// for any new option added so a silent mpv-rejection is
+        /// immediately traceable to a specific key.
+        @discardableResult
+        private func setOption(_ mpv: OpaquePointer, _ name: String, _ value: String) -> CInt {
+            let status = mpv_set_option_string(mpv, name, value)
+            if status < 0 {
+                #if DEBUG
+                print("[MPV-ERR] option \"\(name)\"=\"\(value)\" rejected: \(String(cString: mpv_error_string(status)))")
+                #endif
+            }
+            return status
         }
 
         private func logOption(_ name: String, _ status: CInt) {

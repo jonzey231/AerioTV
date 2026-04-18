@@ -23,18 +23,39 @@ struct MultiviewTransportBar: View {
     /// `PlayerSession.shared.exit()`.
     var onExit: () -> Void
 
+    /// Drives the 5-second chrome auto-fade. Bar button actions
+    /// report interaction so clicks keep chrome visible for another
+    /// 5 seconds. iPad's `.onTapGesture` path covers taps anywhere
+    /// else; tvOS's `.onMoveCommand` on the container covers D-pad
+    /// navigation.
+    @EnvironmentObject private var chromeState: MultiviewChromeState
+
     var body: some View {
+        #if os(tvOS)
+        HStack(spacing: 20) {
+            tileCountChip
+            Spacer(minLength: 20)
+            addButton
+            exitButton
+        }
+        // tvOS needs more vertical breathing room because the
+        // focused `+` / `×` buttons scale to 1.15 — cramming them
+        // into the iPad-sized bar clips the focus halo against the
+        // grid above.
+        .padding(.horizontal, 60)
+        .padding(.vertical, 24)
+        .background(Color.black)
+        #else
         HStack(spacing: 14) {
             tileCountChip
-
             Spacer(minLength: 12)
-
             addButton
             exitButton
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(Color.black)
+        #endif
     }
 
     // MARK: - Subviews
@@ -46,7 +67,11 @@ struct MultiviewTransportBar: View {
     private var tileCountChip: some View {
         HStack(spacing: 6) {
             Text("\(store.count) / \(store.maxTiles)")
+                #if os(tvOS)
+                .font(.system(size: 28, weight: .semibold).monospacedDigit())
+                #else
                 .font(.footnote.monospacedDigit())
+                #endif
                 .foregroundStyle(store.isAtMax ? .secondary : .primary)
             if store.isAtMax {
                 Text("max")
@@ -76,18 +101,31 @@ struct MultiviewTransportBar: View {
         )
     }
 
-    /// `+` icon button. Disabled at cap. Text label removed in favour
-    /// of the glyph — matches the per-tile close-`×` affordance and
-    /// reduces bar height.
+    /// `+` icon button. Disabled at cap.
     private var addButton: some View {
-        Button(action: onAdd) {
+        Button {
+            chromeState.reportInteraction()
+            onAdd()
+        } label: {
+            #if os(tvOS)
+            Image(systemName: "plus")
+                .font(.system(size: 32, weight: .bold))
+                .foregroundStyle(store.isAtMax ? Color.secondary : Color.white)
+                .frame(width: 80, height: 80)
+                .contentShape(Circle())
+            #else
             Image(systemName: "plus")
                 .font(.body.weight(.semibold))
                 .foregroundStyle(store.isAtMax ? Color.secondary : Color.white)
                 .frame(width: 34, height: 34)
                 .contentShape(Rectangle())
+            #endif
         }
+        #if os(tvOS)
+        .buttonStyle(TransportButtonStyle(tint: .white))
+        #else
         .buttonStyle(.plain)
+        #endif
         .disabled(store.isAtMax)
         .accessibilityLabel("Add tile")
         .accessibilityHint(
@@ -98,21 +136,73 @@ struct MultiviewTransportBar: View {
     }
 
     /// `×` icon button (destructive). Exits multiview entirely.
-    /// Matches the `xmark.circle.fill` affordance on the per-tile
-    /// close buttons so the destructive iconography is consistent.
     private var exitButton: some View {
-        Button(role: .destructive, action: onExit) {
+        Button(role: .destructive) {
+            chromeState.reportInteraction()
+            onExit()
+        } label: {
+            #if os(tvOS)
+            Image(systemName: "xmark")
+                .font(.system(size: 32, weight: .bold))
+                .foregroundStyle(Color.red)
+                .frame(width: 80, height: 80)
+                .contentShape(Circle())
+            #else
             Image(systemName: "xmark")
                 .font(.body.weight(.semibold))
                 .foregroundStyle(Color.red)
                 .frame(width: 34, height: 34)
                 .contentShape(Rectangle())
+            #endif
         }
+        #if os(tvOS)
+        .buttonStyle(TransportButtonStyle(tint: .red))
+        #else
         .buttonStyle(.plain)
+        #endif
         .accessibilityLabel("Exit multiview")
         .accessibilityHint("Leave multiview and stop all streams")
     }
 }
+
+// MARK: - tvOS transport button style
+
+#if os(tvOS)
+/// Focus chrome for transport-bar circular buttons. Reads
+/// `@Environment(\.isFocused)` so a focused `+` lights up with
+/// white fill + ring + 1.15 scale, and a focused `×` gets the
+/// same treatment tinted red. Matches the tile's
+/// `MultiviewTileButtonStyle` language (strong, unambiguous
+/// focus signal) so the whole multiview screen shares one focus
+/// vocabulary.
+struct TransportButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+    let tint: Color
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                Circle().fill(
+                    isFocused ? tint.opacity(0.35) : Color.white.opacity(0.08)
+                )
+            )
+            .overlay(
+                Circle().stroke(
+                    isFocused ? tint : Color.white.opacity(0.15),
+                    lineWidth: isFocused ? 4 : 1
+                )
+            )
+            .scaleEffect(isFocused ? 1.15 : 1.0)
+            .shadow(
+                color: isFocused ? tint.opacity(0.55) : .clear,
+                radius: isFocused ? 16 : 0,
+                y: isFocused ? 6 : 0
+            )
+            .opacity(configuration.isPressed ? 0.75 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
 
 #if DEBUG
 #Preview("Transport Bar — slim") {

@@ -39,9 +39,14 @@ enum MultiviewGridMath {
     /// compact widths.
     static let minTileDimension: CGFloat = 80
 
-    /// Default visual spacing between tiles. Matches the 6pt gutter
-    /// used by the rest of the app's card grids.
-    static let defaultSpacing: CGFloat = 6
+    /// Default visual spacing between tiles. Zero gutter — tiles
+    /// sit flush against each other so the grid reads as one
+    /// continuous display surface rather than a tiled card collection.
+    /// Per user request (2026-04-17): the previous 6pt gutter visually
+    /// cluttered the grid and wasted screen real-estate on a TV.
+    /// Focus feedback (scale + shadow) still lets the user pick out
+    /// the focused tile without a physical gap.
+    static let defaultSpacing: CGFloat = 0
 
     /// For a given tile index in a given count, return the index of
     /// the physical neighbor in the specified direction (or `nil`
@@ -77,16 +82,36 @@ enum MultiviewGridMath {
         let rects = Self.rects(for: count, in: container, spacing: spacing)
         guard rects.indices.contains(index) else { return nil }
         let me = rects[index]
-        // Small epsilon so "adjacent" rects (separated by spacing)
-        // still register as perpendicular-axis overlap.
+        // Primary-axis tolerance: lets tiles separated by `spacing`
+        // still register as "in the requested direction". With
+        // `spacing=0` this is 1 px of subpixel slop, which is fine.
         let eps = spacing + 1
+
+        // Perpendicular-axis overlap must be strictly POSITIVE — mere
+        // boundary-point contact doesn't count. Without this, a 2×2
+        // grid with `spacing=0` treats the top-right tile as a
+        // right-neighbour of the bottom-left tile, because they share
+        // the single point `(halfW, halfH)` and the old 1-px eps
+        // pushed `y.maxY+eps > me.minY` over the line.
+        //
+        // Using `> 1` (instead of `> 0`) tolerates floating-point
+        // rounding in layout math while still rejecting exact-
+        // boundary contact — the "real" overlap between two tiles in
+        // the same row is always > 1 px regardless of container size
+        // (smallest case is a 9-grid third-height tile sharing its
+        // full-height edge with a neighbour, which is hundreds of px).
+        func perpendicularOverlap(on axis: (CGFloat, CGFloat), of r: (CGFloat, CGFloat)) -> CGFloat {
+            min(axis.1, r.1) - max(axis.0, r.0)
+        }
 
         // Candidates are tiles that overlap on the perpendicular axis
         // AND lie strictly on the requested side. Pick the closest.
         var best: (idx: Int, dist: CGFloat)?
         for (i, r) in rects.enumerated() where i != index {
-            let overlapsX = (r.minX - eps) < me.maxX && (r.maxX + eps) > me.minX
-            let overlapsY = (r.minY - eps) < me.maxY && (r.maxY + eps) > me.minY
+            let xOverlap = perpendicularOverlap(on: (me.minX, me.maxX), of: (r.minX, r.maxX))
+            let yOverlap = perpendicularOverlap(on: (me.minY, me.maxY), of: (r.minY, r.maxY))
+            let overlapsX = xOverlap > 1
+            let overlapsY = yOverlap > 1
             let d: CGFloat
             switch direction {
             case .left:

@@ -69,6 +69,21 @@ final class MultiviewStore: ObservableObject {
     /// window keeps decoding.
     @Published var isPiPActive: Bool = false
 
+    /// Set to `true` while `AddToMultiviewSheet` is presented on tvOS
+    /// at N=1. Pauses EVERY tile's mpv (including the audio tile) so
+    /// the picker's channel-list rendering + image loading doesn't
+    /// compete with live decode for memory. Observed OOMs at 1.8+ GB
+    /// RSS on Apple TV 4K when the picker was up over a playing tile
+    /// for more than a few seconds; pausing frees the videotoolbox
+    /// decode surface + IOSurface texture pool so the picker has
+    /// headroom. Resumes on sheet dismissal (pick or cancel).
+    ///
+    /// `MPVPlayerView.Coordinator.applyPauseIfChanged(...)` already
+    /// handles property-toggle semantics correctly — toggling this
+    /// flag translates to a single `mpv_set_property(pause, true/false)`
+    /// per tile, not a re-seed.
+    @Published var isPickerPresented: Bool = false
+
     /// Latest `ProcessInfo.thermalState` the app has observed. Kept
     /// in the store (not computed live) so the add-sheet's
     /// `.critical`-refusal banner flips promptly on the
@@ -96,6 +111,76 @@ final class MultiviewStore: ObservableObject {
     /// cool-iPad user who saw it at home gets warned again after the
     /// device has been in a bag all day.
     var warningLastShownAt: Date?
+
+    // MARK: - Progress-store registry
+    //
+    // The unified N=1 chrome (PlaybackChromeOverlay + PlaybackOptionsPanel)
+    // needs to bind scrubber / play-pause / track pickers / speed /
+    // sleep timer to *the audio tile's* `PlayerProgressStore`. Each
+    // tile's `MultiviewTileView` owns its own store as a
+    // `@StateObject`; this registry lets the chrome look one up by
+    // tile id without routing state through SwiftUI's environment.
+    //
+    // Entries are held by strong reference while the tile is mounted;
+    // `MultiviewTileView.onAppear` calls `registerProgressStore(...)`,
+    // `.onDisappear` calls `unregisterProgressStore(...)`. The
+    // `.onDisappear` cleanup means the dictionary never holds a
+    // reference to a torn-down tile. We don't weak-ref the store
+    // because SwiftUI's `@StateObject` retains it for the view's
+    // lifetime — a weak ref would just race ahead of onDisappear
+    // without buying anything.
+    //
+    // The dictionary is NOT `@Published` — every tile mount / remount
+    // would otherwise fire `objectWillChange` on `MultiviewStore`,
+    // invalidating every chrome/tile view that observes the store.
+    // Non-audio tile re-registration is a pure no-op for chrome state,
+    // so we don't want to pay the invalidation cost. Instead, we bump
+    // `audioProgressStoreRevision` *only* when the entry that
+    // `audioProgressStore` resolves to has actually changed — which
+    // is the only delta chrome observers care about.
+    private var progressStoresByTileID: [String: PlayerProgressStore] = [:]
+
+    /// Published revision counter that bumps whenever the result of
+    /// `audioProgressStore` has changed (audio tile itself register,
+    /// re-register, or unregister). Chrome observers can watch this
+    /// in an `onChange` if they cache progress-store refs; the
+    /// `audioTileID` change is already published separately and
+    /// handles the most common case (swap audio between tiles).
+    @Published private(set) var audioProgressStoreRevision: Int = 0
+
+    /// Currently-audible tile's progress store. `nil` when there's
+    /// no audio tile or the audio tile hasn't registered yet (brief
+    /// window between tile mount and first SwiftUI body pass). The
+    /// chrome overlay should gate its Options pill on non-nil.
+    var audioProgressStore: PlayerProgressStore? {
+        guard let id = audioTileID else { return nil }
+        return progressStoresByTileID[id]
+    }
+
+    /// Called by `MultiviewTileView.onAppear`. Replaces any existing
+    /// entry for this tile id (e.g. view re-render mid-session).
+    /// Only fires `objectWillChange` when the registered tile is the
+    /// audio tile — every other register is a quiet dictionary write.
+    func registerProgressStore(_ store: PlayerProgressStore, for tileID: String) {
+        let wasAudio = (audioTileID == tileID)
+        let prior = progressStoresByTileID[tileID]
+        progressStoresByTileID[tileID] = store
+        if wasAudio && prior !== store {
+            audioProgressStoreRevision &+= 1
+        }
+    }
+
+    /// Called by `MultiviewTileView.onDisappear` (and by `remove(id:)`
+    /// / `reset()` below to cover cases where `onDisappear` races the
+    /// store mutation). Bumps the revision only if the unregistered
+    /// tile was the audio tile.
+    func unregisterProgressStore(for tileID: String) {
+        let wasAudio = (audioTileID == tileID)
+        let had = progressStoresByTileID.removeValue(forKey: tileID) != nil
+        if wasAudio && had {
+            audioProgressStoreRevision &+= 1
+        }
+    }
 
     /// Seconds during which the perf-warning stays "recently shown"
     /// and the soft-limit gate is auto-skipped. 2h matches the thermal
@@ -334,6 +419,13 @@ final class MultiviewStore: ObservableObject {
         fullscreenTileID = nil
         relocatingTileID = nil
         isPiPActive = false
+        // Clear the progress-store registry so the chrome overlay
+        // doesn't keep a dangling reference to a torn-down tile's
+        // `PlayerProgressStore`. SwiftUI unmount triggers
+        // `.onDisappear` → `unregisterProgressStore(...)` for each
+        // tile asynchronously, but this wipe runs now and covers
+        // the window between mode flip and disappear.
+        progressStoresByTileID = [:]
         // Intentionally NOT resetting `warningLastShownAt` — it's
         // a 2h throttle across multiview sessions, not per-session.
     }

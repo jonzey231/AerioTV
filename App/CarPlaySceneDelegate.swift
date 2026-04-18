@@ -135,15 +135,30 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
     private func playChannel(_ channel: ChannelDisplayItem) {
         guard !channel.streamURLs.isEmpty else { return }
 
-        // Start playback on main thread (NowPlayingManager is @MainActor)
+        // Start playback on main thread (PlayerSession and
+        // NowPlayingManager are both @MainActor). CarPlay delegate
+        // callbacks run on an arbitrary queue, so the hop is
+        // required.
         DispatchQueue.main.async {
-            let headers: [String: String] = {
-                if let server = ChannelStore.shared.activeServer {
-                    return server.authHeaders
-                }
-                return ["Accept": "*/*"]
-            }()
-            NowPlayingManager.shared.startPlaying(channel, headers: headers)
+            if PlaybackFeatureFlags.useUnifiedPlayback {
+                // Phase B routing: funnel through PlayerSession so
+                // the iPad UI (if the user unlocks mid-CarPlay
+                // session) sees this channel as tile 0 and
+                // multiview + lockscreen both stay in sync.
+                _ = PlayerSession.shared.begin(
+                    item: channel,
+                    server: ChannelStore.shared.activeServer
+                )
+            } else {
+                // Legacy path — direct write to NowPlayingManager.
+                let headers: [String: String] = {
+                    if let server = ChannelStore.shared.activeServer {
+                        return server.authHeaders
+                    }
+                    return ["Accept": "*/*"]
+                }()
+                NowPlayingManager.shared.startPlaying(channel, headers: headers)
+            }
         }
 
         // Switch to Now Playing template
