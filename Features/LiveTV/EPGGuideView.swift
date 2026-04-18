@@ -637,7 +637,15 @@ struct EPGGuideView: View {
     /// top-right mini position lands on a program 2–3 hours in the
     /// future (because that's what's directly below the mini).
     /// Setting this to a program's id claims focus on that cell.
-    @FocusState private var focusedProgramID: String?
+    // NOTE: `@FocusState private var focusedProgramID: String?` was
+    // removed alongside the `.focused(...)` binding on each program
+    // cell. Both formed a redundant focus-routing channel that
+    // created two competing focus targets per cell
+    // (`TVPressOverlay`'s `PressCatcherView` + the SwiftUI
+    // `.focused` binding), which manifested as specific program
+    // cells being permanently unreachable via Siri Remote D-pad.
+    // See `programCell(_:channelItem:nextProgramStart:)` for the
+    // full diagnosis and rationale.
     #endif
 
     // Time window: 1h back + user-configured hours forward.
@@ -906,38 +914,29 @@ struct EPGGuideView: View {
             .onReceive(
                 NotificationCenter.default.publisher(for: .forceGuideFocus)
             ) { _ in
-                // Claim focus on the first channel's CURRENTLY
-                // PLAYING program cell. Without this, tvOS's spatial
-                // search from the top-right mini position lands on a
-                // program cell directly below the mini — which
-                // visually maps to ~2 hours in the future because
-                // that's the time column under the mini's x-position.
-                // Putting focus on the "now" program lets the first
-                // D-pad down from the user land on the next
-                // channel's "now" program (spatially aligned in the
-                // same time column), which is the natural EPG nav.
+                // `.forceGuideFocus` fires after the mini-player is
+                // dismissed and the guide should reclaim focus. We
+                // set `focusedChannelID` to the first channel so
+                // the tvOS focus engine has a reasonable starting
+                // landmark; the spatial search then picks the
+                // nearest focusable program cell in that row.
+                //
+                // Prior to v1.6.3 this handler also set
+                // `focusedProgramID = live.id` to place focus
+                // directly on the first channel's currently-airing
+                // program. That path was removed alongside the
+                // `.focused($focusedProgramID, equals: prog.id)`
+                // binding on each cell — keeping them was creating
+                // duplicate focus targets per cell and leaving some
+                // program cells permanently unreachable. The
+                // natural `focusedChannelID` fallback below gets
+                // the user close enough; one D-pad press lands on
+                // the "now" cell if the focus engine doesn't
+                // already pick it.
                 guard let firstChannel = channels.first else { return }
-                let now = Date()
-                let firstChannelPrograms = guideStore.programs[firstChannel.id] ?? []
-                let livePrograms = firstChannelPrograms.filter {
-                    $0.start <= now && $0.end > now
-                }
                 Task { @MainActor in
-                    // 50ms is empirical: long enough to beat the
-                    // focus pass tvOS runs when the mini-player
-                    // transition lands, short enough to feel
-                    // instant.
                     try? await Task.sleep(nanoseconds: 50_000_000)
-                    if let live = livePrograms.first {
-                        focusedProgramID = live.id
-                    } else {
-                        // No EPG data for the first channel (or the
-                        // current time falls in a gap). Fall back to
-                        // the channel cell on the left — always
-                        // focusable, user can D-pad right to find a
-                        // program.
-                        focusedChannelID = firstChannel.id
-                    }
+                    focusedChannelID = firstChannel.id
                 }
             }
             #endif
@@ -946,24 +945,52 @@ struct EPGGuideView: View {
     }
 
     // MARK: - Guide Row (single channel)
+    //
+    // HStack layout on both tvOS and iPadOS/macOS. Before this change
+    // the row was a `ZStack` with `programRow` extended to
+    // `totalGridWidth` (~22,200 pt on tvOS, ~13,320 pt on iPad) and
+    // offset via `.offset(x:)`, with `channelCell` drawn on top at
+    // `zIndex(0.5)` with an opaque `Color.cardBackground`. Program
+    // cells whose clamped start landed at `windowStart` (the common
+    // case for currently-airing programs that began before the visible
+    // scroll window) had their UIView frames extending *behind* the
+    // opaque channel column. The tvOS focus engine and iPadOS click
+    // routing both treated the occluded regions inconsistently: some
+    // cells remained reachable (focus center happened to land clear of
+    // the channel column), others disappeared from the focus graph
+    // entirely. Specifically reported: NHL Hockey on ESPN HD
+    // (3:00–5:30, overlapping the channel column) was unfocusable on
+    // tvOS while College Softball on ESPN2 HD (3:00–5:00, same clamped
+    // start and offset) worked — likely due to subtle differences in
+    // how tvOS samples focus regions across rows in the section.
+    //
+    // The HStack below mirrors the pinned `timeHeaderRow` structure at
+    // line ~807: channel column and program area are siblings, never
+    // overlapping. `programRow` still renders at `totalGridWidth` and
+    // gets `.offset(x: horizontalOffset)` for the scroll effect, but
+    // the enclosing `.frame(width: screenWidth - channelColumnWidth)
+    // .clipped()` bounds its visible region so program cell UIViews
+    // are always fully inside the program area and never collide with
+    // the channel column's bounds. Focus / hit testing becomes
+    // unambiguous.
+    //
+    // Note on the removed "overflow left over the channel column"
+    // comment: the previous layout claimed focused cells could
+    // overflow left, but no `zIndex(1)` was ever applied to focused
+    // cells — they remained at the default `zIndex(0)`, under the
+    // channel column's `zIndex(0.5)`. Any leftward overflow was
+    // therefore invisible (covered by the opaque channel column),
+    // which means this simplification loses no visible behaviour.
     private func guideRow(for channel: ChannelDisplayItem, screenWidth: CGFloat) -> some View {
-        ZStack(alignment: .leading) {
-            // Program blocks — positioned right of channel column
-            programRow(for: channel)
-                .frame(width: totalGridWidth, height: rowHeight)
-                .offset(x: channelColumnWidth + horizontalOffset)
-                // Clip only the right edge using a frame that extends far left
-                // but constrains the right side to the screen width.
-                // This allows focused cells to overflow left over the channel column.
-
-            // Channel logo + name — pinned to left edge, drawn on top of unfocused programs
+        HStack(spacing: 0) {
+            // Left: fixed-width channel column. Standalone UIView;
+            // no overlap with program cells.
             channelCell(for: channel)
                 .frame(width: channelColumnWidth, height: rowHeight)
                 .background(Color.cardBackground)
                 .overlay(alignment: .trailing) {
                     Rectangle().fill(Color.accentPrimary.opacity(0.2)).frame(width: 1)
                 }
-                .zIndex(0.5) // above unfocused programs (zIndex 0), below focused (zIndex 1)
                 #if os(tvOS)
                 // Bind the channel cell (which contains a focusable
                 // `GuideChannelButton` on tvOS) to the row-level
@@ -973,12 +1000,26 @@ struct EPGGuideView: View {
                 // mini player.
                 .focused($focusedChannelID, equals: channel.id)
                 #endif
+
+            // Right: program area, clipped to exactly the visible
+            // program-area width. `programRow` is still
+            // `totalGridWidth` wide internally and `.offset` by
+            // the horizontal scroll amount, but the outer `.frame`
+            // + `.clipped()` bound its visible region so program
+            // cell UIViews can no longer extend behind the
+            // channel column sibling above.
+            programRow(for: channel)
+                .frame(width: totalGridWidth, height: rowHeight)
+                .offset(x: horizontalOffset)
+                .frame(width: max(0, screenWidth - channelColumnWidth),
+                       height: rowHeight,
+                       alignment: .leading)
+                .clipped()
         }
         .frame(width: screenWidth, height: rowHeight, alignment: .leading)
         #if os(tvOS)
         .focusSection() // each row is a distinct focus region — Down always moves to the next row
         #endif
-        .clipped() // clip right edge only — focused cells overflow vertically via row spacing
         .overlay(alignment: .bottom) {
             Rectangle().fill(Color.accentPrimary.opacity(0.08)).frame(height: 1)
         }
@@ -1096,14 +1137,29 @@ struct EPGGuideView: View {
             shortTimeFormatter: shortTimeFormatter, onSelect: onSelectChannel
         )
         .offset(x: x, y: 0)
-        #if os(tvOS)
-        // External focus-claim hook so `.forceGuideFocus` (fired on
-        // mini-player minimize) can land focus on a specific program
-        // cell — used to put focus on the currently-playing program
-        // of the first channel. Normally the binding is nil and the
-        // focus engine drives navigation naturally.
-        .focused($focusedProgramID, equals: prog.id)
-        #endif
+        // NOTE: `.focused($focusedProgramID, equals: prog.id)` was
+        // previously attached here on tvOS as a programmatic focus
+        // hook for `.forceGuideFocus` (mini-player minimize → land
+        // focus on the first channel's "now" cell). It has been
+        // removed because it silently created a second focus
+        // target on top of the `TVPressOverlay`'s
+        // `PressCatcherView` (see
+        // `Shared/TVPressGesture.swift:43` — "Do NOT also add
+        // `.focusable()` / `.focused()` to cellContent — the
+        // overlay UIView is the focusable element. Having both
+        // would create two competing focus targets"). The dual
+        // targets manifested as specific program cells being
+        // unreachable via Siri Remote D-pad: the tvOS focus
+        // engine saw two focusable regions per cell and routed
+        // inconsistently, skipping some cells entirely (reported:
+        // NHL Hockey Eastern on ESPN HD, 2026 NFL Draft Rankings:
+        // Offense and Chris Simms Unbuttoned on NBC Sports NOW).
+        // The minor regression: after mini-player minimize, focus
+        // now lands on whatever cell the tvOS focus engine picks
+        // by default rather than the first channel's live cell
+        // specifically. The user can D-pad to reach their
+        // intended cell — acceptable tradeoff versus some cells
+        // being permanently unreachable.
     }
 
     // MARK: - Time Indicator Line

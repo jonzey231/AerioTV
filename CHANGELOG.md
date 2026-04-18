@@ -1,5 +1,50 @@
 # Changelog
 
+## v1.6.3 — 2026-04-18
+
+### Fixed
+
+- **tvOS Siri Remote D-pad could not focus certain program cells
+  in the EPG guide.** Specific cells (e.g. NHL Hockey on ESPN HD,
+  2026 NFL Draft Rankings: Offense and Chris Simms Unbuttoned on
+  NBC Sports NOW) rendered correctly but were permanently skipped
+  by the focus engine, making them unreachable. Root cause: each
+  program cell had both a `TVPressOverlay` (UIKit-backed
+  `PressCatcherView` that is the primary focusable element) AND a
+  SwiftUI `.focused($focusedProgramID, equals: prog.id)` binding.
+  The `TVPressOverlay` docstring (`Shared/TVPressGesture.swift`)
+  explicitly warns against this: "the overlay UIView is the
+  focusable element — having both would create two competing
+  focus targets." With two focus candidates per cell, the tvOS
+  focus engine routed inconsistently depending on layout position,
+  scroll offset, and ZStack order — which is why the symptom was
+  specific cells rather than all or none. The fix removes the
+  redundant `.focused(...)` binding on each cell, leaving
+  `TVPressOverlay` as the sole focusable element on tvOS (matching
+  the working pattern already used in `ChannelListView`).
+- **iPadOS / macOS guide grid click routing on cells that
+  overlapped the channel column.** The guide row was a `ZStack`
+  with `programRow` extended to the full timeline width and the
+  channel column drawn on top at `zIndex(0.5)` with an opaque
+  background. Program cells clamped to `windowStart` had their
+  UIView frames extending *behind* the opaque channel column,
+  which caused hit-test routing inconsistencies — some cells
+  worked, others did not. Restructured to an `HStack` layout with
+  the channel column and program area as siblings (mirroring the
+  pinned time-header structure). Program cells can no longer
+  extend into the channel column's UIView bounds.
+
+### Changed
+
+- **`.forceGuideFocus` notification (fired when the mini-player
+  minimizes)** now routes to `focusedChannelID` (first channel)
+  and lets tvOS's spatial focus search pick the nearest program
+  cell. Previously it set `focusedProgramID` directly to the
+  first channel's live program; that path was removed alongside
+  the dual-focus-target cleanup. The user lands within one D-pad
+  press of the live cell, which is close enough that the prior
+  precision isn't missed.
+
 ## v1.6.2 — 2026-04-18
 
 ### Fixed
