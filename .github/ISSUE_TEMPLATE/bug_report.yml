@@ -1,0 +1,41 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: App Version
+      description: What version of the app are you running?
+      placeholder: e.g. v1.6.3
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device / Environment
+      description: Device model, OS version (iOS, iPadOS, tvOS), and any relevant context
+      placeholder: e.g. iPhone 15 Pro, iOS 18.2
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Detailed Description
+      description: What happened? What did you expect to happen? Include steps to reproduce, logs, screenshots, and any other context.
+      placeholder: |
+        **Steps to reproduce:**
+        1.
+        2.
+        3.
+
+        **Expected behavior:**
+
+        **Actual behavior:**
+
+        **Logs / screenshots:**
+    validations:
+      required: true
