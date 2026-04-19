@@ -9,7 +9,7 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
 - This version may have bugs but will always be the latest.
 
 Sideload using your preferred method using the .ipa from [Releases](https://github.com/jonzey231/AerioTV/releases).
-- This version will occasionally be ahead of the AppleTestflight version.
+- This version will occasionally be ahead of the Apple Testflight version.
 
 ## Features
 
