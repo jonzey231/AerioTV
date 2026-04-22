@@ -27,6 +27,19 @@ struct AddServerView: View {
     @State private var deviceNickname: String = DeviceInfo.modelName
     @State private var dvrDestination: RecordingDestination = .dispatcharrServer
 
+    // Advanced: External XMLTV (Dispatcharr only). Collapsed by default unless
+    // the user has already populated a URL, in which case we auto-expand so
+    // they can see what's set.
+    @State private var xmltvAdvancedExpanded: Bool = false
+    @State private var xmltvTestState: XMLTVTestState = .idle
+
+    enum XMLTVTestState: Equatable {
+        case idle
+        case testing
+        case success(Int)    // program count
+        case failure(String) // user-facing error
+    }
+
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
@@ -92,11 +105,22 @@ struct AddServerView: View {
             let stored = UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? ""
             let parsed = stored.split(separator: ",").map { String($0) }
             ssidEntries = parsed.isEmpty ? [""] : parsed
-            NetworkMonitor.shared.refresh()
+            // Intentionally NOT auto-calling `NetworkMonitor.refresh(force: true)`
+            // here — doing so was the cause of the Location-permission
+            // prompt that fired immediately when a first-run user opened
+            // "Add Server" (before they'd added a LAN URL or typed a
+            // single character). Users interpreted the double prompt
+            // (Location + Local Network) as the app over-reaching.
+            //
+            // The "current WiFi" badge below reads `networkMonitor.currentSSID`
+            // from cache, and the adjacent refresh button still lets
+            // the user trigger a live fetch (which prompts for Location
+            // with context). That's the opt-in flow Aerio's Welcome
+            // screen already uses with its "Detect Home WiFi" card.
         }
         #endif
         .fullScreenCover(item: $savedServer) { server in
-            ServerSyncView(server: server)
+            ServerSyncView(mode: .onboarding(server: server))
                 .onDisappear {
                     // When the sync screen is dismissed, also dismiss AddServerView.
                     dismiss()
@@ -243,8 +267,198 @@ struct AddServerView: View {
                 AppTextField("API Key", placeholder: "••••••••••••••••",
                              text: $viewModel.apiKey, icon: "key.fill", isSecure: true)
                 infoBox(icon: "info.circle.fill",
-                        message: "Use a Dispatcharr API key (Settings → API keys). This enables native Dispatcharr endpoints for Live TV, Guide, Movies, and TV Shows.")
+                        message: "Use a Dispatcharr API key (System → Users → Edit User → API & XC). This enables native Dispatcharr endpoints for Live TV, Guide, Movies, and TV Shows.")
+
+                advancedXMLTVSection
             }
+        }
+    }
+
+    // MARK: - Advanced XMLTV Section (Dispatcharr only)
+
+    /// Collapsible disclosure for the optional external-XMLTV override.
+    /// Auto-expands when a URL is already set, so returning users see
+    /// what's configured rather than having to hunt for a tucked-away
+    /// field. Includes a Test button that fetches a small prefix and
+    /// runs it through `XMLTVParser` before the user commits.
+    @ViewBuilder
+    private var advancedXMLTVSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header — the disclosure toggle
+            Button {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    xmltvAdvancedExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "calendar.badge.clock")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.accentSecondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Advanced: External XMLTV")
+                            .font(.headlineSmall)
+                            .foregroundColor(.textPrimary)
+                        Text("Recommended for CPU-constrained Dispatcharr hosts.")
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                    }
+                    Spacer()
+                    if !viewModel.dispatcharrXMLTVURL
+                        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("Configured")
+                            .font(.labelSmall.weight(.semibold))
+                            .foregroundColor(.statusOnline)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.statusOnline.opacity(0.12))
+                            .clipShape(Capsule())
+                    }
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.textTertiary)
+                        .rotationEffect(.degrees(xmltvAdvancedExpanded ? 90 : 0))
+                        .animation(.spring(response: 0.35, dampingFraction: 0.8),
+                                   value: xmltvAdvancedExpanded)
+                }
+                .padding(16)
+            }
+            #if os(tvOS)
+            .buttonStyle(TVNoHighlightButtonStyle())
+            #else
+            .buttonStyle(.plain)
+            #endif
+
+            if xmltvAdvancedExpanded {
+                VStack(alignment: .leading, spacing: 16) {
+                    Divider()
+                        .background(Color.borderSubtle)
+                        .padding(.horizontal, 16)
+
+                    VStack(alignment: .leading, spacing: 16) {
+                        AppTextField(
+                            "Custom XMLTV URL",
+                            placeholder: "https://example.com/xmltv.xml",
+                            text: $viewModel.dispatcharrXMLTVURL,
+                            icon: "calendar",
+                            keyboardType: .URL
+                        )
+
+                        // Test button + status pill. Disabled when empty so
+                        // the user can't burn a fetch on whitespace.
+                        HStack(spacing: 10) {
+                            Button {
+                                Task { await testXMLTVURL() }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    if case .testing = xmltvTestState {
+                                        ProgressView().tint(.accentPrimary).scaleEffect(0.8)
+                                    } else {
+                                        Image(systemName: "checkmark.seal")
+                                    }
+                                    Text("Test XMLTV URL")
+                                }
+                                .font(.labelMedium.weight(.semibold))
+                                .foregroundColor(.accentPrimary)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(Color.accentPrimary.opacity(0.12))
+                                .clipShape(Capsule())
+                            }
+                            #if os(tvOS)
+                            .buttonStyle(TVNoHighlightButtonStyle())
+                            #else
+                            .buttonStyle(.plain)
+                            #endif
+                            .disabled(xmltvTrimmed.isEmpty ||
+                                      { if case .testing = xmltvTestState { return true } else { return false } }())
+
+                            xmltvStatusPill
+                            Spacer(minLength: 0)
+                        }
+
+                        infoBox(
+                            icon: "bolt.fill",
+                            message: "Override the XMLTV source AerioTV pulls EPG from. Leave blank to use Dispatcharr's own XMLTV output at /output/epg (the default — category data and all). Set only if you want to bypass Dispatcharr and fetch XMLTV straight from your upstream provider."
+                        )
+                    }
+                    .padding([.horizontal, .bottom], 16)
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .background(Color.cardBackground)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.accentSecondary.opacity(0.25), lineWidth: 1)
+        )
+        .onAppear {
+            // Auto-expand when returning to a server that already has a URL
+            // so the configured value is immediately visible.
+            if !xmltvTrimmed.isEmpty {
+                xmltvAdvancedExpanded = true
+            }
+        }
+    }
+
+    private var xmltvTrimmed: String {
+        viewModel.dispatcharrXMLTVURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @ViewBuilder
+    private var xmltvStatusPill: some View {
+        switch xmltvTestState {
+        case .idle:
+            EmptyView()
+        case .testing:
+            EmptyView()  // spinner already shown inside the button
+        case .success(let count):
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.statusOnline)
+                Text(count > 0 ? "Valid — \(count) programs" : "Valid XMLTV")
+                    .font(.labelSmall.weight(.semibold))
+                    .foregroundColor(.statusOnline)
+                    .lineLimit(1)
+            }
+        case .failure(let err):
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundColor(.statusLive)
+                Text(err)
+                    .font(.labelSmall)
+                    .foregroundColor(.statusLive)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    /// Fetches the user's XMLTV URL and runs it through XMLTVParser so we
+    /// can tell them whether it's valid BEFORE save. Caps the download at
+    /// ~5 MB by cancelling after a short timeout — we only need to prove
+    /// the response parses as XMLTV with at least one programme.
+    @MainActor
+    private func testXMLTVURL() async {
+        let urlString = xmltvTrimmed
+        guard !urlString.isEmpty else { return }
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            xmltvTestState = .failure("URL must start with http:// or https://")
+            return
+        }
+
+        xmltvTestState = .testing
+
+        do {
+            let programs = try await XMLTVParser.fetchAndParse(url: url)
+            xmltvTestState = .success(programs.count)
+        } catch {
+            // Strip anything implementation-y from the error so the banner
+            // stays short and readable in the small pill.
+            let raw = error.localizedDescription
+            let trimmed = raw.count > 120 ? String(raw.prefix(120)) + "…" : raw
+            xmltvTestState = .failure(trimmed.isEmpty ? "Couldn't parse as XMLTV" : trimmed)
         }
     }
 
@@ -377,7 +591,9 @@ struct AddServerView: View {
                 }
                 Spacer()
                 Button {
-                    NetworkMonitor.shared.refresh()
+                    // Explicit user tap → always query, same rationale as the
+                    // Refresh button in the Settings Home WiFi section.
+                    NetworkMonitor.shared.refresh(force: true)
                 } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 12, weight: .medium))
@@ -389,6 +605,40 @@ struct AddServerView: View {
             .padding(10)
             .background(Color.elevatedBackground)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            // On WiFi but SSID is nil → user hasn't granted Location (Precise).
+            // Surface a one-tap Settings deep-link instead of only text so users
+            // don't have to hunt through Privacy → Location Services manually.
+            if networkMonitor.isOnWifi && networkMonitor.currentSSID == nil && !networkMonitor.isRefreshing {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "location.slash")
+                            .font(.system(size: 13))
+                            .foregroundColor(.statusWarning)
+                            .padding(.top, 1)
+                        Text("Allow Location (Precise) so AerioTV can read your WiFi name and auto-switch to the local URL at home.")
+                            .font(.labelSmall)
+                            .foregroundColor(.statusWarning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Button {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "gear")
+                            Text("Open Settings")
+                        }
+                        .font(.labelMedium.weight(.semibold))
+                        .foregroundColor(.accentPrimary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(10)
+                .background(Color.statusWarning.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            }
 
             // SSID entries
             ForEach(ssidEntries.indices, id: \.self) { index in

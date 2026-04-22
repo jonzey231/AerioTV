@@ -41,6 +41,44 @@ struct ChannelListView: View {
     @AppStorage("defaultLiveTVView") private var defaultLiveTVView = "guide"
     @AppStorage("channelSortMode") private var sortModeRaw = "number"
     @State private var showGuideView = false
+    #if os(iOS)
+    /// Collapses the iPhone-only chrome (filter pills) when the user
+    /// scrolls down in the channel list. Hysteresis (80 / 20) on the
+    /// scroll-y trigger prevents jitter near the edges.
+    @State private var isChromeCollapsed: Bool = false
+    /// Surfaces NetworkMonitor.localServerUnreachable as a Live TV banner —
+    /// the user is on a configured home SSID but the server's local URL
+    /// failed a probe (most often due to a VPN blocking LAN traffic).
+    @ObservedObject private var networkMonitor = NetworkMonitor.shared
+    /// Experimental "compact chrome" layout flag, owned by Developer
+    /// Settings. When on (iPhone only), the Manage Groups button moves
+    /// to the nav-bar trailing edge and the filter/search bars become
+    /// hideable via two companion toggles below. Default OFF so the
+    /// main user base is unaffected.
+    @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
+    /// Hide the group-pill row entirely. Only honored when compact chrome
+    /// is ON — otherwise ignored so the classic layout stays untouched.
+    @AppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
+    /// Collapse the always-visible nav-bar search drawer into an
+    /// on-demand pull-down. Only honored when compact chrome is ON.
+    @AppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
+    /// True only on actual iPhones AND when the Developer flag is on.
+    /// iPad / Mac Catalyst always get the classic layout.
+    private var isCompactChrome: Bool {
+        compactChromeiPhone && UIDevice.current.userInterfaceIdiom == .phone
+    }
+    #endif
+
+    /// Cross-platform accessor used by the shared body content. Always
+    /// returns `false` on tvOS (compact chrome is iPhone-only) so the
+    /// tvOS build still compiles without referencing iOS-only storage.
+    private var compactChromeHidesFilterBar: Bool {
+        #if os(iOS)
+        return isCompactChrome && hideFilterBarCompact
+        #else
+        return false
+        #endif
+    }
     #if os(tvOS)
     @State private var showSearchField = false
     /// tvOS guide focus target. Normally `nil` so the focus engine
@@ -51,6 +89,19 @@ struct ChannelListView: View {
     /// the disabled mini player. Cleared back to nil immediately
     /// after the claim so subsequent D-pad navigation isn't pinned.
     @FocusState private var focusedGuideRowID: String?
+
+    /// Namespace for imperative focus reset. Used together with
+    /// `resetFocus(in:)` and `.prefersDefaultFocus(...)` on the top
+    /// channel row — when the mini-player minimizes and the
+    /// `.forceGuideFocus` notification fires, calling
+    /// `resetFocus(in: guideFocusNS)` forcibly moves focus back into
+    /// the guide and lands it on the row marked as the default. The
+    /// plain `@FocusState` write alone wasn't strong enough — tvOS's
+    /// focus engine had already committed to the mini tile
+    /// (spatial-search nearest focusable) by the time the write
+    /// landed, and treated our claim as a rejected request.
+    @Namespace private var guideFocusNS
+    @Environment(\.resetFocus) private var resetFocus
     #endif
 
     private let hiddenGroupsKey = "hiddenChannelGroups"
@@ -108,16 +159,60 @@ struct ChannelListView: View {
                             }
                         }
                     }
+                    // Compact-chrome mode: surface the Manage Groups button in
+                    // the nav bar since the inline pill-bar copy is hidden.
+                    // Badge mirrors the inline button's count so users keep
+                    // visibility into how many groups are hidden.
+                    if isCompactChrome {
+                        ToolbarItem(placement: .navigationBarTrailing) {
+                            Button {
+                                showManageGroups = true
+                            } label: {
+                                ZStack(alignment: .topTrailing) {
+                                    Image(systemName: "line.3.horizontal.decrease.circle")
+                                        .foregroundColor(.accentPrimary)
+                                    if hiddenGroups.count > 0 {
+                                        Text("\(hiddenGroups.count)")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 1)
+                                            .background(Color.statusWarning)
+                                            .clipShape(Capsule())
+                                            .offset(x: 8, y: -6)
+                                    }
+                                }
+                            }
+                            .accessibilityLabel("Manage Groups")
+                        }
+                    }
                     #endif
                 }
                 #if os(iOS)
+                // When compact chrome + "Hide Search" is on, drop to
+                // `.automatic` so the search drawer only appears when the
+                // user pulls down — reclaims the ~50 pt the always-visible
+                // drawer otherwise eats on iPhone landscape. Classic layout
+                // keeps `.always` so today's users see no change.
                 .searchable(text: $searchText,
-                            placement: .navigationBarDrawer(displayMode: .always),
+                            placement: .navigationBarDrawer(
+                                displayMode: (isCompactChrome && hideSearchBarCompact) ? .automatic : .always
+                            ),
                             prompt: "Search channels")
                 #endif
                 .onChange(of: searchText)       { _, _ in filterChannels() }
                 .onChange(of: selectedGroup)    { _, _ in filterChannels() }
                 .onChange(of: sortModeRaw)      { _, _ in filterChannels() }
+                // Re-sort when favorites change so the Favorites-First mode
+                // drops newly-unfavorited rows back into the number-sorted
+                // section below without waiting for the user to switch
+                // tabs or groups. `.count` is a cheap membership-change
+                // signal: add and remove both bump it, while drag-reorder
+                // inside the Favorites tab (which doesn't affect this
+                // view's sort) leaves it unchanged.
+                .onChange(of: favoritesStore.favoriteItems.count) { _, _ in
+                    filterChannels()
+                }
                 // Sync filtered list whenever the store delivers new data.
                 .onChange(of: channelStore.channels) { _, items in
                     filterChannels()
@@ -245,47 +340,88 @@ struct ChannelListView: View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
 
-            if servers.isEmpty {
-                EmptyStateView(
-                    icon: "antenna.radiowaves.left.and.right",
-                    title: "No Servers",
-                    message: "Add a server in Settings to browse Live TV channels."
-                )
-            } else if channelStore.isLoading && channelStore.channels.isEmpty {
-                LoadingView(message: "Loading channels…")
-            } else if let error = channelStore.error, channelStore.channels.isEmpty {
-                errorView(error)
-            } else if channelStore.channels.isEmpty {
-                EmptyStateView(
-                    icon: "tv",
-                    title: "No Channels",
-                    message: "No channels found on the active server.",
-                    action: { Task { await channelStore.forceRefresh(servers: servers) } },
-                    actionTitle: "Refresh"
-                )
-            } else if showGuideView {
-                VStack(spacing: 0) {
-                    if channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty {
-                        groupFilterBar
-                            .padding(.vertical, 10)
-                            #if os(tvOS)
-                            .focusSection()
-                            #endif
-                    }
-                    EPGGuideView(
-                        channels: filteredChannels,
-                        servers: Array(servers),
-                        onSelectChannel: { item in
-                            startPlayback(item)
+            VStack(spacing: 0) {
+                #if os(iOS)
+                // SSID-detected-but-LAN-unreachable banner. NetworkMonitor.shared
+                // sets `localServerUnreachable` true when the user is on a
+                // configured home SSID but a 3-second probe of the server's
+                // localURL fails — usually because a VPN is blocking LAN.
+                if networkMonitor.localServerUnreachable {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.statusWarning)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("SSID recognized but can't connect to LAN address")
+                                .font(.labelSmall.weight(.semibold))
+                                .foregroundColor(.textPrimary)
+                            Text("You're on your home WiFi, but the server's local URL didn't respond. This is usually an active VPN blocking LAN traffic, a mistyped Local URL, or the server being off. Check Settings → Playlists → [server] → Edit.")
+                                .font(.labelSmall)
+                                .foregroundColor(.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                    )
-                    #if os(tvOS)
-                    .focusSection()
-                    #endif
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.statusWarning.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .padding(.horizontal, 14)
+                    .padding(.top, 6)
+                    .transition(.move(edge: .top).combined(with: .opacity))
                 }
-            } else {
-                channelListContent
+                #endif
+
+                bodyContent
             }
+        }
+    }
+
+    @ViewBuilder
+    private var bodyContent: some View {
+        if servers.isEmpty {
+            EmptyStateView(
+                icon: "antenna.radiowaves.left.and.right",
+                title: "No Servers",
+                message: "Add a server in Settings to browse Live TV channels."
+            )
+        } else if channelStore.isLoading && channelStore.channels.isEmpty {
+            LoadingView(message: "Loading channels…")
+        } else if let error = channelStore.error, channelStore.channels.isEmpty {
+            errorView(error)
+        } else if channelStore.channels.isEmpty {
+            EmptyStateView(
+                icon: "tv",
+                title: "No Channels",
+                message: "No channels found on the active server.",
+                action: { Task { await channelStore.forceRefresh(servers: servers) } },
+                actionTitle: "Refresh"
+            )
+        } else if showGuideView {
+            VStack(spacing: 0) {
+                // Compact-chrome honors the user's hide-filter preference even
+                // in the iPad Guide layout (iPad itself is gated by the flag,
+                // so this only activates on actual iPhones in landscape).
+                if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
+                    && !compactChromeHidesFilterBar {
+                    groupFilterBar
+                        .padding(.vertical, 10)
+                        #if os(tvOS)
+                        .focusSection()
+                        #endif
+                }
+                EPGGuideView(
+                    channels: filteredChannels,
+                    servers: Array(servers),
+                    onSelectChannel: { item in
+                        startPlayback(item)
+                    }
+                )
+                #if os(tvOS)
+                .focusSection()
+                #endif
+            }
+        } else {
+            channelListContent
         }
     }
 
@@ -293,13 +429,23 @@ struct ChannelListView: View {
 
     private var channelListContent: some View {
         VStack(spacing: 0) {
-            if channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty {
+            if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
+                && !compactChromeHidesFilterBar {
+                #if os(iOS)
+                // iPhone collapses the filter pills when the user scrolls
+                // down in the list to reclaim ~40% of the screen otherwise
+                // taken by chrome. iPad always shows the pills.
+                if !(UIDevice.current.userInterfaceIdiom == .phone && isChromeCollapsed) {
+                    groupFilterBar
+                        .padding(.vertical, 10)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                #else
                 groupFilterBar
                     .padding(.vertical, 10)
-                    #if os(tvOS)
                     .focusSection()
                     .focusEffectDisabled()
-                    #endif
+                #endif
             }
 
             #if os(tvOS)
@@ -336,12 +482,21 @@ struct ChannelListView: View {
                             // yank focus from a minimized mini
                             // player.
                             .focused($focusedGuideRowID, equals: item.id)
+                            // Marks the top row as the default-focus
+                            // target for the guide scope. When
+                            // `resetFocus(in: guideFocusNS)` fires
+                            // from the `.forceGuideFocus` handler
+                            // below, tvOS moves focus to whichever
+                            // row has this flag set — which is the
+                            // top row by construction.
+                            .prefersDefaultFocus(item.id == filteredChannels.first?.id, in: guideFocusNS)
                         }
                     }
                     .padding(.vertical, 8)
                 }
                 .background(Color.appBackground)
                 .focusSection()
+                .focusScope(guideFocusNS)
                 .onReceive(
                     NotificationCenter.default.publisher(for: .guideScrollToTop)
                 ) { _ in
@@ -352,15 +507,27 @@ struct ChannelListView: View {
                 .onReceive(
                     NotificationCenter.default.publisher(for: .forceGuideFocus)
                 ) { _ in
-                    // Claim focus on the first visible channel.
-                    // `Task.yield()` gives tvOS's own focus pass a
-                    // frame to complete before our write lands —
-                    // otherwise our programmatic set can be
-                    // overridden by the engine's default handling.
-                    guard let firstID = filteredChannels.first?.id else { return }
+                    // Reclaim focus from the minimized mini player
+                    // via Apple's documented imperative focus-reset
+                    // hook. `resetFocus(in:)` is the ONLY reliable
+                    // way to move focus when tvOS's engine has
+                    // already committed to another focusable view
+                    // (the mini tile): a plain `@FocusState` write
+                    // is treated as a request that the engine may
+                    // reject. `resetFocus` forces a re-evaluation
+                    // within the scope and lands on the row with
+                    // `.prefersDefaultFocus(true, in: ...)` — i.e.
+                    // the top channel row.
+                    //
+                    // The 400ms delay covers the 350ms minimize
+                    // spring animation. Triggering during the
+                    // animation lets tvOS ignore the reset because
+                    // the mini tile's frame is still in flux; waiting
+                    // until after the animation commits is what makes
+                    // the reset stick.
                     Task { @MainActor in
-                        await Task.yield()
-                        focusedGuideRowID = firstID
+                        try? await Task.sleep(nanoseconds: 400_000_000)
+                        resetFocus(in: guideFocusNS)
                     }
                 }
             }
@@ -388,6 +555,24 @@ struct ChannelListView: View {
             .refreshable {
                 await EPGCache.shared.invalidateAll()
                 await channelStore.forceRefresh(servers: servers)
+            }
+            // iPhone-only: collapse the chrome (filter pills) when the
+            // list scrolls past 80pt; expand again near the top (< 20pt).
+            // Hysteresis prevents jitter at the boundary. iPad keeps the
+            // chrome visible — it has plenty of vertical space.
+            .onScrollGeometryChange(for: CGFloat.self) { geo in
+                geo.contentOffset.y
+            } action: { _, y in
+                guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+                if y > 80 && !isChromeCollapsed {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isChromeCollapsed = true
+                    }
+                } else if y < 20 && isChromeCollapsed {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isChromeCollapsed = false
+                    }
+                }
             }
             #endif
         }
@@ -439,10 +624,23 @@ struct ChannelListView: View {
                 }
                 #endif
 
+                // Compact-chrome mode hoists Manage Groups into the nav bar
+                // (see the toolbar block above), so we drop it from the pill
+                // row here to avoid a duplicate button. Classic layout
+                // keeps the inline button exactly where it was.
+                #if os(iOS)
+                if !isCompactChrome {
+                    ManageGroupsButton(
+                        action: { showManageGroups = true },
+                        hiddenCount: hiddenGroups.count
+                    )
+                }
+                #else
                 ManageGroupsButton(
                     action: { showManageGroups = true },
                     hiddenCount: hiddenGroups.count
                 )
+                #endif
 
                 ForEach(["All"] + visibleGroups, id: \.self) { group in
                     #if os(tvOS)
@@ -523,12 +721,17 @@ struct ChannelListView: View {
         case "name":
             result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         case "favorites":
-            result.sort {
-                let fav0 = favoritesStore.isFavorite($0.id)
-                let fav1 = favoritesStore.isFavorite($1.id)
-                if fav0 != fav1 { return fav0 }
-                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-            }
+            // Partition preserves the original order within each bucket
+            // (channels arrive from ChannelStore in number order), so
+            // favorites appear first in number order and non-favorites
+            // follow in number order. The previous implementation used
+            // `.sort` with a localizedCaseInsensitiveCompare tiebreaker,
+            // which silently switched non-favorites to alphabetical even
+            // though the user never asked for "By Name" — that was the
+            // bug the user reported.
+            let favs = result.filter { favoritesStore.isFavorite($0.id) }
+            let nonFavs = result.filter { !favoritesStore.isFavorite($0.id) }
+            result = favs + nonFavs
         default: // "number"
             break // Channels arrive in number order from ChannelStore
         }
@@ -689,7 +892,16 @@ struct ChannelListView: View {
                     let upcoming = progs
                         .filter { $0.endTime > now }
                         .sorted { $0.startTime < $1.startTime }
-                        .map { EPGEntry(title: $0.title, description: $0.description, startTime: $0.startTime, endTime: $0.endTime) }
+                        .map {
+                            // M3U EPG comes from XMLTV, which DOES
+                            // have `<category>` tags. Passing it
+                            // through keeps List view's expanded
+                            // schedule tinted on M3U sources the
+                            // same as on Dispatcharr sources.
+                            EPGEntry(title: $0.title, description: $0.description,
+                                     startTime: $0.startTime, endTime: $0.endTime,
+                                     category: $0.category)
+                        }
                     if !upcoming.isEmpty {
                         await EPGCache.shared.set(upcoming, for: "m3u_\(channelID)")
                     }
@@ -711,25 +923,60 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     let streamURL: URL?
     let streamURLs: [URL]
     var tvgID: String? = nil
+    /// Dispatcharr-only: the channel's server-side UUID string.
+    /// Needed as an EPG-matching key because Dispatcharr's Dummy
+    /// EPG feature (see `apps/epg/api_views.py` in the Dispatcharr
+    /// repo — `EPGGridAPIView`) tags synthesized dummy program
+    /// entries with `tvg_id = str(channel.uuid)`. Without this
+    /// field, channels that rely on Dummy EPG (rather than an
+    /// uploaded XMLTV source) appear blank in the guide even
+    /// though Dispatcharr's own web UI shows them. `nil` for XC
+    /// and M3U where there's no server-side UUID concept.
+    var uuid: String? = nil
     var currentProgram: String? = nil
     var currentProgramDescription: String? = nil
     var currentProgramStart: Date? = nil
     var currentProgramEnd: Date? = nil
+    /// Raw XMLTV `<category>` (or Xtream `genre`) of the currently-airing
+    /// program, if the EPG source provided one. Read by `CategoryColor.bucket(for:)`
+    /// when the optional "Tint channel cards" toggle is on. Nil for sources that
+    /// don't expose category data (Dispatcharr and Xtream Codes currently).
+    var currentProgramCategory: String? = nil
 }
 
 // MARK: - EPG Entry (for upcoming schedule)
 struct EPGEntry: Identifiable, Equatable {
-    var id: String { "\(title)-\(startTime?.timeIntervalSinceReferenceDate ?? 0)" }
+    /// Stable id incorporating start AND end time. Including end time
+    /// guards against malformed EPG feeds where two adjacent programs
+    /// share the same title and start timestamp — without it, ForEach
+    /// would treat them as the same row and SwiftUI's contextMenu /
+    /// preview pair could bind to the wrong program (the long-pressed
+    /// row showed one title but the context-menu preview showed
+    /// another). See ChannelListView guidePanel for the consumer.
+    var id: String {
+        let s = startTime?.timeIntervalSinceReferenceDate ?? 0
+        let e = endTime?.timeIntervalSinceReferenceDate ?? 0
+        return "\(title)-\(s)-\(e)"
+    }
     let title: String
     let description: String
     let startTime: Date?
     let endTime: Date?
+    /// XMLTV `<category>` tag (or empty when the EPG source doesn't
+    /// expose one — e.g., Dispatcharr's JSON API or Xtream Codes).
+    /// Drives the per-program gradient tint on the List-view
+    /// expanded-schedule rows, mirroring what the Guide view already
+    /// shows via `GuideProgram.category`. Both views now read from
+    /// `GuideStore.programs` (via `seedEPGCache`) so they stay in
+    /// sync rather than each re-deriving category from scratch.
+    let category: String
 
-    init(title: String, description: String = "", startTime: Date?, endTime: Date?) {
+    init(title: String, description: String = "", startTime: Date?, endTime: Date?, category: String = "") {
         self.title = title
         self.description = description
         self.startTime = startTime
         self.endTime = endTime
+        self.category = category
     }
 }
 
@@ -741,12 +988,52 @@ struct ChannelRow: View {
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var isExpanded = false
+    /// Observe `GuideStore.programs` so the expanded-schedule
+    /// panel can read category-enriched programmes DIRECTLY
+    /// from the same dataset the Guide view already uses — no
+    /// intermediate `EPGCache` / `fetchUpcoming` hop. Two prior
+    /// rounds of debugging tried to fix the "expanded rows
+    /// don't tint" bug by patching the cache layer; both times
+    /// a different key-mismatch or timing race surfaced.
+    /// Reading from GuideStore eliminates the whole class of
+    /// problems: if the Guide view can tint it, so can we.
+    @ObservedObject private var guideStore = GuideStore.shared
+    /// Opt-in sub-toggle nested under Settings → Guide Display →
+    /// "Color Programs by Category". When on AND the currently-airing
+    /// program's category matches one of the four buckets, a thin
+    /// colored stripe is drawn on the leading edge of the row.
+    /// Default off so existing users don't see a surprise visual change.
+    @AppStorage("tintChannelCards") private var tintChannelCards: Bool = false
+
+    /// Per-view scale slider (#21) read by the iOS channel-row text
+    /// and padding. tvOS rows keep their fixed Emby metrics since
+    /// they're already tuned for 10-foot viewing. 0.85–1.25 matches
+    /// the slider range in Settings → Appearance → Display Scale.
+    #if !os(tvOS)
+    @AppStorage("listScale") private var listScale: Double = 1.0
+    /// Clamp to the slider range so a corrupted UserDefaults value
+    /// (e.g., imported from an older build) can't blow up the row
+    /// layout. The 1e-3 margin is cosmetic — avoids reading exactly
+    /// 0.85 as "slightly below 0.85" when the floating-point step
+    /// lands on a binary-exact value.
+    private var listScaleClamped: CGFloat {
+        CGFloat(max(0.85, min(1.25, listScale)))
+    }
+    #endif
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
     @State private var reminderTarget: EPGEntry?
     @State private var showReminderDialog = false
     @State private var recordTarget: EPGEntry?
     @State private var showRecordSheet = false
+    /// Tracks which upcoming-program row currently owns the popover
+    /// shown in response to a long-press. `EPGEntry.id` is
+    /// deterministic (title + start + end) so the binding is stable
+    /// across renders. Only one popover is visible at a time per
+    /// channel card; setting this to a new id is what presents it.
+    #if !os(tvOS)
+    @State private var activePopoverEntryID: String?
+    #endif
     #if os(tvOS)
     /// tvOS uses onLongPressGesture + confirmationDialog instead of
     /// .contextMenu on upcoming-program rows (.contextMenu flashes the
@@ -782,6 +1069,25 @@ struct ChannelRow: View {
                 guidePanel
             }
         }
+        // When the XMLTV parse lands and EPGCache is re-seeded
+        // with category data, re-fetch our upcoming list so the
+        // per-program gradient tint picks up the new data. Only
+        // fires work when this card is actually expanded — a
+        // collapsed card has no rows to re-tint and would just
+        // be burning a fetch. Posted by
+        // `ChannelStore.primeXMLTVFromURL` after `seedEPGCache`.
+        .onReceive(NotificationCenter.default.publisher(for: .epgCategoriesDidUpdate)) { _ in
+            guard isExpanded, let fetch = fetchUpcoming else { return }
+            Task {
+                upcomingPrograms = await fetch()
+            }
+        }
+        // Clip to the same rounded shape as the background so
+        // expanded rows that now extend full-width (no horizontal
+        // outer padding, fixes the category-tint bleed on the
+        // sides) don't poke past the card's rounded bottom corners.
+        // tvOS does the same so both platforms render identically.
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .background {
             #if os(tvOS)
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -799,6 +1105,41 @@ struct ChannelRow: View {
                 .overlay {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .fill(Color.accentPrimary.opacity(0.04))
+                }
+                // Category tint — a linear gradient that fades from ~30%
+                // opacity on the leading edge down to 0 by the card's
+                // midline. This replaces the earlier 5 pt stripe, which
+                // users found visually cramped ("just a colored bar on
+                // the side" — #22 feedback). The fade keeps the right-
+                // hand 60% of the card completely uncolored, so the
+                // channel name, program title, progress bar, and the
+                // chevron all stay legible against their original
+                // background.
+                //
+                // Opt-in via Settings → Guide Display → "Tint Channel
+                // Cards". Stays transparent when either the master
+                // toggle or the channel-card variant is off, or when
+                // the current program's category doesn't match a bucket.
+                .overlay {
+                    if tintChannelCards,
+                       CategoryColor.isEnabled,
+                       let raw = item.currentProgramCategory,
+                       let bucket = CategoryColor.bucket(for: raw) {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    stops: [
+                                        .init(color: bucket.baseColor.opacity(0.30), location: 0.0),
+                                        .init(color: bucket.baseColor.opacity(0.18), location: 0.22),
+                                        .init(color: bucket.baseColor.opacity(0.06), location: 0.45),
+                                        .init(color: .clear,                          location: 0.65),
+                                    ],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .accessibilityHidden(true)
+                    }
                 }
                 .overlay {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -959,7 +1300,12 @@ struct ChannelRow: View {
             Button {
                 debugLog("🎮 Channel expand: \(item.name) — toggling schedule (expanded=\(!isExpanded))")
                 withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
-                if isExpanded && upcomingPrograms.isEmpty, fetchUpcoming != nil {
+                // Skip the network fetch when GuideStore already has
+                // programmes for this channel — the expanded panel
+                // now prefers GuideStore, so the fetch would be
+                // redundant work. Still fires for Xtream + cold-
+                // launch-before-XMLTV cases (GuideStore empty).
+                if isExpanded, futurePrograms.isEmpty, fetchUpcoming != nil {
                     isLoadingUpcoming = true
                     Task {
                         upcomingPrograms = await fetchUpcoming?() ?? []
@@ -995,47 +1341,51 @@ struct ChannelRow: View {
 
     // MARK: - iOS / iPadOS Row (unchanged)
     #if !os(tvOS)
-    @ViewBuilder
     private var iOSRow: some View {
-        HStack(spacing: isWide ? 14 : 10) {
+        // `s` is the Live TV List scale slider (Appearance → Display
+        // Scale → Live TV List). Sizes multiply by `s` so dragging
+        // the slider resizes the row live. `isWide` still drives the
+        // iPad vs. iPhone branch before scale is applied.
+        let s = listScaleClamped
+        return HStack(spacing: (isWide ? 14 : 10) * s) {
             Text(item.number)
-                .font(isWide ? .body.monospaced() : .monoSmall)
+                .font(.system(size: (isWide ? 17 : 13) * s, design: .monospaced))
                 .lineLimit(1)
                 .foregroundColor(.textTertiary)
-                .frame(width: isWide ? 36 : 26, alignment: .trailing)
+                .frame(width: (isWide ? 36 : 26) * s, alignment: .trailing)
 
             CachedLogoImage(
                 url: item.logoURL,
-                width: isWide ? 50 : 38,
-                height: isWide ? 34 : 26
+                width: (isWide ? 50 : 38) * s,
+                height: (isWide ? 34 : 26) * s
             )
 
-            VStack(alignment: .leading, spacing: isWide ? 4 : 2) {
+            VStack(alignment: .leading, spacing: (isWide ? 4 : 2) * s) {
                 Text(item.name)
-                    .font(isWide ? .body.weight(.medium) : .bodyMedium)
+                    .font(.system(size: (isWide ? 17 : 15) * s, weight: .medium))
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
 
                 if let program = item.currentProgram, !program.isEmpty {
                     HStack(spacing: 8) {
                         MarqueeText(text: program,
-                                    font: isWide ? .subheadline : .labelSmall,
+                                    font: .system(size: (isWide ? 15 : 11) * s),
                                     color: .accentPrimary.opacity(0.85),
                                     isActive: false)  // Static during scroll — saves GPU
-                            .frame(height: isWide ? 20 : 16)
+                            .frame(height: (isWide ? 20 : 16) * s)
                         if let end = item.currentProgramEnd {
                             nowPlayingTimeRemaining(end: end)
                         }
                     }
                     if let desc = item.currentProgramDescription, !desc.isEmpty {
                         Text(desc)
-                            .font(isWide ? .caption : .system(size: 10))
+                            .font(.system(size: (isWide ? 12 : 10) * s))
                             .foregroundColor(.textSecondary)
                             .lineLimit(2)
                     }
                 } else {
                     Text(item.group)
-                        .font(isWide ? .subheadline : .labelSmall)
+                        .font(.system(size: (isWide ? 15 : 11) * s))
                         .foregroundColor(.textSecondary)
                         .lineLimit(1)
                 }
@@ -1053,7 +1403,12 @@ struct ChannelRow: View {
             if item.currentProgram != nil || fetchUpcoming != nil {
                 Button {
                     withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
-                    if isExpanded && upcomingPrograms.isEmpty, fetchUpcoming != nil {
+                    // Skip the network fetch when GuideStore already has
+                // programmes for this channel — the expanded panel
+                // now prefers GuideStore, so the fetch would be
+                // redundant work. Still fires for Xtream + cold-
+                // launch-before-XMLTV cases (GuideStore empty).
+                if isExpanded, futurePrograms.isEmpty, fetchUpcoming != nil {
                         isLoadingUpcoming = true
                         Task {
                             upcomingPrograms = await fetchUpcoming?() ?? []
@@ -1084,8 +1439,8 @@ struct ChannelRow: View {
                 .buttonStyle(.plain)
             }
         }
-        .padding(.vertical, isWide ? 18 : 13)
-        .padding(.horizontal, isWide ? 18 : 14)
+        .padding(.vertical, (isWide ? 18 : 13) * s)
+        .padding(.horizontal, (isWide ? 18 : 14) * s)
         .contentShape(Rectangle())
         .onTapGesture { onTap() }
         .onLongPressGesture(minimumDuration: 0.5) {
@@ -1122,15 +1477,163 @@ struct ChannelRow: View {
 
     // MARK: - Guide Panel (shared iOS + tvOS)
 
-    /// Upcoming programs filtered to exclude the currently-airing program
-    /// (already shown in the channel card header).
+    /// Upcoming programs filtered to exclude the currently-airing
+    /// program (already shown in the channel card header).
+    ///
+    /// **Primary source: `GuideStore.programs[item.id]`**. Same
+    /// dataset the Guide view reads from. XMLTV populates it on
+    /// all platforms via `ChannelStore.primeXMLTVFromURL`, so
+    /// categories are guaranteed present on Dispatcharr + M3U
+    /// when the feed has them. No cache-layer round-trip.
+    ///
+    /// **Fallback: `upcomingPrograms`** from the legacy
+    /// `fetchUpcoming` closure. Primarily covers Xtream Codes,
+    /// which does per-channel EPG fetches that never populate
+    /// GuideStore. Also catches the transient window on a first
+    /// cold launch where a channel exists but XMLTV hasn't
+    /// parsed yet — in that case we still show SOMETHING rather
+    /// than an empty panel.
     private var futurePrograms: [EPGEntry] {
         let now = Date()
+        let fromGuideStore = guideStore.programs[item.id] ?? []
+        if !fromGuideStore.isEmpty {
+            return fromGuideStore
+                .filter { $0.end > now && $0.start > now }
+                .sorted { $0.start < $1.start }
+                .map {
+                    EPGEntry(title: $0.title, description: $0.description,
+                             startTime: $0.start, endTime: $0.end,
+                             category: $0.category)
+                }
+        }
         return upcomingPrograms.filter { entry in
             guard let end = entry.endTime else { return true }
             return end > now && (entry.startTime ?? now) > now
         }
     }
+
+    #if !os(tvOS)
+    /// Small summary + action popover shown when the user long-presses
+    /// an upcoming-program row. Replaces the SwiftUI `.contextMenu` that
+    /// kept docking at the screen bottom on iPhone (#23 feedback).
+    ///
+    /// Structured as a tiny VStack — header (title + time range) then
+    /// one or two actions (Set / Cancel Reminder, Record). `.buttonStyle(.plain)`
+    /// + explicit padding match the visual weight of an iOS context
+    /// menu without relying on the system-provided one. Dismissed by
+    /// tapping any action (which sets `activePopoverEntryID = nil`)
+    /// or by tapping outside the popover (SwiftUI default).
+    @ViewBuilder
+    private func programActionPopover(for entry: EPGEntry) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header — program title + time range. Mirrors the old
+            // context-menu preview's data without the extra padding
+            // that made it look like a second card when docked at
+            // the bottom.
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.textPrimary)
+                    .lineLimit(2)
+                if let start = entry.startTime {
+                    HStack(spacing: 4) {
+                        Text(start, style: .time)
+                        if let end = entry.endTime {
+                            Text("–")
+                            Text(end, style: .time)
+                        }
+                    }
+                    .font(.system(size: 12))
+                    .foregroundColor(.textTertiary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
+
+            Divider()
+
+            // Actions — reminder + record, conditional on whether
+            // the program is still in the future / currently airing.
+            VStack(spacing: 0) {
+                if let start = entry.startTime, start > Date() {
+                    let key = ReminderManager.programKey(
+                        channelName: item.name,
+                        title: entry.title,
+                        start: start
+                    )
+                    if ReminderManager.shared.hasReminder(forKey: key) {
+                        popoverActionButton(
+                            title: "Cancel Reminder",
+                            systemImage: "bell.slash",
+                            isDestructive: true
+                        ) {
+                            ReminderManager.shared.cancelReminder(forKey: key)
+                            activePopoverEntryID = nil
+                        }
+                    } else {
+                        popoverActionButton(
+                            title: "Set Reminder",
+                            systemImage: "bell.badge",
+                            isDestructive: false
+                        ) {
+                            ReminderManager.shared.scheduleReminder(
+                                programTitle: entry.title,
+                                channelName: item.name,
+                                startTime: start
+                            )
+                            activePopoverEntryID = nil
+                        }
+                    }
+                }
+                if let end = entry.endTime, end > Date() {
+                    popoverActionButton(
+                        title: "Record",
+                        systemImage: "record.circle",
+                        isDestructive: false
+                    ) {
+                        recordTarget = entry
+                        activePopoverEntryID = nil
+                        // Slight delay so the popover dismiss animation
+                        // finishes before the sheet presents — without
+                        // this iOS sometimes swallows the sheet.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            showRecordSheet = true
+                        }
+                    }
+                }
+            }
+        }
+        .frame(minWidth: 240, idealWidth: 280, maxWidth: 320)
+    }
+
+    /// One row inside `programActionPopover`. Full-width tap target
+    /// with icon + label, matching the visual rhythm of a system
+    /// context-menu row (system uses UITableView cells internally;
+    /// this is the SwiftUI approximation).
+    private func popoverActionButton(
+        title: String,
+        systemImage: String,
+        isDestructive: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .medium))
+                    .frame(width: 22)
+                Text(title)
+                    .font(.system(size: 15))
+                Spacer()
+            }
+            .foregroundColor(isDestructive ? .statusLive : .accentPrimary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+    #endif
 
     @ViewBuilder
     private var guidePanel: some View {
@@ -1160,10 +1663,119 @@ struct ChannelRow: View {
                 .padding(.horizontal, 14)
                 .padding(.bottom, 10)
             } else {
+                #if os(iOS)
+                // iOS: No inner ScrollView — nesting vertical scrolls traps
+                // the gesture inside the expanded card and prevents the
+                // outer channel list from scrolling. Let the outer list
+                // handle all vertical scrolling.
+                VStack(spacing: 0) {
+                    ForEach(futurePrograms) { entry in
+                        // Rebind to a local constant so SwiftUI's ForEach
+                        // diffing can't swap the captured reference between
+                        // when the user starts a long-press and when the
+                        // contextMenu/preview closures are evaluated.
+                        // Without this, the preview occasionally rendered a
+                        // different program than the one the user pressed
+                        // (e.g. user long-pressed "Moeder Natuur 07:10" but
+                        // the dialog previewed "Timmy tijd 06:05–06:10").
+                        let rowEntry = entry
+                        // Long-press + popover replaces `.contextMenu` here
+                        // because SwiftUI's `.contextMenu(menuItems:preview:)`
+                        // on iPhone has a documented "docks the preview +
+                        // menu at the screen bottom" failure mode when the
+                        // source view is inside a nested scroll container
+                        // (our expanded guidePanel inside a ChannelRow
+                        // inside a List). Research turned up no SwiftUI
+                        // API that controls the context-menu preview
+                        // position — Apple's own apps use UIKit
+                        // `UIContextMenuInteraction` directly. `.popover`
+                        // with `.presentationCompactAdaptation(.popover)`
+                        // gives us the native popover on iPhone (iOS 16.4+)
+                        // and always anchors to the attached view via
+                        // `attachmentAnchor: .rect(.bounds)` — which is
+                        // exactly "where the user long-pressed" per #23
+                        // feedback.
+                        epgEntryRow(entry: rowEntry, isLast: rowEntry.id == futurePrograms.last?.id)
+                            // No horizontal outer padding — rows now
+                            // extend to the card's inner edge, so the
+                            // parent card's category gradient can't
+                            // "bleed" through the gaps between rows
+                            // (#22 feedback: "I can see my category
+                            // color between future programs at the
+                            // edges which looks unfinished"). Rows
+                            // still get 2 pt vertical breathing room
+                            // so they read as individual cards rather
+                            // than one run-on block.
+                            .padding(.vertical, 2)
+                            .background(
+                                // ZStack layering — the previous
+                                // version used two chained `.background`
+                                // modifiers to stack solid-fill + gradient.
+                                // That was a SwiftUI ordering bug: stacked
+                                // `.background` modifiers each go further
+                                // back than the previous, so the "solid
+                                // fill to block parent gradient bleed"
+                                // modifier ended up IN FRONT of the per-
+                                // program gradient — hiding it completely.
+                                // Three rounds of debugging chased the
+                                // data layer for something that was a
+                                // render ordering bug. ZStack has
+                                // unambiguous paint order: first child at
+                                // the back, last child at the front.
+                                ZStack {
+                                    Rectangle()
+                                        .fill(Color.cardBackground)
+                                    if tintChannelCards,
+                                       CategoryColor.isEnabled,
+                                       !rowEntry.category.isEmpty,
+                                       let bucket = CategoryColor.bucket(for: rowEntry.category) {
+                                        LinearGradient(
+                                            stops: [
+                                                .init(color: bucket.baseColor.opacity(0.30), location: 0.0),
+                                                .init(color: bucket.baseColor.opacity(0.18), location: 0.22),
+                                                .init(color: bucket.baseColor.opacity(0.06), location: 0.45),
+                                                .init(color: .clear,                          location: 0.65),
+                                            ],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
+                                    }
+                                }
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture { /* no-op; prevents accidental parent-scroll triggers */ }
+                            .onLongPressGesture(minimumDuration: 0.4) {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                activePopoverEntryID = rowEntry.id
+                            }
+                            .popover(
+                                isPresented: Binding(
+                                    get: { activePopoverEntryID == rowEntry.id },
+                                    set: { if !$0 { activePopoverEntryID = nil } }
+                                ),
+                                attachmentAnchor: .rect(.bounds)
+                            ) {
+                                programActionPopover(for: rowEntry)
+                                    .presentationCompactAdaptation(.popover)
+                            }
+                    }
+                }
+                .padding(.bottom, 4)
+                #else
+                // tvOS: keep the nested ScrollView (needed for focus
+                // mechanics) and chain `.confirmationDialog` directly
+                // onto it. Previously the `.confirmationDialog` was
+                // inside a separate `#if os(tvOS) ... #endif` block
+                // AFTER the iOS/tvOS `#if/#else/#endif` branching —
+                // the `#if` boundary broke the modifier chain (a
+                // free-floating `.modifier(...)` isn't a valid
+                // top-level ViewBuilder expression), so the tvOS
+                // build errored with "'()' cannot conform to 'View'"
+                // on line ~1287. Attaching the dialog to the tvOS
+                // branch keeps the chain continuous.
                 ScrollView(.vertical, showsIndicators: true) {
                     VStack(spacing: 0) {
                         ForEach(futurePrograms) { entry in
-                            #if os(tvOS)
                             // UIKit-backed overlay because SwiftUI's tvOS
                             // long-press fires on release, not at threshold
                             // (see Shared/TVPressGesture.swift).
@@ -1174,99 +1786,12 @@ struct ChannelRow: View {
                                         onLongPress: { ctxDialogEntry = entry }
                                     )
                                 )
-                            #else
-                            epgEntryRow(entry: entry, isLast: entry.id == futurePrograms.last?.id)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 2)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                        .fill(Color.cardBackground)
-                                )
-                                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10))
-                                .contextMenu {
-                                    if let start = entry.startTime, start > Date() {
-                                        let key = ReminderManager.programKey(channelName: item.name, title: entry.title, start: start)
-                                        if ReminderManager.shared.hasReminder(forKey: key) {
-                                            Button(role: .destructive) {
-                                                ReminderManager.shared.cancelReminder(forKey: key)
-                                            } label: {
-                                                Label("Cancel Reminder", systemImage: "bell.slash")
-                                            }
-                                        } else {
-                                            Button {
-                                                ReminderManager.shared.scheduleReminder(
-                                                    programTitle: entry.title,
-                                                    channelName: item.name,
-                                                    startTime: start
-                                                )
-                                            } label: {
-                                                Label("Set Reminder", systemImage: "bell.badge")
-                                            }
-                                        }
-                                    }
-                                    if let end = entry.endTime, end > Date() {
-                                        Button {
-                                            recordTarget = entry
-                                            showRecordSheet = true
-                                        } label: {
-                                            Label("Record", systemImage: "record.circle")
-                                        }
-                                    }
-                                } preview: {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        HStack(spacing: 8) {
-                                            if let logoURL = item.logoURL {
-                                                CachedLogoImage(url: logoURL, width: 32, height: 22)
-                                            }
-                                            Text(item.name)
-                                                .font(.caption.weight(.semibold))
-                                                .foregroundColor(.textSecondary)
-                                        }
-                                        Divider()
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(entry.title)
-                                                .font(.body.weight(.semibold))
-                                                .foregroundColor(.textPrimary)
-                                            if !entry.description.isEmpty {
-                                                Text(entry.description)
-                                                    .font(.caption)
-                                                    .foregroundColor(.accentPrimary.opacity(0.85))
-                                                    .lineLimit(2)
-                                            }
-                                            if let start = entry.startTime {
-                                                HStack(spacing: 4) {
-                                                    Text(start, style: .time)
-                                                    if let end = entry.endTime {
-                                                        Text("–")
-                                                        Text(end, style: .time)
-                                                    }
-                                                }
-                                                .font(.caption)
-                                                .foregroundColor(.textTertiary)
-                                            }
-                                        }
-                                    }
-                                    .padding(14)
-                                    .frame(width: 300, alignment: .leading)
-                                    .background(Color.cardBackground)
-                                }
-                            #endif
                         }
                     }
                 }
                 .frame(maxHeight: upcomingScrollMaxHeight)
-                #if os(tvOS)
                 .focusSection()
-                #endif
                 .padding(.bottom, 4)
-                // NOTE: The `.sheet` / `.fullScreenCover` that presents
-                // RecordProgramSheet used to live here, but on iOS the
-                // user can also trigger it from the channel card's
-                // long-press confirmationDialog — which fires even when
-                // the card is collapsed (no guidePanel in hierarchy).
-                // Moved to the outer body so the presenter is always
-                // mounted whenever the channel card is visible.
-                #if os(tvOS)
                 .confirmationDialog(
                     ctxDialogEntry?.title ?? "",
                     isPresented: Binding(
@@ -1571,8 +2096,36 @@ struct FavoritesView: View {
                             .listRowInsets(EdgeInsets(top: 3, leading: 16, bottom: 3, trailing: 16))
                             #if os(iOS)
                             .listRowSeparator(.hidden)
+                            // Remove from within the Favorites tab itself —
+                            // swipe-left reveals a red Remove action. Users
+                            // previously had to hunt for the channel in Live
+                            // TV list view to un-star it.
+                            .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                Button(role: .destructive) {
+                                    favoritesStore.toggle(item)
+                                } label: {
+                                    Label("Remove", systemImage: "star.slash")
+                                }
+                            }
+                            // Mirrors the swipe action for discoverability —
+                            // iPhone users often long-press before swiping.
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    favoritesStore.toggle(item)
+                                } label: {
+                                    Label("Remove from Favorites", systemImage: "star.slash")
+                                }
+                            }
                             #endif
                         }
+                        // tvOS Siri Remote can't drag-reorder, so the .onMove
+                        // hook is iOS-only. The Edit-mode toolbar button below
+                        // is also gated to iOS.
+                        #if os(iOS)
+                        .onMove { source, destination in
+                            favoritesStore.move(fromOffsets: source, toOffset: destination)
+                        }
+                        #endif
                     }
                     .listStyle(.plain)
                     .background(Color.appBackground)
@@ -1584,6 +2137,15 @@ struct FavoritesView: View {
             .navigationTitle("Favorites")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.large)
+            .toolbar {
+                // EditButton flips the List into Edit mode so the drag
+                // handles appear. Hidden when there are no favorites.
+                if !favoritesStore.favoriteItems.isEmpty {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        EditButton()
+                    }
+                }
+            }
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
         }

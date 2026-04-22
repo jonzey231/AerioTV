@@ -4,6 +4,16 @@ struct WelcomeView: View {
     @Binding var hasCompletedOnboarding: Bool
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @ObservedObject private var syncManager = SyncManager.shared
+    #if os(iOS)
+    /// Observe the live Location authorization status so the Home
+    /// WiFi opt-in card updates the moment the user responds to the
+    /// iOS permission prompt (button → "Allow" in the system dialog
+    /// → card switches to "✓ Enabled"). Also handles the case where
+    /// the user returns to onboarding after having previously
+    /// granted or denied: the card renders the current state on
+    /// first paint instead of forcing them to tap again.
+    @ObservedObject private var networkMonitor = NetworkMonitor.shared
+    #endif
 
     var body: some View {
         ZStack {
@@ -128,7 +138,26 @@ struct WelcomeView: View {
                     // iCloud Sync opt-in
                     iCloudSyncToggle
                         .padding(.horizontal, 32)
-                        .padding(.bottom, 20)
+                        .padding(.bottom, 12)
+
+                    // Home WiFi (Location permission) opt-in — see
+                    // `homeWiFiPermissionCard` for the full explainer.
+                    // Placed here so users see it right next to the
+                    // iCloud Sync toggle (both are optional privacy
+                    // opt-ins) rather than having to discover it via
+                    // a warning in Settings later. Hidden if the user
+                    // has already responded (granted or denied) so we
+                    // don't nag on repeat onboarding launches.
+                    if networkMonitor.locationAuthStatus == .notDetermined {
+                        homeWiFiPermissionCard
+                            .padding(.horizontal, 32)
+                            .padding(.bottom, 20)
+                    } else {
+                        // Keep the vertical rhythm consistent when the
+                        // card is hidden — without this, the iCloud
+                        // row butts right up against the CTA.
+                        Spacer().frame(height: 8)
+                    }
 
                     // CTA
                     VStack(spacing: 10) {
@@ -225,6 +254,67 @@ struct WelcomeView: View {
         .buttonStyle(.plain)
         .disabled(syncManager.isImporting)
     }
+
+    #if os(iOS)
+    // MARK: - Home WiFi Permission Card
+    //
+    // Shown during onboarding (on iOS only) while the user has not yet
+    // made a decision on Location permission. The iOS WiFi APIs
+    // (`NEHotspotNetwork.fetchCurrent` and `CNCopyCurrentNetworkInfo`)
+    // are gated by Apple behind Location auth — there is no "just let
+    // me read the SSID" permission. Surfacing the request here, with
+    // an explainer, is far better UX than letting the user stumble
+    // into the yellow Settings warning and then hunt through iOS
+    // Settings to fix it. Hidden when auth is already determined
+    // (granted or denied) so the card doesn't become a nag.
+    @ViewBuilder
+    private var homeWiFiPermissionCard: some View {
+        Button {
+            networkMonitor.requestLocationAuthorization()
+            // The button intentionally doesn't flip any local state —
+            // the card re-renders when `networkMonitor.locationAuthStatus`
+            // changes, which happens automatically via the
+            // `@Published` property once the user responds to the
+            // iOS system prompt.
+        } label: {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.accentPrimary.opacity(0.15))
+                        .frame(width: 36, height: 36)
+                    Image(systemName: "wifi")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.accentPrimary)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Detect Home WiFi")
+                        .font(.headlineSmall)
+                        .foregroundColor(.textPrimary)
+                    Text("Let Aerio recognise your home network and automatically use the server's local URL when you're on it. iOS requires Location permission to read the WiFi name.")
+                        .font(.bodySmall)
+                        .foregroundColor(.textSecondary)
+                        .lineLimit(4)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.textTertiary)
+            }
+            .padding(12)
+            .background(Color.cardBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.borderSubtle, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+    #endif
 }
 
 // MARK: - tvOS Onboarding Components

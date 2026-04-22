@@ -90,9 +90,13 @@ struct XtreamCodesAPI {
     let password: String
 
     // Shared session — reused across all calls (avoid creating a new URLSession per request).
+    // 20s per-request idle timeout: a dead Docker container / unreachable host
+    // should surface an error well inside 20 seconds, not the 60s Apple default.
+    // 300s resource timeout covers legitimately-large EPG / VOD payloads for
+    // servers with 10K+ channels.
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForRequest = 20
         config.timeoutIntervalForResource = 300
         return URLSession(configuration: config)
     }()
@@ -102,7 +106,7 @@ struct XtreamCodesAPI {
     func verifyConnection() async throws -> XtreamAccountInfo {
         let url = try buildURL(path: "/player_api.php", params: ["action": ""])
         let (data, response) = try await loggedData(from: url)
-        try validate(response: response)
+        try validate(response: response, data: data)
         return try decode(XtreamAccountInfo.self, from: data)
     }
 
@@ -314,11 +318,37 @@ struct XtreamCodesAPI {
     }
 
     private func validate(response: URLResponse) throws {
+        try validate(response: response, data: nil)
+    }
+
+    /// Body-aware validation. When `data` is provided we also detect the common
+    /// "user typed a Dispatcharr/reverse-proxy URL by mistake" case: the server
+    /// returns HTTP 200 with an HTML login page, which would otherwise fall
+    /// through to JSON decoding and produce a wall-of-HTML error.
+    private func validate(response: URLResponse, data: Data?) throws {
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         switch http.statusCode {
         case 200...299: break
         case 401, 403: throw APIError.unauthorized
         default: throw APIError.serverError(http.statusCode)
+        }
+
+        // HTML-sniffing: Content-Type header OR first few bytes of the body.
+        let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased() ?? ""
+        let bodyLooksHTML: Bool = {
+            guard let data, data.count > 0 else { return false }
+            let prefix = data.prefix(64)
+            guard let head = String(data: prefix, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() else { return false }
+            return head.hasPrefix("<!doctype html") || head.hasPrefix("<html") || head.hasPrefix("<head")
+        }()
+        if contentType.contains("text/html") || bodyLooksHTML {
+            throw APIError.decodingError(NSError(
+                domain: "XtreamCodesAPI",
+                code: -10,
+                userInfo: [NSLocalizedDescriptionKey:
+                    "The server returned a web page instead of Xtream Codes API data. Double-check the Server URL — it should point to the Xtream-compatible endpoint (often a different port than the web admin). Verify by opening \(http.url?.absoluteString ?? "the URL") in a browser: you should see JSON, not a login page."
+                ]
+            ))
         }
     }
 
@@ -606,9 +636,14 @@ struct DispatcharrAPI {
     }
 
     // Shared session — reused across all calls (avoid creating a new URLSession per request).
+    // 20s per-request idle timeout mirrors XtreamCodesAPI's session: lets
+    // error states (dead container, firewalled host, etc.) surface well
+    // inside the 20s mark instead of the 60s Apple default that makes the
+    // app feel "perpetually loading" to a user whose server is actually
+    // down. Resource-wide 300s still covers large EPG/VOD payloads.
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForRequest = 20
         config.timeoutIntervalForResource = 300
         return URLSession(configuration: config)
     }()
@@ -646,6 +681,17 @@ struct DispatcharrAPI {
             "/api/version"
         ]
 
+        /// Per-attempt outcome used to diagnose a failed verify. Tracking
+        /// this lets us give the user an actionable error ("API key is
+        /// wrong", "server unreachable", "server is running but didn't
+        /// route to the API") instead of dumping a raw HTML body.
+        enum AttemptOutcome {
+            case html                 // 200 text/html — SPA shell, auth likely missing/invalid
+            case httpError(Int)       // 4xx/5xx
+            case jsonDecodeFailed     // 200 JSON but shape didn't match any expected schema
+            case other                // e.g., 2xx with non-JSON, non-HTML body
+        }
+        var attemptOutcomes: [AttemptOutcome] = []
         var lastBodySnippet: String = ""
         var lastStatus: Int?
         var lastContentType: String?
@@ -669,6 +715,7 @@ struct DispatcharrAPI {
             if (lastStatus ?? 0) < 200 || (lastStatus ?? 0) >= 300 {
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
                 lastBodySnippet = String(body.prefix(800))
+                attemptOutcomes.append(.httpError(lastStatus ?? 0))
                 continue
             }
 
@@ -676,6 +723,7 @@ struct DispatcharrAPI {
             if let ct = lastContentType?.lowercased(), ct.contains("text/html") {
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
                 lastBodySnippet = String(body.prefix(800))
+                attemptOutcomes.append(.html)
                 continue
             }
 
@@ -715,20 +763,78 @@ struct DispatcharrAPI {
             } catch {
                 let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
                 lastBodySnippet = String(body.prefix(800))
+                attemptOutcomes.append(.jsonDecodeFailed)
                 continue
             }
         }
 
+        // Summarise the attempts into a user-actionable message. The
+        // previous version dumped the raw HTML body into the error,
+        // which (a) buried the actual cause in a wall of markup and
+        // (b) didn't tell the user what to try. The most common real
+        // failure modes are:
+        //   • Every probe came back as HTML (SPA shell). This almost
+        //     always means the API key is missing/wrong (Dispatcharr's
+        //     front-door routes unauthenticated requests to the login
+        //     SPA) OR the URL points at the web port but not through
+        //     the `/api` prefix (e.g., a reverse proxy that strips
+        //     `/api`).
+        //   • 401/403 on every probe → authentication rejected.
+        //   • Everything 4xx/5xx → server error.
+        //   • Mixed/other → fall back to a generic "couldn't recognise
+        //     the server response" message with the last body snippet
+        //     as the final diagnostic breadcrumb.
         let urlString = lastURL?.absoluteString ?? "<unknown url>"
-        let ctString = lastContentType ?? "<unknown content-type>"
-        let statusString = lastStatus.map(String.init) ?? "<unknown status>"
+        let allHTML = !attemptOutcomes.isEmpty
+            && attemptOutcomes.allSatisfy { if case .html = $0 { return true } else { return false } }
+        let all401or403 = !attemptOutcomes.isEmpty
+            && attemptOutcomes.allSatisfy {
+                if case .httpError(let s) = $0, s == 401 || s == 403 { return true }
+                return false
+            }
+
+        let message: String
+        if allHTML {
+            message = """
+                Dispatcharr returned the web UI instead of the API for every \
+                endpoint we tried. This usually means one of:
+                  • Your API key is missing or incorrect. Generate a new API \
+                key in Dispatcharr → Settings → API Keys and paste it into \
+                the API Key field above.
+                  • The Server URL points at the web app but not at the API \
+                (for example, a reverse proxy that strips or rewrites /api). \
+                Verify the URL works by opening \(urlString) in a browser \
+                while logged out — you should see a JSON error, not the \
+                Dispatcharr login page.
+                  • The URL is correct but the port is wrong. Confirm the \
+                port matches the Dispatcharr API port on your server.
+                """
+        } else if all401or403 {
+            message = """
+                Dispatcharr rejected the API key on every probe (HTTP \
+                \(attemptOutcomes.compactMap { if case .httpError(let s) = $0 { return String(s) } else { return nil } }.first ?? "?")). \
+                Double-check the API Key field — you can generate a new key \
+                in Dispatcharr → Settings → API Keys.
+                """
+        } else {
+            // Mixed failures or "other" — surface enough detail to diagnose
+            // without pasting the entire HTML body.
+            let ctString = lastContentType ?? "<unknown content-type>"
+            let statusString = lastStatus.map(String.init) ?? "<unknown status>"
+            let snippet = lastBodySnippet.isEmpty
+                ? ""
+                : " Body preview: \(lastBodySnippet.prefix(160))…"
+            message = """
+                Couldn't recognise the server response while verifying the \
+                connection. Last attempted URL: \(urlString) \
+                (status: \(statusString), content-type: \(ctString)).\(snippet)
+                """
+        }
 
         throw APIError.decodingError(NSError(
             domain: "DispatcharrAPI",
             code: -2,
-            userInfo: [NSLocalizedDescriptionKey:
-                "Unrecognized API response while verifying connection. URL: \(urlString) Status: \(statusString) Content-Type: \(ctString). Body: \(lastBodySnippet)"
-            ]
+            userInfo: [NSLocalizedDescriptionKey: message]
         ))
     }
 
@@ -955,12 +1061,38 @@ struct DispatcharrAPI {
     // instead of waiting for the entire library to load. Critical for large libraries
     // (e.g. 20 000+ movies = ~40 sequential API calls with page_size=100).
 
-    func getVODMoviesStream() -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
-        makePageStream(firstPath: "/api/vod/movies/?page_size=100")
+    /// Paginated movie stream. When `category` is non-nil, appends
+    /// `&category=<url-encoded-name>` so Dispatcharr returns only
+    /// movies tagged with that category. Confirmed in the API schema
+    /// that `/api/vod/movies/` accepts `category` as a name filter
+    /// (the value is the category NAME, not its id — IDs are silently
+    /// ignored). Used by `VODStore` to fetch one stream per
+    /// user-enabled category and tag each movie with its real
+    /// Dispatcharr category name at ingest time — fixes GH #1 where
+    /// `categoryName` was previously parsed from the movie's `genre`
+    /// string and therefore never matched the category picker.
+    func getVODMoviesStream(category: String? = nil) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
+        makePageStream(firstPath: Self.moviesPath(category: category))
     }
 
-    func getVODSeriesStream() -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
-        makePageStream(firstPath: "/api/vod/series/?page_size=100")
+    func getVODSeriesStream(category: String? = nil) -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
+        makePageStream(firstPath: Self.seriesPath(category: category))
+    }
+
+    private static func moviesPath(category: String?) -> String {
+        guard let category, !category.isEmpty else {
+            return "/api/vod/movies/?page_size=100"
+        }
+        let encoded = category.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? category
+        return "/api/vod/movies/?page_size=100&category=\(encoded)"
+    }
+
+    private static func seriesPath(category: String?) -> String {
+        guard let category, !category.isEmpty else {
+            return "/api/vod/series/?page_size=100"
+        }
+        let encoded = category.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? category
+        return "/api/vod/series/?page_size=100&category=\(encoded)"
     }
 
     /// Server-side search — uses DRF's ?search= filter so items not yet locally fetched are found.
@@ -1720,10 +1852,53 @@ struct DispatcharrVODCategory: Decodable, Identifiable {
     let id: Int
     let name: String
     let categoryType: String   // "movie" or "series"
+    /// Per-M3U-account enable state. Dispatcharr's `/api/vod/categories/`
+    /// endpoint returns ALL categories discovered from the provider —
+    /// including ones the user has toggled off in the M3U Group Filter
+    /// admin UI. The `enabled` bit inside each `m3u_accounts[]` entry
+    /// tells us whether this category was selected for ingest on that
+    /// particular account. A category is considered "user-enabled"
+    /// iff ANY of its `m3u_accounts[]` entries has `enabled == true`.
+    /// Orphaned categories (empty `m3u_accounts[]`) have no ingest path
+    /// and never carry content, so we treat them as disabled.
+    let m3uAccounts: [DispatcharrCategoryM3UAccount]
 
     enum CodingKeys: String, CodingKey {
         case id, name
         case categoryType = "category_type"
+        case m3uAccounts = "m3u_accounts"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        categoryType = try c.decode(String.self, forKey: .categoryType)
+        // Missing / null → empty array. Old Dispatcharr builds may not
+        // include the field at all.
+        m3uAccounts = (try? c.decode([DispatcharrCategoryM3UAccount].self, forKey: .m3uAccounts)) ?? []
+    }
+
+    /// True when the user has this category enabled on at least one
+    /// of their M3U accounts. The gate Aerio uses to hide categories
+    /// that carry no ingested content.
+    var isEnabledOnAnyAccount: Bool {
+        m3uAccounts.contains { $0.enabled }
+    }
+}
+
+/// Per-M3U-account link inside `DispatcharrVODCategory.m3u_accounts`.
+/// `category` and `m3u_account` are the foreign-key ids on the join
+/// row; `enabled` is the per-account M3U Group Filter toggle from the
+/// Dispatcharr admin UI.
+struct DispatcharrCategoryM3UAccount: Decodable {
+    let category: Int
+    let m3uAccount: Int
+    let enabled: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case category, enabled
+        case m3uAccount = "m3u_account"
     }
 }
 

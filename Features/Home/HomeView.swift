@@ -214,66 +214,119 @@ final class VODStore: ObservableObject {
             debugLog("🎬 VODStore.loadMovies: dispatcharr baseURL=\(baseURL), hasKey=\(!apiKey.isEmpty)")
             let api     = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
 
-            // Fetch categories from the dedicated endpoint concurrently
+            // Fetch categories from the dedicated endpoint and filter to
+            // the ones the user has actually enabled on at least one
+            // M3U account. Dispatcharr's `/api/vod/categories/` returns
+            // EVERY category it ever saw from the provider (467+ on
+            // typical IPTV feeds), including ones the user toggled off
+            // in the admin UI's M3U Group Filter. Without the
+            // `isEnabledOnAnyAccount` gate we'd display XXX / foreign-
+            // language / archived-year buckets that have zero fetchable
+            // content — which is GH #1's primary complaint. Matches
+            // Dispatcharr's own behaviour: the REST API returns movies
+            // only for categories the user enabled for ingest, so the
+            // client should show only the same set.
             let apiCats: [DispatcharrVODCategory] = (try? await api.getVODCategories()) ?? []
-            let movieCatNames = apiCats
-                .filter { $0.categoryType == "movie" || $0.categoryType == "Movie" }
-                .map { VODCategory(id: String($0.id), name: $0.name) }
-            if !movieCatNames.isEmpty {
-                movieCategories = movieCatNames
-                debugLog("🎬 VODStore: fetched \(movieCatNames.count) Dispatcharr movie categories")
+            let enabledMovieCats = apiCats.filter {
+                ($0.categoryType == "movie" || $0.categoryType == "Movie") && $0.isEnabledOnAnyAccount
+            }
+            debugLog("🎬 VODStore: \(apiCats.count) total categories, \(enabledMovieCats.count) enabled movie categories")
+
+            // Show the category list in Manage Groups immediately so the
+            // user sees the real, accurate group list even before movie
+            // streaming finishes.
+            movieCategories = enabledMovieCats.map { VODCategory(id: String($0.id), name: $0.name) }
+
+            // If the user has no movie categories enabled anywhere, the
+            // library is empty by construction. Don't fall back to a
+            // flat unfiltered fetch — that was the old bug where we'd
+            // show everything Dispatcharr had.
+            if enabledMovieCats.isEmpty {
+                movies = []
+                isLoadingMovies = false
+                debugLog("🎬 VODStore.loadMovies: no enabled movie categories, nothing to fetch")
+                return
             }
 
+            // Fetch per-category so each returned movie can be tagged
+            // with its REAL Dispatcharr category name. Sequential rather
+            // than parallel: keeps the implementation simple, yields
+            // predictable progressive-fill UX (first enabled category
+            // appears first), and avoids hammering Dispatcharr with N
+            // concurrent paginated sweeps. If a movie is present in
+            // multiple enabled categories, the FIRST enabled category
+            // to return it claims it (per the decision recorded in the
+            // commit message / GH #1 discussion — keeps
+            // `VODMovie.categoryName: String` as-is without expanding
+            // to an array and cascading through MoviesView's filter
+            // predicate).
             var accumulated: [VODDisplayItem] = []
+            var seenUUIDs: Set<String> = []
             var lastPublishTime = Date.distantPast
             let publishInterval: TimeInterval = 0.5
-            do {
-                debugLog("🎬 VODStore.loadMovies: starting stream fetch")
-                for try await batch in api.getVODMoviesStream() {
-                    guard !Task.isCancelled else { isLoadingMovies = false; return }
-                    let newItems = batch.map { m -> VODDisplayItem in
-                        let streamURL = api.proxyMovieURL(uuid: m.uuid,
-                                                          preferredStreamID: m.streams?.first?.streamID)
-                        let genre = m.genre ?? ""
-                        let catName = genre.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? ""
-                        let movie = VODMovie(
-                            id: String(m.id), name: m.title,
-                            posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) }, backdropURL: nil,
-                            rating: m.rating ?? "", plot: m.plot ?? "",
-                            genre: genre, releaseDate: "", duration: "",
-                            cast: "", director: "", imdbID: "",
-                            categoryID: catName, categoryName: catName.isEmpty ? "Uncategorized" : catName,
-                            streamURL: streamURL, containerExtension: "mp4", serverID: sID
-                        )
-                        return VODDisplayItem(movie: movie)
+            debugLog("🎬 VODStore.loadMovies: starting per-category stream fetch")
+            for cat in enabledMovieCats {
+                guard !Task.isCancelled else { isLoadingMovies = false; return }
+                do {
+                    for try await batch in api.getVODMoviesStream(category: cat.name) {
+                        guard !Task.isCancelled else { isLoadingMovies = false; return }
+                        for m in batch {
+                            // Dedupe: if this uuid was already added by
+                            // an earlier enabled category, skip — that
+                            // category wins the tag.
+                            guard seenUUIDs.insert(m.uuid).inserted else { continue }
+                            let streamURL = api.proxyMovieURL(
+                                uuid: m.uuid,
+                                preferredStreamID: m.streams?.first?.streamID
+                            )
+                            let movie = VODMovie(
+                                id: String(m.id), name: m.title,
+                                posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
+                                backdropURL: nil,
+                                rating: m.rating ?? "", plot: m.plot ?? "",
+                                genre: m.genre ?? "", releaseDate: "", duration: "",
+                                cast: "", director: "", imdbID: "",
+                                // Real Dispatcharr category — the Manage
+                                // Groups filter in MoviesView compares
+                                // against `categoryName`, so tagging with
+                                // the actual category name is what makes
+                                // the filter actually filter.
+                                categoryID: String(cat.id),
+                                categoryName: cat.name,
+                                streamURL: streamURL, containerExtension: "mp4",
+                                serverID: sID
+                            )
+                            accumulated.append(VODDisplayItem(movie: movie))
+                        }
+                        // Throttle publishing to max 2x/second to reduce
+                        // SwiftUI redraws. Always publish on first batch
+                        // to hide the spinner.
+                        let now = Date()
+                        if isLoadingMovies || now.timeIntervalSince(lastPublishTime) >= publishInterval {
+                            movies = accumulated
+                            lastPublishTime = now
+                        }
+                        if isLoadingMovies { isLoadingMovies = false }
                     }
-                    accumulated += newItems
-                    // Throttle publishing to max 2x/second to reduce SwiftUI redraws.
-                    // Always publish on first batch (to hide spinner).
-                    let now = Date()
-                    if isLoadingMovies || now.timeIntervalSince(lastPublishTime) >= publishInterval {
-                        movies = accumulated
-                        lastPublishTime = now
-                    }
-                    // If no API categories were fetched, build from genre data
-                    if movieCatNames.isEmpty {
-                        movieCategories = Self.buildCategories(from: accumulated, using: \.movie?.categoryName)
-                    }
-                    // Hide the spinner after the first page so the grid is visible
-                    // while remaining pages continue loading in the background.
-                    if isLoadingMovies { isLoadingMovies = false }
+                } catch let err as APIError {
+                    // Per-category failure: log it but don't abort the
+                    // whole load. Other categories may still succeed —
+                    // partial results beat a blank screen on a flaky
+                    // backend.
+                    DebugLogger.shared.logError(err, context: "VODStore.loadMovies(\(server.name))[\(cat.name)]")
+                    continue
+                } catch {
+                    DebugLogger.shared.log(
+                        "VODStore.loadMovies(\(server.name))[\(cat.name)] error: \(error.localizedDescription)",
+                        category: "Movies", level: .warning
+                    )
+                    continue
                 }
-                // Final publish to ensure all items visible
-                movies = accumulated
-            } catch let err as APIError {
-                guard !Task.isCancelled else { isLoadingMovies = false; return }
-                if accumulated.isEmpty { moviesError = err.errorDescription }
-                DebugLogger.shared.logError(err, context: "VODStore.loadMovies(\(server.name))")
-            } catch {
-                guard !Task.isCancelled else { isLoadingMovies = false; return }
-                if accumulated.isEmpty { moviesError = error.localizedDescription }
             }
+            // Final publish to ensure all items visible
+            movies = accumulated
             isLoadingMovies = false
+            debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) unique movies across \(enabledMovieCats.count) categories")
             return
         }
 
@@ -334,60 +387,69 @@ final class VODStore: ObservableObject {
             let sID     = server.id
             let api     = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
 
-            // Fetch categories from the dedicated endpoint
+            // Mirrors `loadMovies` above — see that function for the
+            // full rationale on why per-enabled-category fetching +
+            // first-category-wins deduping is the shape of the fix.
             let apiCats: [DispatcharrVODCategory] = (try? await api.getVODCategories()) ?? []
-            let seriesCatNames = apiCats
-                .filter { $0.categoryType == "series" || $0.categoryType == "Series" }
-                .map { VODCategory(id: String($0.id), name: $0.name) }
-            if !seriesCatNames.isEmpty {
-                seriesCategories = seriesCatNames
-                debugLog("📺 VODStore: fetched \(seriesCatNames.count) Dispatcharr series categories")
+            let enabledSeriesCats = apiCats.filter {
+                ($0.categoryType == "series" || $0.categoryType == "Series") && $0.isEnabledOnAnyAccount
+            }
+            debugLog("📺 VODStore: \(apiCats.count) total categories, \(enabledSeriesCats.count) enabled series categories")
+
+            seriesCategories = enabledSeriesCats.map { VODCategory(id: String($0.id), name: $0.name) }
+
+            if enabledSeriesCats.isEmpty {
+                series = []
+                isLoadingSeries = false
+                debugLog("📺 VODStore.loadSeries: no enabled series categories, nothing to fetch")
+                return
             }
 
             var accumulated: [VODDisplayItem] = []
+            var seenUUIDs: Set<String> = []
             var lastPublishTime = Date.distantPast
             let publishInterval: TimeInterval = 0.5
-            do {
-                for try await batch in api.getVODSeriesStream() {
-                    guard !Task.isCancelled else { isLoadingSeries = false; return }
-                    let newItems = batch.map { s -> VODDisplayItem in
-                        let genre = s.genre ?? ""
-                        let catName = genre.components(separatedBy: ",").first?.trimmingCharacters(in: .whitespaces) ?? ""
-                        let show = VODSeries(
-                            id: String(s.id), name: s.name,
-                            posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) }, backdropURL: nil,
-                            rating: s.rating ?? "", plot: s.plot ?? "",
-                            genre: genre, releaseDate: "",
-                            cast: "", director: "",
-                            categoryID: catName, categoryName: catName.isEmpty ? "Uncategorized" : catName,
-                            serverID: sID, seasons: [], episodeCount: 0
-                        )
-                        return VODDisplayItem(series: show)
+            for cat in enabledSeriesCats {
+                guard !Task.isCancelled else { isLoadingSeries = false; return }
+                do {
+                    for try await batch in api.getVODSeriesStream(category: cat.name) {
+                        guard !Task.isCancelled else { isLoadingSeries = false; return }
+                        for s in batch {
+                            guard seenUUIDs.insert(s.uuid).inserted else { continue }
+                            let show = VODSeries(
+                                id: String(s.id), name: s.name,
+                                posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
+                                backdropURL: nil,
+                                rating: s.rating ?? "", plot: s.plot ?? "",
+                                genre: s.genre ?? "", releaseDate: "",
+                                cast: "", director: "",
+                                categoryID: String(cat.id),
+                                categoryName: cat.name,
+                                serverID: sID, seasons: [], episodeCount: 0
+                            )
+                            accumulated.append(VODDisplayItem(series: show))
+                        }
+                        let now = Date()
+                        if isLoadingSeries || now.timeIntervalSince(lastPublishTime) >= publishInterval {
+                            series = accumulated
+                            lastPublishTime = now
+                        }
+                        if isLoadingSeries { isLoadingSeries = false }
                     }
-                    accumulated += newItems
-                    // Throttle publishing to max 2x/second to reduce SwiftUI redraws.
-                    let now = Date()
-                    if isLoadingSeries || now.timeIntervalSince(lastPublishTime) >= publishInterval {
-                        series = accumulated
-                        lastPublishTime = now
-                    }
-                    // If no API categories were fetched, build from genre data
-                    if seriesCatNames.isEmpty {
-                        seriesCategories = Self.buildCategories(from: accumulated, using: \.series?.categoryName)
-                    }
-                    if isLoadingSeries { isLoadingSeries = false }
+                } catch let err as APIError {
+                    DebugLogger.shared.logError(err, context: "VODStore.loadSeries(\(server.name))[\(cat.name)]")
+                    continue
+                } catch {
+                    DebugLogger.shared.log(
+                        "VODStore.loadSeries(\(server.name))[\(cat.name)] error: \(error.localizedDescription)",
+                        category: "TVShows", level: .warning
+                    )
+                    continue
                 }
-                // Final publish to ensure all items visible
-                series = accumulated
-            } catch let err as APIError {
-                guard !Task.isCancelled else { isLoadingSeries = false; return }
-                if accumulated.isEmpty { seriesError = err.errorDescription }
-                DebugLogger.shared.logError(err, context: "VODStore.loadSeries(\(server.name))")
-            } catch {
-                guard !Task.isCancelled else { isLoadingSeries = false; return }
-                if accumulated.isEmpty { seriesError = error.localizedDescription }
             }
+            series = accumulated
             isLoadingSeries = false
+            debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) unique series across \(enabledSeriesCats.count) categories")
             return
         }
 
@@ -487,6 +549,161 @@ final class ChannelStore: ObservableObject {
         await load(server: server)
     }
 
+    /// UserDefaults key for the cached channel→category map. Cached
+    /// on every successful XMLTV categories pass so subsequent app
+    /// launches can render the "Tint Channel Cards" gradient
+    /// immediately, before the (multi-second) XMLTV fetch+parse has
+    /// even started. Without this cache, users saw channel cards
+    /// pop in tintless on every launch and the color faded in
+    /// ~5–10 seconds later — which is what the #22 feedback
+    /// ("gradients took way too long to load") called out.
+    private static let cachedCategoriesKey = "cachedChannelCategories.v1"
+
+    /// Snapshot of the last-known channel→category map. Written by
+    /// `applyXMLTVCategories` after a fresh pass lands, read by
+    /// `primeCategoriesFromCache()` on the next cold load so the
+    /// tint renders on the first frame instead of 5–10 s later.
+    private static func loadCachedCategories() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: cachedCategoriesKey) as? [String: String] ?? [:]
+    }
+
+    private static func saveCachedCategories(_ map: [String: String]) {
+        UserDefaults.standard.set(map, forKey: cachedCategoriesKey)
+    }
+
+    /// Apply whatever category data we have cached from the last
+    /// XMLTV pass so the tint stripe renders immediately on cold
+    /// launch. The fresh XMLTV pass still runs in `loadAllEPG` and
+    /// overwrites with current data — this just means the user
+    /// doesn't stare at an uncolored card while the XMLTV parse
+    /// churns. Call from the channel-load success path.
+    func primeCategoriesFromCache() {
+        let cached = Self.loadCachedCategories()
+        guard !cached.isEmpty else { return }
+        applyXMLTVCategories(cached)
+    }
+
+    /// Called by `GuideStore` when an XMLTV parse surfaces category
+    /// data. Channel cards in Live TV list view read
+    /// `currentProgramCategory` to drive the "Tint Channel Cards"
+    /// stripe, but the initial channel load uses Dispatcharr's JSON
+    /// API which doesn't include categories — so we back-fill here
+    /// from the guide's XMLTV pass. Only updates channels whose
+    /// stored category differs, to avoid spurious @Published fires
+    /// on every EPG refresh.
+    ///
+    /// Also writes the map through to UserDefaults so the next
+    /// cold launch can `primeCategoriesFromCache()` and render the
+    /// tint immediately instead of waiting on the XMLTV fetch.
+    func applyXMLTVCategories(_ categoriesByChannelID: [String: String]) {
+        guard !categoriesByChannelID.isEmpty else { return }
+        var changed = false
+        var updated = channels
+        for i in updated.indices {
+            if let cat = categoriesByChannelID[updated[i].id],
+               updated[i].currentProgramCategory != cat {
+                updated[i].currentProgramCategory = cat
+                changed = true
+            }
+        }
+        if changed {
+            channels = updated
+        }
+        // Persist so the next app launch can prime the tint from
+        // cache on the first frame. Merging into the existing cache
+        // rather than replacing means a partial XMLTV pass (e.g.,
+        // parser errored halfway) doesn't wipe previously-known
+        // categories for channels it didn't cover.
+        var merged = Self.loadCachedCategories()
+        for (id, cat) in categoriesByChannelID {
+            merged[id] = cat
+        }
+        Self.saveCachedCategories(merged)
+    }
+
+    /// Mirror of `EPGGuideView.fetchDispatcharr`'s URL-construction
+    /// logic. Returns the URL AerioTV should pull XMLTV from for a
+    /// Dispatcharr server — the user's explicit override if set,
+    /// otherwise the derived `{base}/output/epg?tvg_id_source=tvg_id`
+    /// default that emits categories and tvg_id-keyed channels.
+    /// Returns nil when there's nothing sane to fetch (empty or
+    /// malformed base URL).
+    static func dispatcharrXMLTVURL(baseURL: String, override: String) -> URL? {
+        let explicit = override.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !explicit.isEmpty, let url = URL(string: explicit) {
+            return url
+        }
+        let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !base.isEmpty else { return nil }
+        let trimmed = base.hasSuffix("/") ? String(base.dropLast()) : base
+        return URL(string: "\(trimmed)/output/epg?tvg_id_source=tvg_id")
+    }
+
+    /// Full XMLTV pass that feeds the SAME `GuideStore.programs`
+    /// dataset the Guide view reads from — so Live-TV list rows
+    /// (current-program tint) AND the expanded schedule panel
+    /// (per-upcoming-program tint) share one source of truth with
+    /// the Guide view's tinted cells. Previously List view re-
+    /// derived categories from JSON (which has none), producing
+    /// the "Guide shows colors, List doesn't" asymmetry users
+    /// rightly called out ("they should both be using the same
+    /// dataset").
+    ///
+    /// Runs on every platform. On iPad / Mac where EPGGuideView
+    /// eventually mounts, the view's own fetchXMLTVFromURL call
+    /// becomes a refresh (the merge logic in `mergeProgram`
+    /// dedupes by title + time). On iPhone this is the only
+    /// XMLTV pass that happens — which is exactly why we need it
+    /// here.
+    func primeXMLTVFromURL(_ url: URL) async {
+        let now = Date()
+        let windowStart = now.addingTimeInterval(-3600)
+        let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
+        let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
+        let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
+
+        // Snapshot channels + server on the main actor before
+        // handing off — GuideStore's XMLTV method is @MainActor
+        // too and will re-dispatch, but snapshotting here keeps
+        // the call site sync-clean.
+        let snapshot = channels
+        guard let activeServer = activeServer else { return }
+
+        await GuideStore.shared.fetchXMLTVFromURL(
+            url: url,
+            channels: snapshot,
+            windowStart: windowStart,
+            windowEnd: windowEnd
+        )
+        // Propagate into EPGCache so List-view `fetchUpcoming`
+        // (which reads EPGCache) picks up category-enriched
+        // EPGEntry items instead of the JSON-sourced, category-
+        // empty entries. This is what makes expanded schedule
+        // rows tintable on iPhone the same way Guide cells are
+        // tintable on iPad / tvOS.
+        //
+        // `await` here is load-bearing: `seedEPGCache` does its
+        // writes on a detached utility-priority task, so without
+        // awaiting its `.value` we'd return while the EPGCache
+        // set-loop was still running. The ServerSyncView cover
+        // would dismiss, the user would expand a channel, and
+        // `fetchUpcoming` would hit EPGCache before the seed had
+        // overwritten the JSON-bulk's category-less entries —
+        // leaving rows uncolored. Awaiting ensures the category
+        // data is actually in-place before we return.
+        await GuideStore.shared.seedEPGCache(channels: snapshot, server: activeServer)
+
+        // Let any currently-expanded schedule panels know the
+        // category data has landed so they can re-fetch with
+        // the freshly-seeded EPGCache. Without this, a user who
+        // expanded a card BEFORE `loadAllEPG` completed (e.g.,
+        // during the second-launch fast path where channels
+        // hydrate instantly from cache) would keep staring at
+        // non-tinted rows until they manually collapsed and
+        // re-expanded.
+        NotificationCenter.default.post(name: .epgCategoriesDidUpdate, object: nil)
+    }
+
     // MARK: - Private Loader
 
     private func load(server: ServerConnection) async {
@@ -506,7 +723,30 @@ final class ChannelStore: ObservableObject {
         let serverID = server.id
         let epgURL   = server.effectiveEPGURL
         debugLog("🔷 ChannelStore.load: snapshot done (type=\(type), baseURL=\(baseURL), hasPw=\(!password.isEmpty), hasKey=\(!apiKey.isEmpty))")
-        debugLog("🔷 ChannelStore.load: starting fetch...")
+
+        // Fast reachability probe (only on a cold load). A dead Docker
+        // container, a wrong host, or a stopped VPN would otherwise
+        // make the user stare at the "Setting Up…" cover for the full
+        // 20s URLSession timeout before the error view surfaces.
+        // HEAD with a 4s timeout turns that into ~3s with a specific,
+        // actionable message. Skipped when we already have cached
+        // channels — if the user is refreshing and the probe blips,
+        // we don't want to wipe working data over a transient failure.
+        if channels.isEmpty {
+            if let probeMessage = await Self.reachabilityProbe(baseURL: baseURL) {
+                debugLog("🔷 ChannelStore.load: probe failed — \(probeMessage)")
+                self.error = probeMessage
+                self.isLoading = false
+                DebugLogger.shared.logChannelLoad(
+                    serverType: type.rawValue,
+                    duration: Date().timeIntervalSince(start),
+                    error: nil)
+                return
+            }
+            debugLog("🔷 ChannelStore.load: probe ok — starting fetch...")
+        } else {
+            debugLog("🔷 ChannelStore.load: probe skipped (warm refresh) — starting fetch...")
+        }
 
         // Auto-retry for transient server-side errors (503/502/504) with backoff.
         // This handles the common case where the server is starting up when the app launches.
@@ -530,6 +770,12 @@ final class ChannelStore: ObservableObject {
                 orderedGroups = groups
                 error = nil
                 debugLog("🔷 ChannelStore.load: published \(items.count) channels")
+                // Apply any cached categories RIGHT NOW so the tint
+                // stripe renders on the first frame channels appear,
+                // instead of fading in 5–10 seconds later when the
+                // live XMLTV parse wraps. The fresh XMLTV pass in
+                // `loadAllEPG` still overwrites with current data.
+                primeCategoriesFromCache()
                 TopShelfDataManager.syncTopChannels(channels: items)
                 DebugLogger.shared.logChannelLoad(
                     serverType: type.rawValue,
@@ -564,12 +810,122 @@ final class ChannelStore: ObservableObject {
                     duration: Date().timeIntervalSince(start),
                     error: e)
                 break
+            } catch let u as URLError {
+                // Full fetch failed with a URL-layer error even though
+                // the probe passed (e.g., the server accepts HEAD but
+                // hangs on GET, or the route we're hitting isn't up
+                // yet). Translate common codes to user-friendly copy
+                // instead of surfacing Apple's generic strings.
+                if channels.isEmpty {
+                    self.error = Self.userFacingURLErrorMessage(u, baseURL: baseURL)
+                }
+                break
             } catch {
                 if channels.isEmpty { self.error = error.localizedDescription }
                 break
             }
         }
         isLoading = false
+    }
+
+    // MARK: - Reachability Probe
+
+    /// Fast `HEAD`-request probe used at the start of a cold channel
+    /// load to short-circuit the 20s URLSession timeout when the
+    /// server is completely unreachable (stopped Docker container,
+    /// wrong IP, LAN-blocking VPN, no network).
+    ///
+    /// Returns `nil` when the server responds with anything from
+    /// 100–599 — a 401, 404, or 405 all prove the network + host are
+    /// alive, which is all we care about at this stage. Returns a
+    /// user-facing error string otherwise. Callers use the return
+    /// value as an early-exit path: a non-nil result means "set this
+    /// as the channel-load error and skip the full fetch."
+    ///
+    /// The 4-second timeout is chosen so:
+    ///  - Dead Docker container / wrong IP → fails in ~1s (TCP reset)
+    ///  - LAN-unreachable host → fails at 4s instead of at 20s
+    ///  - A healthy-but-slow WAN server → usually answers a HEAD well
+    ///    inside 4s, so legitimate servers aren't punished by the probe
+    private static func reachabilityProbe(baseURL: String) async -> String? {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let url = URL(string: trimmed) else {
+            return "Invalid server URL — check Settings → Server."
+        }
+        var request = URLRequest(url: url, timeoutInterval: 4)
+        request.httpMethod = "HEAD"
+
+        // One-shot ephemeral session so the probe never contends with
+        // the shared Dispatcharr / Xtream sessions' configured
+        // timeouts or connection pools.
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 4
+        config.timeoutIntervalForResource = 4
+        config.waitsForConnectivity = false
+        let session = URLSession(configuration: config)
+
+        do {
+            let (_, response) = try await session.data(for: request)
+            // Any HTTP response proves the TCP + TLS + HTTP path is
+            // alive. We don't care about the status code here — even
+            // a 404 / 405 means the box is up.
+            if let http = response as? HTTPURLResponse,
+               (100..<600).contains(http.statusCode) {
+                return nil
+            }
+            // Non-HTTPURLResponse shouldn't happen over http(s) but
+            // be defensive rather than crash.
+            return "Unexpected response from \(hostDescriptor(url)). Check Settings → Server."
+        } catch let u as URLError {
+            return userFacingURLErrorMessage(u, baseURL: trimmed)
+        } catch {
+            return "Can't reach \(hostDescriptor(url)): \(error.localizedDescription)"
+        }
+    }
+
+    /// Maps the common `URLError` codes hit during a dead-server
+    /// probe or fetch into short, user-facing copy. We surface the
+    /// host so the user has a concrete thing to check (wrong IP vs
+    /// wrong port vs just offline), and hint at the likely fix for
+    /// each kind of failure. The previous pass through
+    /// `error.localizedDescription` produced Apple's generic strings
+    /// ("A server with the specified hostname could not be found.")
+    /// which users didn't know how to act on.
+    private static func userFacingURLErrorMessage(_ error: URLError, baseURL: String) -> String {
+        let host = URL(string: baseURL).map(hostDescriptor) ?? baseURL
+        switch error.code {
+        case .cannotConnectToHost:
+            return "Can't reach \(host). Is your server running?"
+        case .cannotFindHost, .dnsLookupFailed:
+            return "Couldn't find \(host). Check the URL in Settings → Server."
+        case .timedOut:
+            return "\(host) isn't responding. Check your server and network connection."
+        case .notConnectedToInternet:
+            return "No internet connection."
+        case .networkConnectionLost:
+            return "Lost connection to \(host). Check your network and try again."
+        case .secureConnectionFailed, .serverCertificateUntrusted,
+             .serverCertificateHasBadDate, .serverCertificateHasUnknownRoot,
+             .serverCertificateNotYetValid, .clientCertificateRejected:
+            return "Secure connection to \(host) failed. Check your server's TLS certificate."
+        default:
+            return "Can't reach \(host): \(error.localizedDescription)"
+        }
+    }
+
+    /// Returns `"host:port"` when the URL has a non-default port, or
+    /// just `"host"` otherwise. Used in error messages so the user
+    /// sees a concrete thing to verify. Falls back to the full URL
+    /// string if the `URL` can't produce a host (shouldn't happen
+    /// after `URL(string:)` succeeds, but kept for safety).
+    private static func hostDescriptor(_ url: URL) -> String {
+        guard let host = url.host, !host.isEmpty else {
+            return url.absoluteString
+        }
+        if let port = url.port, ![80, 443].contains(port) {
+            return "\(host):\(port)"
+        }
+        return host
     }
 
     // MARK: - Bulk EPG Loading
@@ -583,6 +939,10 @@ final class ChannelStore: ObservableObject {
         let username = server.username
         let password = server.effectivePassword
         let apiKey   = server.effectiveApiKey
+        // Snapshot the Dispatcharr XMLTV override early. `server` is
+        // a SwiftData model; reading a property after an `await`
+        // suspension risks a thread-context violation.
+        let dispatcharrXMLTVOverride = server.dispatcharrXMLTVURL
 
         isEPGLoading = true
         defer { isEPGLoading = false }
@@ -645,6 +1005,38 @@ final class ChannelStore: ObservableObject {
                 TopShelfDataManager.syncTopChannels(channels: self.channels)
             } catch {
                 debugLog("📺 Bulk EPG failed: \(error.localizedDescription) — falling back to lazy loading")
+            }
+
+            // XMLTV pass through the shared GuideStore so BOTH the
+            // Live-TV list tint AND the Guide grid read from one
+            // dataset (user feedback: "they should both be using
+            // the same dataset"). iPhone never mounts EPGGuideView,
+            // so without this call GuideStore.programs would stay
+            // empty on phone and the List-view expanded schedule
+            // would have no category data to tint with.
+            //
+            // Awaited (not Task.detached) on purpose: the user
+            // specifically asked for the category cache to land
+            // "when EPG is loading while ServerSyncView is
+            // showing." Since `isEPGLoading` stays true until this
+            // function returns, and `MainTabView.initialSyncKey`
+            // observes `isEPGLoading`, the ServerSyncView cover
+            // now only dismisses after the XMLTV parse has
+            // completed and `seedEPGCache` has written
+            // category-enriched EPGEntries into EPGCache. Net
+            // effect: first frame of Live TV shows all tints
+            // (current-program gradient on cards AND per-program
+            // gradients on expanded rows) with zero fade-in lag.
+            //
+            // iPad / Mac / tvOS also hit this path — the later
+            // EPGGuideView fetchXMLTVFromURL call is then a
+            // dedupe/refresh (the merge logic in `mergeProgram`
+            // replaces-by-overlap, so duplicates don't stack).
+            if let xmltvURL = Self.dispatcharrXMLTVURL(
+                baseURL: baseURL,
+                override: dispatcharrXMLTVOverride
+            ) {
+                await primeXMLTVFromURL(xmltvURL)
             }
 
         case .xtreamCodes:
@@ -828,7 +1220,15 @@ final class ChannelStore: ObservableObject {
                 let upcoming = byChannel[tvgID]!
                     .filter { $0.endTime > now }
                     .sorted { $0.startTime < $1.startTime }
-                    .map { EPGEntry(title: $0.title, description: $0.description, startTime: $0.startTime, endTime: $0.endTime) }
+                    .map {
+                        // M3U's upstream XMLTV carries `<category>`
+                        // tags — pass them through so the List-view
+                        // expanded schedule can render per-program
+                        // tints matching what the Guide view shows.
+                        EPGEntry(title: $0.title, description: $0.description,
+                                 startTime: $0.startTime, endTime: $0.endTime,
+                                 category: $0.category)
+                    }
                 if !upcoming.isEmpty {
                     await EPGCache.shared.set(upcoming, for: "m3u_\(tvgID)")
                 }
@@ -842,6 +1242,7 @@ final class ChannelStore: ObservableObject {
                     items[idx].currentProgramDescription  = current.description
                     items[idx].currentProgramStart        = current.startTime
                     items[idx].currentProgramEnd          = current.endTime
+                    items[idx].currentProgramCategory     = current.category
                 }
             }
         }
@@ -945,17 +1346,25 @@ final class ChannelStore: ObservableObject {
                 categoryOrder: groupOrder.firstIndex(of: grp) ?? Int.max,
                 streamURL: urls.first, streamURLs: urls)
             item.tvgID = ch.tvgID
+            // Carry the channel's Dispatcharr UUID so the guide's
+            // EPG matcher can recognise Dummy EPG entries, which are
+            // tagged with `tvg_id = str(channel.uuid)` by the server
+            // (see `fetchDispatcharr` in `EPGGuideView.swift`).
+            item.uuid = ch.uuid
             return item
         }
         items = sortChannels(items, groupOrder: groupOrder)
 
         // Apply EPG data.
         if let programs, !programs.isEmpty {
-            var epgByTvgID: [String: (title: String, description: String, start: Date?, end: Date?)] = [:]
+            var epgByTvgID: [String: (title: String, description: String, start: Date?, end: Date?, category: String?)] = [:]
             for prog in programs {
                 guard let tvgID = prog.tvgID, !tvgID.isEmpty, !prog.title.isEmpty else { continue }
                 let desc = prog.description.isEmpty ? prog.subTitle : prog.description
-                epgByTvgID[tvgID] = (prog.title, desc, prog.startTime?.toDate(), prog.endTime?.toDate())
+                // Dispatcharr's EPG grid response doesn't currently include a
+                // category field, so we carry nil through — the channel card
+                // stripe will simply fall through to the neutral fallback.
+                epgByTvgID[tvgID] = (prog.title, desc, prog.startTime?.toDate(), prog.endTime?.toDate(), nil)
             }
             items = items.map { item in
                 guard let tvgID = item.tvgID, !tvgID.isEmpty,
@@ -965,6 +1374,7 @@ final class ChannelStore: ObservableObject {
                 updated.currentProgramDescription  = info.description
                 updated.currentProgramStart        = info.start
                 updated.currentProgramEnd          = info.end
+                updated.currentProgramCategory     = info.category
                 return updated
             }
         }
@@ -987,6 +1397,11 @@ final class FavoritesStore: ObservableObject {
     /// The value writes go through `TopShelfKeychain` instead.
     static let appGroupID = "group.app.molinete.aerio.topshelf"
 
+    /// UserDefaults key persisting the user's manually-chosen favorite ordering.
+    /// Mirrored to iCloud KVS via `SyncManager` so the order rides along
+    /// with the membership set.
+    static let orderKey = "favoriteOrder"
+
     init() {
         let saved = UserDefaults.standard.stringArray(forKey: "favoriteChannelIDs") ?? []
         self.favoriteIDs = Set(saved)
@@ -1000,18 +1415,71 @@ final class FavoritesStore: ObservableObject {
             favoriteItems.removeAll { $0.id == item.id }
         } else {
             favoriteIDs.insert(item.id)
+            // Append at the end so newly-favorited channels show up after the
+            // user's manually-ordered list rather than getting alphabetically
+            // shuffled into the middle.
             favoriteItems.append(item)
-            favoriteItems.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         }
         UserDefaults.standard.set(Array(favoriteIDs), forKey: "favoriteChannelIDs")
+        persistOrder()
         syncToSharedDefaults()
+        // Favorites are a deliberate user action — push to iCloud KVS
+        // immediately instead of the normal 60s debounced preference push.
+        // Fixes GitHub issue #2 (Veldmuus): removing a favorite then force-
+        // closing the app within 60s would let the next launch's
+        // pullFromCloud() restore the stale favorite from KVS.
+        SyncManager.shared.pushPreferencesImmediate()
+    }
+
+    /// Reorder favorites in response to a SwiftUI `.onMove` from the
+    /// iOS Favorites tab. Persists the new order to UserDefaults under
+    /// `favoriteOrder` (and SyncManager mirrors that key to iCloud KVS
+    /// so the manual order syncs across devices, not just the membership
+    /// set under `favoriteChannelIDs`).
+    func move(fromOffsets source: IndexSet, toOffset destination: Int) {
+        favoriteItems.move(fromOffsets: source, toOffset: destination)
+        persistOrder()
+        syncToSharedDefaults()
+        // Same rationale as toggle() — deliberate user action, push now.
+        SyncManager.shared.pushPreferencesImmediate()
     }
 
     /// Called when channels load — hydrates in-memory favorites from fresh item data.
     func register(items: [ChannelDisplayItem]) {
-        favoriteItems = items.filter { favoriteIDs.contains($0.id) }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let filtered = items.filter { favoriteIDs.contains($0.id) }
+        let orderedIDs = UserDefaults.standard.stringArray(forKey: Self.orderKey) ?? []
+        let orderIndex = Dictionary(uniqueKeysWithValues: orderedIDs.enumerated().map { ($1, $0) })
+        favoriteItems = filtered.sorted { (a, b) in
+            // Items present in the saved order honor that order. Anything not
+            // yet ordered (newly favorited on another device, or pre-existing
+            // favorites from before this feature shipped) falls through to a
+            // stable alphabetical tail so the list isn't randomly shuffled.
+            let ai = orderIndex[a.id]
+            let bi = orderIndex[b.id]
+            switch (ai, bi) {
+            case let (a?, b?):
+                return a < b
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            case (nil, nil):
+                return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            }
+        }
+        // Refresh the persisted order so the next launch sees the merged list
+        // (any newly-arrived favorite IDs are now appended in alphabetical
+        // order, while previously-ordered IDs keep their position).
+        persistOrder()
         syncToSharedDefaults()
+    }
+
+    /// Writes the current ordered favorite IDs to UserDefaults under
+    /// `favoriteOrder`. SyncManager mirrors this key to iCloud KVS so
+    /// the manual order syncs across devices.
+    private func persistOrder() {
+        let orderedIDs = favoriteItems.map { $0.id }
+        UserDefaults.standard.set(orderedIDs, forKey: Self.orderKey)
     }
 
     /// Writes favorite channel info to shared storage for the Top Shelf
@@ -1410,6 +1878,13 @@ struct MainTabView: View {
     @ObservedObject private var favoritesStore = FavoritesStore.shared
     @StateObject private var vodStore = VODStore()
     @ObservedObject private var channelStore = ChannelStore.shared
+    /// Watches the shared GuideStore so the initial-sync loading cover
+    /// can wait for the XMLTV parse (which populates category data and
+    /// most of the guide content) to finish before dismissing. Without
+    /// this, the cover would close on the faster JSON bulk-EPG signal
+    /// and drop the user into a partially-populated guide while
+    /// XMLTV was still loading silently in the background.
+    @ObservedObject private var guideStore = GuideStore.shared
     /// Watches `PlayerSession.shared.mode` so the inline-player slot
     /// can mode-branch between single-stream `PlayerView` and the new
     /// `MultiviewContainerView`. `@ObservedObject` on a singleton is
@@ -1495,33 +1970,105 @@ struct MainTabView: View {
 
     /// Hashable digest that flips whenever ANY of the initial sync
     /// signals change (channels, EPG, VOD movies, VOD series, DVR
-    /// reconcile). `.onChange(of: initialSyncKey)` listens to it and
-    /// calls `tryDismissInitialLoading()` each time.
+    /// reconcile, OR a channel-load error). `.onChange(of: initialSyncKey)`
+    /// listens to it and calls `tryDismissInitialLoading()` each time.
+    /// Including the error field is the thing that unsticks the
+    /// loading screen when credentials are wrong: channels stay empty,
+    /// `channelsDone` stays false, but flipping error from nil → message
+    /// triggers a dismiss + surfaces the actionable error view beneath.
     private var initialSyncKey: String {
         let channelsDone = !channelStore.isLoading && !channelStore.channels.isEmpty
-        let epgDone      = !channelStore.isEPGLoading
+        // Both the JSON bulk EPG (`channelStore.isEPGLoading`) AND the
+        // XMLTV parse (`guideStore.isLoading`) need to wrap before the
+        // loading cover is honest. XMLTV is generally the slower of
+        // the two but carries the category data the user actually
+        // sees — dismissing before XMLTV finishes produces the
+        // "partial guide appears, then pops in more content" UX that
+        // users reported as "no loading indicator, took forever."
+        let epgDone      = !channelStore.isEPGLoading && !guideStore.isLoading
         let vodDone      = !vodStore.isLoadingMovies && !vodStore.isLoadingSeries
         let dvrDone      = didInitialDVRReconcile || !needsInitialDVRSync
-        return "\(channelsDone)|\(epgDone)|\(vodDone)|\(dvrDone)"
+        let errorPresent = channelStore.error != nil
+        return "\(channelsDone)|\(epgDone)|\(vodDone)|\(dvrDone)|\(errorPresent)"
     }
 
-    /// Dynamic status string displayed on the Loading Guide screen so
-    /// the user knows which phase is in flight. Evaluated top-down in
-    /// roughly the order the phases complete.
-    private var initialLoadingStatusText: String {
-        if channelStore.isLoading || channelStore.channels.isEmpty {
-            return "Loading channels"
+    /// Derived stage list for the initial-sync loading cover, passed
+    /// to `ServerSyncView` in its `.initialLaunch` mode. The four
+    /// phases run partly in parallel (channels + VOD at least), so
+    /// the cover shows them as independent rows with their own status
+    /// indicators rather than as a single progressing status string.
+    /// Derived from the observed stores — no separate fetch logic
+    /// lives inside the cover itself.
+    private var loadingStages: [SyncStage] {
+        // EPG: combined "channels + guide programs" stage. Still
+        // `.loading` until both the JSON bulk AND the XMLTV parse
+        // have wrapped, so the row flips to `.done` only when the
+        // guide is actually usable.
+        let channelsReady = !channelStore.isLoading && !channelStore.channels.isEmpty
+        let epgReady = !channelStore.isEPGLoading && !guideStore.isLoading
+        var epgStage = SyncStage(id: "epg", label: "Loading EPG")
+        if channelsReady && epgReady {
+            let channelCount = channelStore.channels.count
+            let programCount = guideStore.programs.values.reduce(0) { $0 + $1.count }
+            let detail: String
+            if programCount > 0 {
+                detail = "\(channelCount) channels · \(programCount) programs"
+            } else if channelCount > 0 {
+                detail = "\(channelCount) channels"
+            } else {
+                detail = ""
+            }
+            epgStage.status = .done(detail)
+        } else {
+            epgStage.status = .loading
         }
-        if channelStore.isEPGLoading {
-            return "Downloading program guide"
+
+        // VOD stage — only really meaningful for servers that expose
+        // a VOD library. For pure live-TV sources (M3U), the stage
+        // resolves immediately to a "not available" done state.
+        let hasVODServer = allServers.contains { $0.supportsVOD }
+        var vodStage = SyncStage(id: "vod", label: "Loading VOD")
+        if !hasVODServer {
+            vodStage.status = .done("No VOD on this source")
+        } else if vodStore.isLoadingMovies || vodStore.isLoadingSeries {
+            vodStage.status = .loading
+        } else {
+            let titles = vodStore.movies.count + vodStore.series.count
+            vodStage.status = .done(titles > 0 ? "\(titles) titles" : "")
         }
-        if vodStore.isLoadingMovies || vodStore.isLoadingSeries {
-            return "Loading movies & series"
+
+        // DVR stage — only relevant for Dispatcharr servers.
+        // Resolves to "not available" on XC / M3U since those don't
+        // have a server-side recording API.
+        var dvrStage = SyncStage(id: "dvr", label: "Loading DVR")
+        if !needsInitialDVRSync {
+            dvrStage.status = .done("Not available for this server type")
+        } else if didInitialDVRReconcile {
+            dvrStage.status = .done("")
+        } else {
+            dvrStage.status = .loading
         }
-        if needsInitialDVRSync && !didInitialDVRReconcile {
-            return "Syncing recordings"
-        }
-        return "Finishing up"
+
+        // Preferences stage — reflects the iCloud KVS pull. Always
+        // done by the time the cover even has channels to show
+        // (SyncManager.pullFromCloud fires earlier during onboarding
+        // or app launch), so we surface the synced/off state rather
+        // than animating a meaningless spinner.
+        var prefsStage = SyncStage(id: "preferences", label: "Loading preferences")
+        prefsStage.status = .done(
+            SyncManager.shared.isSyncEnabled ? "Synced" : "iCloud Sync off"
+        )
+
+        return [epgStage, vodStage, dvrStage, prefsStage]
+    }
+
+    /// Name shown under "Setting Up" on the initial-launch cover.
+    /// When multiple servers are configured we surface the first
+    /// one's name — showing "2 servers" would be technically
+    /// accurate but less warm than "Your Dispatcharr Box". Empty
+    /// string resolves to "Your server" inside `ServerSyncView`.
+    private var initialLoadingServerName: String {
+        allServers.first?.name ?? ""
     }
 
     /// Show the initial sync loading screen when we have a server
@@ -1549,8 +2096,23 @@ struct MainTabView: View {
     /// views instead of a half-populated app.
     private func tryDismissInitialLoading() {
         guard showInitialEPGLoading else { return }
+
+        // Error path — channel fetch ended with an error and no data arrived.
+        // Dismiss the loading screen so the underlying error view can render
+        // its actionable message (e.g. "Invalid credentials — check your API
+        // Key in Settings") instead of trapping the user behind a spinner.
+        if channelStore.error != nil, channelStore.channels.isEmpty, !channelStore.isLoading {
+            withAnimation(.easeOut(duration: 0.4)) {
+                showInitialEPGLoading = false
+            }
+            debugLog("🔶 Initial sync ended with error — dismissing loading screen so error view can show")
+            return
+        }
+
         guard !channelStore.isLoading, !channelStore.channels.isEmpty else { return }
         guard !channelStore.isEPGLoading else { return }
+        // XMLTV parse must also complete — see `initialSyncKey` doc comment.
+        guard !guideStore.isLoading else { return }
         guard !vodStore.isLoadingMovies, !vodStore.isLoadingSeries else { return }
         if needsInitialDVRSync && !didInitialDVRReconcile { return }
 
@@ -1563,7 +2125,8 @@ struct MainTabView: View {
     @State private var miniPlayerDragOffset: CGFloat = 0
 
     private var isAnyBackgroundWork: Bool {
-        channelStore.isLoading || channelStore.isEPGLoading || vodStore.isLoadingMovies || vodStore.isLoadingSeries
+        channelStore.isLoading || channelStore.isEPGLoading || guideStore.isLoading
+            || vodStore.isLoadingMovies || vodStore.isLoadingSeries
     }
 
     var body: some View {
@@ -1676,14 +2239,39 @@ struct MainTabView: View {
                             )
                             // Hit-testing off so remote taps don't
                             // land on the mini. Focus-release is
-                            // handled inside `MultiviewTileView`
-                            // (the tile's Button reads
-                            // `nowPlaying.isMinimized` and flips its
-                            // own `.focusable(false)` — `.disabled`
-                            // on the wrapper also suppresses
-                            // `.onPlayPauseCommand` at the container
-                            // level, which is why we don't use it
-                            // here.
+                            // forced here by `.disabled(minimized)`
+                            // — that makes the tile Button inside
+                            // MultiviewTileView non-focusable, so
+                            // tvOS's focus engine cannot land on
+                            // the mini and must route D-pad focus
+                            // to the guide behind. An earlier
+                            // attempt delegated focus-release to
+                            // MultiviewTileView via conditional
+                            // `.focusable(Bool)` on the Button,
+                            // but Apple's docs + on-device testing
+                            // showed that `.focusable(Bool)` on a
+                            // SwiftUI Button is ignored while the
+                            // Button already holds focus — so the
+                            // tile stayed focused and only the
+                            // NEXT D-pad movement escaped the
+                            // mini. Disabling at this wrapper
+                            // level is what the user sees as
+                            // "focus immediately returns to the
+                            // guide on minimize."
+                            //
+                            // `.onPlayPauseCommand { nowPlaying.expand() }`
+                            // lives at the MainTabView body level
+                            // (see HomeView `.onPlayPauseCommand`
+                            // far above) — that handler is attached
+                            // OUTSIDE this disabled subtree and
+                            // still fires, so Play/Pause on the
+                            // Siri Remote still re-expands the
+                            // mini. The guide's
+                            // `.prefersDefaultFocus` + the
+                            // `.forceGuideFocus` `resetFocus`
+                            // handler handle the "which guide row
+                            // gets focus" question.
+                            .disabled(minimized)
                             .allowsHitTesting(!minimized)
                             .padding(.trailing, minimized ? 40 : 0)
                             .padding(.top, minimized ? 40 : 0)
@@ -1830,6 +2418,19 @@ struct MainTabView: View {
 
     private var hasFavorites: Bool { !favoritesStore.favoriteItems.isEmpty }
     private var hasRecordings: Bool { !allRecordings.isEmpty }
+    /// True when the active server has advertised ANY VOD content, OR
+    /// is still loading its VOD library. Keeping the tab visible while
+    /// loading prevents the flicker of "tab missing → tab appears" on
+    /// cold launch or server switch. A server that completes loading
+    /// with zero movies and zero series (e.g., a bare live-TV-only
+    /// M3U) hides the tab entirely — matching the dynamic behaviour
+    /// of the DVR and Favorites tabs.
+    private var hasVOD: Bool {
+        !vodStore.movies.isEmpty
+            || !vodStore.series.isEmpty
+            || vodStore.isLoadingMovies
+            || vodStore.isLoadingSeries
+    }
 
     // MARK: - Tab Content
     private var tabContentView: some View {
@@ -1856,9 +2457,17 @@ struct MainTabView: View {
                 .tag(AppTab.dvr)
             }
 
-            OnDemandView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
-                .tabItem { Label(AppTab.onDemand.title, systemImage: AppTab.onDemand.icon) }
-                .tag(AppTab.onDemand)
+            // On Demand tab only exists while the active server exposes
+            // VOD content (or is still loading its library). A server
+            // that returns empty movie + series lists (e.g., a pure
+            // live-TV M3U or a Dispatcharr instance without any VOD
+            // ingested) hides the tab entirely, matching the dynamic
+            // behaviour of Favorites and DVR.
+            if hasVOD {
+                OnDemandView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
+                    .tabItem { Label(AppTab.onDemand.title, systemImage: AppTab.onDemand.icon) }
+                    .tag(AppTab.onDemand)
+            }
 
             #if os(tvOS)
             SettingsView(selectedTab: $selectedTab)
@@ -1882,6 +2491,17 @@ struct MainTabView: View {
         // If the user deletes their last recording while on the DVR tab, redirect home.
         .onChange(of: hasRecordings) { _, nowHasRecordings in
             if !nowHasRecordings && selectedTab == .dvr {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                    selectedTab = .liveTV
+                }
+            }
+        }
+        // If the VOD library drains (e.g., server switched to a
+        // pure live-TV source) while the user is on the On Demand
+        // tab, redirect home rather than leaving them staring at a
+        // tab whose backing content is gone.
+        .onChange(of: hasVOD) { _, nowHasVOD in
+            if !nowHasVOD && selectedTab == .onDemand {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     selectedTab = .liveTV
                 }
@@ -1917,8 +2537,27 @@ struct MainTabView: View {
         // every signal; onChange fires each time any of them flip.
         .onChange(of: initialSyncKey) { _, _ in tryDismissInitialLoading() }
         .fullScreenCover(isPresented: $showInitialEPGLoading) {
-            InitialEPGLoadingView(statusText: initialLoadingStatusText)
-                .interactiveDismissDisabled()
+            // Reuse the same cover that fires after onboarding so users
+            // see a consistent "Setting Up …" experience whether they
+            // just added a server or are booting a fresh install. The
+            // `.initialLaunch` mode lets `ServerSyncView` render our
+            // store-derived stages instead of driving its own fetches.
+            ServerSyncView(
+                mode: .initialLaunch(
+                    serverName: initialLoadingServerName,
+                    stages: loadingStages,
+                    onContinueAnyway: {
+                        // User-triggered escape hatch — drops them
+                        // into the main UI even if background fetches
+                        // are still hung. When the fetch eventually
+                        // fails with an error,
+                        // `ChannelListView.errorView` handles
+                        // surfacing the retry path.
+                        showInitialEPGLoading = false
+                        debugLog("🔶 User dismissed initial loading screen manually")
+                    }
+                )
+            )
         }
         // Pre-fetch VOD data whenever the VOD server list changes.
         // Delay VOD loading so it doesn't compete with channel loading on remote servers.
@@ -1938,12 +2577,36 @@ struct MainTabView: View {
             debugLog("🔶 MainTabView.task(channelServerKey): firing, servers=\(allServers.count)")
             channelStore.refresh(servers: allServers)
             debugLog("🔶 MainTabView.task(channelServerKey): refresh called")
+            // Flip `isEPGLoading` to true RIGHT NOW — before the
+            // wait-for-channels loop. Without this there's a race
+            // window: `channelStore.isLoading` flips false the
+            // instant channels finish hydrating (from
+            // SwiftData / the JSON API), but `isEPGLoading` doesn't
+            // flip true until the next line starts executing
+            // `loadAllEPG`. In that single-run-loop-tick gap,
+            // `initialSyncKey` reads `channelsDone=true` AND
+            // `epgDone=true` AND dismisses the ServerSyncView
+            // cover — before a single XMLTV byte has downloaded.
+            // The user sees Live TV with uncolored schedule rows
+            // because `seedEPGCache` hasn't run yet. Setting the
+            // flag pre-emptively closes the race; `loadAllEPG`'s
+            // `defer` still resets it when done.
+            if !allServers.isEmpty {
+                channelStore.isEPGLoading = true
+            }
             // Wait for channels to finish loading, then load ALL EPG upfront
             while channelStore.isLoading {
                 try? await Task.sleep(for: .milliseconds(200))
             }
             if !channelStore.channels.isEmpty {
                 await channelStore.loadAllEPG()
+            } else {
+                // Channel load failed (auth, server down). Reset
+                // the flag we pre-set above so the cover can
+                // dismiss via the error path — otherwise the user
+                // would be stuck staring at "Setting Up …" with
+                // no way out.
+                channelStore.isEPGLoading = false
             }
         }
         // DVR reconcile at tab-bar level so the DVR tab lights up as
@@ -1983,40 +2646,13 @@ struct MainTabView: View {
         }
         .liquidGlassTabBar()
         #if os(tvOS)
-        .onExitCommand {
-            if nowPlaying.isActive && !nowPlaying.isMinimized {
-                debugLog("🎮 Menu pressed: full-screen player → minimize to corner")
-                withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() }
-            } else if nowPlaying.isActive && nowPlaying.isMinimized {
-                // Under unified playback, the mini is N=1 multiview
-                // collapsed to a corner. Fully stopping requires
-                // `PlayerSession.shared.stop()` — it tears down
-                // MultiviewStore + mpv + flips mode to `.idle`.
-                // `nowPlaying.stop()` alone only clears lockscreen
-                // metadata and leaves the container rendering.
-                debugLog("🎮 Menu pressed: mini player → stop playback")
-                PlayerSession.shared.stop()
-            } else if isVODDetailPushed {
-                // Pop the VOD detail view back to the browse list.
-                // We must do this programmatically because .onExitCommand consumes
-                // the Menu event before NavigationStack can handle it.
-                debugLog("🎮 Menu pressed: VOD detail pushed → popping to browse list")
-                isVODDetailPushed = false
-                vodNavPopRequested = true
-            } else if selectedTab == .liveTV {
-                // Menu on the guide (nothing playing, no mini) =
-                // "take me back to the top of the list". Matches the
-                // Apple TV / Music convention for long lists. Posted
-                // as a notification so ChannelListView can scroll its
-                // internal ScrollViewReader without HomeView having
-                // to hold a binding through the tab view hierarchy.
-                debugLog("🎮 Menu pressed: Live TV tab → scroll guide to top")
-                NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
-            } else {
-                debugLog("🎮 Menu pressed: \(selectedTab.rawValue) tab → switch to Live TV")
-                selectedTab = .liveTV
-            }
-        }
+        // Body extracted to `handleMenuPress()` — the inline closure grew
+        // past Swift's type-inference budget (the chain of `else if`
+        // branches mixed with string interpolation in `debugLog`'s
+        // `@autoclosure` repeatedly tripped "unable to type-check this
+        // expression in reasonable time"). Calling a plain method side-
+        // steps the budget entirely.
+        .onExitCommand { handleMenuPress() }
         .onPlayPauseCommand {
             if nowPlaying.isMinimized {
                 debugLog("🎮 Play/Pause pressed: expand mini player to full screen")
@@ -2047,6 +2683,50 @@ struct MainTabView: View {
         #endif
     }
 
+    #if os(tvOS)
+    /// Apple TV Menu-button handler. Pulled out of `.onExitCommand`
+    /// because the inline closure repeatedly tripped Swift's
+    /// type-inference budget ("unable to type-check this expression in
+    /// reasonable time") as the if/else chain grew with the v1.6.x
+    /// tab-state additions. A plain method has its own scope so the
+    /// budget resets cleanly.
+    private func handleMenuPress() {
+        if nowPlaying.isActive && !nowPlaying.isMinimized {
+            debugLog("🎮 Menu pressed: full-screen player → minimize to corner")
+            withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() }
+        } else if nowPlaying.isActive && nowPlaying.isMinimized {
+            // Under unified playback, the mini is N=1 multiview
+            // collapsed to a corner. Fully stopping requires
+            // `PlayerSession.shared.stop()` — it tears down
+            // MultiviewStore + mpv + flips mode to `.idle`.
+            // `nowPlaying.stop()` alone only clears lockscreen
+            // metadata and leaves the container rendering.
+            debugLog("🎮 Menu pressed: mini player → stop playback")
+            PlayerSession.shared.stop()
+        } else if isVODDetailPushed {
+            // Pop the VOD detail view back to the browse list.
+            // We must do this programmatically because .onExitCommand consumes
+            // the Menu event before NavigationStack can handle it.
+            debugLog("🎮 Menu pressed: VOD detail pushed → popping to browse list")
+            isVODDetailPushed = false
+            vodNavPopRequested = true
+        } else if selectedTab == .liveTV {
+            // Menu on the guide (nothing playing, no mini) =
+            // "take me back to the top of the list". Matches the
+            // Apple TV / Music convention for long lists. Posted
+            // as a notification so ChannelListView can scroll its
+            // internal ScrollViewReader without HomeView having
+            // to hold a binding through the tab view hierarchy.
+            debugLog("🎮 Menu pressed: Live TV tab → scroll guide to top")
+            NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
+        } else {
+            let tabName = selectedTab.rawValue
+            debugLog("🎮 Menu pressed: " + tabName + " tab → switch to Live TV")
+            selectedTab = .liveTV
+        }
+    }
+    #endif
+
     private func configureTabBarAppearance() {
         debugLog("🔶 MainTabView.configureTabBarAppearance: thread=\(Thread.current)")
 #if os(iOS)
@@ -2070,6 +2750,37 @@ struct MainTabView: View {
 
 
 #if os(iOS)
+// MARK: - Mini Player Chrome Modifier
+
+/// Wraps the `MultiviewContainerView` with the mini-player visual
+/// chrome (rounded clip + drop shadow) when, and only when, the
+/// player is in its minimized state. Applying these modifiers
+/// unconditionally — even with cornerRadius=0 / color=.clear —
+/// inserts a mask layer + shadow rendering pass into the layer
+/// tree at fullscreen, and that extra layer stack was interfering
+/// with iOS's auto-PiP restore animation (the transition fell back
+/// to the generic "zoom + PiP-icon" placeholder because iOS's
+/// floating-window → source-layer animation couldn't cleanly
+/// animate through the mask/shadow stack). Using a ViewModifier
+/// keeps the wrapped view's identity stable across the branch
+/// (SwiftUI's `_ConditionalContent` preserves view identity for
+/// the `content` parameter), so flipping between minimized and
+/// fullscreen doesn't rebuild `MultiviewContainerView` and tear
+/// down the active mpv player.
+private struct MiniPlayerChromeModifier: ViewModifier {
+    let minimized: Bool
+
+    func body(content: Content) -> some View {
+        if minimized {
+            content
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .shadow(color: .black.opacity(0.6), radius: 20, y: 8)
+        } else {
+            content
+        }
+    }
+}
+
 // MARK: - Mini Player Bar
 struct MiniPlayerBar: View {
     let item: ChannelDisplayItem
@@ -2227,62 +2938,3 @@ struct MiniPlayerBar: View {
 }
 #endif
 
-// MARK: - Initial EPG Loading View
-/// Full-screen loading view shown while initial channels + EPG + VOD
-/// + DVR data syncs. Dismissed automatically once every phase is
-/// finished so the user never lands in a half-populated List / Guide.
-struct InitialEPGLoadingView: View {
-    /// Current phase, e.g. "Loading channels", "Downloading program
-    /// guide", "Loading movies & series", "Syncing recordings". The
-    /// parent (MainTabView) computes this from the live store flags.
-    let statusText: String
-
-    @ObservedObject private var theme = ThemeManager.shared
-    @State private var dots = ""
-    @State private var timer: Timer?
-
-    var body: some View {
-        ZStack {
-            Color.appBackground.ignoresSafeArea()
-            VStack(spacing: 24) {
-                Spacer()
-
-                Image(systemName: "tv.and.mediabox")
-                    .font(.system(size: 64))
-                    .foregroundColor(theme.accent)
-
-                Text("Setting Up")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundColor(.textPrimary)
-
-                Text("\(statusText)\(dots)")
-                    .font(.system(size: 18))
-                    .foregroundColor(.textSecondary)
-                    .frame(width: 400, alignment: .center)
-                    .animation(.easeInOut(duration: 0.2), value: statusText)
-
-                ProgressView()
-                    .progressViewStyle(.circular)
-                    #if os(tvOS)
-                    .scaleEffect(1.5)
-                    #endif
-                    .tint(theme.accent)
-                    .padding(.top, 8)
-
-                Spacer()
-                Spacer()
-            }
-        }
-        .onAppear {
-            timer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [self] _ in
-                Task { @MainActor in
-                    dots = dots.count >= 3 ? "" : dots + "."
-                }
-            }
-        }
-        .onDisappear {
-            timer?.invalidate()
-            timer = nil
-        }
-    }
-}

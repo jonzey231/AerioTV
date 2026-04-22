@@ -40,25 +40,49 @@ struct MultiviewLayoutView<Content: View>: View {
 
     var body: some View {
         GeometryReader { geom in
-            let rects = MultiviewGridMath.rects(
-                for: tiles.count,
-                in: geom.size,
-                spacing: spacing
-            )
-            ZStack(alignment: .topLeading) {
-                // Zip is safe: if tiles.count > 9 the math clamps to 9
-                // and zip will truncate — we'd rather drop a tile
-                // visually than index-OOB crash. The store itself caps
-                // at 9 via `MultiviewStore.maxTiles`.
-                ForEach(Array(zip(tiles, rects).enumerated()), id: \.element.0.id) { _, pair in
-                    let (tile, rect) = pair
-                    content(tile)
-                        .frame(width: rect.width, height: rect.height)
-                        .position(x: rect.midX, y: rect.midY)
-                        .transition(.scale(scale: 0.85).combined(with: .opacity))
+            if tiles.count == 1, let sole = tiles.first {
+                // N=1 short-circuit — critical for auto-PiP restore.
+                //
+                // At N=1 the sole tile IS the player view. Wrapping it
+                // in `.frame(width:height:).position(x:y:)` inside an
+                // `.animation(.easeInOut, value: tiles)` scope inserts
+                // a transform + implicit-animation layer above the
+                // `AVSampleBufferDisplayLayer`, which makes iOS's
+                // auto-PiP restore animation unable to compute a
+                // clean target rect and fall back to its default
+                // "zoom + PiP-icon placeholder" transition. Legacy
+                // `PlayerView` mounts the representable flat inside a
+                // plain ZStack (no position/frame/animation wrapper)
+                // and iOS's restore lands cleanly there — we match
+                // that shape at N=1.
+                //
+                // At N>=2 the grid math (position + frame + implicit
+                // tiles-value animation) is exactly what we want for
+                // the add/remove/rearrange choreography, so we keep
+                // it there.
+                content(sole)
+                    .frame(width: geom.size.width, height: geom.size.height)
+            } else {
+                let rects = MultiviewGridMath.rects(
+                    for: tiles.count,
+                    in: geom.size,
+                    spacing: spacing
+                )
+                ZStack(alignment: .topLeading) {
+                    // Zip is safe: if tiles.count > 9 the math clamps to 9
+                    // and zip will truncate — we'd rather drop a tile
+                    // visually than index-OOB crash. The store itself caps
+                    // at 9 via `MultiviewStore.maxTiles`.
+                    ForEach(Array(zip(tiles, rects).enumerated()), id: \.element.0.id) { _, pair in
+                        let (tile, rect) = pair
+                        content(tile)
+                            .frame(width: rect.width, height: rect.height)
+                            .position(x: rect.midX, y: rect.midY)
+                            .transition(.scale(scale: 0.85).combined(with: .opacity))
+                    }
                 }
+                .animation(.easeInOut(duration: 0.28), value: tiles)
             }
-            .animation(.easeInOut(duration: 0.28), value: tiles)
         }
     }
 }

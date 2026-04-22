@@ -29,6 +29,16 @@ import SwiftData
 /// Phase 2: fetches upcoming programs from network (only if cache is stale).
 @MainActor
 final class GuideStore: ObservableObject {
+    /// Singleton so non-guide views (MainTabView's initial-sync
+    /// loading cover, specifically) can observe `isLoading` during
+    /// the XMLTV parse. Previously GuideStore was a per-view
+    /// `@StateObject` in EPGGuideView — which meant MainTabView had
+    /// no visibility into whether XMLTV had finished, so the loading
+    /// cover would dismiss on the faster JSON bulk path and drop
+    /// the user into a partially-populated guide while XMLTV was
+    /// still parsing silently.
+    static let shared = GuideStore()
+
     @Published var programs: [String: [GuideProgram]] = [:]  // channelID → programs
     @Published var isLoading = false
 
@@ -188,6 +198,15 @@ final class GuideStore: ObservableObject {
             return
         }
         isLoading = true
+        // Previously the only `isLoading = false` assignment was on
+        // the "no server found" early-return path. The normal happy
+        // path fell through without resetting the flag, which meant
+        // subsequent `fetchUpcoming` calls (tab switch, pull-to-
+        // refresh, iCloud sync triggering a channels refresh) would
+        // hit the guard above and no-op forever. It also kept the
+        // "Syncing…" indicator pinned and the initial-sync loading
+        // cover waiting indefinitely.
+        defer { isLoading = false }
 
         let now = Date()
         let windowStart = now.addingTimeInterval(-3600)
@@ -199,8 +218,7 @@ final class GuideStore: ObservableObject {
 
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else {
             debugLog("📺 GuideStore.fetchUpcoming: no server found")
-            isLoading = false
-            return
+            return  // `defer` above resets isLoading
         }
         debugLog("📺 GuideStore.fetchUpcoming: server=\(server.name), type=\(server.type), channels=\(channels.count)")
 
@@ -244,6 +262,44 @@ final class GuideStore: ObservableObject {
     // MARK: - Dispatcharr
     private func fetchDispatcharr(server: ServerConnection, channels: [ChannelDisplayItem],
                                    windowStart: Date, windowEnd: Date) async {
+        // Prefer Dispatcharr's XMLTV output endpoint over the JSON REST
+        // API. The `/api/epg/*` endpoints strip category data, but
+        // `{baseURL}/output/epg` re-emits the upstream XMLTV including
+        // `<category>` tags — see `apps/output/views.py`'s
+        // `generate_epg()`. This is also what third-party clients like
+        // Emby / Jellyfin consume, so it's the canonical "give me my
+        // guide data" URL. The user's explicit override wins when set
+        // (some setups need a different XMLTV source or auth token).
+        //
+        // NOTE: handled before beginBatch() to avoid nested batch sessions —
+        // fetchXMLTVFromURL manages its own begin/endBatch pair.
+        let explicitURL = server.dispatcharrXMLTVURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = server.effectiveBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let derivedOutputURL: String? = {
+            guard !base.isEmpty else { return nil }
+            let trimmed = base.hasSuffix("/") ? String(base.dropLast()) : base
+            // Append `?tvg_id_source=tvg_id` so Dispatcharr emits the
+            // <channel id="..."> + <programme channel="..."> attributes
+            // using each channel's tvg_id. Without this, Dispatcharr
+            // defaults to the channel NUMBER, which is effectively
+            // random for our tvg_id-keyed channel matching. See
+            // Dispatcharr's apps/output/views.py `generate_epg()`:
+            //
+            //   if tvg_id_source == 'tvg_id' and channel.tvg_id:
+            //       channel_id = channel.tvg_id
+            //   else:
+            //       channel_id = str(formatted_channel_number)
+            return "\(trimmed)/output/epg?tvg_id_source=tvg_id"
+        }()
+        if let xmltvURL = (explicitURL.isEmpty ? derivedOutputURL : explicitURL),
+           let parsedURL = URL(string: xmltvURL) {
+            debugLog("📺 [EPG source=xmltv-direct source=\(explicitURL.isEmpty ? "dispatcharr-output" : "custom-override")] server=\(server.name) url=\(parsedURL.host ?? "?")")
+            await fetchXMLTVFromURL(url: parsedURL, channels: channels,
+                                     windowStart: windowStart, windowEnd: windowEnd)
+            return
+        }
+        debugLog("📺 [EPG source=dispatcharr-api fallback] server=\(server.name) (could not build XMLTV URL)")
+
         beginBatch()
         defer { endBatch() }
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
@@ -265,11 +321,29 @@ final class GuideStore: ObservableObject {
             },
             uniquingKeysWith: { first, _ in first }
         )
+        // THIRD key: channel UUID → display ID. Dispatcharr's Dummy
+        // EPG feature (custom-pattern + standard no-EPG fallback)
+        // synthesizes program entries whose `tvg_id` is NOT the
+        // channel's real tvg_id but the channel's UUID string
+        // (`str(channel.uuid)` in Dispatcharr's Python source — see
+        // `apps/epg/api_views.py::EPGGridAPIView`). Without this
+        // mapping, every channel relying on Dummy EPG would appear
+        // blank in the Aerio guide because the first-pass
+        // `tvgIDToChannelID` lookup misses and the `intIDToChannelID`
+        // fallback runs only when `prog.tvg_id` is absent. Lowercase
+        // both sides for consistency with the tvgID map.
+        let uuidToChannelID: [String: String] = Dictionary(
+            channels.compactMap { ch in
+                guard let u = ch.uuid, !u.isEmpty else { return nil }
+                return (u.lowercased(), ch.id)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
 
         // Try the EPG grid endpoint first — returns -1h to +24h in one request with
         // synthetic dummy programs for channels without EPG data.
         #if DEBUG
-        debugLog("📺 Dispatcharr: fetching EPG grid, tvgID map has \(tvgIDToChannelID.count) entries, intID map has \(intIDToChannelID.count) entries")
+        debugLog("📺 Dispatcharr: fetching EPG grid, tvgID map has \(tvgIDToChannelID.count) entries, intID map has \(intIDToChannelID.count) entries, uuid map has \(uuidToChannelID.count) entries")
         #endif
         do {
             let gridPrograms = try await api.getEPGGrid()
@@ -277,13 +351,23 @@ final class GuideStore: ObservableObject {
             debugLog("📺 Dispatcharr: EPG grid returned \(gridPrograms.count) programs")
             #endif
             var matched = 0
+            var matchedViaUUID = 0
             for prog in gridPrograms {
                 guard let start = prog.startTime?.toDate(),
                       let end = prog.endTime?.toDate(),
                       end > windowStart && start < windowEnd else { continue }
                 let channelID: String?
                 if let tvg = prog.tvgID, !tvg.isEmpty {
-                    channelID = tvgIDToChannelID[tvg.lowercased()]
+                    let key = tvg.lowercased()
+                    if let cid = tvgIDToChannelID[key] {
+                        channelID = cid
+                    } else if let cid = uuidToChannelID[key] {
+                        // Dummy EPG entry — the `tvg_id` IS the channel UUID.
+                        channelID = cid
+                        matchedViaUUID += 1
+                    } else {
+                        channelID = nil
+                    }
                 } else if let chInt = prog.channel {
                     channelID = intIDToChannelID[chInt]
                 } else {
@@ -297,7 +381,7 @@ final class GuideStore: ObservableObject {
                 mergeProgram(gp, for: cid)
             }
             #if DEBUG
-            debugLog("📺 Dispatcharr: EPG grid matched \(matched) programs to channels")
+            debugLog("📺 Dispatcharr: EPG grid matched \(matched) programs to channels (\(matchedViaUUID) via Dummy EPG UUID key)")
             #endif
             return // Grid endpoint succeeded — no need for fallback
         } catch {
@@ -315,7 +399,8 @@ final class GuideStore: ObservableObject {
                       end > windowStart && start < windowEnd else { continue }
                 let channelID: String?
                 if let tvg = prog.tvgID, !tvg.isEmpty {
-                    channelID = tvgIDToChannelID[tvg.lowercased()]
+                    let key = tvg.lowercased()
+                    channelID = tvgIDToChannelID[key] ?? uuidToChannelID[key]
                 } else if let chInt = prog.channel {
                     channelID = intIDToChannelID[chInt]
                 } else {
@@ -337,7 +422,8 @@ final class GuideStore: ObservableObject {
                       end > windowStart && start < windowEnd else { continue }
                 let channelID: String?
                 if let tvg = prog.tvgID, !tvg.isEmpty {
-                    channelID = tvgIDToChannelID[tvg.lowercased()]
+                    let key = tvg.lowercased()
+                    channelID = tvgIDToChannelID[key] ?? uuidToChannelID[key]
                 } else if let chInt = prog.channel {
                     channelID = intIDToChannelID[chInt]
                 } else {
@@ -410,64 +496,157 @@ final class GuideStore: ObservableObject {
                              windowStart: Date, windowEnd: Date) async {
         let epgURLStr = server.effectiveEPGURL
         guard !epgURLStr.isEmpty, let epgURL = URL(string: epgURLStr) else { return }
-        guard let parsed = try? await XMLTVParser.fetchAndParse(url: epgURL) else { return }
+        await fetchXMLTVFromURL(url: epgURL, channels: channels,
+                                 windowStart: windowStart, windowEnd: windowEnd)
+    }
+
+    /// Core XMLTV fetch/parse path. Accepts a pre-resolved URL so callers
+    /// that source their XMLTV feed from somewhere other than
+    /// `server.effectiveEPGURL` (e.g. the per-server Dispatcharr XMLTV
+    /// override) can reuse the exact same parsing + matching logic.
+    ///
+    /// Matching strategy: the XMLTV spec says `<programme channel="...">`
+    /// must match a `<channel id="...">` earlier in the document, but
+    /// the spec is silent on what that id looks like. In the wild we
+    /// see three patterns:
+    ///   • tvg_id (e.g. "espn.us") — what most pure-XMLTV sources use
+    ///   • channel number (e.g. "5") — what Dispatcharr's `/output/epg`
+    ///     uses by default when the `tvg_id_source` query param isn't set
+    ///   • Dispatcharr channel UUID — used for synthetic "Dummy EPG"
+    ///     entries on channels that have no upstream XMLTV mapping
+    ///
+    /// We build maps for all three (case-insensitive) and try them in
+    /// order: tvg_id → number → UUID. A programme matches the first
+    /// map that contains its `channel=...` value. This mirrors the
+    /// logic in the JSON-API Dispatcharr fetch path above and makes
+    /// us resilient to whichever identifier shape the XMLTV source
+    /// happened to use.
+    /// Internal (no `private`) so `ChannelStore.loadAllEPG` can call
+    /// the same path from the non-Guide-view code flow (iPhone never
+    /// mounts EPGGuideView, but it still needs XMLTV data for the
+    /// Live-TV list tint + per-program expanded-schedule colors).
+    /// Both call sites end up populating `programs` + seeding
+    /// `EPGCache` via `seedEPGCache`, so Guide view and List view
+    /// read from one unified dataset.
+    func fetchXMLTVFromURL(url: URL, channels: [ChannelDisplayItem],
+                                    windowStart: Date, windowEnd: Date) async {
+        guard let parsed = try? await XMLTVParser.fetchAndParse(url: url) else {
+            debugLog("📺 XMLTV fetch/parse failed for \(url.host ?? "?")")
+            return
+        }
         beginBatch()
         defer { endBatch() }
 
         let tvgIDToChannelID: [String: String] = Dictionary(
             channels.compactMap { ch in
                 guard let tvg = ch.tvgID, !tvg.isEmpty else { return nil }
-                return (tvg, ch.id)
+                return (tvg.lowercased(), ch.id)
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let numberToChannelID: [String: String] = Dictionary(
+            channels.map { ($0.number, $0.id) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let uuidToChannelID: [String: String] = Dictionary(
+            channels.compactMap { ch in
+                guard let uuid = ch.uuid, !uuid.isEmpty else { return nil }
+                return (uuid.lowercased(), ch.id)
             },
             uniquingKeysWith: { first, _ in first }
         )
 
+        var matched = 0
+        var missed = 0
+        // Collect currently-airing categories keyed by channel id so we
+        // can push them back to ChannelStore after the loop — that makes
+        // the Live TV list view's "Tint Channel Cards" stripe work off
+        // the same XMLTV source as the guide itself.
+        let now = Date()
+        var currentCategoriesByChannelID: [String: String] = [:]
         for prog in parsed {
-            guard prog.endTime > windowStart && prog.startTime < windowEnd,
-                  let channelID = tvgIDToChannelID[prog.channelID] else { continue }
-            let gp = GuideProgram(channelID: channelID, title: prog.title,
+            guard prog.endTime > windowStart && prog.startTime < windowEnd else { continue }
+            let key = prog.channelID.lowercased()
+            let channelID = tvgIDToChannelID[key]
+                ?? numberToChannelID[prog.channelID]
+                ?? uuidToChannelID[key]
+            guard let cid = channelID else {
+                missed += 1
+                continue
+            }
+            matched += 1
+            let gp = GuideProgram(channelID: cid, title: prog.title,
                                   description: prog.description,
                                   start: prog.startTime, end: prog.endTime,
                                   category: prog.category)
-            mergeProgram(gp, for: channelID)
+            mergeProgram(gp, for: cid)
+            // Track the currently-airing program per channel.
+            if !prog.category.isEmpty, prog.startTime <= now, prog.endTime > now {
+                currentCategoriesByChannelID[cid] = prog.category
+            }
         }
+        debugLog("📺 XMLTV \(url.host ?? "?"): \(matched) programs matched, \(missed) skipped (no channel)")
+        // Back-fill ChannelStore so Tint Channel Cards reflects the
+        // XMLTV categories on every channel row.
+        ChannelStore.shared.applyXMLTVCategories(currentCategoriesByChannelID)
     }
 
     // MARK: - Rolling Prefetch
-    /// Tracks which channel IDs have already been fetched to avoid duplicate requests.
+    /// Tracks channels that have either populated data (via the bulk
+    /// fetch) or returned from a per-channel fetch. Reset by
+    /// `resetPrefetchCache()` after bulk refresh / pull-to-refresh so
+    /// the set doesn't poison subsequent scroll cycles (GH #3:
+    /// "scroll past and back = empty" — the set persisted forever
+    /// even when the per-channel fetch had returned zero programs,
+    /// so the user could never recover without switching views).
     private var fetchedChannelIDs: Set<String> = []
 
-    /// Called when a guide row appears on screen. Fetches EPG for this channel
-    /// (and the next ~20) if not already loaded.
+    /// Called by the outer Guide task after a bulk re-fetch or a
+    /// pull-to-refresh so that subsequent per-cell `.onAppear`
+    /// handlers are free to re-check. Without this, channels that
+    /// were fetched during the previous session's scroll remain
+    /// flagged and the per-channel prefetch never retries — even
+    /// when the bulk fetch has since populated data.
+    func resetPrefetchCache() {
+        fetchedChannelIDs.removeAll(keepingCapacity: true)
+    }
+
+    /// Called when a guide row appears on screen. Fetches EPG for
+    /// this channel if not already loaded AND the bulk fetch didn't
+    /// already populate its future programs.
     func prefetchIfNeeded(channel: ChannelDisplayItem, servers: [ServerConnection]) {
         guard !fetchedChannelIDs.contains(channel.id) else { return }
 
         // Skip the per-channel network fetch when we already have
         // upcoming program data for this channel from the bulk
         // fetch. Dispatcharr's `fetchDispatcharr` populates this
-        // map for every tvg_id-matched channel in a single
-        // `/api/epg/grid/` request, and Xtream's `fetchXtream`
-        // does the same via its first batched pass. Without this
-        // gate, every guide row's `.onAppear` was firing a
-        // redundant `/api/epg/programs/?tvg_id=X` request on top
-        // of the bulk response — Dispatcharr hosts with 100+
-        // channels were seeing the guide mount produce 100+
-        // simultaneous API-keyed requests (reported in the wild
-        // against v1.6.0 / v1.6.1). Still mark the channel as
-        // fetched so we don't re-check on every subsequent
-        // `.onAppear` as the user scrolls back into the row.
+        // map for every tvg_id-matched channel in a single XMLTV
+        // request, and Xtream's `fetchXtream` does the same via
+        // its first batched pass. Without this gate, every guide
+        // row's `.onAppear` would fire a redundant per-channel
+        // request on top of the bulk response.
         let futureThreshold = Date().addingTimeInterval(30 * 60) // 30 min
         let hasUpcoming = (programs[channel.id] ?? []).contains { $0.end > futureThreshold }
         if hasUpcoming {
+            // Cache hit — bulk fetch covered us. Mark as fetched
+            // because no per-channel work is needed.
             fetchedChannelIDs.insert(channel.id)
             return
         }
-        fetchedChannelIDs.insert(channel.id)
 
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else { return }
         let now = Date()
         let windowStart = now.addingTimeInterval(-3600)
-        let windowEnd   = now.addingTimeInterval(3 * 3600)
+        // Respect the user's EPG window setting (Settings → EPG
+        // window hours). Previously hardcoded to 3 hours, which
+        // meant even when the user configured a 24- or 36-hour
+        // window, per-cell fetches only ever retrieved 3 hours
+        // and the guide appeared sparse past that (GH #3 symptom
+        // "Not respecting the Time from Settings"). 0 = "All
+        // available" — cap at 14 days as a practical maximum.
+        let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
+        let effectiveWindowHours = epgWindowHours > 0 ? min(epgWindowHours, 14 * 24) : 36
+        let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
 
         // Capture server properties before entering sendable closure
         let serverType = server.type
@@ -527,6 +706,16 @@ final class GuideStore: ObservableObject {
             for prog in fetched {
                 mergeProgram(prog, for: channelID)
             }
+            // Mark this channel as fetched ONLY if we actually got
+            // programs back. Previously the id was inserted BEFORE
+            // the fetch ran, so a timeout / transient failure left
+            // the channel flagged but empty forever (GH #3 symptom
+            // "scroll past and back and the cell stays empty").
+            // Deferring the insert until we have data means a later
+            // scroll into the same row will retry the fetch.
+            if !fetched.isEmpty {
+                self.fetchedChannelIDs.insert(channelID)
+            }
         }
     }
 
@@ -570,7 +759,16 @@ final class GuideStore: ObservableObject {
     /// GuideStore data so that cards open instantly without a network fetch.
     /// Runs in a single background Task so 691 channels don't spawn 691 tasks and
     /// block the main thread with the building of entries.
-    func seedEPGCache(channels: [ChannelDisplayItem], server: ServerConnection?) {
+    /// `async` so callers can await the write to `EPGCache` before
+    /// dismissing the initial-sync loading cover. Prior version
+    /// fire-and-forgot the detached work, which meant the cover
+    /// could drop the user into Live TV while the seed was still
+    /// running — and the first read of `fetchUpcoming` returned
+    /// the JSON bulk's category-less entries, leaving expanded
+    /// schedule rows uncolored (user feedback: "still not getting
+    /// per-program gradient"). Callers inside the Guide view that
+    /// don't care about completion can ignore the await.
+    func seedEPGCache(channels: [ChannelDisplayItem], server: ServerConnection?) async {
         guard let server else { return }
         let serverType = server.type
         let baseURL = server.effectiveBaseURL
@@ -578,7 +776,7 @@ final class GuideStore: ObservableObject {
         let snapshot = programs
         let channelRefs: [(id: String, tvgID: String?)] = channels.map { ($0.id, $0.tvgID) }
 
-        Task.detached(priority: .utility) {
+        await Task.detached(priority: .utility) {
             let now = Date()
             var built: [(key: String, entries: [EPGEntry])] = []
             built.reserveCapacity(channelRefs.count)
@@ -598,7 +796,17 @@ final class GuideStore: ObservableObject {
                 let entries = progs
                     .filter { $0.end > now }
                     .sorted { $0.start < $1.start }
-                    .map { EPGEntry(title: $0.title, description: $0.description, startTime: $0.start, endTime: $0.end) }
+                    .map {
+                        // Passing `category: $0.category` is the bridge
+                        // that lets the List-view expanded panel render
+                        // per-program gradient tints the same way the
+                        // Guide view does — both read from this same
+                        // GuideStore dataset, so there's no risk of one
+                        // view showing a category color the other doesn't.
+                        EPGEntry(title: $0.title, description: $0.description,
+                                 startTime: $0.start, endTime: $0.end,
+                                 category: $0.category)
+                    }
                 guard !entries.isEmpty else { continue }
                 built.append((cacheKey, entries))
             }
@@ -607,7 +815,7 @@ final class GuideStore: ObservableObject {
                 await EPGCache.shared.set(item.entries, for: item.key)
             }
             debugLog("📺 GuideStore.seedEPGCache: seeded \(built.count) entries (background)")
-        }
+        }.value
     }
 
     // MARK: - Helpers
@@ -622,7 +830,13 @@ struct EPGGuideView: View {
     let servers: [ServerConnection]
     let onSelectChannel: (ChannelDisplayItem) -> Void
 
-    @StateObject private var guideStore = GuideStore()
+    // Observe the shared GuideStore so its loading state is visible to
+    // MainTabView's initial-sync loading cover (see HomeView's
+    // `initialSyncKey`). Using `.shared` instead of instantiating per-view
+    // also means the guide keeps its populated programs dictionary across
+    // view mounts — no more blank guide on a tab switch while XMLTV
+    // re-parses from scratch.
+    @ObservedObject private var guideStore = GuideStore.shared
     @EnvironmentObject private var channelStore: ChannelStore
     @Environment(\.modelContext) private var modelContext
     @State private var _epgCacheIsFresh = false
@@ -646,6 +860,15 @@ struct EPGGuideView: View {
     // cells being permanently unreachable via Siri Remote D-pad.
     // See `programCell(_:channelItem:nextProgramStart:)` for the
     // full diagnosis and rationale.
+
+    /// Namespace + imperative reset hook for the guide's focus
+    /// scope. See ChannelListView's identical setup for the full
+    /// rationale — `resetFocus(in:)` is the only reliable way to
+    /// pull focus back into the guide from a minimized mini-player
+    /// tile, because tvOS's focus engine has already committed to
+    /// the mini by the time a plain `@FocusState` write can fire.
+    @Namespace private var guideFocusNS
+    @Environment(\.resetFocus) private var resetFocus
     #endif
 
     // Time window: 1h back + user-configured hours forward.
@@ -681,10 +904,17 @@ struct EPGGuideView: View {
     private let cellGap: CGFloat = 1        // hairline gap between program cells (Emby style)
     private let rowGap: CGFloat = 1         // hairline gap between rows
     #else
-    private let channelColumnWidth: CGFloat = 100
-    private let rowHeight: CGFloat = 72
-    private let timeHeaderHeight: CGFloat = 32
-    private let pixelsPerHour: CGFloat = 360
+    /// User-controllable guide scale (Settings → Network → Guide Display →
+    /// Guide Size). Range 0.75…1.5, default 1.0. Multiplies the iOS/iPadOS/Mac
+    /// layout constants below so the whole grid (column width, row height,
+    /// header height, pixels-per-hour, and per-cell font sizes — see
+    /// `GuideProgramButton.cellContent`) scales together. tvOS uses fixed
+    /// constants because the slider isn't exposed there.
+    @AppStorage("guideScale") private var guideScale: Double = 1.0
+    private var channelColumnWidth: CGFloat { 100 * guideScale }
+    private var rowHeight: CGFloat { 72 * guideScale }
+    private var timeHeaderHeight: CGFloat { 32 * guideScale }
+    private var pixelsPerHour: CGFloat { 360 * guideScale }
     private let cellGap: CGFloat = 1
     private let rowGap: CGFloat = 1
     #endif
@@ -717,6 +947,17 @@ struct EPGGuideView: View {
         #endif
         .task(id: channels.count) {
             guard !channels.isEmpty else { return }
+            // Reset the rolling-prefetch "already fetched" set
+            // every time the channel list changes (server switch,
+            // initial load, iCloud-sync import). Otherwise the
+            // set poisoned subsequent scroll cycles: a cell that
+            // got fetched empty would stay flagged forever and
+            // never retry, producing the GH #3 "scroll past and
+            // come back, cell is empty" regression. This line +
+            // the "only insert on non-empty fetch" change in
+            // `prefetchIfNeeded` together close the loop.
+            guideStore.resetPrefetchCache()
+
             let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
             let activeServerID = activeServer?.id.uuidString ?? "unknown"
 
@@ -727,7 +968,7 @@ struct EPGGuideView: View {
             // Phase 1: seed from current-program data on channels (fills gaps)
             guideStore.seedFromChannels(channels)
             // Seed EPGCache so List-view card expansion is instant
-            guideStore.seedEPGCache(channels: channels, server: activeServer)
+            await guideStore.seedEPGCache(channels: channels, server: activeServer)
 
             // Phase 2: fetch from network only if cache is stale.
             // Also fetch if the cache has no future programs (e.g., fresh install with only
@@ -745,7 +986,7 @@ struct EPGGuideView: View {
             let serverID = activeServer?.id.uuidString ?? "unknown"
             guideStore.saveToCache(modelContext: modelContext, serverID: serverID)
             // Re-seed EPGCache with freshly fetched data
-            guideStore.seedEPGCache(channels: channels, server: activeServer)
+            await guideStore.seedEPGCache(channels: channels, server: activeServer)
             channelStore.isEPGLoading = false
         }
         // When MainTabView's loadAllEPG() finishes, re-seed guide from EPGCache
@@ -753,7 +994,9 @@ struct EPGGuideView: View {
             if wasLoading && !isLoading && !channels.isEmpty {
                 let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
                 guideStore.seedFromChannels(channels)
-                guideStore.seedEPGCache(channels: channels, server: activeServer)
+                Task {
+                    await guideStore.seedEPGCache(channels: channels, server: activeServer)
+                }
             }
         }
         // Timer removed — time indicator redraws via TimelineView
@@ -911,32 +1154,31 @@ struct EPGGuideView: View {
                 }
             }
             #if os(tvOS)
+            .focusScope(guideFocusNS)
             .onReceive(
                 NotificationCenter.default.publisher(for: .forceGuideFocus)
             ) { _ in
-                // `.forceGuideFocus` fires after the mini-player is
-                // dismissed and the guide should reclaim focus. We
-                // set `focusedChannelID` to the first channel so
-                // the tvOS focus engine has a reasonable starting
-                // landmark; the spatial search then picks the
-                // nearest focusable program cell in that row.
+                // Reclaim focus from the minimized mini-player via
+                // Apple's imperative focus-reset API. See
+                // ChannelListView's `.forceGuideFocus` handler for
+                // the full rationale — briefly: a plain
+                // `@FocusState` write (what this handler did
+                // pre-v1.6.4) was treated by tvOS as a focus
+                // REQUEST that the engine routinely rejected
+                // because it had already committed to the mini
+                // tile by the time the write landed. Calling
+                // `resetFocus(in:)` forces tvOS to re-evaluate
+                // focus within the scope and lands on the row
+                // carrying `.prefersDefaultFocus(true, in:)` —
+                // which is the top channel row.
                 //
-                // Prior to v1.6.3 this handler also set
-                // `focusedProgramID = live.id` to place focus
-                // directly on the first channel's currently-airing
-                // program. That path was removed alongside the
-                // `.focused($focusedProgramID, equals: prog.id)`
-                // binding on each cell — keeping them was creating
-                // duplicate focus targets per cell and leaving some
-                // program cells permanently unreachable. The
-                // natural `focusedChannelID` fallback below gets
-                // the user close enough; one D-pad press lands on
-                // the "now" cell if the focus engine doesn't
-                // already pick it.
-                guard let firstChannel = channels.first else { return }
+                // The 400ms delay covers the 350ms minimize spring
+                // animation; triggering during the animation lets
+                // tvOS ignore the reset because the mini tile's
+                // frame is still in flux.
                 Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 50_000_000)
-                    focusedChannelID = firstChannel.id
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    resetFocus(in: guideFocusNS)
                 }
             }
             #endif
@@ -999,6 +1241,11 @@ struct EPGGuideView: View {
                 // outer ScrollView to claim focus from a minimized
                 // mini player.
                 .focused($focusedChannelID, equals: channel.id)
+                // Mark the top row as the default-focus target so
+                // `resetFocus(in: guideFocusNS)` lands here. See
+                // the `.forceGuideFocus` handler on the outer
+                // ScrollView for the full rationale.
+                .prefersDefaultFocus(channel.id == channels.first?.id, in: guideFocusNS)
                 #endif
 
             // Right: program area, clipped to exactly the visible
@@ -1046,8 +1293,14 @@ struct EPGGuideView: View {
                         .font(.system(size: 20, weight: .medium))
                         .foregroundColor(.textSecondary)
                     #else
+                    // Scale with `guideScale` so shrinking / enlarging
+                    // the grid also resizes the time-column labels.
+                    // Without this the time strip keeps a fixed 10pt
+                    // font while the row / column dimensions stretch,
+                    // producing oversized headers at 0.75x and
+                    // undersized ones at 1.5x (R3 review finding).
                     Text(timeFormatter.string(from: date).lowercased())
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 10 * guideScale, weight: .medium))
                         .foregroundColor(.textSecondary)
                     #endif
                 }
@@ -1209,16 +1462,49 @@ struct EPGGuideView: View {
 private struct GuideChannelButton: View {
     let channel: ChannelDisplayItem
     let onSelect: (ChannelDisplayItem) -> Void
+    @EnvironmentObject private var favoritesStore: FavoritesStore
 
     var body: some View {
         #if os(tvOS)
         // Non-focusable label on tvOS — users select program cells to play.
         // This prevents focus from jumping to the channel column when scrolling down.
+        // tvOS long-press overlay lets users still manage favorites from here
+        // without having to switch to List view.
         channelLabel
+            .overlay(alignment: .topTrailing) {
+                if favoritesStore.isFavorite(channel.id) {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(.statusWarning)
+                        .padding(6)
+                }
+            }
         #else
         channelLabel
+            .overlay(alignment: .topTrailing) {
+                if favoritesStore.isFavorite(channel.id) {
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(.statusWarning)
+                        .padding(4)
+                }
+            }
             .contentShape(Rectangle())
             .onTapGesture { onSelect(channel) }
+            // Long-press to manage favorite without leaving the guide.
+            // Fills the UX gap raised in Veldmuus's feedback pass — adding
+            // favorites was previously only possible from Live TV List view.
+            .contextMenu {
+                Button {
+                    favoritesStore.toggle(channel)
+                } label: {
+                    if favoritesStore.isFavorite(channel.id) {
+                        Label("Remove from Favorites", systemImage: "star.slash")
+                    } else {
+                        Label("Add to Favorites", systemImage: "star")
+                    }
+                }
+            }
         #endif
     }
 
@@ -1314,6 +1600,28 @@ private struct GuideProgramButton: View {
     // Access ReminderManager directly — @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
     private var reminderManager: ReminderManager { .shared }
+    /// FavoritesStore lets us offer "Add/Remove from Favorites" from a
+    /// program cell's long-press menu — users expect that action to
+    /// work from anywhere they long-press in the guide, not just the
+    /// channel column cell on the left.
+    @EnvironmentObject private var favoritesStore: FavoritesStore
+    /// Observe the category-colour setting so flipping it in
+    /// Settings → Guide Display refreshes every visible cell live
+    /// (without this, `cellBackground` would keep reading the old
+    /// value through `CategoryColor.isEnabled` until SwiftUI
+    /// re-rendered the cell for another reason, e.g. scroll or
+    /// focus change). The property is unused inside the body —
+    /// its purpose is to tie the cell's render cycle to the
+    /// `AppStorage` value so SwiftUI invalidates the view on
+    /// toggle. Zero-cost: reading `AppStorage` is the same lookup
+    /// as `UserDefaults.standard.bool(forKey:)`.
+    @AppStorage(CategoryColor.enabledKey) private var categoryColorsEnabled: Bool = true
+    #if !os(tvOS)
+    /// User-controllable guide scale (see `EPGGuideView.guideScale`). Multiplies
+    /// the iOS/iPadOS/Mac per-cell font sizes so text scales with the grid.
+    /// tvOS sizes stay fixed.
+    @AppStorage("guideScale") private var guideScale: Double = 1.0
+    #endif
     #if os(tvOS)
     // @State (not @FocusState) because a transparent UIKit overlay
     // (TVPressOverlay) is what actually owns focus on tvOS now; it
@@ -1351,23 +1659,23 @@ private struct GuideProgramButton: View {
             #else
             HStack(spacing: 4) {
                 Text(prog.title)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 12 * guideScale, weight: .semibold))
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 if hasReminder {
                     Image(systemName: "bell.fill")
-                        .font(.system(size: 9))
+                        .font(.system(size: 9 * guideScale))
                         .foregroundColor(.accentPrimary)
                 }
             }
             if !prog.description.isEmpty {
                 Text(prog.description)
-                    .font(.system(size: 10))
+                    .font(.system(size: 10 * guideScale))
                     .foregroundColor(.textSecondary)
                     .lineLimit(nil)
             }
             Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
-                .font(.system(size: 9))
+                .font(.system(size: 9 * guideScale))
                 .foregroundColor(.textTertiary)
             #endif
         }
@@ -1431,6 +1739,13 @@ private struct GuideProgramButton: View {
             .confirmationDialog(prog.title,
                                 isPresented: $showCtxDialog,
                                 titleVisibility: .visible) {
+                // Favorite toggle first — most frequent action users take
+                // on a program cell that isn't "just play it."
+                Button(favoritesStore.isFavorite(channelItem.id)
+                       ? "Remove from Favorites"
+                       : "Add to Favorites") {
+                    favoritesStore.toggle(channelItem)
+                }
                 if isRecordable {
                     Button(prog.isLive ? "Record from Now" : "Record") {
                         showRecordSheet = true
@@ -1471,7 +1786,29 @@ private struct GuideProgramButton: View {
         cellContent
             .contentShape(Rectangle())
             .onTapGesture { onSelect(channelItem) }
-            .contextMenu {
+            // `.contextMenu(menuItems:preview:)` — the preview form is
+            // REQUIRED here. Program cells are sized to the
+            // program's on-guide duration (often hundreds of pixels
+            // wide for a 90-minute show), which made the default
+            // auto-generated preview enormous; iOS couldn't fit it
+            // next to the touch and anchored the whole menu at the
+            // screen bottom instead. Supplying a compact 320-pt
+            // preview lets the system place the menu right next to
+            // the user's finger, which is what #23 asked for.
+            .contextMenu(menuItems: {
+                // Favorite toggle — same action as long-pressing the
+                // channel column on the left. Placed first so users
+                // can manage favorites without hunting for the
+                // narrow channel cell.
+                Button {
+                    favoritesStore.toggle(channelItem)
+                } label: {
+                    if favoritesStore.isFavorite(channelItem.id) {
+                        Label("Remove from Favorites", systemImage: "star.slash")
+                    } else {
+                        Label("Add to Favorites", systemImage: "star")
+                    }
+                }
                 if isRecordable {
                     Button {
                         showRecordSheet = true
@@ -1498,7 +1835,9 @@ private struct GuideProgramButton: View {
                         }
                     }
                 }
-            }
+            }, preview: {
+                programPreviewCard
+            })
             .sheet(isPresented: $showRecordSheet) {
                 RecordProgramSheet(
                     programTitle: prog.title,
@@ -1513,16 +1852,96 @@ private struct GuideProgramButton: View {
         #endif
     }
 
+    #if !os(tvOS)
+    /// Compact preview card used by `.contextMenu(menuItems:preview:)`
+    /// so the iOS system can anchor the long-press menu next to the
+    /// finger. Sized small enough (320 pt wide, 2-line title, 4-line
+    /// description) that iOS never has to punt the menu to the screen
+    /// bottom — which was the symptom user Veldmuus called out in #23.
+    private var programPreviewCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                if prog.isLive {
+                    Text("LIVE")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.statusLive)
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                }
+                Text(channelItem.name)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+
+            Text(prog.title)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.textPrimary)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+
+            Text("\(shortTimeFormatter.string(from: prog.start)) – \(shortTimeFormatter.string(from: prog.end))")
+                .font(.system(size: 12))
+                .foregroundColor(.textTertiary)
+
+            if !prog.description.isEmpty {
+                Text(prog.description)
+                    .font(.system(size: 13))
+                    .foregroundColor(.textSecondary)
+                    .lineLimit(4)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
+        .background(Color.cardBackground)
+    }
+    #endif
+
     #if os(tvOS)
-    /// Emby-style colors: focused = bright highlight, live = lighter gray, future = dark
+    /// Focused = bright highlight, live = lighter gray, future = dark.
     private var cellBackground: Color {
+        // Category colour (indigo / purple / light-blue / green by
+        // default) takes precedence over the neutral white tint when
+        // the user has the feature on and the program's category
+        // matches a bucket.
+        // The helper returns nil when the feature is off or no bucket
+        // matches, so we fall through to the existing white-tint logic.
+        // `categoryColorsEnabled` is intentionally read here (not just
+        // via `CategoryColor.isEnabled`) so SwiftUI's dependency
+        // tracking observes the `@AppStorage` and invalidates this
+        // cell the instant the user flips the toggle in Settings.
+        if categoryColorsEnabled,
+           let cat = CategoryColor.backgroundColor(
+            rawCategory: prog.category,
+            isLive: prog.isLive,
+            isFocused: isFocused
+        ) {
+            return cat
+        }
         if isFocused { return Color.white.opacity(0.25) }
         if prog.isLive { return Color.white.opacity(0.12) }
         return Color.white.opacity(0.05)
     }
     #else
     private var cellBackground: Color {
-        prog.isLive ? Color.accentPrimary.opacity(0.25) : Color.cardBackground
+        // See tvOS branch above — same fallthrough behaviour when the
+        // feature is off or category doesn't match a known bucket.
+        // Same `categoryColorsEnabled` dependency-tracking trick so
+        // the iOS guide refreshes live on toggle.
+        if categoryColorsEnabled,
+           let cat = CategoryColor.backgroundColor(
+            rawCategory: prog.category,
+            isLive: prog.isLive,
+            isFocused: false
+        ) {
+            return cat
+        }
+        return prog.isLive ? Color.accentPrimary.opacity(0.25) : Color.cardBackground
     }
     #endif
 }

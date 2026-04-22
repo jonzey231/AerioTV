@@ -6,6 +6,18 @@
 	<string>development</string>
 	<key>com.apple.developer.aps-environment</key>
 	<string>development</string>
+	<!--
+	  Required for `NEHotspotNetwork.fetchCurrent()` to return the
+	  connected WiFi SSID on iOS and iPadOS. Without this, iOS returns
+	  nil even when Location (Precise) is granted and the user is on
+	  WiFi. tvOS ignores this key — it has no WiFi-info API.
+	  Both iOS and tvOS targets point at this entitlements file per
+	  project.yml; the previous file `SupportingFiles/Aerio.entitlements`
+	  that also had this key was never referenced by the build and is
+	  now orphaned.
+	-->
+	<key>com.apple.developer.networking.wifi-info</key>
+	<true/>
 	<key>com.apple.developer.icloud-container-identifiers</key>
 	<array/>
 	<key>com.apple.developer.icloud-services</key>

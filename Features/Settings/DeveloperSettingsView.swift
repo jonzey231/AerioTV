@@ -19,6 +19,25 @@ struct DeveloperSettingsView: View {
     /// legacy `PlayerView` fallback while we chase the bug.
     @AppStorage("playback.unified") private var unifiedPlayback = true
 
+    /// **Experimental** — iPhone-only. When on, the Live TV chrome is
+    /// compacted: Manage Groups moves into the nav bar toolbar, and the
+    /// filter-pills + search strip can be hidden entirely via two new
+    /// toggles inside the Manage Groups sheet. Default **off** so the
+    /// main user base is unaffected; we ship the flag first to let
+    /// opted-in testers validate the layout before considering a flip.
+    /// Reads:
+    /// - `ChannelListView` for the chrome layout branch
+    /// - `ManageGroupsSheet` for the hide-filter / hide-search toggles
+    @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
+
+    /// Companion toggles — previously only exposed inside the Manage
+    /// Groups sheet, which made the parent "Compact Chrome" toggle
+    /// seem to do nothing (#22 feedback: "I can't tell what iPhone
+    /// Compact Chrome even does"). Exposed inline here so turning
+    /// Compact Chrome ON reveals its actual controls directly beneath.
+    @AppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
+    @AppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
+
     @Query private var servers: [ServerConnection]
 
     @State private var showEnableConfirmation = false
@@ -88,64 +107,6 @@ struct DeveloperSettingsView: View {
     private var iOSBody: some View {
         List {
 
-                // MARK: - Debug Logging Toggle
-                Section {
-                    HStack(spacing: 14) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(debugLoggingEnabled
-                                      ? Color.accentPrimary.opacity(0.18)
-                                      : Color.elevatedBackground)
-                                .frame(width: 36, height: 36)
-                            Image(systemName: debugLoggingEnabled
-                                  ? "ladybug.fill"
-                                  : "ladybug")
-                                .font(.system(size: 16, weight: .medium))
-                                .foregroundColor(debugLoggingEnabled ? .accentPrimary : .textSecondary)
-                        }
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Debug Logging")
-                                .font(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Text(debugLoggingEnabled
-                                 ? "Active — writing to aerio_debug_logs.txt"
-                                 : "Off — no data is collected")
-                                .font(.labelSmall)
-                                .foregroundColor(debugLoggingEnabled ? .accentPrimary : .textTertiary)
-                        }
-
-                        Spacer()
-
-                        Toggle("", isOn: Binding(
-                            get: { debugLoggingEnabled },
-                            set: { newValue in
-                                if newValue {
-                                    showEnableConfirmation = true
-                                } else {
-                                    showDisableConfirmation = true
-                                }
-                            }
-                        ))
-                        .labelsHidden()
-                        .tint(.accentPrimary)
-                    }
-                    .padding(.vertical, 4)
-                    .listRowBackground(Color.cardBackground)
-
-                } header: {
-                    Text("Logging")
-                        .sectionHeaderStyle()
-                } footer: {
-                    Text("When enabled, detailed logs are written to a file in On My iPhone › AerioTV. Logs include network requests, playback events, EPG activity, errors, and app lifecycle events. No personally identifiable information is collected.")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                        .padding(.top, 4)
-                }
-                #if os(iOS)
-                .listSectionSeparator(.hidden)
-                #endif
-
                 // MARK: - Unified Playback (experimental)
                 Section {
                     HStack(spacing: 14) {
@@ -193,6 +154,102 @@ struct DeveloperSettingsView: View {
                 #if os(iOS)
                 .listSectionSeparator(.hidden)
                 #endif
+
+                // MARK: - Experimental UI (iPhone only)
+                // Veldmuus-proposal flag. Only show on actual iPhones — the
+                // feature doesn't apply to iPad (its layout isn't cramped) or
+                // to Mac Catalyst (no UIDevice.phone idiom in the iOS-family
+                // sense). When toggled, the compact-chrome layout moves the
+                // Manage Groups icon to the nav-bar trailing edge and lets
+                // users hide the filter pills + search from inside the sheet.
+                if UIDevice.current.userInterfaceIdiom == .phone {
+                    Section {
+                        HStack(spacing: 14) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(compactChromeiPhone
+                                          ? Color.accentPrimary.opacity(0.18)
+                                          : Color.elevatedBackground)
+                                    .frame(width: 36, height: 36)
+                                Image(systemName: compactChromeiPhone
+                                      ? "iphone.gen3.landscape"
+                                      : "iphone.gen3")
+                                    .font(.system(size: 16, weight: .medium))
+                                    .foregroundColor(compactChromeiPhone ? .accentPrimary : .textSecondary)
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("iPhone Compact Chrome")
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Text(compactChromeiPhone
+                                     ? "On — Manage Groups lives in the Live TV nav bar"
+                                     : "Off — classic layout")
+                                    .font(.labelSmall)
+                                    .foregroundColor(compactChromeiPhone ? .accentPrimary : .textTertiary)
+                            }
+
+                            Spacer()
+
+                            Toggle("", isOn: $compactChromeiPhone)
+                                .labelsHidden()
+                                .tint(.accentPrimary)
+                        }
+                        .padding(.vertical, 4)
+                        .listRowBackground(Color.cardBackground)
+
+                        // Companion toggles — only meaningful when
+                        // Compact Chrome is ON. Previously these were
+                        // buried inside the Manage Groups sheet, which
+                        // made the parent toggle seem inert ("I can't
+                        // tell what iPhone Compact Chrome even does").
+                        // Surfacing them here means turning Compact
+                        // Chrome on immediately reveals its actual
+                        // controls — users can see at a glance what
+                        // the feature does before toggling sub-options.
+                        if compactChromeiPhone {
+                            Toggle(isOn: $hideFilterBarCompact) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Hide Filter Bar")
+                                        .font(.bodyMedium)
+                                        .foregroundColor(.textPrimary)
+                                    Text("Removes the group pills strip above the channel list.")
+                                        .font(.labelSmall)
+                                        .foregroundColor(.textTertiary)
+                                }
+                            }
+                            .tint(.accentPrimary)
+                            .listRowBackground(Color.cardBackground)
+
+                            Toggle(isOn: $hideSearchBarCompact) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Hide Search Bar")
+                                        .font(.bodyMedium)
+                                        .foregroundColor(.textPrimary)
+                                    Text("Replaces the always-visible search row with the nav-bar search icon.")
+                                        .font(.labelSmall)
+                                        .foregroundColor(.textTertiary)
+                                }
+                            }
+                            .tint(.accentPrimary)
+                            .listRowBackground(Color.cardBackground)
+                        }
+                    } header: {
+                        Text("Experimental UI")
+                            .sectionHeaderStyle()
+                    } footer: {
+                        Text(compactChromeiPhone
+                             ? "Compact Chrome moves Manage Groups into the Live TV nav bar. The two toggles above let you further reclaim vertical space by hiding the filter pills and/or the search row. All three options revert instantly — no restart required."
+                             : "Designed for iPhone landscape. When enabled, Manage Groups moves to the nav bar and two further toggles appear for hiding the filter pills and search row. Reverting restores the classic layout instantly."
+                        )
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                        .padding(.top, 4)
+                    }
+                    #if os(iOS)
+                    .listSectionSeparator(.hidden)
+                    #endif
+                }
 
                 // MARK: - Log File Actions (only when logging is active or file exists)
                 if debugLoggingEnabled || (logger.logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
@@ -287,6 +344,73 @@ struct DeveloperSettingsView: View {
                     .listSectionSeparator(.hidden)
                     #endif
                 }
+
+                // MARK: - Debug Logging Toggle
+                // Relocated from the top of this screen to sit just
+                // above "What's Captured" — that positioning makes
+                // the toggle's effect self-documenting: you see the
+                // toggle, immediately below you see "here's what
+                // enabling it will log", and below that the log
+                // file actions. Previously the toggle was at the
+                // very top and the explainer + file actions were
+                // buried several sections down, which made it
+                // unclear to users what the toggle actually did.
+                Section {
+                    HStack(spacing: 14) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(debugLoggingEnabled
+                                      ? Color.accentPrimary.opacity(0.18)
+                                      : Color.elevatedBackground)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: debugLoggingEnabled
+                                  ? "ladybug.fill"
+                                  : "ladybug")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(debugLoggingEnabled ? .accentPrimary : .textSecondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Debug Logging")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Text(debugLoggingEnabled
+                                 ? "Active — writing to aerio_debug_logs.txt"
+                                 : "Off — no data is collected")
+                                .font(.labelSmall)
+                                .foregroundColor(debugLoggingEnabled ? .accentPrimary : .textTertiary)
+                        }
+
+                        Spacer()
+
+                        Toggle("", isOn: Binding(
+                            get: { debugLoggingEnabled },
+                            set: { newValue in
+                                if newValue {
+                                    showEnableConfirmation = true
+                                } else {
+                                    showDisableConfirmation = true
+                                }
+                            }
+                        ))
+                        .labelsHidden()
+                        .tint(.accentPrimary)
+                    }
+                    .padding(.vertical, 4)
+                    .listRowBackground(Color.cardBackground)
+
+                } header: {
+                    Text("Logging")
+                        .sectionHeaderStyle()
+                } footer: {
+                    Text("When enabled, detailed logs are written to a file in On My iPhone › AerioTV. Logs include network requests, playback events, EPG activity, errors, and app lifecycle events. No personally identifiable information is collected.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                        .padding(.top, 4)
+                }
+                #if os(iOS)
+                .listSectionSeparator(.hidden)
+                #endif
 
                 // MARK: - What's Logged
                 Section {

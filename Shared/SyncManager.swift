@@ -69,17 +69,52 @@ final class SyncManager: ObservableObject {
     private let syncStringKeys = [
         "selectedTheme", "liquidGlassStyle", "customAccentHex",
         "defaultTab", "defaultLiveTVView", "streamBufferSize",
-        "bgRefreshType", "globalHomeSSIDs"
+        "bgRefreshType", "globalHomeSSIDs",
+        // Guide Display palette overrides — one hex string per
+        // category bucket. Missing keys fall through to the defaults
+        // in `ProgramCategory.defaultHex`, so clients running older
+        // builds that don't know about these keys are safe.
+        "categoryColor.sports", "categoryColor.movie",
+        "categoryColor.kids",   "categoryColor.news",
+        // Additional buckets added with the "Add more categories"
+        // disclosure section. Same safety property as above —
+        // older clients ignore unknown keys.
+        "categoryColor.documentary", "categoryColor.drama",
+        "categoryColor.comedy",      "categoryColor.reality",
+        "categoryColor.educational", "categoryColor.scifi",
+        "categoryColor.music"
+    ]
+    /// Data-typed keys (Codable JSON blobs). `customCategoryColors.v1`
+    /// holds the user-defined `[CustomCategory]` list from
+    /// `CategoryColor.loadCustomCategories()` — it needs its own
+    /// sync lane because it's stored as Data in UserDefaults, not
+    /// a plain String/Bool/Number.
+    private let syncDataKeys: [String] = [
+        CategoryColor.customCategoriesKey
     ]
     private let syncBoolKeys = [
-        "useCustomAccent", "pipEnabled", "preferAVPlayer", "bgRefreshEnabled"
+        "useCustomAccent", "preferAVPlayer", "bgRefreshEnabled",
+        // Guide Display master toggle + channel-card stripe companion.
+        "enableCategoryColors", "tintChannelCards",
+        // Per-bucket enable flags for the additional (non-default)
+        // buckets surfaced in "Add more categories". Default buckets
+        // are always on, so we only sync the additional flags.
+        "categoryBucketEnabled.documentary", "categoryBucketEnabled.drama",
+        "categoryBucketEnabled.comedy",      "categoryBucketEnabled.reality",
+        "categoryBucketEnabled.educational", "categoryBucketEnabled.scifi",
+        "categoryBucketEnabled.music"
     ]
     private let syncDoubleKeys  = ["networkTimeout"]
     private let syncIntKeys = [
         "maxRetries", "bgRefreshIntervalMins", "bgRefreshHour", "bgRefreshMinute",
         "epgWindowHours"
     ]
-    private let syncStringArrayKeys  = ["favoriteChannelIDs"]
+    // `favoriteChannelIDs` carries the membership Set; `favoriteOrder`
+    // carries the user's manual drag-reorder positions from the iOS
+    // Favorites tab. Both are plain `[String]` so they share the same
+    // sync path. Kept distinct so older clients that only know about
+    // the membership key keep working.
+    private let syncStringArrayKeys  = ["favoriteChannelIDs", "favoriteOrder"]
     private let syncHiddenGroupKeys = [
         "hiddenChannelGroups", "hiddenMovieGroups", "hiddenSeriesGroups"
     ]
@@ -360,6 +395,10 @@ final class SyncManager: ObservableObject {
         for k in syncBoolKeys        { if ud.object(forKey: k) != nil       { dict[k] = ud.bool(forKey: k) } }
         for k in syncDoubleKeys      { if ud.object(forKey: k) != nil       { dict[k] = ud.double(forKey: k) } }
         for k in syncIntKeys         { if ud.object(forKey: k) != nil       { dict[k] = ud.integer(forKey: k) } }
+        // Data-typed keys are mirrored through KVS as Data so
+        // complex blobs like the custom-categories JSON list
+        // round-trip intact across devices.
+        for k in syncDataKeys        { if let v = ud.data(forKey: k)        { dict[k] = v } }
         for k in syncStringArrayKeys { if let v = ud.stringArray(forKey: k) { dict[k] = v } }
         for k in syncHiddenGroupKeys {
             if let data = ud.data(forKey: k),
@@ -466,6 +505,7 @@ final class SyncManager: ObservableObject {
         for k in syncBoolKeys        { if let v = dict[k] as? Bool     { ud.set(v, forKey: k) } }
         for k in syncDoubleKeys      { if let v = dict[k] as? Double   { ud.set(v, forKey: k) } }
         for k in syncIntKeys         { if let v = dict[k] as? Int      { ud.set(v, forKey: k) } }
+        for k in syncDataKeys        { if let v = dict[k] as? Data     { ud.set(v, forKey: k) } }
         for k in syncStringArrayKeys { if let v = dict[k] as? [String] { ud.set(v, forKey: k) } }
         for k in syncHiddenGroupKeys {
             if let arr = dict[k] as? [String],
@@ -881,6 +921,16 @@ extension Notification.Name {
     /// vocabulary as Apple's TV / Music apps where Menu on a long
     /// list means "take me back to the top".
     static let guideScrollToTop = Notification.Name("guideScrollToTop")
+    /// Posted by `ChannelStore.primeXMLTVFromURL` after it has
+    /// finished the XMLTV parse AND written category-enriched
+    /// entries into EPGCache via `GuideStore.seedEPGCache`. Any
+    /// open expanded schedule panels listen for this and re-fetch
+    /// their `upcomingPrograms` so the newly-landed category data
+    /// drives the per-program tint gradient — without this, a
+    /// schedule panel that was expanded BEFORE the XMLTV parse
+    /// completed would stay visually uncolored until the user
+    /// collapsed and re-opened it.
+    static let epgCategoriesDidUpdate = Notification.Name("epgCategoriesDidUpdate")
     /// Posted when the tvOS single-stream player is minimized to the
     /// corner. The guide (ChannelListView / EPGGuideView) listens
     /// and programmatically moves its own `@FocusState` to the

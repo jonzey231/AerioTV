@@ -64,6 +64,23 @@ struct PlaybackChromeOverlay: View {
     /// timer.
     @EnvironmentObject private var chromeState: MultiviewChromeState
 
+    #if !os(tvOS)
+    /// Drives the iPhone-portrait title layout — moves the channel +
+    /// program strip below the button row when we're tall, keeps it
+    /// inline between buttons otherwise. On iPhone, `verticalSizeClass`
+    /// is `.regular` in portrait and `.compact` in landscape.
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    /// True only on an actual iPhone held in portrait. iPad keeps the
+    /// inline layout regardless of orientation because it has enough
+    /// horizontal room for the title between buttons; iPhone landscape
+    /// keeps inline too (the horizontal bar is short enough that
+    /// vertically stacking would eat valuable vertical space).
+    private var isiPhonePortrait: Bool {
+        UIDevice.current.userInterfaceIdiom == .phone && verticalSizeClass == .regular
+    }
+    #endif
+
     var body: some View {
         // This overlay ONLY renders the iOS top bar at N=1. tvOS
         // chrome (Options pill + Add pill + live progress band) is
@@ -74,11 +91,25 @@ struct PlaybackChromeOverlay: View {
         // in this file.
         #if !os(tvOS)
         if store.tiles.count == 1 {
-            soleTileChrome_iOS
-                .opacity(chromeState.isVisible ? 1 : 0)
-                .allowsHitTesting(chromeState.isVisible)
-                .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
-                .accessibilityHidden(!chromeState.isVisible)
+            ZStack {
+                // Audio-Only foreground cover. Drawn BEHIND the top
+                // chrome so Close / Overflow / + remain tappable — the
+                // user needs access to the overflow menu to exit
+                // Audio-Only mode. Nothing renders unless the audio
+                // tile has its `isAudioOnly` flag set, so the default
+                // video-playing case pays zero overhead.
+                if let audio = store.audioProgressStore {
+                    AudioOnlyForegroundOverlay(
+                        progressStore: audio,
+                        title: soleTileTitle
+                    )
+                }
+                soleTileChrome_iOS
+                    .opacity(chromeState.isVisible ? 1 : 0)
+                    .allowsHitTesting(chromeState.isVisible)
+                    .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
+                    .accessibilityHidden(!chromeState.isVisible)
+            }
         }
         #else
         EmptyView()
@@ -92,6 +123,58 @@ struct PlaybackChromeOverlay: View {
     private var soleTileTitle: String {
         store.tiles.first?.item.name ?? ""
     }
+
+    #if !os(tvOS)
+    /// Dynamic top inset for the N=1 chrome. Adapts to the device in
+    /// real time — no hardcoded "iPhone Pro Max needs X pt" branching,
+    /// no guessing based on user-agent. Every iPhone, iPad, and Mac
+    /// Catalyst layout falls out of the public safe-area / status-bar
+    /// APIs. See the comment at the `.padding(.top, dynamicTopInset)`
+    /// call site for the full reasoning.
+    private var dynamicTopInset: CGFloat {
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first(where: { $0.activationState == .foregroundActive })
+            ?? scenes.first
+
+        // Window safe area inset. `.first { $0.isKeyWindow }` can return
+        // nil mid-transition, so we fall back to any window of the scene.
+        let windowInset: CGFloat = {
+            guard let scene else { return 0 }
+            if let key = scene.windows.first(where: { $0.isKeyWindow }) {
+                return key.safeAreaInsets.top
+            }
+            return scene.windows.first?.safeAreaInsets.top ?? 0
+        }()
+
+        // Status-bar frame height — an independent measurement that iOS
+        // updates alongside layout changes (orientation, status-bar
+        // hiding, etc.). Identical to `windowInset` in most cases, but
+        // picks up scenarios where the latter was zeroed by an ancestor
+        // `.ignoresSafeArea()`.
+        let statusBarHeight = scene?.statusBarManager?.statusBarFrame.height ?? 0
+
+        // Per-orientation floor. In landscape on iPhone the reported
+        // inset is usually 0 (no status bar; side notch doesn't affect
+        // the top edge), so the 48pt floor we used to apply universally
+        // pushed the Close / Overflow / Add buttons noticeably lower
+        // than they should sit (#22 feedback). Landscape gets a 20pt
+        // floor instead, which hugs the top edge while still clearing
+        // rounded-corner insets and the hardware camera cutout.
+        // Portrait keeps the 48pt floor so the chrome clears a compact
+        // Live Activity pill or a short status bar on non-notch phones.
+        let idiomIsPhone = UIDevice.current.userInterfaceIdiom == .phone
+        let isLandscapePhone: Bool = {
+            guard idiomIsPhone else { return false }
+            return scene?.interfaceOrientation.isLandscape ?? false
+        }()
+        let floor: CGFloat = isLandscapePhone ? 20 : 48
+
+        // Take the max so we always pick up the larger of the two
+        // reported values, then add a 12pt breathing constant.
+        return max(max(windowInset, statusBarHeight) + 12, floor)
+    }
+    #endif
 
     // MARK: - iOS N=1 top bar
 
@@ -110,38 +193,67 @@ struct PlaybackChromeOverlay: View {
     @ViewBuilder
     private var soleTileChrome_iOS: some View {
         VStack(spacing: 0) {
+            // Button row. In iPhone portrait we deliberately drop the
+            // inline title from this row and mount it on its own full-width
+            // row below — otherwise the channel name + program name get
+            // squeezed between Close and the Overflow/+ cluster and
+            // truncate inside a ~160pt gap that can't hold them.
             HStack(alignment: .center, spacing: 12) {
                 closeButton_iOS
-                Spacer(minLength: 8)
-                titleLabel_iOS
-                Spacer(minLength: 8)
-                if canRecordCurrentProgram_iOS {
-                    recordButton_iOS
+                if !isiPhonePortrait {
+                    Spacer(minLength: 8)
+                    titleInlineLabel_iOS
+                    Spacer(minLength: 8)
+                } else {
+                    Spacer(minLength: 0)
                 }
                 if let audio = store.audioProgressStore {
                     iPadOverflowAdapter(
                         progressStore: audio,
                         sleepTimerEnd: $sleepTimerEnd,
-                        showStreamInfo: $showStreamInfo
+                        showStreamInfo: $showStreamInfo,
+                        canRecord: canRecordCurrentProgram_iOS,
+                        onRecord: {
+                            chromeState.reportInteraction()
+                            showRecordSheet = true
+                        }
                     )
                 }
                 addButton_iOS
-                airPlayButton_iOS
             }
             .padding(.horizontal, 16)
-            // Hardcoded top padding large enough to clear the iPad
-            // status bar / clock in any orientation. `.safeAreaPadding`
-            // didn't work here because HomeView mounts
-            // `MultiviewContainerView` with `.ignoresSafeArea()`,
-            // which zeros out the safe area for descendants — so
-            // any safe-area-respecting modifier resolves to 0 and
-            // the chrome row lands on top of the status bar. 48 pt
-            // covers iPad landscape (24 pt status bar + 24 pt
-            // margin) and iPad portrait (44 pt status bar + 4 pt
-            // margin); the gradient background extends under the
-            // status bar via `.ignoresSafeArea(edges: .top)` below
-            // so there's no visible seam.
-            .padding(.top, 48)
+            // Dynamic top inset — not a hardcoded constant, and not a
+            // device-specific bump. We read the two public signals iOS
+            // exposes for "how far down the chrome should start":
+            //
+            //   • window.safeAreaInsets.top  → reflects notch / Dynamic
+            //     Island cutout on iPhone Pro devices (~59pt) and the
+            //     status-bar height on iPad (~24pt) / old iPhones (~20pt)
+            //   • statusBarManager.statusBarFrame.height → usually matches
+            //     the above but picks up some layouts where safeAreaInsets
+            //     is zeroed (e.g., inside an ancestor using
+            //     `.ignoresSafeArea()`, which is exactly our situation —
+            //     the container zeroes the safe area for its children)
+            //
+            // The max of the two is "what iOS thinks the top is right
+            // now." We add a small constant (12pt) for breathing room
+            // and floor at 48pt so the chrome never looks cramped on
+            // devices that report abnormally small insets (iPad
+            // landscape, older home-button iPhones). No device model
+            // probing, no manual bumps per form factor.
+            .padding(.top, dynamicTopInset)
+
+            // iPhone-portrait only: dedicated title row below the buttons.
+            // Gets the full horizontal width so the channel name and
+            // currently-airing program name both render in full. Since
+            // we're in portrait the video is letterboxed anyway — this
+            // row overlays black bars, not the stream itself.
+            if isiPhonePortrait {
+                titleStack_iPhonePortrait
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+            }
+
             Spacer(minLength: 0)
             liveProgressBand
                 .padding(.horizontal, 20)
@@ -196,6 +308,11 @@ struct PlaybackChromeOverlay: View {
         .accessibilityHint("Stop playback and return to the guide")
     }
 
+    /// Inline title used in the button-row HStack for iPad and iPhone
+    /// landscape. Single line, truncates if it runs out of room between
+    /// the Close button and the right-hand cluster. iPhone portrait
+    /// swaps this for `titleStack_iPhonePortrait` below, which takes a
+    /// full-width row of its own.
     private var titleLabel_iOS: some View {
         Text(soleTileTitle)
             .font(.system(size: 16, weight: .semibold))
@@ -204,6 +321,52 @@ struct PlaybackChromeOverlay: View {
             .truncationMode(.tail)
             .accessibilityAddTraits(.isHeader)
             .accessibilityHint("Currently playing channel")
+    }
+
+    /// Alias kept so inline call sites stay readable. Same behavior as
+    /// `titleLabel_iOS`.
+    private var titleInlineLabel_iOS: some View { titleLabel_iOS }
+
+    /// iPhone-portrait title block. Gets its own row below the button
+    /// cluster with the full screen width to itself — no more getting
+    /// squeezed between pill buttons. Shows channel name on top, the
+    /// currently-airing program name underneath (when EPG is known),
+    /// and the start-end time range under that. Three short lines beat
+    /// a truncated single line for the user's "what am I watching?"
+    /// test.
+    private var titleStack_iPhonePortrait: some View {
+        let tile = store.tiles.first
+        let program = tile?.item.currentProgram ?? ""
+        let start = tile?.item.currentProgramStart
+        let end = tile?.item.currentProgramEnd
+
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(soleTileTitle)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .truncationMode(.tail)
+
+            if !program.isEmpty {
+                Text(program)
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+            }
+
+            if let start, let end {
+                HStack(spacing: 4) {
+                    Text(start, style: .time)
+                    Text("–")
+                    Text(end, style: .time)
+                }
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(.white.opacity(0.6))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
     }
 
     private var addButton_iOS: some View {
@@ -232,27 +395,6 @@ struct PlaybackChromeOverlay: View {
     /// match the system recording vocabulary. Tapping presents
     /// `RecordProgramSheet` for the audio tile's current program,
     /// saving the user a trip back to the guide + long-press.
-    private var recordButton_iOS: some View {
-        Button {
-            chromeState.reportInteraction()
-            showRecordSheet = true
-        } label: {
-            ZStack {
-                Circle()
-                    .fill(.ultraThinMaterial)
-                    .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
-                    .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
-                Image(systemName: "record.circle")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(Color.red)
-            }
-            .frame(width: 52, height: 52)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Record current program")
-        .accessibilityHint("Schedule a recording of what's currently airing on this channel")
-    }
-
     /// True when the audio tile has live EPG data so recording the
     /// currently-playing program is meaningful. Gates the iOS
     /// Record pill — streams with no EPG (raw M3U / missing tvg-id)
@@ -264,26 +406,6 @@ struct PlaybackChromeOverlay: View {
         return audio.item.currentProgram?.isEmpty == false
     }
 
-    /// AirPlay system routing button. Same 52×52 `.ultraThinMaterial`
-    /// chrome as the Close / `+` buttons so the three pills read as
-    /// a row. `AirPlayButton` is a `UIViewRepresentable` defined in
-    /// `PlayerView.swift` that wraps `AVRoutePickerView`; reusing
-    /// it here means the N=1 unified chrome has feature parity with
-    /// the legacy PlayerView top bar. System owns the picker UI
-    /// entirely, so no state lives in this overlay.
-    private var airPlayButton_iOS: some View {
-        ZStack {
-            Circle()
-                .fill(.ultraThinMaterial)
-                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
-                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
-            AirPlayButton()
-                .frame(width: 34, height: 34)
-        }
-        .frame(width: 52, height: 52)
-        .accessibilityLabel("AirPlay")
-        .accessibilityHint("Stream audio and video to an AirPlay device")
-    }
     #endif
 
     // MARK: - Live program progress band
@@ -368,13 +490,20 @@ struct PlaybackChromeOverlay: View {
 /// audio tile being registered, which happens asynchronously).
 ///
 /// Wiring notes:
-/// - `togglePiP` routes to `progressStore.togglePiPAction` which the
-///   tile's mpv Coordinator installs at setup.
-/// - `toggleStreamInfo` / `toggleAudioOnly` are no-ops for now — the
-///   stream-info overlay and audio-only background are ported in a
-///   later Phase C.6 pass. Until then, tapping them is a cosmetic
-///   state flip on `showStreamInfo` that has no visible effect in
-///   the unified path (legacy PlayerView still honours it).
+/// - Picture-in-Picture has no menu entry — PiP is swipe-home-only
+///   (auto-PiP) and is gated by the Settings toggle. The
+///   single-stream Coordinator builds the AVPictureInPictureController
+///   eagerly in `makeUIViewController`; multiview currently does not
+///   auto-PiP (known gap).
+/// - `toggleStreamInfo` is a cosmetic state flip for now — the
+///   stream-info overlay is a later Phase C.6 port.
+/// - `toggleAudioOnly` mutates `progressStore.isAudioOnly` on the
+///   audio tile's store. `PlaybackChromeOverlay` observes the same
+///   store via `AudioOnlyForegroundOverlay` (below) and renders the
+///   dark-wash + artwork foreground treatment when the flag is set.
+///   Background-audio discipline (audio keeps playing with the app
+///   closed when Audio-Only is on) is already honoured by
+///   `Coordinator.didEnterBackground` via the same flag.
 /// - `onMenuOpen`/`Close` are no-ops here. In legacy `PlayerView`
 ///   they gated the 4s controls-hide timer; the unified chrome
 ///   uses `MultiviewChromeState` which is already driven by any
@@ -384,6 +513,13 @@ private struct iPadOverflowAdapter: View {
     @ObservedObject var progressStore: PlayerProgressStore
     @Binding var sleepTimerEnd: Date?
     @Binding var showStreamInfo: Bool
+    /// Gates the "Record Current Program" menu item. Passed down from
+    /// `PlaybackChromeOverlay` which computes it from the audio tile's
+    /// live EPG state (`canRecordCurrentProgram_iOS`).
+    let canRecord: Bool
+    /// Fired from the menu. The overlay flips `showRecordSheet` so the
+    /// container presents `RecordProgramSheet`.
+    let onRecord: () -> Void
 
     var body: some View {
         PlayerOverflowMenu(
@@ -393,21 +529,101 @@ private struct iPadOverflowAdapter: View {
             currentSubtitleTrackID: progressStore.currentSubtitleTrackID,
             speed: progressStore.speed,
             isLive: true,  // multiview is always live-only in v1
-            isPiPActive: progressStore.isPiPActive,
-            hasPiP: progressStore.togglePiPAction != nil,
             sleepTimerEnd: sleepTimerEnd,
             showStreamInfo: showStreamInfo,
-            isAudioOnly: false,  // audio-only bg not yet ported to unified path
+            isAudioOnly: progressStore.isAudioOnly,
+            canRecord: canRecord,
             setAudioTrack: { [weak progressStore] in progressStore?.setAudioTrackAction?($0) },
             setSubtitleTrack: { [weak progressStore] in progressStore?.setSubtitleTrackAction?($0) },
             setSpeed: { [weak progressStore] in progressStore?.setSpeedAction?($0) },
-            togglePiP: { [weak progressStore] in progressStore?.togglePiPAction?() },
             setSleepTimer: { newEnd in sleepTimerEnd = newEnd },
             toggleStreamInfo: { showStreamInfo.toggle() },
-            toggleAudioOnly: nil,
+            toggleAudioOnly: { [weak progressStore] in
+                // Flip the audio tile's flag. This drives:
+                //   (a) the menu icon ("music.note" ↔ "video.fill")
+                //       via the iAudioOnly binding passed on the next
+                //       re-render of iPadOverflowAdapter,
+                //   (b) AudioOnlyForegroundOverlay (observing the
+                //       same store) to fade the dark-wash cover in
+                //       or out, and
+                //   (c) didEnterBackground to keep audio alive when
+                //       the app backgrounds.
+                guard let store = progressStore else { return }
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    store.isAudioOnly.toggle()
+                }
+            },
+            recordAction: onRecord,
             onMenuOpen: nil,
             onMenuClose: nil
         )
+    }
+}
+
+// MARK: - Audio-Only foreground overlay
+
+/// Dark-wash cover drawn over the sole video tile when the user has
+/// flipped Audio Only in the overflow menu. Mirrors the legacy
+/// `PlayerView.audioOnlyBackground` visual treatment (gradient +
+/// music-note circle + channel name + "Audio Only" caption) so the
+/// unified-player path looks the same to the user.
+///
+/// We deliberately do NOT touch mpv's `vid` property from the
+/// foreground — parity with legacy behaviour. The video tile keeps
+/// decoding underneath us; this overlay simply hides it. The GPU
+/// cost is acceptable for the foreground case; the real power saving
+/// kicks in on swipe-home, where `Coordinator.didEnterBackground`
+/// sets `vid=no` for audio-only mode.
+///
+/// Separated from `iPadOverflowAdapter` so it can mount at the
+/// chrome-overlay level (behind the top bar) rather than inside the
+/// HStack of menu buttons.
+private struct AudioOnlyForegroundOverlay: View {
+    @ObservedObject var progressStore: PlayerProgressStore
+    let title: String
+
+    var body: some View {
+        ZStack {
+            if progressStore.isAudioOnly {
+                ZStack {
+                    LinearGradient(
+                        colors: [Color(hex: "0A0F0D"), Color(hex: "111916")],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .ignoresSafeArea()
+
+                    VStack(spacing: 24) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.accentPrimary.opacity(0.15))
+                                .frame(width: 140, height: 140)
+                            Image(systemName: "music.note")
+                                .font(.system(size: 56, weight: .light))
+                                .foregroundStyle(LinearGradient.accentGradient)
+                        }
+                        .shadow(color: Color.accentPrimary.opacity(0.3), radius: 30)
+
+                        Text(title)
+                            .font(.title2.bold())
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 32)
+
+                        Text("Audio Only")
+                            .font(.subheadline)
+                            .foregroundColor(.gray)
+                    }
+                }
+                .transition(.opacity)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Audio only: \(title)")
+                .accessibilityHint("Video is hidden. Audio continues playing. Tap the options button to show video.")
+            }
+        }
+        // Animate flag transitions even when the parent doesn't wrap
+        // the toggle in withAnimation. Keeps the fade consistent across
+        // entry points (menu tap here, mirroring from elsewhere later).
+        .animation(.easeInOut(duration: 0.25), value: progressStore.isAudioOnly)
     }
 }
 #endif

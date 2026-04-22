@@ -210,10 +210,35 @@ struct AerioApp: App {
             case .inactive:    DebugLogger.shared.logLifecycle("Scene → inactive")
             case .background:
                 DebugLogger.shared.logLifecycle("Scene → background")
+                // Flush any pending debounced iCloud pushes before the OS
+                // suspends us. Without this, preference changes (favorites,
+                // theme, etc.) made in the last 60 seconds get dropped when
+                // the user force-closes the app — the push is still sitting
+                // on the main queue waiting out its asyncAfter debounce. See
+                // GitHub issue #2.
+                SyncManager.shared.pushPreferencesImmediate()
                 #if os(tvOS)
                 // Stop playback so audio doesn't continue in the background.
                 // tvOS has no PiP or background audio entitlement for IPTV streams.
+                //
+                // Previously posted `.stopPlaybackForBackground` which HomeView
+                // handled via `nowPlaying.stop()` — that path only stopped the
+                // NowPlayingManager's single-stream state and left MultiviewStore
+                // tiles running, so multiview audio kept playing after a Home-press
+                // (user-reported regression; reproduces on both single and
+                // multiview on Apple TV).
+                //
+                // Fire the notification AND directly call `PlayerSession.exit()`
+                // — the unified teardown path that resets MultiviewStore, flips
+                // mode to `.idle`, clears NowPlayingInfoCenter, and stops the
+                // single-stream NowPlayingManager. The notification is kept so any
+                // other listeners (e.g., HomeView) still get a chance to tear down
+                // their own state cleanly before PlayerSession wipes the shared
+                // stores.
                 NotificationCenter.default.post(name: .stopPlaybackForBackground, object: nil)
+                Task { @MainActor in
+                    PlayerSession.shared.exit()
+                }
                 #endif
                 // Stop all active local recordings — iOS suspends URLSession
                 // data tasks within ~30s of backgrounding, so the recording
@@ -253,12 +278,76 @@ final class NetworkMonitor: ObservableObject {
     /// True when the device has an active WiFi interface.
     @Published private(set) var isOnWifi = false
 
+    /// Current Location authorization status, republished from the
+    /// underlying CLLocationManager delegate so any SwiftUI view can
+    /// drive its UI from this single source of truth. Used by the
+    /// onboarding "Enable Home WiFi Detection" card so it can show
+    /// "✓ Enabled", "Allow", or "Denied" without each view needing
+    /// its own CLLocationManager.
+    @Published private(set) var locationAuthStatus: CLAuthorizationStatus
+
+    /// True when on a matched home SSID AND the configured localURL
+    /// failed a reachability probe. Most commonly caused by an active
+    /// VPN that blocks LAN traffic. Surfaced by the Live TV banner.
+    @Published private(set) var localServerUnreachable: Bool = false
+
     private let pathMonitor = NWPathMonitor()
     private var lastWifiState = false
     private let locationDelegate = LocationDelegate()
 
     private init() {
+        // Seed the published auth status from the delegate's manager
+        // before any view observes us.
+        self.locationAuthStatus = locationDelegate.manager.authorizationStatus
+        // Subscribe to EVERY authorization change (including the
+        // `.notDetermined → .authorizedWhenInUse` transition that
+        // happens when the user accepts the prompt) so the
+        // onboarding UI and Settings footers can react live. The
+        // one-shot `onPendingResolution` callback remains separate
+        // so `ensureLocationAuthorization` can still resume a
+        // pending SSID fetch once.
+        locationDelegate.onStatusChange = { [weak self] newStatus in
+            Task { @MainActor in
+                guard let self else { return }
+                let wasAuthorized = self.locationAuthStatus == .authorizedWhenInUse
+                    || self.locationAuthStatus == .authorizedAlways
+                let isAuthorizedNow = newStatus == .authorizedWhenInUse
+                    || newStatus == .authorizedAlways
+                self.locationAuthStatus = newStatus
+                // User just granted Location (typically by returning
+                // from iOS Settings after the onboarding "Unknown
+                // network" warning). Kick off the SSID fetch directly
+                // without going through `refresh()`'s hasHomeSSIDs
+                // guard — the whole point of the warning was that the
+                // user doesn't have any home SSIDs yet and needs to
+                // see their current one to configure one.
+                if !wasAuthorized, isAuthorizedNow {
+                    DebugLogger.shared.log(
+                        "NetworkMonitor: location just granted — kicking off SSID fetch",
+                        category: "Network", level: .info)
+                    self.fetchSSID()
+                }
+            }
+        }
         startPathMonitor()
+    }
+
+    // MARK: - Public (onboarding / Settings)
+
+    /// Prompt the user for Location (When In Use) authorization. Safe
+    /// to call in any state — if already authorized, the completion
+    /// fires immediately with `true`; if already denied, fires with
+    /// `false` (the user must grant it via iOS Settings); if not yet
+    /// determined, presents the system prompt and fires when the
+    /// user responds.
+    ///
+    /// Used by the onboarding Home WiFi card so the user can grant
+    /// the permission up-front with context, rather than stumbling
+    /// into the "network name unavailable" warning deep in Settings.
+    func requestLocationAuthorization(completion: (@MainActor (Bool) -> Void)? = nil) {
+        ensureLocationAuthorization { granted in
+            completion?(granted)
+        }
     }
 
     // MARK: - Public
@@ -324,6 +413,53 @@ final class NetworkMonitor: ObservableObject {
             DebugLogger.shared.log(
                 "NetworkMonitor: SSID = \(ssid ?? "<nil>")",
                 category: "Network", level: .info)
+
+            // If the resolved SSID matches a configured home SSID,
+            // probe the active server's local URL. A VPN that blocks
+            // LAN traffic will fail the probe and surface a banner
+            // in Live TV so the user can disable the VPN.
+            if let ssid, Self.isHomeSSID(ssid) {
+                let localURL = ChannelStore.shared.activeServer?.localURL ?? ""
+                Task { await self.probeLocalServer(localURL: localURL) }
+            } else {
+                self.localServerUnreachable = false
+            }
+        }
+    }
+
+    /// Returns true if the given SSID is listed in `globalHomeSSIDs`
+    /// (comma-separated, whitespace-trimmed).
+    private static func isHomeSSID(_ ssid: String) -> Bool {
+        let homeCSV = UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? ""
+        let homeSSIDs = homeCSV
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return homeSSIDs.contains(ssid)
+    }
+
+    /// HEAD-probes the configured local URL with a 3-second timeout.
+    /// Any 2xx–4xx response means "server is reachable on the LAN"
+    /// (even a 401/403 from an auth-required endpoint proves the TCP
+    /// path is alive). 5xx, network errors, or timeouts flip the
+    /// `localServerUnreachable` flag true so the Live TV banner can
+    /// warn the user — usually about an active LAN-blocking VPN.
+    func probeLocalServer(localURL: String) async {
+        guard !localURL.isEmpty, let url = URL(string: localURL) else {
+            await MainActor.run { self.localServerUnreachable = false }
+            return
+        }
+        var request = URLRequest(url: url, timeoutInterval: 3)
+        request.httpMethod = "HEAD"
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, (200..<500).contains(http.statusCode) {
+                await MainActor.run { self.localServerUnreachable = false }
+                return
+            }
+            await MainActor.run { self.localServerUnreachable = true }
+        } catch {
+            await MainActor.run { self.localServerUnreachable = true }
         }
     }
 
@@ -333,7 +469,7 @@ final class NetworkMonitor: ObservableObject {
         case .authorizedWhenInUse, .authorizedAlways:
             completion(true)
         case .notDetermined:
-            locationDelegate.onAuthChange = { newStatus in
+            locationDelegate.onPendingResolution = { newStatus in
                 Task { @MainActor in
                     completion(newStatus == .authorizedWhenInUse || newStatus == .authorizedAlways)
                 }
@@ -353,10 +489,19 @@ final class NetworkMonitor: ObservableObject {
                 // Refresh SSID only when we connect to (or switch) Wi-Fi networks.
                 if onWifi && !self.lastWifiState {
                     self.refresh()
+                    // VPN toggles often surface as a WiFi transition
+                    // without the SSID actually changing. Re-probe the
+                    // local URL so the banner can update even when
+                    // `fetchSSID` returns the same value as before.
+                    if let ssid = self.currentSSID, Self.isHomeSSID(ssid) {
+                        let localURL = ChannelStore.shared.activeServer?.localURL ?? ""
+                        Task { await self.probeLocalServer(localURL: localURL) }
+                    }
                 } else if !onWifi {
                     // Left WiFi — clear SSID so we don't use a stale LAN URL.
                     self.currentSSID = nil
                     UserDefaults.standard.removeObject(forKey: "cachedCurrentSSID")
+                    self.localServerUnreachable = false
                 }
                 self.lastWifiState = onWifi
             }
@@ -365,10 +510,28 @@ final class NetworkMonitor: ObservableObject {
     }
 }
 
-/// Minimal CLLocationManager delegate for obtaining location authorization.
+/// CLLocationManager delegate that exposes two distinct callbacks:
+/// a persistent `onStatusChange` (fires on every authorization
+/// update so `NetworkMonitor.locationAuthStatus` stays in sync with
+/// the live system state), and a one-shot `onPendingResolution`
+/// used internally by `NetworkMonitor.ensureLocationAuthorization`
+/// to resume a pending SSID fetch once the user responds to the
+/// system prompt. Split into two because the previous single
+/// `onAuthChange` was one-shot + self-clearing, which can't serve
+/// a persistent observer at the same time.
 private class LocationDelegate: NSObject, CLLocationManagerDelegate {
     let manager = CLLocationManager()
-    var onAuthChange: ((CLAuthorizationStatus) -> Void)?
+    /// Fires on EVERY authorization change, including the initial
+    /// `.notDetermined` state. The SwiftUI-facing observer
+    /// (`NetworkMonitor.locationAuthStatus`) wires into this.
+    var onStatusChange: ((CLAuthorizationStatus) -> Void)?
+    /// One-shot callback — set by `ensureLocationAuthorization`
+    /// when kicking off `requestWhenInUseAuthorization()`, fires
+    /// once the user responds with a determined status, then
+    /// clears itself. Guarded against firing for `.notDetermined`
+    /// so a passing pre-prompt notification can't wake a pending
+    /// SSID fetch early.
+    var onPendingResolution: ((CLAuthorizationStatus) -> Void)?
 
     override init() {
         super.init()
@@ -377,9 +540,10 @@ private class LocationDelegate: NSObject, CLLocationManagerDelegate {
 
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         let status = manager.authorizationStatus
+        onStatusChange?(status)
         guard status != .notDetermined else { return }
-        onAuthChange?(status)
-        onAuthChange = nil
+        onPendingResolution?(status)
+        onPendingResolution = nil
     }
 }
 #endif

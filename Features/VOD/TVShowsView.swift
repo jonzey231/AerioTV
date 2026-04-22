@@ -26,15 +26,24 @@ struct TVShowsView: View {
 
     private let hiddenGroupsKey = "hiddenSeriesGroups"
 
+    /// User-tunable UI scale (0.85–1.25). iPhone + tvOS ignore the value;
+    /// iPad / Mac Catalyst stretch the poster minimum so the grid reads
+    /// comfortably on wider displays (see AppearanceSettingsView).
+    @AppStorage("uiScale") private var uiScale: Double = 1.0
+
     #if os(tvOS)
-    private let columns = [
-        GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 32)
-    ]
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 32)]
+    }
     private let gridRowSpacing: CGFloat = 48
     #else
-    private let columns = [
-        GridItem(.adaptive(minimum: 120, maximum: 160), spacing: 12)
-    ]
+    private var columns: [GridItem] {
+        let clamped = max(0.85, min(1.25, uiScale))
+        let isRegular = UIDevice.current.userInterfaceIdiom != .phone
+        let minimum: CGFloat = isRegular ? 120 * clamped : 120
+        let maximum: CGFloat = isRegular ? 160 * clamped : 160
+        return [GridItem(.adaptive(minimum: minimum, maximum: maximum), spacing: 12)]
+    }
     private let gridRowSpacing: CGFloat = 16
     #endif
 
@@ -346,7 +355,7 @@ struct TVShowsView: View {
             EmptyStateView(
                 icon: "tv",
                 title: "Series Unavailable",
-                message: "M3U playlists do not include VOD content. Switch to an Xtream Codes or Dispatcharr API playlist in Settings > Playlists to browse movies."
+                message: "M3U playlists do not include VOD content. Switch to an Xtream Codes or Dispatcharr API playlist in Settings > Playlists to browse TV shows."
             )
         } else {
             EmptyStateView(

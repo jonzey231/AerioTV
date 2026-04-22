@@ -470,7 +470,6 @@ struct MultiviewTileView: View {
             .contentShape(Rectangle())
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(a11yLabel)
-            .accessibilityAddTraits(.isButton)
             .confirmationDialog(
                 Text(verbatim: tile.item.name),
                 isPresented: $showMenu,
@@ -505,32 +504,55 @@ struct MultiviewTileView: View {
     /// intentional enough to warrant the long-press gesture; a
     /// one-tap X made it too easy to accidentally dismiss streams
     /// during audio-focus taps.
+    @ViewBuilder
     private var tileContent: some View {
-        ZStack {
-            tappableRegion
+        if isSoleTile {
+            // N=1 short-circuit. The sole tile IS the player view —
+            // clipShape / scaleEffect / hoverEffect / per-tile
+            // animations exist only to distinguish tiles in a
+            // multiview grid, and wrapping the auto-PiP source
+            // `AVSampleBufferDisplayLayer` in a clipped + animated
+            // transform stack was making iOS's PiP restore
+            // animation read a stale / animated target rect and
+            // fall back to its default "zoom + PiP-icon placeholder"
+            // transition. Legacy `PlayerView` mounts the same
+            // representable directly inside a plain ZStack (no
+            // clip, no scale, no animation) and iOS's restore
+            // animation lands cleanly there — we match that.
+            //
+            // The black background underlay is kept so letterboxed
+            // streams don't render over whatever's behind them.
+            ZStack {
+                tappableRegion
+            }
+            .background(Color.black)
+        } else {
+            ZStack {
+                tappableRegion
+            }
+            .overlay(
+                // Focus ring (tvOS) / relocate-amber. Audio-active is
+                // signalled by the audioBadge (speaker icon top-left),
+                // not a ring — see `ring` docstring.
+                Self.tileShape
+                    .stroke(ring.color, lineWidth: ring.width)
+            )
+            .clipShape(Self.tileShape)
+            // Black underlay so letterbox bars aren't transparent.
+            .background(Self.tileShape.fill(Color.black))
+            // tvOS focus lift: scale + outer shadow combine with the
+            // white ring above to create the full "card lifts on focus"
+            // feedback. iPad uses hoverEffect below (no-op on touch).
+            .scaleEffect(focusScale)
+            .shadow(
+                color: focusShadow.color,
+                radius: focusShadow.radius,
+                y: focusShadow.y
+            )
+            .animation(.easeInOut(duration: 0.18), value: isFocused)
+            .animation(.easeInOut(duration: 0.15), value: store.relocatingTileID)
+            .hoverEffect(.highlight)
         }
-        .overlay(
-            // Focus ring (tvOS) / relocate-amber. Audio-active is
-            // signalled by the audioBadge (speaker icon top-left),
-            // not a ring — see `ring` docstring.
-            Self.tileShape
-                .stroke(ring.color, lineWidth: ring.width)
-        )
-        .clipShape(Self.tileShape)
-        // Black underlay so letterbox bars aren't transparent.
-        .background(Self.tileShape.fill(Color.black))
-        // tvOS focus lift: scale + outer shadow combine with the
-        // white ring above to create the full "card lifts on focus"
-        // feedback. iPad uses hoverEffect below (no-op on touch).
-        .scaleEffect(focusScale)
-        .shadow(
-            color: focusShadow.color,
-            radius: focusShadow.radius,
-            y: focusShadow.y
-        )
-        .animation(.easeInOut(duration: 0.18), value: isFocused)
-        .animation(.easeInOut(duration: 0.15), value: store.relocatingTileID)
-        .hoverEffect(.highlight)
     }
 
     /// Gesture-receiving inner ZStack. Everything that should respond
@@ -595,16 +617,21 @@ struct MultiviewTileView: View {
 
             // Per-tile corner chrome suppressed at N=1 (container
             // chrome renders title + Close at the top bar instead).
+            //
+            // For N>1: mutually-exclusive audio badge (centered, with
+            // channel name pill) OR bottom label strip — never both.
+            // The audio tile gets the centered badge as its identity
+            // marker; other tiles get the bottom name pill. Rendering
+            // both on the audio tile produced a duplicate channel
+            // name (user flagged: "the channel name is also appearing
+            // at the very bottom of the display which shouldn't be
+            // there since it's already listed inside the tile itself").
             if !isSoleTile {
-                // Audio-active badge (top-left). Visual language
-                // matches the rest of the app: accent color + speaker
-                // icon. Only drawn on the audio tile.
                 if isAudioActive {
                     audioBadge
+                } else {
+                    labelStrip
                 }
-
-                // Tile chrome — channel name strip along the bottom.
-                labelStrip
             }
 
             // Red decode-error overlay. Only shown when mpv's failover
@@ -729,22 +756,56 @@ struct MultiviewTileView: View {
     // visually noisy. Closing a tile is significant enough to
     // warrant the deliberate long-press gesture.
 
+    /// Audio-tile indicator — centered on the tile, visually matching
+    /// tvOS's `CenterAudioIconView` (accent speaker capsule above a
+    /// dark channel-name pill). Users on iOS complained the previous
+    /// corner placement "hung off" the tile and looked out of place;
+    /// centering puts it in the same language as Apple TV.
+    ///
+    /// INTENTIONALLY state-less: no local `@State`, no `Task`,
+    /// no `withAnimation`. Visibility is a pure read of the existing
+    /// `chromeState.isVisible` — which also drives every other piece
+    /// of tile chrome, so the indicator fades in/out with the rest
+    /// of the overlay on user-idle timing. A previous attempt to
+    /// add per-tile state + a 2.5 s fade-out `Task` correlated with
+    /// a cascading freeze during single-stream → multiview
+    /// transitions, because the state mutation fired
+    /// `MPVPlayerViewRepresentable.updateUIViewController` at the
+    /// same moment mpv was doing a `loadfile ... replace` for the
+    /// "snap to live edge" cascade. Keeping this pure-read avoids
+    /// that entire class of issue.
     private var audioBadge: some View {
-        VStack {
-            HStack {
-                Image(systemName: "speaker.wave.2.fill")
-                    .font(.caption)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        Capsule().fill(Color.accentPrimary)
-                    )
-                    .padding(8)
-                Spacer()
-            }
-            Spacer()
+        VStack(spacing: 8) {
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Capsule().fill(Color.accentPrimary))
+                .shadow(color: .black.opacity(0.45), radius: 6, y: 2)
+
+            Text(tile.item.name)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill(Color.black.opacity(0.65))
+                        .overlay(
+                            Capsule().strokeBorder(
+                                Color.white.opacity(0.22),
+                                lineWidth: 0.5
+                            )
+                        )
+                )
+                .shadow(color: .black.opacity(0.4), radius: 4, y: 1)
         }
+        // Constrain width so long channel names truncate instead of
+        // pushing the indicator past small-tile edges.
+        .frame(maxWidth: 220)
         .allowsHitTesting(false)
         .opacity(chromeState.isVisible ? 1 : 0)
     }
@@ -1240,3 +1301,30 @@ struct MultiviewTileButtonStyle: ButtonStyle {
     }
 }
 #endif
+
+// NOTE: `iOSCenterAudioIndicator` (an iOS center-of-tile audio-
+// routing badge ported from tvOS's `CenterAudioIconView`) was
+// prototyped here and reverted after user testing on
+// iPhone 17 Pro Max / iOS 26 showed the Add-to-Multiview `Done`
+// tap producing a cascading freeze every time.
+//
+// Root signal from the log:
+//   unpause → reload live stream (snap to live edge) on all tiles
+//   → end-file STOP on tile 1 → watchdog silent → app frozen
+//
+// The "unpause → reload" cascade is pre-existing behaviour (tiles
+// pause while the add-sheet is up, unpause on dismiss, and live
+// streams snap back to live via `loadfile ... replace`). What
+// changed: the indicator introduced @State + withAnimation
+// + a Task.sleep tied to the audio-tile identity at the exact
+// moment SwiftUI was already re-invalidating
+// `MPVPlayerViewRepresentable` due to the pause/unpause
+// transition. The combination correlated with the freeze.
+//
+// The top-left `audioBadge` remains as the only audio-focus
+// affordance. Re-introducing the center indicator safely would
+// likely mean putting it on a sibling overlay view at
+// `MultiviewContainerView` level that observes `store.audioTileID`
+// directly, so per-tile re-renders don't bubble into
+// `MPVPlayerViewRepresentable.updateUIViewController` during
+// multi-tile transitions. Feature is on the backlog.

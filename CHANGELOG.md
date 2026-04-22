@@ -1,5 +1,174 @@
 # Changelog
 
+## v1.6.4 — 2026-04-18
+
+### New — EPG category colors (Jellyfin-style)
+
+- **Guide cells now tint by program category** — Sports gets indigo,
+  Movies gets deep purple, Kids gets light blue, News gets green,
+  matching the Material Design 600 palette Jellyfin uses for its
+  own live-TV guide. Focused and currently-airing cells get a
+  brighter tint of the same hue so the "now playing" signal stays
+  readable; unmatched categories fall back to the existing neutral
+  white/accent tint.
+- **Settings → Network → Guide Display toggle** ("Color Programs by
+  Category") lets users turn the feature off and go back to the
+  flat neutral look. Default: on.
+- The category matcher handles real-world messy EPG strings —
+  splits on `/ , ;`, casefolds, matches substrings against aliases
+  that cover English plus common German / Spanish / French terms
+  ("Fußball", "Noticias", "Jeunesse", etc.). Multi-category
+  programs like "Sports / Football" resolve via a Kids → Sports →
+  News → Movie priority order, matching Jellyfin's behaviour.
+- Currently active for **M3U + XMLTV** playlists, which are the
+  only EPG source type whose responses Aerio already parses the
+  `<category>` element from. Dispatcharr and Xtream Codes don't
+  currently surface categories in their EPG API responses;
+  support for Xtream's `genre` field is tracked as a follow-up.
+
+### Fixed
+
+- **Dispatcharr Dummy EPG entries now appear in the guide.**
+  Dispatcharr's built-in Dummy EPG feature (regex-driven synthetic
+  program entries for channels without real EPG data) tags every
+  generated program with `tvg_id = str(channel.uuid)`. Aerio was
+  previously matching incoming EPG programs to channels by
+  `tvg_id` (string) or `channel` (integer ID) only, so Dummy EPG
+  programs were silently dropped for every channel — those
+  channels appeared blank in the guide even though Dispatcharr's
+  own web UI showed them. Fix: added a third matching key,
+  `channel UUID string → display ID`, which routes Dummy EPG
+  programs into the right row. `ChannelDisplayItem` grew a
+  matching `uuid: String?` field that's populated for Dispatcharr
+  channels and left `nil` for XC / M3U (which have no
+  server-side UUID concept).
+- **"Failed to parse server response" error during Test Connection**
+  now produces an actionable message instead of dumping the raw
+  HTML body of the Dispatcharr login page. When every verification
+  probe comes back as `text/html`, the message explicitly calls
+  out the three real-world causes: (1) API key missing or wrong,
+  (2) URL points at the web port but not through `/api` (e.g., a
+  reverse proxy stripping the prefix), (3) wrong port. A
+  401/403-only case gets its own "API key was rejected" message,
+  and mixed failures get a compact one-line diagnostic with the
+  last status + content-type + a 160-character body preview
+  (rather than ~800 characters of `<!doctype html>`).
+- **Home WiFi warning on iOS** now tells the user what to do
+  rather than asking them to open Xcode. Previous text:
+  "Verify the 'Access WiFi Information' capability is enabled in
+  Xcode → Signing & Capabilities." New text: "To detect your
+  Home WiFi, grant Aerio Location access: open the iOS Settings
+  app → Privacy & Security → Location Services → Aerio → choose
+  'While Using the App' and enable Precise Location." The
+  capability and the `NSLocationWhenInUseUsageDescription` string
+  both ship with the app — the missing piece on the user side is
+  always Location permission, which the iOS system requires on
+  top of the capability before `NEHotspotNetwork.fetchCurrent`
+  will return the SSID.
+- **Auto-PiP on swipe-home restored (GH #4).** Single-stream
+  playback: swiping home now re-engages Picture-in-Picture
+  automatically, matching v1.6.0 behaviour. The v1.6.1 Unified
+  Player refactor silently dropped this — the PiP controller
+  was only built lazily on the first manual tap and
+  `canStartPictureInPictureAutomaticallyFromInline` was never
+  set. Fix: solo-tile paths eagerly build the
+  `AVPictureInPictureController` in `makeUIViewController` and
+  opt into automatic engagement. A `pipAutoEligible` Coordinator
+  flag guards against the `vid=no` GPU-safeguard firing mid-
+  engagement and starving iOS of frames.
+- **Return-to-app after PiP no longer leaves a black screen
+  (GH #4).** The background-entry `vid=no` safeguard wasn't
+  paired with a matching `vid=auto` on foreground entry, so
+  mpv came back with video decoding disabled and the user had
+  to restart the channel. `willEnterForeground` now explicitly
+  re-enables video and undoes the defensive pause only when
+  this app owned it.
+- **Background-audio discipline.** Audio now keeps playing with
+  the app closed only when the user picked Audio Only, PiP is
+  engaged, or AirPlay is routing audio to another device.
+  Everything else pauses mpv cleanly on swipe-home so the app
+  stops making sound when the user has just navigated away.
+- **Audio Only mode now populates the lockscreen and Dynamic
+  Island with the channel name and logo.** Flipping Audio Only
+  and swiping home previously left the lockscreen blank — the
+  `AudioSessionRefCount` 0→1 activation could silently fail on
+  cold launch (OSStatus -50) and never be retried, and iOS
+  won't publish `MPNowPlayingInfoCenter` info unless the
+  session is in `.playback` at publish time.
+  `NowPlayingBridge.configure()` now defensively re-applies
+  the category + `setActive(true)` and registers remote-
+  control events synchronously before writing the now-playing
+  dict. Channel artwork is pre-decoded to a 512-pt thumbnail
+  and published via the deprecated `MPMediaItemArtwork(image:)`
+  init — the modern closure-based init crashes with
+  `_dispatch_assert_queue_fail` inside iOS's Media framework
+  on full-resolution source images; the thumbnail + no-closure
+  combination sidesteps the crash.
+- **VOD group filter now reflects Dispatcharr's enabled
+  categories and actually filters (GH #1).** Two bugs in one
+  fix. Before: the Manage Groups sheet listed every one of
+  the ~467 categories Dispatcharr had ever seen from the
+  provider, including disabled / orphaned / foreign-language
+  buckets that carry no fetchable content; and the filter
+  predicate compared selected categories against each movie's
+  `categoryName`, which was comma-split from the `genre`
+  string and therefore almost never matched a real category
+  name — so toggling a group either did nothing or hid
+  everything. After: the Manage Groups sheet filters by
+  `m3u_accounts[].enabled == true` so only groups you've
+  enabled in Dispatcharr's admin UI appear; each VOD title is
+  fetched per-enabled-category via Dispatcharr's
+  `?category=<name>` filter and tagged with its real
+  Dispatcharr category name; first-enabled-category-wins
+  dedupes titles that belong to multiple enabled categories.
+  Covers Movies and Series. Xtream Codes path unchanged.
+- **Setting-up loading stages now center on Apple TV.** The
+  progress card on the onboarding / initial-launch sync
+  screen was stretching edge-to-edge on the ~1920pt tvOS
+  display, leaving the "Loading EPG / VOD / DVR / preferences"
+  rows pinned to the far left and visually disconnected from
+  the centered logo and title above. Constrained to 720pt
+  max width on tvOS so the card centers cleanly. iPhone /
+  iPad unchanged — their screen isn't wide enough for the
+  stretch to look wrong.
+- **Apple TV: focus now returns to the guide after
+  minimizing a live stream to the corner mini-player.**
+  Previously, pressing Menu on the full-screen player shrunk
+  playback to the corner but focus stayed stuck on the mini
+  tile, so D-pad wouldn't navigate the guide until the user
+  mashed a direction to nudge focus across. The
+  `.forceGuideFocus` notification handler was writing
+  `@FocusState = firstChannel.id`, which tvOS routinely
+  rejected because its focus engine had already committed
+  to the mini tile (spatial-search nearest focusable target)
+  by the time the write landed. Replaced with Apple's
+  documented imperative focus-reset API:
+  `@Environment(\.resetFocus)` + `@Namespace` on the guide
+  scope, `.prefersDefaultFocus(true, in: ...)` on the top
+  channel row, and `resetFocus(in: ...)` called from the
+  notification handler after a 400ms delay (covers the
+  350ms minimize spring animation). Both the list-style
+  guide and the grid-style EPG view got the same
+  treatment.
+
+### Changed
+
+- **Picture-in-Picture is now auto-only.** The overflow-menu
+  PiP button has been removed. Swipe home to engage PiP; tap
+  the ⤢ maximize icon on the floating window to return.
+  Removing the toggle eliminates a footgun where users turned
+  it off and then wondered why swipe-home killed their stream,
+  and also matches v1.6.0's default behaviour.
+- **On Demand tab now hides dynamically.** A server that returns
+  zero movies and zero series (e.g., a pure live-TV M3U, or a
+  Dispatcharr instance with no VOD ingested) no longer shows a
+  permanently empty On Demand tab. The tab animates in the
+  moment the VOD library loads and out the moment it empties,
+  matching the behaviour of the Favorites and DVR tabs. If the
+  user is on the On Demand tab when the library drains (e.g.,
+  they switch to a live-only server), focus redirects to Live TV
+  so they aren't stranded on a missing tab.
+
 ## v1.6.3 — 2026-04-18
 
 ### Fixed

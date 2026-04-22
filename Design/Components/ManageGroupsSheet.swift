@@ -30,6 +30,18 @@ struct ManageGroupsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var hiddenGroups: Set<String> = []
 
+    #if os(iOS)
+    /// Mirrors the Developer-Settings flag. When ON on an iPhone, the sheet
+    /// exposes a Layout section with two companion toggles below so the
+    /// user can hide the filter pills + search bar on Live TV.
+    @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
+    @AppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
+    @AppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
+    private var showsCompactLayoutSection: Bool {
+        compactChromeiPhone && UIDevice.current.userInterfaceIdiom == .phone
+    }
+    #endif
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -78,6 +90,46 @@ struct ManageGroupsSheet: View {
     #if !os(tvOS)
     private var iOSGroupList: some View {
         List {
+            // Compact-chrome layout controls. Only appears when the Developer
+            // flag is ON and we're on an iPhone — gives users one place to
+            // hide the filter pills + search bar in Live TV. Mirrors Veldmuus's
+            // Discord proposal; kept opt-in so the main user base isn't
+            // affected until we promote the flag.
+            if showsCompactLayoutSection {
+                Section {
+                    Toggle(isOn: $hideFilterBarCompact) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Hide Filter Bar")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Text("Removes the group pills strip from Live TV.")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                        }
+                    }
+                    .tint(.accentPrimary)
+                    .listRowBackground(Color.cardBackground)
+
+                    Toggle(isOn: $hideSearchBarCompact) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Hide Search Bar")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Text("Collapses the always-visible search drawer. Pull down on the list to search.")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                        }
+                    }
+                    .tint(.accentPrimary)
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Layout")
+                        .font(.labelSmall)
+                        .foregroundColor(.textSecondary)
+                        .textCase(nil)
+                }
+            }
+
             Section {
                 ForEach(allGroups, id: \.self) { group in
                     Button {

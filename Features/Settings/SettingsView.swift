@@ -160,6 +160,13 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
+                        NavigationLink(destination: GuideDisplaySettingsView()) {
+                            SettingsRow(icon: "calendar", iconColor: .accentPrimary,
+                                        title: "Guide Display", subtitle: "Category colors, channel stripe & guide size")
+                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
                         NavigationLink(destination: NetworkSettingsView()) {
                             SettingsRow(icon: "network", iconColor: .accentSecondary,
                                         title: "Network", subtitle: "Timeout, buffer, home WiFi & refresh")
@@ -346,8 +353,9 @@ struct SettingsView: View {
             #if os(tvOS)
             .navigationDestination(for: String.self) { route in
                 switch route {
-                case "appearance": AppearanceSettingsView()
-                case "network":    NetworkSettingsView()
+                case "appearance":      AppearanceSettingsView()
+                case "guide-display":   GuideDisplaySettingsView()
+                case "network":         NetworkSettingsView()
                 case "dvr-settings": DVRSettingsView()
                 case "developer":  DeveloperSettingsView()
                 case "edit-server":
@@ -558,6 +566,10 @@ struct SettingsView: View {
                     TVSettingsNavButton(label: "Appearance", icon: "paintbrush.fill",
                                         iconColor: .accentPrimary, subtitle: "Theme & display options") {
                         navPath.append("appearance")
+                    }
+                    TVSettingsNavButton(label: "Guide Display", icon: "calendar",
+                                        iconColor: .accentPrimary, subtitle: "Category colors, channel stripe & guide size") {
+                        navPath.append("guide-display")
                     }
                     TVSettingsNavButton(label: "Network", icon: "network",
                                         iconColor: .accentSecondary, subtitle: "Timeout, buffer, home WiFi & refresh") {
@@ -1201,8 +1213,15 @@ struct ServerDetailView: View {
                     } footer: {
                         #if os(iOS)
                         if networkMonitor.currentSSID == nil && networkMonitor.isOnWifi {
-                            // On WiFi but SSID is nil — entitlement is almost certainly missing.
-                            Text("⚠️ Wi-Fi detected but SSID is unknown. Add the \"Access WiFi Information\" capability in Xcode → Signing & Capabilities, and set the entitlements file in Build Settings → Code Signing Entitlements.")
+                            // On WiFi but SSID is nil — almost always because
+                            // the user hasn't granted Location access. The
+                            // entitlement + Info.plist string ship with the
+                            // app; iOS additionally requires the user to
+                            // grant Location (Precise) before
+                            // NEHotspotNetwork.fetchCurrent will return the
+                            // SSID. Direct the user to the iOS Settings
+                            // path rather than surfacing Xcode jargon.
+                            Text("⚠️ Wi-Fi detected but SSID is unknown. To detect your network, grant Aerio Location access: open the iOS Settings app → Privacy & Security → Location Services → Aerio → choose \"While Using the App\" and enable Precise Location.")
                                 .font(.labelSmall)
                                 .foregroundColor(.statusWarning)
                         } else if let matched = server.activeHomeSSID {
@@ -1450,6 +1469,18 @@ struct EditServerSheet: View {
     @Bindable var server: ServerConnection
     @Environment(\.dismiss) private var dismiss
 
+    // XMLTV validation state for the Dispatcharr EPG Source row. Mirrors
+    // AddServerView's XMLTVTestState so the edit flow can also validate
+    // before save.
+    @State private var xmltvTestState: XMLTVEditTestState = .idle
+
+    enum XMLTVEditTestState: Equatable {
+        case idle
+        case testing
+        case success(Int)
+        case failure(String)
+    }
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -1519,6 +1550,54 @@ struct EditServerSheet: View {
                         .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Authentication").sectionHeaderStyle()
+                }
+                Section {
+                    TextField("Custom XMLTV URL (optional)",
+                              text: $server.dispatcharrXMLTVURL,
+                              prompt: Text("https://example.com/xmltv.xml"))
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .listRowBackground(Color.cardBackground)
+                        .onChange(of: server.dispatcharrXMLTVURL) { _, _ in
+                            // Reset test result whenever the URL changes so
+                            // a stale "Valid" pill doesn't mislead the user.
+                            xmltvTestState = .idle
+                        }
+
+                    // Test button + status. Mirrors AddServerView's validation
+                    // affordance so editing a server feels consistent with
+                    // adding one.
+                    HStack(spacing: 10) {
+                        Button {
+                            Task { await testEditXMLTVURL() }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if case .testing = xmltvTestState {
+                                    ProgressView().tint(.accentPrimary).scaleEffect(0.8)
+                                } else {
+                                    Image(systemName: "checkmark.seal")
+                                }
+                                Text("Test XMLTV URL")
+                            }
+                            .font(.labelMedium.weight(.semibold))
+                            .foregroundColor(.accentPrimary)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(editXMLTVTrimmed.isEmpty ||
+                                  { if case .testing = xmltvTestState { return true } else { return false } }())
+
+                        xmltvEditStatusPill
+
+                        Spacer(minLength: 0)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("EPG Source").sectionHeaderStyle()
+                } footer: {
+                    Text("Override the XMLTV source AerioTV pulls EPG from. Leave blank to use Dispatcharr's own XMLTV output at /output/epg (the default). Set only if you want to bypass Dispatcharr and fetch XMLTV straight from your upstream provider.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
                 }
             } else if server.type == .m3uPlaylist {
                 Section {
@@ -1604,8 +1683,17 @@ struct EditServerSheet: View {
                         tvEditField("Password", text: $server.password, isSecure: true)
                     }
                 } else if server.type == .dispatcharrAPI {
-                    tvEditSection("Authentication") {
-                        tvEditField("API Key", text: $server.apiKey, isSecure: true)
+                    Group {
+                        tvEditSection("Authentication") {
+                            tvEditField("API Key", text: $server.apiKey, isSecure: true)
+                        }
+                        tvEditSection("EPG Source") {
+                            tvEditField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)
+                            Text("Override the XMLTV source AerioTV pulls EPG from. Leave blank to use Dispatcharr's own XMLTV output at /output/epg (the default, with category data).")
+                                .font(.system(size: 22))
+                                .foregroundColor(.textTertiary)
+                                .padding(.top, 4)
+                        }
                     }
                 } else if server.type == .m3uPlaylist {
                     tvEditSection("EPG Guide") {
@@ -1702,6 +1790,61 @@ struct EditServerSheet: View {
         }
     }
     #endif
+
+    // MARK: - XMLTV Edit Test Helpers (iOS only — tvOS editor omits the button)
+
+    #if os(iOS)
+    private var editXMLTVTrimmed: String {
+        server.dispatcharrXMLTVURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @ViewBuilder
+    private var xmltvEditStatusPill: some View {
+        switch xmltvTestState {
+        case .idle, .testing:
+            EmptyView()
+        case .success(let count):
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.statusOnline)
+                Text(count > 0 ? "Valid — \(count) programs" : "Valid XMLTV")
+                    .font(.labelSmall.weight(.semibold))
+                    .foregroundColor(.statusOnline)
+                    .lineLimit(1)
+            }
+        case .failure(let err):
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.circle.fill")
+                    .foregroundColor(.statusLive)
+                Text(err)
+                    .font(.labelSmall)
+                    .foregroundColor(.statusLive)
+                    .lineLimit(2)
+            }
+        }
+    }
+
+    @MainActor
+    private func testEditXMLTVURL() async {
+        let urlString = editXMLTVTrimmed
+        guard !urlString.isEmpty else { return }
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            xmltvTestState = .failure("URL must start with http:// or https://")
+            return
+        }
+        xmltvTestState = .testing
+        do {
+            let programs = try await XMLTVParser.fetchAndParse(url: url)
+            xmltvTestState = .success(programs.count)
+        } catch {
+            let raw = error.localizedDescription
+            let trimmed = raw.count > 120 ? String(raw.prefix(120)) + "…" : raw
+            xmltvTestState = .failure(trimmed.isEmpty ? "Couldn't parse as XMLTV" : trimmed)
+        }
+    }
+    #endif
 }
 
 
@@ -1729,8 +1872,17 @@ struct EditServerPage: View {
                             tvField("Password", text: $server.password, isSecure: true)
                         }
                     } else if server.type == .dispatcharrAPI {
-                        tvSection("Authentication") {
-                            tvField("API Key", text: $server.apiKey, isSecure: true)
+                        Group {
+                            tvSection("Authentication") {
+                                tvField("API Key", text: $server.apiKey, isSecure: true)
+                            }
+                            tvSection("EPG Source") {
+                                tvField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)
+                                Text("Override the XMLTV source AerioTV pulls EPG from. Leave blank to use Dispatcharr's own XMLTV output at /output/epg (the default, with category data).")
+                                    .font(.system(size: 22))
+                                    .foregroundColor(.textTertiary)
+                                    .padding(.top, 4)
+                            }
                         }
                     } else if server.type == .m3uPlaylist {
                         tvSection("EPG Guide") {
@@ -1869,6 +2021,23 @@ struct NetworkSettingsView: View {
     @AppStorage("maxRetries")              private var maxRetries          = 3
     @AppStorage("streamBufferSize")        private var streamBufferSize    = "default"
     @AppStorage("epgWindowHours")           private var epgWindowHours      = 36          // default 36 hours
+    /// Tint EPG program cells by their category (Sports / Movies /
+    /// Kids / News). Mirrors the `CategoryColor.enabledKey` constant
+    /// — default `true`, so the category palette is on out of the box
+    /// and users who prefer the flat neutral cells can disable it here.
+    @AppStorage(CategoryColor.enabledKey)   private var enableCategoryColors = true
+    /// Companion toggle that extends the category palette from the EPG
+    /// guide cells to the Live TV channel cards. Opt-in and default off
+    /// so existing users don't suddenly see colored stripes appear on every row.
+    @AppStorage("tintChannelCards")         private var tintChannelCards     = false
+    /// User-controllable scale factor applied to the EPG grid layout
+    /// (cell width, row height, header height, pixels-per-hour, and
+    /// per-cell font sizes). Range 0.75…1.5 in 0.05 increments,
+    /// default 1.0 (today's "100%" sizing). Read by `EPGGuideView` and
+    /// `GuideProgramButton` via the same `"guideScale"` key. Only
+    /// surfaced on iPad and Mac — iPhone uses the list view, tvOS uses
+    /// the Siri Remote which makes a slider awkward.
+    @AppStorage("guideScale")              private var guideScale          = 1.0
     @AppStorage("bgRefreshEnabled")        private var bgRefreshEnabled    = false
     @AppStorage("bgRefreshType")           private var bgRefreshType       = "interval"  // "interval" or "time"
     @AppStorage("bgRefreshIntervalMins")   private var bgRefreshInterval   = 1440        // 24 hours
@@ -1910,7 +2079,13 @@ struct NetworkSettingsView: View {
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         #if os(iOS)
         .task {
-            NetworkMonitor.shared.refresh(force: true)
+            // Intentionally NOT auto-calling `NetworkMonitor.refresh(force: true)`
+            // here — a user opening Network Settings shouldn't trigger
+            // an iOS Location prompt on their way to toggling a setting
+            // that may have nothing to do with WiFi. The "Refresh SSID
+            // Detection" button below is the explicit, context-aware
+            // way to ask for Location. Cached SSID (if any) still
+            // renders via `networkMonitor.currentSSID`.
             let stored = UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? ""
             let parsed = stored.split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1968,6 +2143,10 @@ struct NetworkSettingsView: View {
                         )
                     }
                 }
+
+                // Guide Display moved to its own top-level page —
+                // `GuideDisplaySettingsView`, reachable from the
+                // main Settings → App Settings section.
             }
             .padding(48)
         }
@@ -2086,6 +2265,13 @@ struct NetworkSettingsView: View {
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
 
+                // Guide Display moved to its own top-level page —
+                // `GuideDisplaySettingsView`, reachable from the main
+                // Settings → App Settings section. Reason: users
+                // couldn't find category colours here buried under
+                // Network; and "Guide Display" isn't really a
+                // networking concern anyway.
+
                 // MARK: Home WiFi (LAN Switching)
                 #if os(iOS)
                 Section {
@@ -2144,6 +2330,22 @@ struct NetworkSettingsView: View {
                         }
                     }
 
+                    // When the device is on WiFi but SSID came back nil, the
+                    // user almost certainly hasn't granted Location (Precise).
+                    // Surface a one-tap deep-link to iOS Settings so they don't
+                    // have to hand-walk Privacy → Location Services → Aerio.
+                    if networkMonitor.isOnWifi && networkMonitor.currentSSID == nil && !networkMonitor.isRefreshing {
+                        Button {
+                            if let url = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(url)
+                            }
+                        } label: {
+                            Label("Grant Location Access in Settings", systemImage: "location.circle")
+                                .foregroundColor(.accentPrimary)
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
+
                     // SSID list
                     ForEach(ssidEntries.indices, id: \.self) { index in
                         HStack(spacing: 10) {
@@ -2197,7 +2399,7 @@ struct NetworkSettingsView: View {
                     Text("Home WiFi (LAN Switching)").sectionHeaderStyle()
                 } footer: {
                     if networkMonitor.isOnWifi && networkMonitor.currentSSID == nil {
-                        Text("⚠️ Wi-Fi detected but network name unavailable. Verify the \"Access WiFi Information\" capability is enabled in Xcode → Signing & Capabilities.")
+                        Text("⚠️ Wi-Fi detected but network name unavailable. To detect your Home WiFi, grant Aerio Location access: open the iOS Settings app → Privacy & Security → Location Services → Aerio → choose \"While Using the App\" and enable Precise Location.")
                             .font(.labelSmall).foregroundColor(.statusWarning)
                     } else {
                         Text("When connected to any of these networks, AerioTV uses each server's local URL instead of its remote URL. Set each server's local URL in Settings → Playlists → [server] → Edit.")
@@ -2315,5 +2517,719 @@ struct NetworkSettingsView: View {
         return String(format: "%d:%02d %@", h12, minute, ampm)
     }
 }
+
+// MARK: - Category Color Picker Row (iOS only)
+//
+// One row in Settings → Guide Display that binds a SwiftUI
+// `ColorPicker` to the hex-string stored at the bucket's
+// `storageKey`. The binding converts between `Color` (what
+// ColorPicker speaks) and the hex string (what UserDefaults
+// persists). `@AppStorage` observes the underlying key, so any
+// open guide view re-renders its cells the moment the user lifts
+// their finger off the ColorPicker's eyedropper — no apply
+// button needed.
+//
+// tvOS is intentionally excluded: the system ColorPicker on tvOS
+// is awkward (two-axis hue/saturation grid with Siri Remote
+// trackpad). We surface only the on/off toggle there and point
+// users to iPhone/iPad for palette customisation.
+#if os(iOS)
+private struct CategoryColorPickerRow: View {
+    let category: ProgramCategory
+
+    /// Bound to the UserDefaults-backed hex string via
+    /// `@AppStorage`. When the user picks a new colour in the
+    /// system picker, SwiftUI writes it here (as hex), which in
+    /// turn triggers every observer of the same key to re-render
+    /// — including every `GuideProgramButton.cellBackground`
+    /// via the existing `@AppStorage` wiring on the cell.
+    @AppStorage private var storedHex: String
+
+    init(category: ProgramCategory) {
+        self.category = category
+        // Seed the @AppStorage with the category's default hex
+        // when the key is missing, so the ColorPicker shows the
+        // current effective colour on first render. Writing the
+        // default here is fine because `.onChange` is idempotent
+        // and `resetPaletteToDefaults()` removes the key
+        // explicitly.
+        self._storedHex = AppStorage(
+            wrappedValue: category.defaultHex,
+            category.storageKey
+        )
+    }
+
+    /// Two-way bridge between the hex string (persistence) and
+    /// `Color` (ColorPicker's required binding type).
+    private var colorBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: storedHex) },
+            set: { newColor in
+                let hex = newColor.toHex()
+                // Skip no-op writes to avoid a pointless
+                // UserDefaults change notification that would
+                // still trigger observers.
+                if hex != storedHex { storedHex = hex }
+            }
+        )
+    }
+
+    var body: some View {
+        ColorPicker(selection: colorBinding, supportsOpacity: false) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color(hex: storedHex).opacity(0.22))
+                        .frame(width: 36, height: 36)
+                    Image(systemName: category.sfSymbol)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(Color(hex: storedHex))
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(category.displayName)
+                        .font(.bodyMedium)
+                        .foregroundColor(.textPrimary)
+                    Text("Default: #\(category.defaultHex)")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                }
+            }
+        }
+        // Palette picks are deliberate user actions — push to iCloud
+        // right away instead of waiting for the 60-second debounced
+        // preferences push. Same rationale as FavoritesStore: force-
+        // quitting the app inside the debounce window would otherwise
+        // drop the change on the floor and the next launch would
+        // re-import the stale palette from KVS.
+        .onChange(of: storedHex) { _, _ in
+            SyncManager.shared.pushPreferencesImmediate()
+        }
+    }
+}
+#endif
+
+// MARK: - Guide Display Settings
+//
+// Standalone top-level settings page for guide-related visual controls:
+// the program-category colour palette, the channel-card stripe toggle,
+// per-bucket colour overrides (iOS), and the Guide Size slider.
+//
+// Previously these lived as a Section inside NetworkSettingsView, which
+// users couldn't find — category colours aren't really a networking
+// concern, and burying them two levels deep behind "Network" made the
+// feature effectively invisible. Lifting it to its own page at the
+// App Settings level (alongside Appearance / Network / DVR) matches the
+// user's mental model.
+struct GuideDisplaySettingsView: View {
+    @ObservedObject private var theme = ThemeManager.shared
+    @AppStorage(CategoryColor.enabledKey) private var enableCategoryColors = true
+    @AppStorage("tintChannelCards")       private var tintChannelCards = false
+    @AppStorage("guideScale")             private var guideScale: Double = 1.0
+
+    /// Summary text for the "Add more categories" disclosure row —
+    /// shows "Off", "3 extra", "Custom", or "5 extra + Custom" so
+    /// the user can see at a glance whether they've enabled
+    /// anything beyond the four default buckets.
+    fileprivate var moreCategoriesSummary: String {
+        let extraOn = CategoryColor.additionalBuckets.filter { CategoryColor.isBucketEnabled($0) }.count
+        let customCount = CategoryColor.loadCustomCategories().count
+        switch (extraOn, customCount) {
+        case (0, 0): return "Off"
+        case (let e, 0): return "\(e) extra"
+        case (0, let c): return "\(c) custom"
+        case (let e, let c): return "\(e) extra · \(c) custom"
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            #if os(tvOS)
+            tvOSBody
+            #else
+            iOSBody
+            #endif
+        }
+        .navigationTitle("Guide Display")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.large)
+        #else
+        .toolbar(.hidden, for: .navigationBar)
+        #endif
+        .toolbarBackground(Color.appBackground, for: .navigationBar)
+    }
+
+    // MARK: - iOS Body
+    #if !os(tvOS)
+    private var iOSBody: some View {
+        List {
+            // Master toggle + channel-card companion toggle.
+            //
+            // iPhone's Live TV tab is List-only (Guide view is iPad /
+            // Mac / Apple TV). The master toggle still matters on
+            // iPhone because it unlocks the "Tint Channel Cards"
+            // feature below — but "tint guide cells" was misleading
+            // copy that made iPhone testers think nothing happens
+            // when they flip it (they looked for a Guide view that
+            // doesn't exist). Device-aware text resolves that.
+            Section {
+                Toggle(isOn: $enableCategoryColors) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Color Programs by Category")
+                            .font(.bodyMedium).foregroundColor(.textPrimary)
+                        Text(UIDevice.current.userInterfaceIdiom == .phone
+                             ? "Unlocks category-based coloring. On iPhone this drives the Tint Channel Cards stripe below."
+                             : "Tint guide cells by program type — tap any color below to customise.")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+                .onChange(of: enableCategoryColors) { _, _ in
+                    SyncManager.shared.pushPreferencesImmediate()
+                }
+
+                Toggle(isOn: $tintChannelCards) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Tint Channel Cards")
+                            .font(.bodyMedium).foregroundColor(.textPrimary)
+                        Text("Adds a colored stripe to Live TV channel cards (list view) based on what's currently airing.")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+                .disabled(!enableCategoryColors)
+                .opacity(enableCategoryColors ? 1.0 : 0.4)
+                .onChange(of: tintChannelCards) { _, _ in
+                    SyncManager.shared.pushPreferencesImmediate()
+                }
+            } header: {
+                Text("Category Colors").sectionHeaderStyle()
+            } footer: {
+                Text(UIDevice.current.userInterfaceIdiom == .phone
+                     ? "iPhone's Live TV tab only renders the List view. Cards tint with a gradient that fades from the leading edge toward the center — based on the currently-airing program on the main row, and the individual program on each expanded schedule row. Dispatcharr and M3U+XMLTV work out of the box; Xtream Codes doesn't expose category data."
+                     : "Programs with a category tag in the EPG source get a leading-edge gradient — on channel cards in the List view (using the currently-airing program), on each row in the expanded schedule (using that program's own category), and on cells in the Guide grid. Dispatcharr and M3U+XMLTV work out of the box; Xtream Codes doesn't expose category data.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+
+            // Default palette — the four buckets that have shipped
+            // since v1.0. Always visible; the new "Add more
+            // categories" row below progressively discloses the
+            // extra buckets + a Custom editor without cluttering
+            // the default Settings view.
+            Section {
+                ForEach(CategoryColor.defaultBuckets, id: \.rawValue) { cat in
+                    CategoryColorPickerRow(category: cat)
+                        .listRowBackground(Color.cardBackground)
+                        .disabled(!enableCategoryColors)
+                        .opacity(enableCategoryColors ? 1.0 : 0.4)
+                }
+
+                NavigationLink {
+                    MoreCategoriesView()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.accentPrimary)
+                        Text("Add more categories")
+                            .font(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                        Spacer()
+                        Text(moreCategoriesSummary)
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                    }
+                }
+                .listRowBackground(Color.cardBackground)
+                .disabled(!enableCategoryColors)
+                .opacity(enableCategoryColors ? 1.0 : 0.4)
+
+                Button(role: .destructive) {
+                    CategoryColor.resetPaletteToDefaults()
+                    // Palette reset is a user action — push immediately
+                    // so other devices don't keep showing the old
+                    // custom colours for up to 60 seconds.
+                    SyncManager.shared.pushPreferencesImmediate()
+                } label: {
+                    HStack {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("Reset Colors to Defaults").font(.bodyMedium)
+                    }
+                    .foregroundColor(.statusWarning)
+                }
+                .listRowBackground(Color.cardBackground)
+                .disabled(!enableCategoryColors)
+                .opacity(enableCategoryColors ? 1.0 : 0.4)
+            } header: {
+                Text("Palette").sectionHeaderStyle()
+            } footer: {
+                Text("Tap a swatch to customise the color used for that program bucket. Kids > Sports > News > Movie priority when a program matches multiple.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+
+            // Guide size slider — iPad + Mac only (iPhone uses the list
+            // view; no grid to scale). Writes through the shared
+            // `guideScale` AppStorage key that EPGGuideView observes, so
+            // dragging resizes the live guide instantly.
+            if UIDevice.current.userInterfaceIdiom != .phone {
+                Section {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Guide Size")
+                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                            Spacer()
+                            Text("\(Int(guideScale * 100))%")
+                                .font(.labelSmall).foregroundColor(.textTertiary)
+                        }
+                        HStack(spacing: 8) {
+                            Image(systemName: "textformat.size.smaller")
+                                .foregroundColor(.textTertiary)
+                                .font(.system(size: 12))
+                            Slider(value: $guideScale, in: 0.75...1.5, step: 0.05)
+                                .tint(theme.accent)
+                            Image(systemName: "textformat.size.larger")
+                                .foregroundColor(.textTertiary)
+                                .font(.system(size: 14))
+                        }
+                    }
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Guide Size").sectionHeaderStyle()
+                } footer: {
+                    Text("Scale the guide grid on iPad and Mac.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+    }
+    #endif
+
+    // MARK: - tvOS Body
+    #if os(tvOS)
+    private var tvOSBody: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 32) {
+                tvSection("Category Colors") {
+                    TVSettingsToggleRow(
+                        icon: "paintpalette.fill",
+                        iconColor: .accentPrimary,
+                        title: "Color Programs by Category",
+                        subtitle: "Tint guide cells by program type. Customise the palette on iPhone / iPad — Settings → Guide Display.",
+                        isOn: $enableCategoryColors,
+                        onChange: { _ in }
+                    )
+                    TVSettingsToggleRow(
+                        icon: "tv.fill",
+                        iconColor: .accentPrimary,
+                        title: "Tint Channel Cards",
+                        subtitle: "Adds a colored stripe to Live TV channel cards based on what's airing now.",
+                        isOn: $tintChannelCards,
+                        onChange: { _ in }
+                    )
+                    .disabled(!enableCategoryColors)
+                    .opacity(enableCategoryColors ? 1.0 : 0.4)
+                }
+            }
+            .padding(48)
+        }
+    }
+
+    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title.uppercased())
+                .font(.system(size: 22, weight: .bold))
+                .foregroundColor(.textTertiary)
+                .tracking(1)
+                .padding(.leading, 20)
+            VStack(alignment: .leading, spacing: 8) {
+                content()
+            }
+        }
+    }
+    #endif
+}
+
+// MARK: - More Categories View
+//
+// Disclosure target for "Add more categories" on the Guide Display
+// settings screen. Presents the seven additional built-in buckets
+// (Documentary / Drama / Comedy / Reality / Educational / Sci-Fi /
+// Music) with an enable toggle + color picker on each row, plus a
+// "Custom" navigation link for user-defined category → color
+// mappings. Default buckets stay on the parent screen.
+#if os(iOS)
+struct MoreCategoriesView: View {
+    @ObservedObject private var theme = ThemeManager.shared
+    /// Bumped whenever a toggle flips so SwiftUI re-renders the
+    /// disabled-state opacity + the upstream summary row. Writes
+    /// to UserDefaults go through `CategoryColor.setBucketEnabled`
+    /// which doesn't fire an @AppStorage notification (the key is
+    /// dynamic), so we nudge the view manually.
+    @State private var enabledRevision: Int = 0
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(CategoryColor.additionalBuckets, id: \.rawValue) { cat in
+                    additionalBucketRow(cat)
+                        .listRowBackground(Color.cardBackground)
+                }
+            } header: {
+                Text("Additional Buckets").sectionHeaderStyle()
+            } footer: {
+                Text("Toggle a bucket on to include its aliases in the matcher. Defaults cover Sports, Movies, Kids, and News — these are extras for feeds that heavily tag Documentary, Drama, Sitcoms, etc.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+
+            Section {
+                NavigationLink {
+                    CustomCategoriesView()
+                } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "paintbrush.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.accentPrimary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Custom").font(.bodyMedium).foregroundColor(.textPrimary)
+                            Text("Define your own category strings and colors")
+                                .font(.labelSmall).foregroundColor(.textTertiary)
+                        }
+                        Spacer()
+                        Text("\(CategoryColor.loadCustomCategories().count)")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
+                }
+                .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("User-Defined").sectionHeaderStyle()
+            } footer: {
+                Text("Custom entries are checked before the built-in buckets, so you can override a match like \"Horror\" or \"Cooking\" with your own color even if a built-in bucket would have caught it.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.appBackground)
+        .navigationTitle("More Categories")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Color.appBackground, for: .navigationBar)
+    }
+
+    @ViewBuilder
+    private func additionalBucketRow(_ cat: ProgramCategory) -> some View {
+        let isOn = Binding(
+            get: { CategoryColor.isBucketEnabled(cat) },
+            set: { newValue in
+                CategoryColor.setBucketEnabled(cat, newValue)
+                enabledRevision &+= 1
+                SyncManager.shared.pushPreferencesImmediate()
+            }
+        )
+        Toggle(isOn: isOn) {
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(cat.baseColor.opacity(isOn.wrappedValue ? 0.8 : 0.3))
+                        .frame(width: 28, height: 28)
+                    Image(systemName: cat.sfSymbol)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(cat.displayName)
+                        .font(.bodyMedium)
+                        .foregroundColor(.textPrimary)
+                    // "Customize color" shown regardless of toggle
+                    // state — the user reported that hiding it on
+                    // off made the nav-link feel like it "disappeared"
+                    // after flipping the toggle off. Users are free
+                    // to edit the color even when the bucket isn't
+                    // actively matching; this just pre-stages the
+                    // color for when they eventually enable it.
+                    NavigationLink {
+                        SingleCategoryColorEditor(category: cat)
+                    } label: {
+                        Text("Customize color")
+                            .font(.labelSmall)
+                            .foregroundColor(.accentPrimary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .tint(theme.accent)
+    }
+}
+
+// MARK: - Single Category Color Editor
+//
+// Standalone color picker for one additional bucket, reached via
+// the "Customize color" label inside MoreCategoriesView. Mirrors
+// the CategoryColorPickerRow behaviour — same hex + color well +
+// reset + sync — but in its own screen so the toggles list above
+// stays scannable.
+struct SingleCategoryColorEditor: View {
+    let category: ProgramCategory
+    @State private var storedHex: String = ""
+
+    private var currentColor: Binding<Color> {
+        Binding(
+            get: { Color(hex: storedHex.isEmpty ? category.defaultHex : storedHex) },
+            set: { newColor in
+                let hex = newColor.toHex()
+                storedHex = hex
+                category.setCustomHex(hex)
+                SyncManager.shared.pushPreferencesImmediate()
+            }
+        )
+    }
+
+    var body: some View {
+        List {
+            Section {
+                ColorPicker(category.displayName, selection: currentColor, supportsOpacity: false)
+                    .listRowBackground(Color.cardBackground)
+                HStack {
+                    Text("Hex")
+                        .foregroundColor(.textSecondary)
+                    Spacer()
+                    Text(storedHex.isEmpty ? category.defaultHex : storedHex)
+                        .font(.monoSmall)
+                        .foregroundColor(.textTertiary)
+                }
+                .listRowBackground(Color.cardBackground)
+
+                Button(role: .destructive) {
+                    category.setCustomHex(nil)
+                    storedHex = ""
+                    SyncManager.shared.pushPreferencesImmediate()
+                } label: {
+                    HStack {
+                        Image(systemName: "arrow.uturn.backward")
+                            .font(.system(size: 14, weight: .semibold))
+                        Text("Reset to Default")
+                    }
+                    .foregroundColor(.statusWarning)
+                }
+                .listRowBackground(Color.cardBackground)
+            } footer: {
+                Text("Applies wherever a program's category matches one of this bucket's aliases in the EPG (see alias list in CategoryColor.swift).")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.appBackground)
+        .navigationTitle(category.displayName)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Color.appBackground, for: .navigationBar)
+        .onAppear {
+            storedHex = UserDefaults.standard.string(forKey: category.storageKey) ?? ""
+        }
+    }
+}
+
+// MARK: - Custom Categories View
+//
+// User-defined string → color mappings. Each entry is a case-
+// insensitive substring matched against the program's raw
+// `<category>` value, with its own hex. Custom entries win over
+// built-in buckets (see `CategoryColor.customHex(for:)`). Stored
+// as a JSON array in UserDefaults under
+// `CategoryColor.customCategoriesKey` and mirrored via SyncManager.
+struct CustomCategoriesView: View {
+    @State private var entries: [CategoryColor.CustomCategory] = []
+    @State private var showAddSheet = false
+    @ObservedObject private var theme = ThemeManager.shared
+
+    var body: some View {
+        List {
+            if entries.isEmpty {
+                Section {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("No custom categories yet")
+                            .font(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                        Text("Tap + above to add a match string (e.g. \"Horror\") and pick a color. Custom entries win over the built-in buckets.")
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                    }
+                    .padding(.vertical, 4)
+                    .listRowBackground(Color.cardBackground)
+                }
+            } else {
+                Section {
+                    ForEach(entries) { entry in
+                        NavigationLink {
+                            CustomCategoryEditor(
+                                entry: entry,
+                                onSave: { updated in
+                                    if let idx = entries.firstIndex(where: { $0.id == updated.id }) {
+                                        entries[idx] = updated
+                                        persist()
+                                    }
+                                },
+                                onDelete: {
+                                    entries.removeAll { $0.id == entry.id }
+                                    persist()
+                                }
+                            )
+                        } label: {
+                            HStack(spacing: 12) {
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(Color(hex: entry.hex))
+                                    .frame(width: 28, height: 28)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.match)
+                                        .font(.bodyMedium)
+                                        .foregroundColor(.textPrimary)
+                                    Text(entry.hex)
+                                        .font(.monoSmall)
+                                        .foregroundColor(.textTertiary)
+                                }
+                                Spacer()
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
+                    .onDelete { indexSet in
+                        entries.remove(atOffsets: indexSet)
+                        persist()
+                    }
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.appBackground)
+        .navigationTitle("Custom Categories")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Color.appBackground, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showAddSheet = true
+                } label: {
+                    Image(systemName: "plus")
+                }
+            }
+        }
+        .sheet(isPresented: $showAddSheet) {
+            NavigationStack {
+                CustomCategoryEditor(
+                    entry: CategoryColor.CustomCategory(match: "", hex: "FF5722"),
+                    isNew: true,
+                    onSave: { new in
+                        entries.append(new)
+                        persist()
+                        showAddSheet = false
+                    },
+                    onDelete: { showAddSheet = false }
+                )
+            }
+        }
+        .onAppear {
+            entries = CategoryColor.loadCustomCategories()
+        }
+    }
+
+    private func persist() {
+        CategoryColor.saveCustomCategories(entries)
+        SyncManager.shared.pushPreferencesImmediate()
+    }
+}
+
+// MARK: - Custom Category Editor
+//
+// Used both for adding a new entry (presented as a sheet from the
+// "+" toolbar button) and editing an existing one (pushed as a
+// nav link). Validates the match string is non-empty before save;
+// hex is always valid because it comes from ColorPicker.
+struct CustomCategoryEditor: View {
+    @State var entry: CategoryColor.CustomCategory
+    var isNew: Bool = false
+    let onSave: (CategoryColor.CustomCategory) -> Void
+    let onDelete: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var theme = ThemeManager.shared
+
+    private var colorBinding: Binding<Color> {
+        Binding(
+            get: { Color(hex: entry.hex) },
+            set: { entry.hex = $0.toHex() }
+        )
+    }
+
+    var body: some View {
+        List {
+            Section {
+                TextField("Match string (e.g. Horror)", text: $entry.match)
+                    .listRowBackground(Color.cardBackground)
+                    .autocorrectionDisabled()
+                ColorPicker("Color", selection: colorBinding, supportsOpacity: false)
+                    .listRowBackground(Color.cardBackground)
+                HStack {
+                    Text("Hex")
+                        .foregroundColor(.textSecondary)
+                    Spacer()
+                    Text(entry.hex)
+                        .font(.monoSmall)
+                        .foregroundColor(.textTertiary)
+                }
+                .listRowBackground(Color.cardBackground)
+            } footer: {
+                Text("Matching is case-insensitive and uses `contains` — entering \"Horror\" will colour any program whose XMLTV category includes the word horror.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+
+            if !isNew {
+                Section {
+                    Button(role: .destructive) {
+                        onDelete()
+                        dismiss()
+                    } label: {
+                        HStack {
+                            Image(systemName: "trash")
+                            Text("Delete")
+                        }
+                        .foregroundColor(.statusLive)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.appBackground)
+        .navigationTitle(isNew ? "New Custom Category" : "Edit Category")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Color.appBackground, for: .navigationBar)
+        .toolbar {
+            if isNew {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(isNew ? "Add" : "Save") {
+                    let trimmed = entry.match.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.isEmpty else { return }
+                    var saved = entry
+                    saved.match = trimmed
+                    onSave(saved)
+                    dismiss()
+                }
+                .disabled(entry.match.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+    }
+}
+#endif
 
 

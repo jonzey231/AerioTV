@@ -110,10 +110,17 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var setAudioTrackAction: ((Int) -> Void)?
     /// Closure set by the Coordinator; sets subtitle track (0 = off).
     var setSubtitleTrackAction: ((Int) -> Void)?
-    /// Closure set by the ViewController; toggles Picture-in-Picture.
-    var togglePiPAction: (() -> Void)?
-    /// Whether PiP is currently active.
+    /// Whether PiP is currently active. Written synchronously by the
+    /// AVPictureInPictureController delegates (auto-PiP only — the manual
+    /// menu entry was removed in favour of swipe-home auto-PiP). Read by
+    /// `Coordinator.didEnterBackground` to skip the vid=no GPU-safeguard
+    /// when iOS is actively driving the PiP window.
     @Published var isPiPActive: Bool = false
+    /// True when the user flipped the overflow menu's "Audio Only" item.
+    /// Mirrored from `PlayerView`'s local `@State` so the Coordinator's
+    /// background handler can keep mpv's audio decoder running when the
+    /// user has explicitly opted into background audio. Default false.
+    @Published var isAudioOnly: Bool = false
     /// Stream technical info (codec, resolution, bitrate, etc.)
     @Published var streamInfo = StreamInfo()
     /// When true, the stream info overlay is visible and the volatile
@@ -675,15 +682,70 @@ private struct PlayerRootView: View {
     }
 
     // MARK: - Safe area helper
-    // Reads the key window's top safe area inset directly from UIKit so it's accurate
-    // even inside a view that uses .ignoresSafeArea().
+    // Reads the key window's top safe area inset directly from UIKit so it's
+    // accurate even inside a view that uses .ignoresSafeArea().
+    //
+    // Two cases the plain reading gets wrong on iPhone:
+    //
+    //  • Portrait with a running Live Activity in the Dynamic Island. iOS
+    //    does NOT enlarge `safeAreaInsets.top` when an LA is active, but
+    //    the LA pill visually extends further down than a plain DI. The
+    //    player's top chrome ends up kissing (or under) the LA pill.
+    //  • Landscape on DI/notch devices. iOS reports `safeAreaInsets.top == 0`
+    //    because the app isn't showing a traditional status bar — but the
+    //    system still draws the status-bar row + any LA as an overlay.
+    //
+    // Fix: on iPhone, bump the reported inset by a constant LA buffer on
+    // devices that have a notch or Dynamic Island (reported > 40pt is a
+    // reliable proxy), and floor landscape to a value that clears a compact
+    // LA pill even when the reported inset is zero.
     private var deviceSafeAreaTop: CGFloat {
         #if os(iOS)
-        UIApplication.shared.connectedScenes
+        // Robust scene/window lookup. `.first { $0.isKeyWindow }` returns
+        // nil during fullScreenCover transitions — that's probably why the
+        // previous read occasionally fell through to 0 even on iPhone Pro
+        // Max portrait. Fall back to the first window of the active scene,
+        // then any connected window, before giving up.
+        let reported: CGFloat = {
+            let scenes = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+            if let active = scenes.first(where: { $0.activationState == .foregroundActive }) {
+                if let key = active.windows.first(where: { $0.isKeyWindow }) {
+                    return key.safeAreaInsets.top
+                }
+                if let any = active.windows.first {
+                    return any.safeAreaInsets.top
+                }
+            }
+            return scenes.first?.windows.first?.safeAreaInsets.top ?? 0
+        }()
+
+        guard UIDevice.current.userInterfaceIdiom == .phone else {
+            return max(reported, 24)  // iPad — conservative minimum
+        }
+        let isLandscape = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
-            .flatMap { $0.windows }
-            .first { $0.isKeyWindow }?
-            .safeAreaInsets.top ?? 44
+            .first?.interfaceOrientation.isLandscape ?? false
+        // Notch / Dynamic Island iPhones report > 40pt of top inset in
+        // portrait; older home-button iPhones report ~20pt. Only apply
+        // the LA buffer to the former in portrait — iPhone SE / 8 would
+        // get wasted vertical space otherwise.
+        //
+        // In landscape we used to apply the LA buffer AND floor at 60pt,
+        // which stacked to ~88pt on Pro iPhones — way too low for a
+        // fullscreen video (#22 feedback). In landscape iOS does not
+        // overlay a Live Activity pill on top of fullscreen-landscape
+        // app content, so the LA buffer isn't needed there, and the
+        // floor only has to clear a hypothetical hardware camera or
+        // rounded-corner insets (~20pt is plenty).
+        let hasNotchOrDI = reported > 40
+        let laBuffer: CGFloat = (hasNotchOrDI && !isLandscape) ? 28 : 0
+        // 20pt floor in landscape keeps the chrome visually snug against
+        // the top edge of the video without crowding the camera cutout.
+        // 70pt floor in portrait continues to clear the status-bar row
+        // and give the LA buffer room to breathe below.
+        let floor: CGFloat = isLandscape ? 20 : 70
+        return max(reported, floor) + laBuffer
         #else
         60   // tvOS has no notch / Dynamic Island
         #endif
@@ -1166,17 +1228,10 @@ private struct PlayerRootView: View {
                         if UIDevice.current.userInterfaceIdiom == .pad {
                             addStreamButton
                         }
-
-                        // AirPlay — always visible (system routing control)
-                        ZStack {
-                            Circle()
-                                .fill(.ultraThinMaterial)
-                                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
-                                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
-                            AirPlayButton()
-                                .frame(width: 34, height: 34)
-                        }
-                        .frame(width: 52, height: 52)
+                        // AirPlay moved into the overflow menu — the
+                        // `AirPlayMenuTrigger` helper keeps a hidden
+                        // AVRoutePickerView in the key window so the
+                        // menu item can still present the system picker.
                         #endif
                     }
                 }
@@ -1250,6 +1305,7 @@ private struct PlayerRootView: View {
         .accessibilityLabel("Add stream")
         .accessibilityHint("Pick another channel to watch alongside this one")
     }
+
     #endif
 
     private var playerOverflowMenu: some View {
@@ -1260,18 +1316,28 @@ private struct PlayerRootView: View {
             currentSubtitleTrackID: progressStore.currentSubtitleTrackID,
             speed: progressStore.speed,
             isLive: isLive,
-            isPiPActive: progressStore.isPiPActive,
-            hasPiP: progressStore.togglePiPAction != nil,
             sleepTimerEnd: sleepTimerEnd,
             showStreamInfo: showStreamInfo,
             isAudioOnly: isAudioOnly,
+            // Legacy single-stream PlayerView doesn't have record-sheet
+            // plumbing (it's only reached with the Developer-Settings
+            // `playback.unified` flag flipped off, a diagnostic fallback).
+            // Record lives in the unified chrome, which users hit by
+            // default. Keep this false here so the menu stays clean on
+            // the legacy path.
+            canRecord: false,
             setAudioTrack: { [weak progressStore] in progressStore?.setAudioTrackAction?($0) },
             setSubtitleTrack: { [weak progressStore] in progressStore?.setSubtitleTrackAction?($0) },
             setSpeed: { [weak progressStore] in progressStore?.setSpeedAction?($0) },
-            togglePiP: { [weak progressStore] in progressStore?.togglePiPAction?() },
             setSleepTimer: { sleepTimerEnd = $0 },
             toggleStreamInfo: { withAnimation(.easeInOut(duration: 0.2)) { showStreamInfo.toggle() } },
-            toggleAudioOnly: { withAnimation(.spring(response: 0.3)) { isAudioOnly.toggle() } },
+            toggleAudioOnly: {
+                withAnimation(.spring(response: 0.3)) { isAudioOnly.toggle() }
+                // Mirror to the store so the Coordinator's background
+                // handler can keep audio alive when the user opts in.
+                progressStore.isAudioOnly = isAudioOnly
+            },
+            recordAction: nil,
             onMenuOpen: { controlsHideTask?.cancel() },
             onMenuClose: { if !progressStore.isPaused { scheduleControlsHide() } }
         )
@@ -1671,20 +1737,22 @@ struct PlayerOverflowMenu: View, Equatable {
     let currentSubtitleTrackID: Int
     let speed: Double
     let isLive: Bool
-    let isPiPActive: Bool
-    let hasPiP: Bool
     let sleepTimerEnd: Date?
     let showStreamInfo: Bool
     let isAudioOnly: Bool
+    /// When true, the menu shows a "Record Current Program" item that
+    /// fires `recordAction`. Gated off the audio tile's live EPG state
+    /// in the unified chrome so it hides for streams without EPG data.
+    let canRecord: Bool
 
     // Action closures — excluded from equality check.
     var setAudioTrack: ((Int) -> Void)?
     var setSubtitleTrack: ((Int) -> Void)?
     var setSpeed: ((Double) -> Void)?
-    var togglePiP: (() -> Void)?
     var setSleepTimer: ((Date?) -> Void)?
     var toggleStreamInfo: (() -> Void)?
     var toggleAudioOnly: (() -> Void)?
+    var recordAction: (() -> Void)?
     var onMenuOpen: (() -> Void)?
     var onMenuClose: (() -> Void)?
 
@@ -1696,11 +1764,10 @@ struct PlayerOverflowMenu: View, Equatable {
         lhs.currentSubtitleTrackID == rhs.currentSubtitleTrackID &&
         lhs.speed == rhs.speed &&
         lhs.isLive == rhs.isLive &&
-        lhs.isPiPActive == rhs.isPiPActive &&
-        lhs.hasPiP == rhs.hasPiP &&
         lhs.sleepTimerEnd == rhs.sleepTimerEnd &&
         lhs.showStreamInfo == rhs.showStreamInfo &&
-        lhs.isAudioOnly == rhs.isAudioOnly
+        lhs.isAudioOnly == rhs.isAudioOnly &&
+        lhs.canRecord == rhs.canRecord
     }
 
     private var sleepTimerRemainingText: String? {
@@ -1799,6 +1866,17 @@ struct PlayerOverflowMenu: View, Equatable {
 
                 Divider()
 
+                // Record current program. Gated on `canRecord` so streams
+                // without live EPG data (raw M3U / missing tvg-id) don't
+                // show an item the user can't usefully tap.
+                if canRecord {
+                    Button {
+                        recordAction?()
+                    } label: {
+                        Label("Record Current Program", systemImage: "record.circle")
+                    }
+                }
+
                 // Sleep timer (sub-menu)
                 Menu {
                     if sleepTimerEnd != nil {
@@ -1847,16 +1925,18 @@ struct PlayerOverflowMenu: View, Equatable {
                     )
                 }
 
-                // Picture-in-Picture
-                if hasPiP {
-                    Button {
-                        togglePiP?()
-                    } label: {
-                        Label(
-                            isPiPActive ? "Exit Picture in Picture" : "Picture in Picture",
-                            systemImage: isPiPActive ? "pip.exit" : "pip.enter"
-                        )
-                    }
+                // Picture-in-Picture is automatic — no manual menu item.
+                // Swipe home to shrink the player into a floating window;
+                // controlled by Settings → Appearance → Picture-in-Picture.
+
+                // AirPlay. Routes audio only on iPhone (the mix of HLS +
+                // MPV-backed TS streams rules out reliable video routing),
+                // so the menu placement matches its actual scope — no
+                // point taking a top-bar chrome slot for audio routing.
+                Button {
+                    AirPlayMenuTrigger.present()
+                } label: {
+                    Label("AirPlay (Audio Only)", systemImage: "airplay.audio")
                 }
                 #endif
             }
@@ -2210,6 +2290,67 @@ struct AirPlayButton: UIViewRepresentable {
         return v
     }
     func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
+}
+
+// MARK: - AirPlay Menu Trigger
+// We moved AirPlay off the top-chrome button row and into the overflow
+// menu. Since AerioTV streams audio-only via AirPlay (no video routing
+// on iPhone given the mix of HLS + MPV-backed TS streams), a dedicated
+// visible button was chrome bloat. Menus, however, can't host an
+// interactive `AVRoutePickerView` directly — items are rendered as
+// Buttons by SwiftUI. We route the menu tap through this helper,
+// which keeps one `AVRoutePickerView` permanently attached to the
+// key window (invisible and sized 1×1 offscreen) and fires the
+// touchUpInside on its internal UIButton when `present()` is called.
+//
+// Subview-hopping into `AVRoutePickerView` is not officially blessed
+// by Apple but is the documented workaround across the iOS community
+// (Podcasts, Spotify, etc. all do it). The route picker view's
+// private subview layout has been stable through iOS 13 → 18; if
+// Apple ever rearranges it, `present()` becomes a no-op and the
+// user can still reach AirPlay via Control Center — a graceful
+// degradation rather than a crash.
+@MainActor
+enum AirPlayMenuTrigger {
+    private static let pickerView: AVRoutePickerView = {
+        let v = AVRoutePickerView(frame: CGRect(x: -100, y: -100, width: 1, height: 1))
+        v.alpha = 0.01       // kept non-zero so the subview button stays touch-enabled
+        v.isUserInteractionEnabled = true
+        return v
+    }()
+
+    /// Attach the hidden picker view to the app's key window (idempotent)
+    /// and fire the underlying UIButton's touchUpInside action to make iOS
+    /// present the system AirPlay route selection sheet.
+    static func present() {
+        attachIfNeeded()
+        for subview in pickerView.subviews {
+            if let button = subview as? UIButton {
+                button.sendActions(for: .touchUpInside)
+                return
+            }
+        }
+        // Iteration fallback — Apple has historically nested the button one
+        // level deeper in some iOS versions. Walk one layer down before
+        // giving up.
+        for subview in pickerView.subviews {
+            for inner in subview.subviews {
+                if let button = inner as? UIButton {
+                    button.sendActions(for: .touchUpInside)
+                    return
+                }
+            }
+        }
+    }
+
+    private static func attachIfNeeded() {
+        guard pickerView.superview == nil else { return }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let activeScene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
+        guard let window = activeScene?.windows.first(where: { $0.isKeyWindow })
+                ?? activeScene?.windows.first else { return }
+        window.addSubview(pickerView)
+    }
 }
 #else
 struct AirPlayButton: View {

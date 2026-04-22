@@ -77,6 +77,10 @@ final class ServerConnection {
     /// the value shows up in Dispatcharr's admin Stats panel. Empty string
     /// means "use the computed default from `DeviceInfo.defaultUserAgent`".
     var customUserAgent: String = ""
+    /// Optional per-Dispatcharr-server XMLTV override. When non-empty,
+    /// Aerio fetches EPG from this URL directly instead of Dispatcharr's
+    /// /api/epg/* endpoints. Ignored for XC and M3U. Empty = use API.
+    var dispatcharrXMLTVURL: String = ""
     /// Preferred destination for new recordings on this server. Only
     /// meaningful for `.dispatcharrAPI` — XC/M3U servers ignore this and
     /// always record locally. Stored as rawValue for SwiftData stability.

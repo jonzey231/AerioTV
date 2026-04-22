@@ -45,6 +45,7 @@
 		B1C2D3E4F5A67890ACE0002C /* ProcessMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */; };
 		B1C2D3E4F5A67890ACE0002F /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00031 /* PlaybackDiagnostics.swift */; };
 		B1C2D3E4F5A67890ACE00032 /* PlaybackChromeOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */; };
+		B1C2D3E4F5A67890ACE00B01 /* CategoryColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */; };
 		A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		294AE2B45D4A82E38B1D09C4 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
 		29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */; };
@@ -113,6 +114,7 @@
 		B1C2D3E4F5A67890ACE0002D /* ProcessMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */; };
 		B1C2D3E4F5A67890ACE00030 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00031 /* PlaybackDiagnostics.swift */; };
 		B1C2D3E4F5A67890ACE00033 /* PlaybackChromeOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */; };
+		B1C2D3E4F5A67890ACE00B02 /* CategoryColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */; };
 		A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		8CF1E8A8912F0A98110ABF07 /* Pods-Aerio_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */; };
 		8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
@@ -298,6 +300,7 @@
 		B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessMetrics.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE00031 /* PlaybackDiagnostics.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlaybackDiagnostics.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlaybackChromeOverlay.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CategoryColor.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TVPressGesture.swift; sourceTree = "<group>"; };
 		F249D5C39D90BC11107F3420 /* Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist"; sourceTree = "<group>"; };
 		F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConnectionViewModel.swift; sourceTree = "<group>"; };
@@ -682,6 +685,7 @@
 				B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */,
 				B1C2D3E4F5A67890ACE00031 /* PlaybackDiagnostics.swift */,
 				B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */,
+				B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -941,6 +945,7 @@
 				B1C2D3E4F5A67890ACE0002C /* ProcessMetrics.swift in Sources */,
 				B1C2D3E4F5A67890ACE0002F /* PlaybackDiagnostics.swift in Sources */,
 				B1C2D3E4F5A67890ACE00032 /* PlaybackChromeOverlay.swift in Sources */,
+				B1C2D3E4F5A67890ACE00B01 /* CategoryColor.swift in Sources */,
 				2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */,
 				A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */,
 				07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */,
@@ -1014,6 +1019,7 @@
 				B1C2D3E4F5A67890ACE0002D /* ProcessMetrics.swift in Sources */,
 				B1C2D3E4F5A67890ACE00030 /* PlaybackDiagnostics.swift in Sources */,
 				B1C2D3E4F5A67890ACE00033 /* PlaybackChromeOverlay.swift in Sources */,
+				B1C2D3E4F5A67890ACE00B02 /* CategoryColor.swift in Sources */,
 				38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */,
 				84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */,
 				115F4DEA73DE0C5C49817C04 /* RecordProgramSheet.swift in Sources */,
@@ -1057,7 +1063,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.6.3;
+				MARKETING_VERSION = 1.6.4;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio.TopShelf;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1111,7 +1117,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.6.3;
+				MARKETING_VERSION = 1.6.4;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio;
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1137,7 +1143,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.6.3;
+				MARKETING_VERSION = 1.6.4;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio.TopShelf;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1206,7 +1212,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.6.3;
+				MARKETING_VERSION = 1.6.4;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1238,7 +1244,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.6.3;
+				MARKETING_VERSION = 1.6.4;
 				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio;
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1307,7 +1313,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.6.3;
+				MARKETING_VERSION = 1.6.4;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

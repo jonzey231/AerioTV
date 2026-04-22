@@ -24,10 +24,13 @@ enum KeychainHelper {
         delete(key, synchronizable: synchronizable)
 
         var query: [CFString: Any] = [
-            kSecClass:       kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: key,
-            kSecValueData:   data
+            kSecClass:         kSecClassGenericPassword,
+            kSecAttrService:   service,
+            kSecAttrAccount:   key,
+            kSecValueData:     data,
+            // AfterFirstUnlock is compatible with iCloud-synchronizable items
+            // and with background refresh when the device is locked post-boot.
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlock
         ]
         if synchronizable {
             query[kSecAttrSynchronizable] = true

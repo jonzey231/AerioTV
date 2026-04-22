@@ -2,6 +2,7 @@
 import SwiftUI
 import AVFoundation
 import AVKit
+import Combine
 import UIKit
 import Libmpv
 import CoreVideo
@@ -146,11 +147,11 @@ class MPVPlayerViewController: UIViewController {
 
     #if os(iOS)
     /// PiP controller — created lazily on first request via
-    /// `ensurePiPController()`. Nil until the user taps the PiP
-    /// toggle on the audio tile's chrome.
+    /// `ensurePiPController()`. Nil until the single-stream
+    /// makeUIViewController path builds it.
     ///
     /// Previously this was eagerly initialized in `viewDidLoad`.
-    /// That meant every multiview tile (up to 9) o mojpaid the cost of
+    /// That meant every multiview tile (up to 9) paid the cost of
     /// an `AVPictureInPictureController` allocation + delegate
     /// table wiring + the `ContentSource` `sampleBufferDisplayLayer`
     /// binding, even though only the audio tile is ever PiP-eligible.
@@ -163,9 +164,19 @@ class MPVPlayerViewController: UIViewController {
     /// `sampleBufferDisplayLayer`, or return the cached instance.
     /// Returns `nil` on platforms / devices where PiP isn't
     /// supported (e.g. iPhone in some locales / older simulators).
-    /// Safe to call from any thread that can touch UIKit; in
-    /// practice it's only called from the `togglePiPAction` closure
-    /// which already runs on the main actor.
+    /// Called from `makeUIViewController` during single-stream
+    /// mount so `canStartPictureInPictureAutomaticallyFromInline`
+    /// has a live controller to fire against when the app
+    /// backgrounds. The manual PiP menu entry has been removed —
+    /// PiP is auto-only.
+    ///
+    /// Paired with `tearDownPiPController()` for the Audio-Only
+    /// suppression path: empirically, iOS ignores runtime writes to
+    /// `canStartPictureInPictureAutomaticallyFromInline = false` and
+    /// still engages auto-PiP on swipe-home. The reliable suppressor
+    /// is destroying the controller entirely when the user flips
+    /// Audio Only, then rebuilding via this method when they flip
+    /// it back off.
     @discardableResult
     func ensurePiPController() -> AVPictureInPictureController? {
         if let existing = pipController { return existing }
@@ -177,8 +188,29 @@ class MPVPlayerViewController: UIViewController {
         )
         let pip = AVPictureInPictureController(contentSource: contentSource)
         pip.delegate = coordinator
+        // Always auto-start PiP when the app backgrounds. No user toggle —
+        // PiP is the only way to keep video alive when the app leaves the
+        // foreground, and removing the toggle eliminates a footgun where
+        // users turned it off and then wondered why swipe-home killed
+        // their stream. iOS only honours this on an already-instantiated
+        // controller, which is why the single-stream path in
+        // `makeUIViewController` below eagerly calls this method.
+        // Multiview auto-PiP is still deferred — eager-create during a
+        // multi-tile mount correlates 1:1 with an app freeze.
+        pip.canStartPictureInPictureAutomaticallyFromInline = true
         pipController = pip
         return pip
+    }
+
+    /// Release the PiP controller entirely. Used by the Audio-Only
+    /// suppression path — without a live controller, iOS has no
+    /// handle on our sample-buffer layer and can't engage auto-PiP
+    /// on swipe-home. The sample buffer layer itself (and mpv) stay
+    /// alive; only the PiP controller goes away.
+    func tearDownPiPController() {
+        guard pipController != nil else { return }
+        pipController?.delegate = nil
+        pipController = nil
     }
     #endif
 
@@ -283,22 +315,54 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         let vc = MPVPlayerViewController()
         vc.coordinator = context.coordinator
 
-        // Wire up PiP toggle (iOS only). `ensurePiPController()` is
-        // the lazy-init path — on first tap the controller is built
-        // against the already-attached `sampleBufferLayer`, cached,
-        // and returned. Subsequent taps hit the cached instance.
-        // Tiles that never tap PiP never pay the allocation cost.
+        // Wire up PiP (iOS only). PiP is auto-only — the manual
+        // overflow-menu entry was removed; users swipe home to
+        // engage PiP, gated by the Settings → Appearance →
+        // Picture-in-Picture toggle.
+        //
+        // Eager-create the controller for SINGLE-STREAM mount
+        // (`tileID == nil`). iOS's auto-PiP-on-background API
+        // (`canStartPictureInPictureAutomaticallyFromInline`) only
+        // fires on an already-instantiated controller, so it has to
+        // exist in the foreground. Single-stream has exactly one
+        // AVSampleBufferDisplayLayer in the hierarchy, so iOS
+        // reliably picks it as the auto-PiP target.
+        //
+        // iOS fires `pictureInPictureControllerWillStartPictureInPicture`
+        // before `didEnterBackground`, and that delegate synchronously
+        // sets `progressStore.isPiPActive = true` — so the background
+        // handler's first-branch check against isPiPActive correctly
+        // short-circuits the vid=no path for the PiP case.
+        //
+        // Eager-create fires on two entry points:
+        //   (a) Legacy PlayerView single-stream path (tileID == nil).
+        //   (b) Unified-player N=1 — a tileID is set, but there's
+        //       exactly one tile in MultiviewStore, which is the case
+        //       when the user launches playback from the Guide /
+        //       Channels list without having added a second tile.
+        //       This is the default user path and MUST support PiP.
+        //
+        // We gate (b) on `tiles.count <= 1` so the dangerous case —
+        // mounting a 2nd tile while the 1st is still loadfile-
+        // cascading — still skips. The 1st tile's mount happens in
+        // isolation (no parallel mpv activity), so eager-create there
+        // is safe; only concurrent multi-tile mounts cause the freeze.
         #if os(iOS)
-        let coord = context.coordinator
-        coord.progressStore.togglePiPAction = { [weak vc, weak coord] in
-            guard let pip = vc?.ensurePiPController() else { return }
-            if pip.isPictureInPictureActive {
-                pip.stopPictureInPicture()
-                DispatchQueue.main.async { coord?.progressStore.isPiPActive = false }
-            } else {
-                pip.startPictureInPicture()
-                DispatchQueue.main.async { coord?.progressStore.isPiPActive = true }
-            }
+        let isSoloTile = (tileID == nil) ||
+            (isAudioActive && MultiviewStore.shared.tiles.count <= 1)
+        if isSoloTile {
+            // Wire the VC weak ref onto the Coordinator so
+            // `updateAutoPiPEligibility()` can tear down / rebuild
+            // the PiP controller in response to Audio-Only toggles.
+            // The helper then performs the initial build (when
+            // isAudioOnly=false) via `vc.ensurePiPController()`.
+            // On devices without PiP support the helper no-ops and
+            // leaves `pipAutoEligible` false.
+            context.coordinator.viewController = vc
+            context.coordinator.updateAutoPiPEligibility()
+            #if DEBUG
+            print("[MPV-PIP] makeUIViewController: tileID=\(tileID ?? "single") coord=\(ObjectIdentifier(context.coordinator)) audioOnly=\(context.coordinator.progressStore.isAudioOnly)")
+            #endif
         }
         #endif
 
@@ -325,6 +389,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         if tileID != nil {
             context.coordinator.applyAudioFocusIfChanged(isAudioActive)
             context.coordinator.applyPauseIfChanged(shouldPause)
+            // NOTE: no PiP wiring here. Multiview tiles do NOT
+            // auto-PiP on background (eager-creating
+            // AVPictureInPictureController during a multi-tile
+            // mount reproducibly freezes the app). The manual PiP
+            // menu item was also removed — PiP is auto-only.
+            // Single-stream playback (the case the user was
+            // reporting as broken vs v1.6.0) still gets auto-PiP
+            // via the eager-create call in `makeUIViewController`
+            // above, which runs once.
         }
     }
 
@@ -438,12 +511,98 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// observer saw.
         private var lastAppliedPause: Bool?
 
+        /// Set true when `didEnterBackground` paused mpv because the
+        /// user hadn't opted into any background-audio mode (no PiP,
+        /// no Audio-Only, no AirPlay). `willEnterForeground` consults
+        /// this to know whether it owns the `pause=0` write, without
+        /// clobbering a user-initiated pause from the play/pause
+        /// button.
+        fileprivate var autoPausedOnBackground: Bool = false
+
+        /// True when this coordinator's VC has a pre-built
+        /// `AVPictureInPictureController` with
+        /// `canStartPictureInPictureAutomaticallyFromInline == true`.
+        /// Belt-and-suspenders to the synchronous
+        /// `progressStore.isPiPActive = true` write in
+        /// `pictureInPictureControllerWillStartPictureInPicture`:
+        /// even if iOS ever re-orders its PiP-engagement /
+        /// background-transition callbacks, the flag guarantees we
+        /// don't set `vid=no` on a coordinator whose video frames
+        /// iOS may still be inspecting to decide whether to engage
+        /// auto-PiP. `vid=no` mid-decision starves the engagement
+        /// and is the original root cause of the auto-PiP
+        /// regression we're closing here.
+        ///
+        /// Flipped false by the `progressStore.$isAudioOnly` sink
+        /// when the user opts into Audio Only — otherwise iOS
+        /// auto-engages PiP on swipe-home even though the user
+        /// explicitly asked for audio only (the PiP window would
+        /// shadow the NowPlaying lockscreen/Dynamic Island UI).
+        fileprivate var pipAutoEligible: Bool = false
+
+        /// Weak reference to the `AVPictureInPictureController`
+        /// built for this coordinator's VC. Used for diagnostic
+        /// logging; the actual build/teardown cycle in
+        /// `updateAutoPiPEligibility()` goes through `viewController`
+        /// so it can manipulate the strong reference that iOS is
+        /// consulting.
+        fileprivate weak var pipController: AVPictureInPictureController?
+
+        /// Weak reference to the backing UIViewController. Needed
+        /// by `updateAutoPiPEligibility()` to tear down and rebuild
+        /// the PiP controller on Audio-Only toggles — the strong
+        /// reference lives on the VC, so clearing the Coordinator's
+        /// weak ref alone wouldn't actually release the controller
+        /// or stop iOS from engaging auto-PiP.
+        fileprivate weak var viewController: MPVPlayerViewController?
+
+        /// Combine subscription bag. Currently holds the sink on
+        /// `progressStore.$isAudioOnly` that disables auto-PiP when
+        /// the user flips Audio Only. Declared fileprivate so the
+        /// representable can add more sinks later without exposing
+        /// them outside the file.
+        fileprivate var cancellables: Set<AnyCancellable> = []
+
+        /// Wall-clock timestamp when `applyPauseIfChanged(true)` last
+        /// set `pause=yes`. Consulted on the next unpause transition to
+        /// decide whether a `loadfile replace` snap-to-live is worth
+        /// doing. Brief pauses (picker open/close during a tile-add —
+        /// typically <2s) fall BEHIND live by less than the cache-secs
+        /// buffer and don't need the reload; long pauses do.
+        ///
+        /// The old behaviour re-seeded every tile on every picker-close,
+        /// which at 9-tile multiview caused cascading `loadfile replace`
+        /// storms (one tile observed a 19s recovery when its reload
+        /// hit `Failed to recognize file format` during the cascade).
+        fileprivate var pauseStartedAt: Date?
+
+        /// Minimum pause duration before an unpause triggers the
+        /// snap-to-live reload. Tuned so normal picker interactions
+        /// (open sheet → pick channel → sheet dismisses) stay under
+        /// the threshold, while genuine "I left this paused for a
+        /// while" pauses still snap forward on resume.
+        private static let snapToLiveMinPauseSeconds: TimeInterval = 2.0
+
         /// Called from `updateUIViewController`. Sends `mute=0` when
         /// the tile becomes audio-active, `mute=1` otherwise. No-op
         /// when the incoming value matches the last applied.
         @MainActor
         fileprivate func applyAudioFocusIfChanged(_ isActive: Bool) {
             guard lastAppliedAudioFocus != isActive else { return }
+            // N=1 short-circuit: at a single tile there is no audio-focus
+            // competition — the one tile is always the audio tile, and
+            // the mpv options `aid=auto` + `mute=no` were set at setup.
+            // SwiftUI still fires `updateUIViewController` on every state
+            // change, which re-calls this path with `isActive=true` each
+            // time; the redundant mpvQueue dispatch + AudioUnit reconfig
+            // shows up in the hot path as wasted work that isn't moving
+            // audio anywhere. Record the state so when a 2nd tile arrives
+            // and genuine audio-focus transitions begin, the debounce
+            // guard above has the right baseline. Skip the mpv write.
+            if MultiviewStore.shared.tiles.count <= 1 {
+                lastAppliedAudioFocus = isActive
+                return
+            }
             lastAppliedAudioFocus = isActive
             DebugLogger.shared.log(
                 "[MV-Audio] mpv audio=\(isActive ? "on" : "off") tile=\(tileID ?? "single")",
@@ -505,6 +664,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let wasPaused = lastAppliedPause == true
             guard lastAppliedPause != paused else { return }
             lastAppliedPause = paused
+            // Timestamp the pause entry so the unpause branch below can
+            // measure dwell and skip the reload for brief pauses.
+            if paused {
+                pauseStartedAt = Date()
+            }
             DebugLogger.shared.log(
                 "[MV-PiP] mpv pause=\(paused) tile=\(tileID ?? "single")",
                 category: "MPV-STREAM", level: .info
@@ -530,15 +694,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //   - Skip on VOD (seeking to live makes no sense for
             //     a fixed-duration stream; resume-from-pause IS
             //     the correct VOD behaviour).
+            //
+            // Additional gate on pause DURATION: a multiview
+            // tile-add fires isPickerPresented → true → every
+            // existing tile pauses; picker dismisses ~1s later →
+            // every tile unpauses. With N tiles and a rapid add
+            // flow, the old code ran `loadfile replace` on every
+            // tile for every add, producing cascading re-seed
+            // storms (19s recovery on one tile observed after the
+            // 9th add, because the reload hit
+            // `Failed to recognize file format` mid-cascade).
+            // mpv's live cache is typically 5s deep, so a <2s
+            // pause doesn't leave us meaningfully behind live —
+            // skip the reload entirely and let mpv resume from
+            // cache. Long pauses (genuine idle) still snap.
             if wasPaused && !paused && isLive, !urls.isEmpty {
-                let url = urls[currentIndex]
-                #if DEBUG
-                print("[MPV-DIAG] \(streamTag) unpause → reload live stream (snap to live edge)")
-                #endif
-                logStore.append("↻ MPV: unpause live → snap to live edge")
-                mpvQueue.async { [weak self] in
-                    guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
-                    self.mpvCommand(mpv, ["loadfile", url.absoluteString, "replace"])
+                let dwell = pauseStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+                if dwell < Self.snapToLiveMinPauseSeconds {
+                    #if DEBUG
+                    print("[MPV-DIAG] \(streamTag) unpause after \(String(format: "%.2f", dwell))s — skipping snap-to-live (brief pause, cache still fresh)")
+                    #endif
+                } else {
+                    let url = urls[currentIndex]
+                    #if DEBUG
+                    print("[MPV-DIAG] \(streamTag) unpause → reload live stream (snap to live edge, dwell=\(String(format: "%.1f", dwell))s)")
+                    #endif
+                    logStore.append("↻ MPV: unpause live → snap to live edge")
+                    mpvQueue.async { [weak self] in
+                        guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                        self.mpvCommand(mpv, ["loadfile", url.absoluteString, "replace"])
+                    }
                 }
             }
         }
@@ -707,7 +892,185 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Audio route change — log AirPlay connect/disconnect
             NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChanged),
                                                    name: AVAudioSession.routeChangeNotification, object: nil)
+
+            #if os(iOS)
+            // Audio-Only suppresses auto-PiP. Without this, swiping home
+            // with Audio-Only on triggers iOS's auto-PiP engagement —
+            // the PiP floating window appears with the stream video,
+            // shadowing NowPlayingBridge's lockscreen / Dynamic Island
+            // audio UI. Reconciling on every isAudioOnly change keeps
+            // `canStartPictureInPictureAutomaticallyFromInline` and
+            // `pipAutoEligible` aligned with the user's current
+            // intent. `.receive(on: main)` so we touch the PiP
+            // controller on the same thread that owns it.
+            progressStore.$isAudioOnly
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] newValue in
+                    #if DEBUG
+                    if let self {
+                        print("[MPV-PIP] isAudioOnly sink fired: newValue=\(newValue) coord=\(ObjectIdentifier(self))")
+                    } else {
+                        print("[MPV-PIP] isAudioOnly sink fired: newValue=\(newValue) coord=<deallocated>")
+                    }
+                    #endif
+                    self?.updateAutoPiPEligibility()
+                }
+                .store(in: &cancellables)
+            #endif
         }
+
+        #if os(iOS)
+        /// Reconcile auto-PiP state with the current Audio-Only flag.
+        /// Writes `canStartPictureInPictureAutomaticallyFromInline` on
+        /// the stored PiP controller and the matching
+        /// `pipAutoEligible` flag so `didEnterBackground` routes to the
+        /// correct branch. Idempotent — safe to call from
+        /// `makeUIViewController` (initial mount) and from the
+        /// `progressStore.$isAudioOnly` sink (subsequent toggles).
+        /// No-op before `pipController` has been assigned, so
+        /// devices / simulators without PiP support stay in the
+        /// default pause-on-background branch.
+        ///
+        /// Not marked `@MainActor` so the Combine sink (nonisolated
+        /// closure, even with `.receive(on: DispatchQueue.main)`)
+        /// can call it directly. Both callers — `makeUIViewController`
+        /// via `UIViewControllerRepresentable`'s main-thread
+        /// contract, and the sink via the main-scheduler delivery —
+        /// guarantee main-thread execution at runtime, which is all
+        /// AVPictureInPictureController needs.
+        fileprivate func updateAutoPiPEligibility() {
+            let audioOnly = progressStore.isAudioOnly
+            guard let vc = viewController else {
+                #if DEBUG
+                print("[MPV-PIP] updateAutoPiPEligibility: viewController=nil audioOnly=\(audioOnly) — deferred (VC not wired yet)")
+                #endif
+                pipController = nil
+                pipAutoEligible = false
+                return
+            }
+            // MPVPlayerViewController is @MainActor-isolated (it's a
+            // UIViewController subclass). Both callers of this method
+            // — makeUIViewController (main-threaded by SwiftUI
+            // contract) and the `.receive(on: main)` sink — guarantee
+            // main-thread execution at runtime. `assumeIsolated` is
+            // the Swift 5.9+ bridge that lets us call @MainActor APIs
+            // without async hops while still satisfying strict
+            // concurrency.
+            MainActor.assumeIsolated {
+                if audioOnly {
+                    // HARD suppress: destroy the PiP controller entirely.
+                    // Setting canStartPictureInPictureAutomaticallyFromInline
+                    // at runtime does NOT prevent iOS from engaging
+                    // auto-PiP once armed — confirmed in device logs
+                    // where the sink wrote `false` to the flag and
+                    // iOS still fired
+                    // `pictureInPictureControllerWillStartPictureInPicture`
+                    // on swipe-home. Only tearing down the controller so
+                    // iOS no longer has a handle on our sample-buffer
+                    // layer reliably suppresses auto-PiP.
+                    vc.tearDownPiPController()
+                    self.pipController = nil
+                    self.pipAutoEligible = false
+                    #if DEBUG
+                    print("[MPV-PIP] updateAutoPiPEligibility: audioOnly=true → tore down PiP controller")
+                    #endif
+                    // Re-assert the now-playing bridge. Tearing down the
+                    // AVPictureInPictureController implicitly revokes iOS's
+                    // "this app is a video-playback host" signal — which is
+                    // the same signal iOS consults when deciding whether to
+                    // surface the lockscreen / Dynamic Island now-playing
+                    // controls for our app. Without a fresh
+                    // `beginReceivingRemoteControlEvents()` + audio-session
+                    // re-activation + `MPNowPlayingInfoCenter` publish
+                    // AFTER the teardown, the lockscreen / Dynamic Island
+                    // stays blank on swipe-home even though our audio
+                    // keeps playing. `NowPlayingBridge.configure(...)` is
+                    // idempotent — re-running it is the documented way to
+                    // reclaim the now-playing route.
+                    //
+                    // Gated on `nowPlayingConfigured` so we only re-assert
+                    // once the bridge was already configured for this
+                    // stream (i.e. the user is toggling Audio Only during
+                    // active playback, not during the initial mount
+                    // before the 2s stability check). On the initial
+                    // mount, the stability check will run configure() for
+                    // the first time and the teardown here is a no-op on
+                    // now-playing anyway (there's nothing published yet).
+                    if self.nowPlayingConfigured {
+                        self.reassertNowPlayingBridge()
+                    }
+                } else {
+                    // Rebuild / re-arm. `ensurePiPController` is
+                    // idempotent (returns cached controller if still
+                    // present), so this is safe on the initial mount
+                    // path as well as the "user flipped Audio Only
+                    // back off" re-arm.
+                    let pip = vc.ensurePiPController()
+                    self.pipController = pip
+                    self.pipAutoEligible = (pip != nil)
+                    #if DEBUG
+                    if let pip {
+                        print("[MPV-PIP] updateAutoPiPEligibility: audioOnly=false → armed pip=\(ObjectIdentifier(pip)) pipAutoEligible=true")
+                    } else {
+                        print("[MPV-PIP] updateAutoPiPEligibility: audioOnly=false → PiP unsupported on this device")
+                    }
+                    #endif
+                }
+            }
+        }
+
+        /// Re-invoke `NowPlayingBridge.configure(...)` with the same
+        /// metadata + command callbacks that the 2s stability-check
+        /// timer used at stream start. Used by the Audio-Only
+        /// teardown path in `updateAutoPiPEligibility()` — destroying
+        /// the `AVPictureInPictureController` revokes iOS's
+        /// remote-control-route assignment, and the lockscreen /
+        /// Dynamic Island now-playing UI stays blank until an app
+        /// re-claims it. Re-running configure() re-calls
+        /// `beginReceivingRemoteControlEvents()`, re-activates the
+        /// `.playback` audio session, and re-publishes the full
+        /// `nowPlayingInfo` dict, which is the documented way to
+        /// reclaim the route.
+        ///
+        /// Must run on MainActor (guaranteed by callers:
+        /// `updateAutoPiPEligibility` wraps its body in
+        /// `MainActor.assumeIsolated`).
+        @MainActor
+        fileprivate func reassertNowPlayingBridge() {
+            // Duration is only meaningful for VOD — for live streams we
+            // always pass `nil` so the lockscreen shows the live
+            // indicator instead of a bogus scrubber.
+            var dur: Double? = nil
+            if !isLive, let mpv {
+                var duration: Double = 0
+                if mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &duration) >= 0, duration > 0 {
+                    dur = duration
+                }
+            }
+            let title = nowPlayingTitle
+            let sub = nowPlayingSubtitle
+            let art = nowPlayingArtworkURL
+            let live = isLive
+            let ps = progressStore
+            #if DEBUG
+            print("[MPV-PIP] reassertNowPlayingBridge: title=\"\(title)\" live=\(live)")
+            #endif
+            NowPlayingBridge.shared.configure(
+                title: title,
+                subtitle: sub,
+                artworkURL: art,
+                duration: dur,
+                isLive: live,
+                onPlay:  { ps.togglePauseAction?() },
+                onPause: { ps.togglePauseAction?() },
+                onSeek: live ? nil : { [weak self] time in
+                    guard let self, let mpv = self.mpv else { return }
+                    let secs = String(format: "%.3f", time)
+                    self.mpvCommand(mpv, ["seek", secs, "absolute"])
+                }
+            )
+        }
+        #endif
 
         deinit {
             NotificationCenter.default.removeObserver(self)
@@ -716,43 +1079,143 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         @objc private func didEnterBackground() {
             guard let mpv else { return }
             #if os(iOS)
-            // Keep video alive if PiP is active or AirPlay is connected —
-            // disabling vid kills the PiP window and drops AirPlay audio.
+            // Background-audio discipline — audio plays with the app closed
+            // ONLY when:
+            //   (1) PiP is engaged (iOS drives the floating window),
+            //   (2) Audio-Only mode is on (lockscreen + Dynamic Island
+            //       controls via NowPlayingBridge), or
+            //   (3) AirPlay is routing audio to another device.
+            // Every other case falls to (4) and pauses mpv so there's no
+            // phantom audio on the home screen.
+            //
+            // The synchronous `progressStore.isPiPActive = true` write in
+            // `pictureInPictureControllerWillStartPictureInPicture`
+            // guarantees branch (1) catches auto-PiP — that delegate fires
+            // before this notification in the iOS background transition
+            // sequence.
+
+            // (1) PiP engaged.
             if progressStore.isPiPActive {
                 #if DEBUG
-                print("[MPV-AIRPLAY] Background: PiP active, keeping vid")
+                print("[MPV-BG] Background: PiP active, keeping vid+audio")
                 #endif
                 return
             }
 
+            // (1.5) Auto-PiP eligible — iOS may still be inspecting
+            //       frames to decide whether to engage PiP. Without
+            //       this branch, the `vid=no` safeguard below starves
+            //       the engagement and PiP silently fails to appear
+            //       (GH #4). When iOS DOES engage, the
+            //       `pictureInPictureControllerWillStartPictureInPicture`
+            //       delegate fires and flips `progressStore.isPiPActive`
+            //       synchronously, so subsequent lifecycle events go
+            //       through branch (1). When iOS decides NOT to engage
+            //       (e.g. hardware limits, low power mode), we leak a
+            //       few frames of background rendering — acceptable
+            //       edge case; auto-PiP is the happy path on every
+            //       PiP-capable iPhone.
+            if pipAutoEligible {
+                #if DEBUG
+                print("[MPV-BG] Background: auto-PiP eligible, keeping vid live")
+                #endif
+                return
+            }
+
+            // (2) Audio-Only mode. Kill video, keep audio + Dynamic Island /
+            //     lockscreen via NowPlayingBridge.
+            if progressStore.isAudioOnly {
+                #if DEBUG
+                print("[MPV-BG] Background: audio-only, vid=no, audio continues (lockscreen + Dynamic Island)")
+                #endif
+                mpv_set_property_string(mpv, "vid", "no")
+                return
+            }
+
+            // (3) AirPlay route.
             let route = AVAudioSession.sharedInstance().currentRoute
             let airPlayAudio = route.outputs.contains(where: { $0.portType == .airPlay })
 
             #if DEBUG
             let outputs = route.outputs.map { "\($0.portName)(\($0.portType.rawValue))" }.joined(separator: ", ")
-            print("[MPV-AIRPLAY] Background: airPlayAudio=\(airPlayAudio), isPiP=\(progressStore.isPiPActive), outputs=[\(outputs)]")
+            print("[MPV-BG] Background: airPlayAudio=\(airPlayAudio), isPiP=\(progressStore.isPiPActive), audioOnly=\(progressStore.isAudioOnly), outputs=[\(outputs)]")
             #endif
 
-            if airPlayAudio { return }
+            if airPlayAudio {
+                mpv_set_property_string(mpv, "vid", "no")
+                return
+            }
             #endif
-            // No PiP / no AirPlay — disable video to prevent GPU crash on background
+
+            // (4) Default — no mode permits background audio. Disable video
+            //     (GPU-crash safeguard) AND pause mpv so audio stops. The
+            //     pause goes through mpvQueue to match every other mpv
+            //     property write in this file — writing `pause` directly
+            //     from the main thread during a background transition
+            //     races mpv's event loop and the audio-session teardown.
+            //     `autoPausedOnBackground` tells the foreground handler to
+            //     undo the pause without clobbering a user-initiated one.
             mpv_set_property_string(mpv, "vid", "no")
+            autoPausedOnBackground = true
+            mpvQueue.async { [weak self] in
+                guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                var flag: Int32 = 1
+                mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
+            }
         }
 
         @objc private func willEnterForeground() {
             guard let mpv else { return }
-            // Re-enable video if it was disabled on background entry
+            // Re-enable video if the background handler disabled it.
             let vid = mpv_get_property_string(mpv, "vid")
             let vidStr = vid.flatMap { String(cString: $0) }
             #if DEBUG
             let route = AVAudioSession.sharedInstance().currentRoute
             let outputs = route.outputs.map { "\($0.portName)(\($0.portType.rawValue))" }.joined(separator: ", ")
-            print("[MPV-AIRPLAY] Foreground: vid=\(vidStr ?? "nil"), isPiP=\(progressStore.isPiPActive), outputs=[\(outputs)]")
+            print("[MPV-BG] Foreground: vid=\(vidStr ?? "nil"), isPiP=\(progressStore.isPiPActive), audioOnly=\(progressStore.isAudioOnly), autoPaused=\(autoPausedOnBackground), outputs=[\(outputs)]")
             #endif
             if vidStr == "no" {
                 mpv_set_property_string(mpv, "vid", "auto")
             }
             mpv_free(vid)
+
+            #if os(iOS)
+            // Recover the AVSampleBufferDisplayLayer's sampleBufferRenderer
+            // if iOS put it into a `.failed` state during background. When
+            // the user backgrounds the app in Audio-Only mode without PiP
+            // engaged, iOS interrupts the sample-buffer pipeline
+            // ("Operation Interrupted" in the renderer's `.error`) and the
+            // layer NEVER self-recovers — even though `vid=auto` re-enables
+            // mpv's video output, frames enqueued onto a failed renderer
+            // are silently dropped and the view stays black. `flush()` on
+            // the renderer resets the decoder state and restores
+            // `isReadyForMoreMediaData`, letting the next enqueued frame
+            // paint. Only run on main (layer is a CA object); run on every
+            // foreground transition because the bookkeeping cost is a
+            // single status read + no-op when the layer is already OK.
+            Task { @MainActor [weak self] in
+                guard let self, let layer = self.viewController?.sampleBufferLayer else { return }
+                if layer.sampleBufferRenderer.status == .failed {
+                    #if DEBUG
+                    let err = layer.sampleBufferRenderer.error?.localizedDescription ?? "?"
+                    print("[MPV-BG] Foreground: sampleBufferRenderer FAILED (\(err)) — flushing to recover")
+                    #endif
+                    layer.sampleBufferRenderer.flush()
+                }
+            }
+            #endif
+
+            // Undo the defensive pause applied in branch (4), but only if
+            // we applied it — never clobber a user-initiated pause. Goes
+            // through mpvQueue to match the background-entry write.
+            if autoPausedOnBackground {
+                autoPausedOnBackground = false
+                mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                    var flag: Int32 = 0
+                    mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
+                }
+            }
         }
 
         @objc private func audioRouteChanged(_ notification: Notification) {
@@ -1105,9 +1568,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //     the diagnostic signal we actually care about when
             //     investigating lag.
             #if DEBUG
+            // Anomaly = something the developer actually wants to see.
+            // The old definition flagged `intervalMs < expected * 0.3`
+            // (i.e. frames arriving faster than expected) as an anomaly,
+            // but live MPEG-TS streams coalesce frames in bursts via
+            // the packetizer — sub-10ms intervals are the rule, not an
+            // exception, and the old threshold generated hundreds of
+            // ⚠️ lines per minute per tile. At 9 tiles that's thousands
+            // of string allocations + stdout writes per minute, enough
+            // to make the Xcode console laggy and noticeably affect the
+            // debug-build feel. Now: only flag LATE frames (interval >
+            // 2× expected) and hard failures (layer not ready / failed
+            // / enqueue rejected). Fast-arrival bursts are expected and
+            // no longer logged.
             let isAnomaly = intervalMs > 0 && (
                 intervalMs > expectedIntervalMs * 2.0 ||
-                intervalMs < expectedIntervalMs * 0.3 ||
                 !layerReady || layerStatus == .failed || !enqueued
             )
 
@@ -1387,6 +1862,69 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // a truly dead host is unchanged — URL-list failover
             // still fires within 30s.
             setOption(mpv, "network-timeout", "30")
+
+            // ────────────────────────────────────────────────────────
+            // Live low-latency tuning. Layered on top of `profile=fast`
+            // (which disables mobile-inappropriate post-processing) —
+            // we deliberately do NOT use `profile=low-latency` wholesale
+            // because its `audio-buffer=0` + `stream-buffer-size=4k`
+            // settings are too aggressive for IPTV over cellular /
+            // flaky Wi-Fi and cause underruns. The curated subset below
+            // targets the demux / probe stage, which is where the
+            // majority of mpv's "tap → first frame" latency lives per
+            // upstream profiling (see issue #4213). Live-only — VOD
+            // benefits from more thorough probing for reliable seek.
+            //
+            // `demuxer-lavf-analyzeduration=0.1`: cap libavformat's
+            // stream-analysis stage at 100ms. Default is 5s — libmpv
+            // scans that much data to identify all elementary streams
+            // before the first frame decodes, which dominates first-
+            // frame latency on well-formed MPEG-TS. Dropping to 0.1s
+            // trusts the first PMT/PAT table (arrives within a few
+            // packets on broadcast-grade TS) and moves straight to
+            // decode. Worst case on an oddly-muxed stream: mpv misses
+            // a late-arriving audio track. Acceptable tradeoff for
+            // the user-perceived speedup.
+            //
+            // `demuxer-lavf-probesize=32768`: 32KB probe (default 5MB).
+            // Pairs with analyzeduration — once we've capped the time
+            // budget, capping the byte budget prevents mpv from
+            // waiting for a full 5MB buffer to arrive before
+            // confirming the stream is decodable.
+            //
+            // (Note: `demuxer-lavf-o-add=fflags=+nobuffer` would also
+            // be a free win here, but MPVKit's bundled libmpv build
+            // rejects the option — logged as `option not found`.
+            // Left out entirely rather than silently fail. The cache
+            // layer above handles the "don't buffer before playing"
+            // intent on its own.)
+            //
+            // `cache-pause-initial=no`: do NOT wait to fully prefill
+            // the cache before playback starts. Default behaviour
+            // prefills to `cache-secs` (5s) before the first frame —
+            // that's a guaranteed 5s floor. `no` starts playing at
+            // the first decodable keyframe and lets the cache fill
+            // behind the playhead.
+            //
+            // `hls-bitrate=max`: for HLS variants, pick the highest
+            // bitrate immediately instead of measuring bandwidth
+            // first. IPTV users are on a known-good home network;
+            // the default ABR handshake adds 500-1500ms before the
+            // first segment downloads.
+            //
+            // `video-latency-hacks=yes`: use demuxer-reported FPS to
+            // drive the frame queue instead of decoding an extra
+            // frame or two to measure it. Saves 1-2 frames of queue
+            // depth at the cost of a slight display-sync jitter on
+            // streams with incorrect FPS metadata (rare on broadcast
+            // MPEG-TS).
+            if isLive {
+                setOption(mpv, "demuxer-lavf-analyzeduration", "0.1")
+                setOption(mpv, "demuxer-lavf-probesize", "32768")
+                setOption(mpv, "cache-pause-initial", "no")
+                setOption(mpv, "hls-bitrate", "max")
+                setOption(mpv, "video-latency-hacks", "yes")
+            }
 
             // Multiview tiles: set initial `mute` / `pause` as mpv
             // options (not runtime properties) so the first decoded
@@ -2020,29 +2558,60 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     }
                 }
 
+                #if DEBUG
+                let debugTileID = tileID ?? "single"
+                print("[NowPlaying-Gate] \(streamTag) 2s stability scheduled (tileID=\(debugTileID), title=\"\(title)\")")
+                #endif
+
                 let ps2 = progressStore
                 let mpvQ = mpvQueue
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-                    guard let self, !self.nowPlayingConfigured else { return }
+                    guard let self, !self.nowPlayingConfigured else {
+                        #if DEBUG
+                        print("[NowPlaying-Gate] 2s fire: self=nil or already configured")
+                        #endif
+                        return
+                    }
                     // Verify still playing — route through mpvQueue to avoid race with stop()
                     let capturedDur = dur  // Bind to let for Sendable compliance
                     mpvQ.async { [weak self] in
-                        guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                        guard let self, let mpv = self.mpv, !self.isShuttingDown else {
+                            #if DEBUG
+                            print("[NowPlaying-Gate] mpvQ fire: self/mpv nil or shutting down")
+                            #endif
+                            return
+                        }
                         var idle: Int64 = 0
                         mpv_get_property(mpv, "core-idle", MPV_FORMAT_FLAG, &idle)
+                        #if DEBUG
+                        print("[NowPlaying-Gate] mpvQ fire: core-idle=\(idle)")
+                        #endif
                         guard idle == 0 else { return }
 
-                        self.nowPlayingConfigured = true
                         Task { @MainActor [weak self] in
                             // Gate on bridge ownership. A non-audio
                             // multiview tile still reaches this path
                             // (every coordinator's stability check
                             // fires after 2s) but must NOT publish
                             // now-playing info — the audio tile owns
-                            // the lockscreen. `nowPlayingConfigured`
-                            // stays `true` either way so we don't
-                            // rearm the 2s timer.
-                            guard let self, self.shouldDriveNowPlayingBridge() else { return }
+                            // the lockscreen. If the gate fails we
+                            // deliberately leave `nowPlayingConfigured`
+                            // false so a later `handleFileLoaded`
+                            // re-arms the 2s timer if this tile
+                            // eventually becomes authoritative (e.g.
+                            // user-initiated `setAudio` swap). The
+                            // previous code set the flag true
+                            // unconditionally, which silently disabled
+                            // lockscreen forever on any ownership race.
+                            guard let self else { return }
+                            let canDrive = self.shouldDriveNowPlayingBridge()
+                            #if DEBUG
+                            let sessionMode = PlayerSession.shared.mode
+                            let audioID = MultiviewStore.shared.audioTileID ?? "nil"
+                            print("[NowPlaying-Gate] shouldDrive=\(canDrive) tileID=\(self.tileID ?? "single") sessionMode=\(sessionMode) audioTileID=\(audioID)")
+                            #endif
+                            guard canDrive else { return }
+                            self.nowPlayingConfigured = true
                             NowPlayingBridge.shared.configure(
                                 title: title,
                                 subtitle: sub,
@@ -2848,11 +3417,187 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // MARK: - PiP Controller Delegate
 
+        // NOTE (2026-04-21 rev 2): Reinstated
+        // `restoreUserInterfaceForPictureInPictureStopWithCompletionHandler`.
+        // The prior note (below, preserved for archaeology) concluded
+        // removing the delegate fixed the placeholder — but the user
+        // confirmed the placeholder+zoom bug persists in every shipped
+        // build since PiP was introduced (commit 791d813, 2026-04-07).
+        // Other mpv-backed iOS IPTV players using the same
+        // AVSampleBufferDisplayLayer architecture (iMPlayer, UHF) DO
+        // produce a clean restore, which means our root cause is
+        // different from what the prior note diagnosed.
+        //
+        // Correct diagnosis (higher confidence):
+        //   * When the user taps ⤢ maximize, iOS fires
+        //     `willStop` → begins restore animation → fires `didStop`
+        //     AFTER the animation completes.
+        //   * Without `restoreUserInterface`, iOS treats our app as a
+        //     "legacy" PiP adopter and uses a conservative restore
+        //     pipeline that PAINTS THE GENERIC PLACEHOLDER ICON over
+        //     the PiP window for the duration of the animation —
+        //     because the framework has no signal that our source
+        //     layer is ready to be re-hosted.
+        //   * With `restoreUserInterface` implemented, iOS marks the
+        //     app as a first-class adopter, coordinates the layer
+        //     reparent with our `completionHandler` call, and skips
+        //     the placeholder (Apple's sample-buffer PiP docs +
+        //     Vonage / WebRTC PiP write-ups all converge on this).
+        //
+        // The prior failed attempts failed for orthogonal reasons:
+        //  * Attempts 1–2 still async-wrote `isPiPActive=false` from
+        //    `didStop`, which re-rendered SwiftUI DURING iOS's restore
+        //    animation. iOS treats an in-flight view hierarchy change
+        //    as "the app isn't ready" and falls back to placeholder.
+        //  * Attempt 4 rebuilt the ContentSource, which obviously
+        //    breaks the layer reparent mid-flight.
+        //  * Attempt 3 added the stub `didStart` / `willStop` which
+        //    was progress but not sufficient on its own.
+        //
+        // The working shape (this revision):
+        //  (a) Move the `isPiPActive = false` write from `didStop` to
+        //      `willStop`, and make it SYNCHRONOUS. `willStop` fires
+        //      BEFORE iOS starts the restore animation, giving SwiftUI
+        //      time to settle its re-render before iOS begins
+        //      compositing the source layer back in.
+        //  (b) Implement `restoreUserInterface…` with a synchronous
+        //      `completionHandler(true)` and NO UI work inside the
+        //      delegate body. The method's mere presence + synchronous
+        //      completion is the signal iOS needs.
+        //  (c) Keep `didStop` as a diagnostic log only — the flag is
+        //      already cleared, and writing it again would re-trigger
+        //      the SwiftUI re-render that we just finished avoiding.
+        //
+        // If this regresses again, capture a sysdiagnose during the
+        // maximize tap — the `mediaserverd` logs under
+        // AVPictureInPictureController will show whether iOS is
+        // classifying us as a first-class adopter. Missing
+        // `restoreUserInterface` shows up as
+        // `pip: falling back to placeholder (no UI restore delegate)`.
+
+        /// Fires before iOS tears down the PiP window and BEFORE the
+        /// restore animation begins. This is the correct place to
+        /// flip `isPiPActive = false` synchronously: SwiftUI re-renders
+        /// immediately, settles, and by the time iOS begins compositing
+        /// the source layer back in, the view hierarchy is stable.
+        ///
+        /// Previously this flag was cleared asynchronously from
+        /// `didStop` — which fires AFTER the restore animation — so
+        /// the SwiftUI re-render landed mid-animation and iOS fell
+        /// back to the placeholder icon + zoom.
+        func pictureInPictureControllerWillStopPictureInPicture(
+            _ pictureInPictureController: AVPictureInPictureController
+        ) {
+            debugLog("🖼️ PiP: will stop")
+            // Freeze the last-displayed frame on the sample-buffer
+            // layer for the duration of iOS's restore animation.
+            // Without this, the renderer keeps draining its queue
+            // during the transition — iOS then has to animate
+            // against a moving target and falls back to showing its
+            // generic PiP-icon placeholder over the window. The
+            // `removingDisplayedImage: false` variant preserves
+            // whatever frame is currently on screen so the restore
+            // animates "current frame in PiP window" → "same
+            // current frame at fullscreen rect", which is the
+            // visually clean path. Cited in AVFoundation dev-forum
+            // field reports as the standard fix for the "PiP icon
+            // flash on maximize" symptom on custom sample-buffer
+            // adopters.
+            MainActor.assumeIsolated {
+                if let vc = viewController {
+                    vc.sampleBufferLayer.sampleBufferRenderer.flush(removingDisplayedImage: false)
+                    #if DEBUG
+                    print("[MPV-PIP] willStop: flushed sampleBufferRenderer (kept displayed image)")
+                    #endif
+                }
+            }
+            // Clear the active flag SYNCHRONOUSLY here, not
+            // asynchronously from `didStop`. See the multi-paragraph
+            // note above this function for the full rationale.
+            progressStore.isPiPActive = false
+            let myTileID = tileID
+            if let myTileID {
+                // MultiviewStore is @MainActor-isolated; we're already on
+                // the main thread inside a PiP delegate callback, so
+                // assumeIsolated is safe and keeps the write synchronous.
+                MainActor.assumeIsolated {
+                    MultiviewStore.shared.isPiPActive = false
+                    DebugLogger.shared.log(
+                        "[MV-PiP] ended tile=\(myTileID)",
+                        category: "Playback", level: .info
+                    )
+                }
+            }
+        }
+
+        /// The critical delegate for a clean restore animation. Apple's
+        /// AVFoundation sample-buffer PiP docs explicitly require this
+        /// method for apps that want iOS to animate the PiP window
+        /// back into the source layer cleanly. Without it, iOS treats
+        /// the app as a legacy adopter and paints a generic PiP icon
+        /// placeholder over the window during the animation.
+        ///
+        /// The body MUST be a synchronous `completionHandler(true)`
+        /// with NO UI work. Any UI mutation, layout pass, view
+        /// controller presentation, or async hop here makes iOS wait
+        /// on the completion handler, and while it waits it paints
+        /// the placeholder. `willStop` already handled the only state
+        /// transition we need (clearing `isPiPActive`), so this
+        /// delegate is intentionally empty.
+        func pictureInPictureController(
+            _ pictureInPictureController: AVPictureInPictureController,
+            restoreUserInterfaceForPictureInPictureStopWithCompletionHandler
+                completionHandler: @escaping (Bool) -> Void
+        ) {
+            debugLog("🖼️ PiP: restore UI")
+            // Synchronous completion. No layout, no state writes, no
+            // async hops. The source view is already in its restored
+            // position (it never moved during PiP — iOS merely
+            // reparented the layer), and `willStop` already cleared
+            // `isPiPActive`, so there's nothing for us to do except
+            // tell iOS we're ready.
+            completionHandler(true)
+        }
+
+        /// Diagnostic hook for PiP-start failures. Purely logging —
+        /// doesn't change behaviour — but when PiP silently refuses to
+        /// start (AirPlay active, audio session category mismatch,
+        /// backgrounded before layer became ready) this is the only
+        /// callback AVFoundation gives us. Prior to this we had no
+        /// visibility into start failures at all.
+        func pictureInPictureController(
+            _ pictureInPictureController: AVPictureInPictureController,
+            failedToStartPictureInPictureWithError error: Error
+        ) {
+            #if DEBUG
+            print("[MPV-PIP] failedToStart: \(error.localizedDescription) (\(error as NSError))")
+            #endif
+        }
+
         func pictureInPictureControllerWillStartPictureInPicture(
             _ pictureInPictureController: AVPictureInPictureController
         ) {
             debugLog("🖼️ PiP: starting")
-            DispatchQueue.main.async { self.progressStore.isPiPActive = true }
+            // Set `progressStore.isPiPActive = true` on the NEXT runloop
+            // tick, NOT synchronously. `isPiPActive` is `@Published`, so a
+            // synchronous write in here fires `objectWillChange` inside
+            // the `willStart` delegate callback — which triggers a SwiftUI
+            // re-render while iOS is mid-PiP-engagement-animation. iOS
+            // observes the source view hierarchy moving during its own
+            // transition and falls back to the generic placeholder-icon
+            // restore animation (the "zoom + PiP icon" regression users
+            // reported on iOS 26.5).
+            //
+            // The prior sync-write was introduced to make
+            // `didEnterBackground`'s PiP branch read the flag before
+            // `vid=no` could fire. That race is now covered by the
+            // `pipAutoEligible` flag (set at controller-creation time,
+            // checked by `didEnterBackground` branch (1.5) BEFORE any
+            // `isPiPActive` read), so we don't need the sync write
+            // anymore — the async hop is safe.
+            DispatchQueue.main.async { [weak self] in
+                self?.progressStore.isPiPActive = true
+            }
             // Multiview: tell the store PiP has engaged so non-audio
             // tiles can pause themselves. Only the audio tile can
             // start PiP (PiP button is only exposed on the audio
@@ -2889,25 +3634,35 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
+        /// Required by Apple's documented PiP adoption pattern — every
+        /// Apple sample (AVFoundationPiPPlayer, AdoptingPictureInPicture,
+        /// createwithswift.com, Vonage reference) implements this hook
+        /// even when the body is empty. Our prior implementation only
+        /// had `willStart`, and AVF's internal state-machine treats a
+        /// missing `didStart` as "the app is not a fully adopted PiP
+        /// participant" — which can tip heuristics toward the generic
+        /// placeholder-icon restore animation. Keeping the body
+        /// minimal (just a log) matches Apple's sample pattern.
+        func pictureInPictureControllerDidStartPictureInPicture(
+            _ pictureInPictureController: AVPictureInPictureController
+        ) {
+            debugLog("🖼️ PiP: did start")
+        }
+
         func pictureInPictureControllerDidStopPictureInPicture(
             _ pictureInPictureController: AVPictureInPictureController
         ) {
             debugLog("🖼️ PiP: stopped")
-            DispatchQueue.main.async { self.progressStore.isPiPActive = false }
-            // Stopping is always safe — clearing the flag when the
-            // store's already been reset is a no-op. Still gate on
-            // tileID so single-stream PiP doesn't touch the
-            // multiview store at all.
-            let myTileID = tileID
-            if let myTileID {
-                Task { @MainActor in
-                    MultiviewStore.shared.isPiPActive = false
-                    DebugLogger.shared.log(
-                        "[MV-PiP] ended tile=\(myTileID)",
-                        category: "Playback", level: .info
-                    )
-                }
-            }
+            // INTENTIONALLY does no state writes. `willStop` + the
+            // `restoreUserInterface…` completion handler have already
+            // handed control back to the app cleanly; writing
+            // `isPiPActive` again from here (even async) would fire
+            // `objectWillChange` AFTER iOS has just finished its
+            // restore animation, causing a one-frame SwiftUI reflow
+            // that can pop the overlay controls back into a different
+            // position than the pre-PiP layout. Kept as a log-only
+            // hook so the next person debugging PiP has symmetry with
+            // `didStart`.
         }
     }
 }

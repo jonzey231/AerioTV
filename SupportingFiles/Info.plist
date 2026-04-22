@@ -51,7 +51,7 @@
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>AerioTV needs local network access to connect to your media server on your home network.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>AerioTV uses your location to detect your WiFi network name so it can automatically switch between local and remote server URLs.</string>
+	<string>Used only when you tap Detect WiFi. iOS gates the WiFi network name behind Location permission; AerioTV reads it so it can automatically switch between your local and remote server URLs when you come home.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

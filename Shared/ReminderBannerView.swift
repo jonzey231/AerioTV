@@ -81,6 +81,12 @@ struct ReminderBannerView: View {
             .animation(.spring(response: 0.4, dampingFraction: 0.85), value: reminderManager.pendingBanner)
             .onTapGesture { dismissBanner() }
             .onAppear { scheduleAutoDismiss() }
+            .onDisappear {
+                // Don't let an orphaned sleep task fire dismissBanner() after
+                // the view has already been removed from the hierarchy.
+                dismissTask?.cancel()
+                dismissTask = nil
+            }
             .onChange(of: reminderManager.pendingBanner) { _, newValue in
                 if newValue != nil { scheduleAutoDismiss() }
             }

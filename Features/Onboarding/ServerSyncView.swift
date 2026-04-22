@@ -4,7 +4,12 @@ import SwiftData
 // MARK: - Sync Stage
 
 /// Represents a loading step shown during server sync.
-private struct SyncStage: Identifiable {
+///
+/// Marked internal (no `private` / `fileprivate`) so `MainTabView` can
+/// build a stage list for `ServerSyncView`'s initial-launch mode. In
+/// onboarding mode the view still builds its own stages; in
+/// initial-launch mode the parent derives them from observable stores.
+struct SyncStage: Identifiable, Equatable {
     let id: String
     let label: String
     var status: StageStatus = .pending
@@ -37,21 +42,111 @@ private struct SyncStage: Identifiable {
 
 // MARK: - Server Sync View
 
-/// Full-screen loading screen shown after a server is added.
-/// Displays step-by-step progress as channels, groups, EPG, and VOD data load.
+/// Full-screen loading screen shown both after a server is manually
+/// added AND during initial-launch hydration. Displays step-by-step
+/// progress as channels, groups, EPG, VOD, DVR, and preferences load.
+///
+/// Two presentation modes are supported via `Mode`:
+///
+/// - `.onboarding(server:)` — the view drives its own fetches against
+///   a newly-added `ServerConnection`, flipping stages as each phase
+///   completes. The user dismisses via a "Continue to Live TV" button
+///   once every stage is done.
+///
+/// - `.initialLaunch(serverName:stages:onContinueAnyway:)` — the parent
+///   (`MainTabView`) derives stage states from its observable stores
+///   and passes them in. This view runs no fetches itself; it simply
+///   renders the provided stages and the long-wait banner if the
+///   initial load stalls. The parent decides when to dismiss.
+///
+/// Using one view for both flows keeps the "Setting Up …" experience
+/// visually identical whether the user reaches it via "Save Playlist"
+/// in Settings or via a cold app launch that still needs to hydrate
+/// channels / EPG / VOD / DVR from disk or network.
 struct ServerSyncView: View {
-    let server: ServerConnection
+    enum Mode {
+        /// After the user manually adds or edits a server. The view
+        /// drives its own fetches and owns the stage state.
+        case onboarding(server: ServerConnection)
+
+        /// After app launch, while `MainTabView`'s stores hydrate.
+        /// The parent supplies pre-derived stages + server name and
+        /// an escape-hatch callback for the "Skip" button.
+        case initialLaunch(
+            serverName: String,
+            stages: [SyncStage],
+            onContinueAnyway: () -> Void
+        )
+    }
+
+    let mode: Mode
     @Environment(\.dismiss) private var dismiss
 
-    @State private var stages: [SyncStage] = [
-        SyncStage(id: "connect",  label: "Connecting to server"),
-        SyncStage(id: "groups",   label: "Loading channel groups"),
-        SyncStage(id: "channels", label: "Loading channels"),
-        SyncStage(id: "epg",      label: "Loading EPG data"),
-        SyncStage(id: "vod",      label: "Loading movies & series"),
+    // MARK: Onboarding-only state
+
+    // 4-stage progress: EPG (channels + guide), VOD (movies & series),
+    // DVR (recordings — Dispatcharr only, else skipped in-place), and
+    // Preferences (iCloud pull when sync is enabled, else skipped in-place).
+    @State private var onboardingStages: [SyncStage] = [
+        SyncStage(id: "epg",          label: "Loading EPG"),
+        SyncStage(id: "vod",          label: "Loading VOD"),
+        SyncStage(id: "dvr",          label: "Loading DVR"),
+        SyncStage(id: "preferences",  label: "Loading preferences"),
     ]
     @State private var allDone = false
     @State private var syncTask: Task<Void, Never>?
+
+    // MARK: Initial-launch-only state (long-wait banner)
+
+    /// Wall-clock timestamp when the cover first appeared. Compared
+    /// against `Date()` on every tick rather than incrementing a
+    /// counter — a counter was susceptible to a double-fire bug if
+    /// `onAppear` ran twice (two tick-timers → counter advanced at
+    /// 2 Hz → banner appeared at wall-clock 5s instead of 10s).
+    @State private var startedAt: Date? = nil
+    /// Driven by the wall-clock check below. Separate from
+    /// `startedAt` so body observes a simple @Published bool.
+    @State private var isTakingTooLong: Bool = false
+    /// 1 Hz tick used only to re-evaluate the wall-clock comparison —
+    /// the tick's own count is not the source of truth.
+    @State private var elapsedTimer: Timer?
+
+    /// The cover stays silent for this long before surfacing the
+    /// long-wait banner + Skip escape hatch. 30s is comfortably past
+    /// a healthy Dispatcharr server's first complete XMLTV parse
+    /// (logs show typical finishes under 12s) so users on normal
+    /// networks never see the banner; users whose server is offline
+    /// see it after a useful signal, not a panicked flash.
+    private let longWaitThresholdSeconds: TimeInterval = 30
+
+    // MARK: Mode-derived accessors
+
+    private var currentStages: [SyncStage] {
+        switch mode {
+        case .onboarding:
+            return onboardingStages
+        case .initialLaunch(_, let stages, _):
+            return stages
+        }
+    }
+
+    private var serverName: String {
+        switch mode {
+        case .onboarding(let server):
+            return server.name
+        case .initialLaunch(let name, _, _):
+            return name
+        }
+    }
+
+    private var interactiveDismissDisabled: Bool {
+        switch mode {
+        case .onboarding:     return !allDone
+        case .initialLaunch:  return true
+        }
+    }
+
+    // MARK: Body
 
     var body: some View {
         ZStack {
@@ -60,7 +155,7 @@ struct ServerSyncView: View {
             VStack(spacing: 32) {
                 Spacer()
 
-                // Logo
+                // Logo + titles
                 VStack(spacing: 12) {
                     Image("AerioLogo")
                         .resizable()
@@ -73,16 +168,16 @@ struct ServerSyncView: View {
                         .font(.headlineLarge)
                         .foregroundColor(.textPrimary)
 
-                    Text(server.name.isEmpty ? "Your server" : server.name)
+                    Text(serverName.isEmpty ? "Your server" : serverName)
                         .font(.bodyMedium)
                         .foregroundColor(.textSecondary)
                 }
 
                 // Progress stages
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(stages) { stage in
+                    ForEach(currentStages) { stage in
                         stageRow(stage)
-                        if stage.id != stages.last?.id {
+                        if stage.id != currentStages.last?.id {
                             Rectangle()
                                 .fill(Color.borderSubtle)
                                 .frame(width: 1, height: 16)
@@ -93,34 +188,88 @@ struct ServerSyncView: View {
                 .padding(20)
                 .background(Color.cardBackground)
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                // On Apple TV the outer VStack is full-screen-width (~1920pt).
+                // Letting the card stretch edge-to-edge with only 32pt padding
+                // leaves the loading rows pinned far to the left on a big
+                // display, visually disconnected from the centered logo + title
+                // above. Constraining to a readable max width + letting the
+                // outer VStack's default .center alignment position it keeps
+                // the card visually aligned with the rest of the setup screen.
+                // iPhone / iPad keep the existing 32pt padding — the screen
+                // isn't wide enough there for the stretch to look wrong.
+                #if os(tvOS)
+                .frame(maxWidth: 720)
+                #else
                 .padding(.horizontal, 32)
+                #endif
+                .animation(.easeInOut(duration: 0.3), value: currentStages)
 
                 Spacer()
 
-                // Bottom actions
-                if allDone {
-                    PrimaryButton("Continue to Live TV", icon: "play.tv") {
-                        dismiss()
-                    }
-                    .padding(.horizontal, 40)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                } else {
-                    Button("Skip") {
-                        syncTask?.cancel()
-                        dismiss()
-                    }
-                    .font(.bodyMedium)
-                    .foregroundColor(.textSecondary)
-                }
+                // Bottom actions — differ by mode
+                bottomActions
 
                 Spacer().frame(height: 20)
             }
         }
-        .interactiveDismissDisabled(!allDone)
+        .interactiveDismissDisabled(interactiveDismissDisabled)
         .task {
-            let task = Task { await runSync() }
-            syncTask = task
-            await task.value
+            await runOnboardingIfNeeded()
+        }
+        .onAppear {
+            startLongWaitTimerIfNeeded()
+        }
+        .onDisappear {
+            cleanupLongWaitTimer()
+        }
+    }
+
+    // MARK: - Bottom Actions
+
+    @ViewBuilder
+    private var bottomActions: some View {
+        switch mode {
+        case .onboarding:
+            if allDone {
+                PrimaryButton("Continue to Live TV", icon: "play.tv") {
+                    dismiss()
+                }
+                .padding(.horizontal, 40)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            } else {
+                Button("Skip") {
+                    syncTask?.cancel()
+                    dismiss()
+                }
+                .font(.bodyMedium)
+                .foregroundColor(.textSecondary)
+            }
+
+        case .initialLaunch(_, _, let onContinueAnyway):
+            // Initial launch: banner fades in at 15s if the load
+            // stalls; Skip button is always available so a user
+            // on a dead server isn't trapped behind a spinner.
+            VStack(spacing: 16) {
+                if isTakingTooLong {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.statusWarning)
+                        Text("This is taking longer than usual. Your server might be offline or unreachable.")
+                            .font(.system(size: 14))
+                            .foregroundColor(.textSecondary)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .frame(maxWidth: 360, alignment: .leading)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
+
+                Button("Skip") {
+                    onContinueAnyway()
+                }
+                .font(.bodyMedium)
+                .foregroundColor(.textSecondary)
+            }
+            .animation(.easeInOut(duration: 0.25), value: isTakingTooLong)
         }
     }
 
@@ -168,43 +317,98 @@ struct ServerSyncView: View {
         .animation(.easeInOut(duration: 0.3), value: stage.status)
     }
 
-    // MARK: - Sync Logic
+    // MARK: - Long-wait Timer (initial-launch only)
+
+    private func startLongWaitTimerIfNeeded() {
+        guard case .initialLaunch = mode else { return }
+        // Invalidate any stale timer before creating a new one —
+        // SwiftUI can fire `onAppear` more than once in a view's
+        // lifetime and each fire would otherwise create a fresh
+        // Timer while leaving the previous one running.
+        elapsedTimer?.invalidate()
+
+        // Record the wall-clock start once per mount. Preserving
+        // it across `onAppear` fires prevents the long-wait banner
+        // from getting reset if SwiftUI re-invokes `onAppear`.
+        if startedAt == nil {
+            startedAt = Date()
+        }
+
+        elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            Task { @MainActor in
+                guard !isTakingTooLong, let started = startedAt else { return }
+                if Date().timeIntervalSince(started) >= longWaitThresholdSeconds {
+                    isTakingTooLong = true
+                }
+            }
+        }
+    }
+
+    private func cleanupLongWaitTimer() {
+        elapsedTimer?.invalidate()
+        elapsedTimer = nil
+        startedAt = nil
+        isTakingTooLong = false
+    }
+
+    // MARK: - Onboarding Sync Logic
+
+    /// Only runs in onboarding mode. Initial-launch mode has the
+    /// parent view drive its own fetches through the shared stores.
+    @MainActor
+    private func runOnboardingIfNeeded() async {
+        guard case .onboarding(let server) = mode else { return }
+        let task = Task { await runSync(for: server) }
+        syncTask = task
+        await task.value
+    }
 
     @MainActor
-    private func runSync() async {
+    private func runSync(for server: ServerConnection) async {
         let snap = server.snapshot
         let epgURLString = server.effectiveEPGURL
 
-        // Stage 0: Connect
-        updateStage("connect", status: .loading)
-        // Brief pause to show "connecting" state
-        try? await Task.sleep(nanoseconds: 400_000_000)
-        guard !Task.isCancelled else { return }
-        updateStage("connect", status: .done("Connected"))
-
-        // Stage 1: Groups
-        updateStage("groups", status: .loading)
-        let groupCount = await loadGroups(snap: snap)
-        guard !Task.isCancelled else { return }
-        updateStage("groups", status: .done(groupCount > 0 ? "\(groupCount) groups" : ""))
-
-        // Stage 2: Channels
-        updateStage("channels", status: .loading)
+        // Stage 1: EPG (channels + guide — a live server is useless without channels,
+        // so we roll the old "Connecting/Groups/Channels/EPG" stages together here).
+        updateStage("epg", status: .loading)
         let channelCount = await loadChannels(snap: snap)
         guard !Task.isCancelled else { return }
-        updateStage("channels", status: .done(channelCount > 0 ? "\(channelCount) channels" : ""))
-
-        // Stage 3: EPG
-        updateStage("epg", status: .loading)
         let epgCount = await loadEPG(snap: snap, epgURL: epgURLString)
         guard !Task.isCancelled else { return }
-        updateStage("epg", status: .done(epgCount > 0 ? "\(epgCount) programs" : ""))
+        let epgDetail: String = {
+            switch (channelCount > 0, epgCount > 0) {
+            case (true, true):   return "\(channelCount) channels · \(epgCount) programs"
+            case (true, false):  return "\(channelCount) channels"
+            case (false, true):  return "\(epgCount) programs"
+            case (false, false): return ""
+            }
+        }()
+        updateStage("epg", status: .done(epgDetail))
 
-        // Stage 4: VOD
+        // Stage 2: VOD
         updateStage("vod", status: .loading)
         let vodCount = await loadVOD(snap: snap)
         guard !Task.isCancelled else { return }
-        updateStage("vod", status: .done(vodCount > 0 ? "\(vodCount) titles" : "No VOD available"))
+        updateStage("vod", status: .done(
+            snap.type == .m3uPlaylist
+                ? "M3U playlists don't expose VOD"
+                : (vodCount > 0 ? "\(vodCount) titles" : "No VOD available")
+        ))
+
+        // Stage 3: DVR — reconcile Dispatcharr recordings (server-side scheduler).
+        // XC and M3U servers have no DVR API; mark the stage done with a note.
+        updateStage("dvr", status: .loading)
+        let dvrDetail = await loadDVR(server: server)
+        guard !Task.isCancelled else { return }
+        updateStage("dvr", status: .done(dvrDetail))
+
+        // Stage 4: Preferences — iCloud Key-Value Store pull when sync is on.
+        // When sync is off, complete in-place with "Sync off" so the user sees
+        // an honest status instead of a silently-skipped stage.
+        updateStage("preferences", status: .loading)
+        let prefsDetail = await loadPreferences()
+        guard !Task.isCancelled else { return }
+        updateStage("preferences", status: .done(prefsDetail))
 
         // All done
         withAnimation(.spring(response: 0.4)) {
@@ -213,14 +417,14 @@ struct ServerSyncView: View {
     }
 
     private func updateStage(_ id: String, status: SyncStage.StageStatus) {
-        if let idx = stages.firstIndex(where: { $0.id == id }) {
+        if let idx = onboardingStages.firstIndex(where: { $0.id == id }) {
             withAnimation(.easeInOut(duration: 0.3)) {
-                stages[idx].status = status
+                onboardingStages[idx].status = status
             }
         }
     }
 
-    // MARK: - Data Loading
+    // MARK: - Data Loading (onboarding only)
 
     private func loadGroups(snap: ServerSnapshot) async -> Int {
         switch snap.type {
@@ -305,5 +509,36 @@ struct ServerSyncView: View {
         default:
             return 0
         }
+    }
+
+    /// DVR reconciliation for Dispatcharr servers. XC / M3U have no server-side
+    /// DVR API so we complete the stage with an honest "Not available" note.
+    @MainActor
+    private func loadDVR(server: ServerConnection) async -> String {
+        guard server.type == .dispatcharrAPI else {
+            return "Not available for this server type"
+        }
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent)
+        if let remote = try? await api.listRecordings() {
+            return remote.isEmpty ? "No recordings scheduled" : "\(remote.count) recordings"
+        }
+        return ""
+    }
+
+    /// Preferences pull from iCloud KVS. When sync is off we complete the stage
+    /// in-place so the user sees a consistent status row rather than a gap.
+    @MainActor
+    private func loadPreferences() async -> String {
+        guard SyncManager.shared.isSyncEnabled else {
+            return "iCloud Sync off"
+        }
+        // Trigger the pull; SyncManager handles its own throttling and merge
+        // flag so this is safe to call even if a pull is already in-flight.
+        SyncManager.shared.pullFromCloud()
+        // Brief yield so the user sees the "loading" dot before the checkmark.
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        return "Synced"
     }
 }

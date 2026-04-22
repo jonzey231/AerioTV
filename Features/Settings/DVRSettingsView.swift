@@ -508,7 +508,8 @@ struct DVRSettingsView: View {
     }
 
     private func clearAllLocalRecordings() {
-        if let dir = coordinator.localRecordingsDirectory {
+        if let dir = coordinator.localRecordingsDirectory,
+           isInsideAppSandbox(dir) {
             try? FileManager.default.removeItem(at: dir)
             try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
@@ -520,6 +521,19 @@ struct DVRSettingsView: View {
             for r in rows { modelContext.delete(r) }
             try? modelContext.save()
         }
+    }
+
+    /// Defensive guard: only allow bulk-delete when the resolved directory is
+    /// actually inside this app's Documents container. Prevents a corrupted
+    /// bookmark or unexpected symlink from nuking something outside the sandbox.
+    private func isInsideAppSandbox(_ url: URL) -> Bool {
+        guard let docs = try? FileManager.default.url(for: .documentDirectory,
+                                                       in: .userDomainMask,
+                                                       appropriateFor: nil,
+                                                       create: false) else { return false }
+        let resolved = url.standardizedFileURL.resolvingSymlinksInPath().path
+        let base = docs.standardizedFileURL.resolvingSymlinksInPath().path
+        return resolved.hasPrefix(base)
     }
 
     private func formatGB(mb: Int) -> String {

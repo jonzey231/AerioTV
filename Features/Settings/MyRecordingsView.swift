@@ -113,7 +113,11 @@ struct MyRecordingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will permanently delete this recording from your device.")
+            if let rec = recordingToDelete, !rec.programTitle.isEmpty {
+                Text("\u{201C}\(rec.programTitle)\u{201D} will be permanently deleted from your device.")
+            } else {
+                Text("This will permanently delete this recording from your device.")
+            }
         }
         .alert("Delete from Server?", isPresented: $showDeleteFromServerAlert) {
             Button("Delete", role: .destructive) {
@@ -121,7 +125,11 @@ struct MyRecordingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will permanently delete this recording from the Dispatcharr server. The file on the server will be removed.")
+            if let rec = recordingToDelete, !rec.programTitle.isEmpty {
+                Text("\u{201C}\(rec.programTitle)\u{201D} will be permanently deleted from the Dispatcharr server.")
+            } else {
+                Text("This will permanently delete this recording from the Dispatcharr server. The file on the server will be removed.")
+            }
         }
         .alert("Save to Device?", isPresented: $showDownloadConfirmation) {
             Button("Save") {

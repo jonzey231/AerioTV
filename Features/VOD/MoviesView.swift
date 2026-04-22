@@ -73,15 +73,27 @@ struct MoviesView: View {
 
     private let hiddenGroupsKey = "hiddenMovieGroups"
 
+    /// User-tunable UI scale (0.85–1.25). Only consumed on iPad / Mac Catalyst
+    /// where the default 120 px minimum can feel cramped on wide displays;
+    /// iPhone grids stay at their designed minimums (user scale is a no-op in
+    /// the ternary below), and tvOS ignores the setting entirely.
+    @AppStorage("uiScale") private var uiScale: Double = 1.0
+
     #if os(tvOS)
-    private let columns = [
-        GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 32)
-    ]
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: 200, maximum: 240), spacing: 32)]
+    }
     private let gridRowSpacing: CGFloat = 48
     #else
-    private let columns = [
-        GridItem(.adaptive(minimum: 120, maximum: 160), spacing: 12)
-    ]
+    private var columns: [GridItem] {
+        // On iPhone the phone-sized minimum is always used. On iPad / Mac the
+        // user's uiScale slider stretches the minimum so posters read larger.
+        let clamped = max(0.85, min(1.25, uiScale))
+        let isRegular = UIDevice.current.userInterfaceIdiom != .phone
+        let minimum: CGFloat = isRegular ? 120 * clamped : 120
+        let maximum: CGFloat = isRegular ? 160 * clamped : 160
+        return [GridItem(.adaptive(minimum: minimum, maximum: maximum), spacing: 12)]
+    }
     private let gridRowSpacing: CGFloat = 16
     #endif
 
