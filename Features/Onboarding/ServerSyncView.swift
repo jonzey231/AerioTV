@@ -254,7 +254,7 @@ struct ServerSyncView: View {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundColor(.statusWarning)
-                        Text("This is taking longer than usual. Your server might be offline or unreachable.")
+                        Text("This is taking longer than usual. If you have a large playlist or VOD library, this is expected behavior on a fresh install. If not, your server or IPTV source might be offline or unreachable.")
                             .font(.system(size: 14))
                             .foregroundColor(.textSecondary)
                             .multilineTextAlignment(.leading)
@@ -469,10 +469,19 @@ struct ServerSyncView: View {
     private func loadEPG(snap: ServerSnapshot, epgURL: String) async -> Int {
         switch snap.type {
         case .dispatcharrAPI:
-            let api = DispatcharrAPI(baseURL: snap.baseURL, auth: .apiKey(snap.apiKey))
-            if let programs = try? await api.getCurrentPrograms() {
-                return programs.count
-            }
+            // Previously called `getCurrentPrograms()` here to count
+            // programs for the onboarding stage detail. That endpoint
+            // is extremely expensive on large Dispatcharr instances
+            // (full-table scan over `epg_programs`) and routinely
+            // pinned a uwsgi worker for 30-60+s during onboarding,
+            // starving the server's pool while the user watched a
+            // loading spinner. The Guide's `/api/epg/grid/` endpoint
+            // covers the same data more cheaply and runs lazily when
+            // the user opens the guide. Returning 0 here keeps the
+            // onboarding moving; the stage renders as "N channels"
+            // without a program count, matching the existing
+            // (channelCount>0, epgCount==0) branch of `epgDetail`.
+            return 0
         case .xtreamCodes:
             // Xtream EPG is per-channel; just verify the server is reachable.
             let api = XtreamCodesAPI(baseURL: snap.baseURL, username: snap.username, password: snap.password)

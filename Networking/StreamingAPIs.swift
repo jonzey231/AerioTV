@@ -881,7 +881,18 @@ struct DispatcharrAPI {
     func getCurrentPrograms(channelUUIDs: [String]? = nil) async throws -> [DispatcharrCurrentProgram] {
         // This endpoint only accepts POST — GET returns 405.
         let url = try buildURL(path: "/api/epg/current-programs/")
-        var request = URLRequest(url: url)
+        // Explicit 20s timeout rather than URLSession's 60s default.
+        // On large Dispatcharr instances this endpoint does a
+        // full-scan of epg_programs to find each channel's currently-
+        // airing row, which can take 30-60+s. The client had been
+        // holding the connection open the entire time; when it
+        // finally gave up and closed, the server-side uwsgi worker
+        // stayed pinned trying to write the response into a dead
+        // socket (the "broken pipe" log lines on the user's server).
+        // 20s fails fast so the worker's kill-after-client-timeout
+        // fires quickly too, freeing pool capacity for other
+        // requests. Callers already treat failure as non-fatal.
+        var request = URLRequest(url: url, timeoutInterval: 20)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
@@ -908,13 +919,20 @@ struct DispatcharrAPI {
         let url = try buildURL(path: "/api/epg/grid/")
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 30
+        // 60s for the initial response headers + body start. Bumped
+        // from 30s because large Dispatcharr instances (thousands of
+        // channels × 25 hours of EPG) serialize a response big enough
+        // that the database query + JSON encode genuinely needs more
+        // time. Callers treat failure as non-fatal (per-cell prefetch
+        // takes over), so false positives cost more UX pain than the
+        // 30s extra worst case.
+        request.timeoutInterval = 60
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
 
         // Use a dedicated session with generous timeout for this large response
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 120
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 180
         let session = URLSession(configuration: config)
 
         let (data, response) = try await session.data(for: request)
@@ -952,7 +970,14 @@ struct DispatcharrAPI {
         }
 
         let url = try buildURL(path: queryPath)
-        var request = URLRequest(url: url, timeoutInterval: 10)
+        // 5s fail-fast. The prior 10s tied up one uwsgi worker per
+        // visible guide cell for 10 seconds when the server was
+        // under duress, and per-cell prefetch is non-essential — the
+        // bulk `getEPGGrid` path normally carries the data. Shorter
+        // timeouts mean faster per-cell failure, which pairs with
+        // the GuideStore circuit breaker to stop firing at all
+        // once the server is proven unresponsive.
+        var request = URLRequest(url: url, timeoutInterval: 5)
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -1042,12 +1067,20 @@ struct DispatcharrAPI {
     // Do NOT use ?no_pagination=true: some Dispatcharr builds preserve that param in every
     // DRF "next" link, causing fetchAllPages to loop through the full library while always
     // appending no_pagination=true. Rely on the next-link loop instead (same as getChannels).
+    //
+    // page_size: 25. Previously 100 — but on large VOD libraries
+    // (tens of thousands of entries), Dispatcharr's per-page
+    // serialization was slow enough that individual requests timed
+    // out client-side while uwsgi workers stayed pinned serializing
+    // into a closed socket (see broken-pipe logs on the testing
+    // server). Smaller pages = faster per-request serialization =
+    // workers freed quicker. More round trips, but each is cheap.
     func getVODMovies() async throws -> [DispatcharrVODMovie] {
-        try await fetchAllPages(DispatcharrVODMovie.self, firstPath: "/api/vod/movies/?page_size=100")
+        try await fetchAllPages(DispatcharrVODMovie.self, firstPath: "/api/vod/movies/?page_size=25")
     }
 
     func getVODSeries() async throws -> [DispatcharrVODSeries] {
-        try await fetchAllPages(DispatcharrVODSeries.self, firstPath: "/api/vod/series/?page_size=100")
+        try await fetchAllPages(DispatcharrVODSeries.self, firstPath: "/api/vod/series/?page_size=25")
     }
 
     /// Fetches VOD categories from `/api/vod/categories/`.
@@ -1059,7 +1092,12 @@ struct DispatcharrAPI {
     // MARK: - Progressive VOD streams
     // Yields one page at a time so the UI can display partial results immediately
     // instead of waiting for the entire library to load. Critical for large libraries
-    // (e.g. 20 000+ movies = ~40 sequential API calls with page_size=100).
+    // (e.g. 20 000+ movies ≈ 800 sequential API calls at page_size=25). The
+    // smaller page size trades more round-trips for shorter per-worker hold time
+    // on the Dispatcharr side — a single page_size=100 request was slow enough
+    // on big libraries to pin a uwsgi worker for 10+ seconds, which under
+    // concurrent load would saturate Dispatcharr's pool and freeze the
+    // container.
 
     /// Paginated movie stream. When `category` is non-nil, appends
     /// `&category=<url-encoded-name>` so Dispatcharr returns only
@@ -1081,29 +1119,29 @@ struct DispatcharrAPI {
 
     private static func moviesPath(category: String?) -> String {
         guard let category, !category.isEmpty else {
-            return "/api/vod/movies/?page_size=100"
+            return "/api/vod/movies/?page_size=25"
         }
         let encoded = category.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? category
-        return "/api/vod/movies/?page_size=100&category=\(encoded)"
+        return "/api/vod/movies/?page_size=25&category=\(encoded)"
     }
 
     private static func seriesPath(category: String?) -> String {
         guard let category, !category.isEmpty else {
-            return "/api/vod/series/?page_size=100"
+            return "/api/vod/series/?page_size=25"
         }
         let encoded = category.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? category
-        return "/api/vod/series/?page_size=100&category=\(encoded)"
+        return "/api/vod/series/?page_size=25&category=\(encoded)"
     }
 
     /// Server-side search — uses DRF's ?search= filter so items not yet locally fetched are found.
     func searchVODMoviesStream(query: String) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        return makePageStream(firstPath: "/api/vod/movies/?search=\(encoded)&page_size=100")
+        return makePageStream(firstPath: "/api/vod/movies/?search=\(encoded)&page_size=25")
     }
 
     func searchVODSeriesStream(query: String) -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        return makePageStream(firstPath: "/api/vod/series/?search=\(encoded)&page_size=100")
+        return makePageStream(firstPath: "/api/vod/series/?search=\(encoded)&page_size=25")
     }
 
     /// Generic paginated stream — yields `[T]` for each DRF results page.

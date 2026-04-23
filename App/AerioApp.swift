@@ -86,6 +86,19 @@ private final class MainThreadWatchdog: @unchecked Sendable {
 struct AerioApp: App {
     @Environment(\.scenePhase) private var scenePhase
 
+    /// Owned explicitly (vs. letting `.modelContainer(for:)` auto-
+    /// build it) so we can fire an eager warmup fetch off-main at
+    /// launch. On the torture playlist the EPGProgram store has
+    /// ~97k rows; SQLite's first-use schema validation + page-cache
+    /// warmup can cost 2-3 seconds on iPad, and without this eager
+    /// hit the cost lands on the MainActor the first time
+    /// `ChannelStore.load` or `@Query var servers` touches the
+    /// context — producing a ~3.4s ping#3 hang on warm relaunch.
+    /// The warmup fetch runs off main (own `ModelContext`) so by
+    /// the time UI code touches the shared context, SQLite is
+    /// already open and hot.
+    let sharedModelContainer: ModelContainer
+
     init() {
         // Ensure the Application Support directory exists before SwiftData/CoreData
         // tries to create the SQLite store there. On a fresh install the directory
@@ -95,6 +108,38 @@ struct AerioApp: App {
             if !fm.fileExists(atPath: appSupport.path) {
                 try? fm.createDirectory(at: appSupport, withIntermediateDirectories: true)
             }
+        }
+
+        // Build the shared container explicitly so we can warm it.
+        let schema = Schema([
+            ServerConnection.self,
+            ChannelGroup.self,
+            Channel.self,
+            EPGProgram.self,
+            M3UPlaylist.self,
+            EPGSource.self,
+            WatchProgress.self,
+            Recording.self
+        ])
+        do {
+            self.sharedModelContainer = try ModelContainer(for: schema)
+        } catch {
+            fatalError("Could not initialize ModelContainer: \(error)")
+        }
+
+        // Fire a throwaway fetch off main to force SQLite open +
+        // schema validation off the critical path. Uses a fresh
+        // background `ModelContext`, never touches MainActor.
+        // `ServerConnection` is a tiny table so the fetch itself
+        // costs microseconds — the expensive work is in what
+        // SwiftData does around it on first access.
+        let containerRef = self.sharedModelContainer
+        Task.detached(priority: .userInitiated) {
+            let start = CFAbsoluteTimeGetCurrent()
+            let ctx = ModelContext(containerRef)
+            _ = try? ctx.fetch(FetchDescriptor<ServerConnection>())
+            let elapsed = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+            debugLog("🗄️ SwiftData warmup fetch: \(elapsed)ms (off-main)")
         }
     }
 
@@ -162,16 +207,7 @@ struct AerioApp: App {
                 }
                 #endif
         }
-        .modelContainer(for: [
-            ServerConnection.self,
-            ChannelGroup.self,
-            Channel.self,
-            EPGProgram.self,
-            M3UPlaylist.self,
-            EPGSource.self,
-            WatchProgress.self,
-            Recording.self
-        ])
+        .modelContainer(sharedModelContainer)
         #if os(iOS)
         // iPad keyboard shortcuts for the multiview grid. No-ops on
         // tvOS (no keyboard) and on iPhone (multiview excluded). The
@@ -807,17 +843,24 @@ struct RootView: View {
     /// can't leak in. This function handles users who are UPGRADING from
     /// a buggy build and still have orphans sitting in their storage.
     private func pruneOrphanedEPGPrograms() {
-        let liveServerIDs = Set(servers.map { $0.id.uuidString })
-        let descriptor = FetchDescriptor<EPGProgram>()
-        guard let all = try? modelContext.fetch(descriptor) else { return }
-        var pruned = 0
-        for ep in all where !liveServerIDs.contains(ep.serverID) {
-            modelContext.delete(ep)
-            pruned += 1
-        }
-        if pruned > 0 {
-            try? modelContext.save()
-            debugLog("🗑️ Pruned \(pruned) orphaned EPGProgram rows (no matching ServerConnection)")
+        // Fetch + iterate all EPGProgram rows on the main MainActor
+        // context WAS the dominant cost of warm-relaunch startup on
+        // the torture playlist (97k rows × 2+ seconds of main-thread
+        // fetch + loop). We now push both the fetch AND the delete
+        // loop to a background `ModelContext` and narrow the fetch
+        // via a predicate so SQLite only returns the rows we're
+        // actually going to delete — which is almost always zero.
+        let liveServerIDArray = servers.map { $0.id.uuidString }
+        let container = modelContext.container
+        Task.detached(priority: .utility) {
+            let bgContext = ModelContext(container)
+            let descriptor = FetchDescriptor<EPGProgram>(
+                predicate: #Predicate<EPGProgram> { !liveServerIDArray.contains($0.serverID) }
+            )
+            guard let orphans = try? bgContext.fetch(descriptor), !orphans.isEmpty else { return }
+            for ep in orphans { bgContext.delete(ep) }
+            try? bgContext.save()
+            debugLog("🗑️ Pruned \(orphans.count) orphaned EPGProgram rows (background)")
         }
     }
 

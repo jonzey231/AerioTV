@@ -46,6 +46,62 @@ final class GuideStore: ObservableObject {
     private var _pendingPrograms: [String: [GuideProgram]] = [:]
     private var _isBatching = false
 
+    /// Idempotency cache for `loadFromCache`. Both
+    /// `MainTabView.task(channelServerKey)` and
+    /// `EPGGuideView.task(id: channels.count)` call `loadFromCache`
+    /// on the same `channels.count` transition. Storing the result
+    /// here lets the second call replay in microseconds once the
+    /// first call has completed. Invalidated by `saveToCache` so a
+    /// fresh network-fetch → cache-save cycle triggers a real
+    /// SwiftData read on the next caller.
+    private var lastLoadFromCacheResult: (serverID: String, isFresh: Bool)? = nil
+
+    /// Coalesces concurrent `loadFromCache` calls. The old sync
+    /// version of `loadFromCache` couldn't race because MainActor
+    /// serialization ran the first call to completion (including the
+    /// `lastLoadFromCacheResult` write) before the second call ever
+    /// entered. Now that the fetch is `async` and hits `await
+    /// Task.detached.value` internally, the first caller suspends
+    /// BEFORE it writes `lastLoadFromCacheResult`, so a second
+    /// concurrent caller would otherwise spawn its own duplicate 97k-
+    /// row fetch. When an in-flight task exists for the matching
+    /// `serverID`, the new caller awaits its `.value` instead.
+    private var inFlightLoadTask: (serverID: String, task: Task<Bool, Never>)? = nil
+
+    /// Coalesces concurrent `fetchXMLTVFromURL` calls. On cold
+    /// install with a Dispatcharr playlist, two separate code paths
+    /// each kick off an XMLTV download+parse against the same
+    /// `{baseURL}/output/epg?tvg_id_source=tvg_id` URL:
+    ///
+    ///   1. `ChannelStore.loadAllEPG` → `primeXMLTVFromURL` (for
+    ///      first-frame tint data on iPhone, which never mounts
+    ///      EPGGuideView)
+    ///   2. `EPGGuideView.task(id: channels.count)` →
+    ///      `fetchUpcoming` → `fetchDispatcharr` (for the guide
+    ///      grid itself)
+    ///
+    /// Both produce byte-identical program data on the 97k-entry
+    /// torture playlist; running them serially doubles the cold-
+    /// install wait. When the second caller arrives while the
+    /// first is still parsing, it awaits the first's `.value`
+    /// instead of starting a duplicate download. Different URLs
+    /// (e.g. an explicit per-server override vs. the derived
+    /// `/output/epg`) don't coalesce — only exact URL matches.
+    private var inFlightXMLTVTask: (url: URL, task: Task<Void, Never>)? = nil
+
+    /// Signature of the last seedEPGCache run — "serverID|channelCount|programCount".
+    /// Warm relaunch fires `seedEPGCache` three times with identical
+    /// inputs (MainTabView.task after loadFromCache, EPGGuideView.task
+    /// after its loadFromCache, and the onChange handler when
+    /// isEPGLoading flips false). The write is actor-serialized and
+    /// idempotent, but iterating 2183 channel refs + snapshotting a
+    /// 97k-entry dict three times is pure wasted CPU. If a caller
+    /// arrives with the same signature as the last run, we skip —
+    /// the first call already populated the EPGCache with the same
+    /// data. Synchronous set-before-suspend means concurrent callers
+    /// on the same @MainActor won't race.
+    private var lastSeedEPGCacheSignature: String? = nil
+
     private func beginBatch() {
         _isBatching = true
         _pendingPrograms = programs
@@ -66,44 +122,99 @@ final class GuideStore: ObservableObject {
     /// the freshness check would pass on stale rows from a deleted server
     /// and the network fetch would be skipped, leaving the guide empty
     /// because the channel IDs no longer match.
-    func loadFromCache(modelContext: ModelContext, channels: [ChannelDisplayItem], serverID: String) -> Bool {
-        let now = Date()
-        let windowStart = now.addingTimeInterval(-3600)
+    func loadFromCache(modelContext: ModelContext, channels: [ChannelDisplayItem], serverID: String) async -> Bool {
+        // Completed-fetch shortcut. Match on serverID so a playlist
+        // switch still forces a real read.
+        if let cached = lastLoadFromCacheResult, cached.serverID == serverID {
+            debugLog("📺 GuideStore.loadFromCache: idempotent replay (serverID=\(serverID), fresh=\(cached.isFresh), programs already loaded=\(programs.count) channels)")
+            return cached.isFresh
+        }
+        // In-flight shortcut — see `inFlightLoadTask` doc comment.
+        // Without this, two concurrent callers that both arrive
+        // before the first fetch completes would each spawn their
+        // own off-main fetch and pay for the 97k-row read twice.
+        if let inFlight = inFlightLoadTask, inFlight.serverID == serverID {
+            debugLog("📺 GuideStore.loadFromCache: joining in-flight fetch (serverID=\(serverID))")
+            return await inFlight.task.value
+        }
+
+        // Snapshot config + container for the off-main fetch. On the
+        // torture playlist, `modelContext.fetch` returns ~97k
+        // EPGProgram rows and we then wrap each one in a GuideProgram
+        // while bucketing by channelID — that's a 2-3 second main-
+        // thread hang. We move both the fetch and the dict build to
+        // a background ModelContext (same pattern as saveToCache
+        // below) so the initial-sync loading cover keeps advancing
+        // instead of freezing. `EPGProgram` instances themselves
+        // never cross the thread boundary — they're read + converted
+        // to plain `GuideProgram` structs on the bg context; only
+        // the resulting Sendable dict (plus counts) comes back.
+        let container = modelContext.container
         let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
         let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
-        let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
-
-        let descriptor = FetchDescriptor<EPGProgram>(
-            predicate: #Predicate<EPGProgram> {
-                $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < windowEnd
-            },
-            sortBy: [SortDescriptor(\.startTime)]
-        )
-        guard let cached = try? modelContext.fetch(descriptor), !cached.isEmpty else {
-            debugLog("📺 GuideStore.loadFromCache: no cached programs for server \(serverID)")
-            return false
-        }
-
-        var result: [String: [GuideProgram]] = [:]
-        for ep in cached {
-            let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
-                                  description: ep.programDescription,
-                                  start: ep.startTime, end: ep.endTime,
-                                  category: ep.category)
-            result[ep.channelID, default: []].append(gp)
-        }
-        programs = result
-        debugLog("📺 GuideStore.loadFromCache: loaded \(cached.count) programs across \(result.count) channels (server \(serverID))")
-
-        // Check freshness using the user's refresh interval setting.
-        // Default 1440 min (24 hours) — EPG data covers days, no need to refresh hourly.
         let refreshMins = UserDefaults.standard.integer(forKey: "bgRefreshIntervalMins")
         let effectiveMins = refreshMins > 0 ? refreshMins : 1440 // 0 means unset → default 24h
         let stalenessThreshold = TimeInterval(effectiveMins * 60)
-        let newestFetch = cached.map(\.fetchedAt).max() ?? .distantPast
-        let isFresh = now.timeIntervalSince(newestFetch) < stalenessThreshold
-        debugLog("📺 GuideStore.loadFromCache: newest fetch \(Int(now.timeIntervalSince(newestFetch)))s ago, threshold \(Int(stalenessThreshold))s, fresh=\(isFresh)")
-        return isFresh
+
+        // Wrap the fetch in a Task that concurrent callers can join
+        // via `inFlightLoadTask`. The Task inherits @MainActor from
+        // the enclosing function, so `self.programs = …` + log +
+        // lastLoadFromCacheResult writes all happen on main. The
+        // expensive work is still in the nested Task.detached.
+        let fetchTask = Task<Bool, Never> { [self] in
+            let loaded: (dict: [String: [GuideProgram]], programCount: Int, isFresh: Bool, newestFetchAgoSec: Int)? = await Task.detached(priority: .userInitiated) {
+                let bgContext = ModelContext(container)
+                let now = Date()
+                let windowStart = now.addingTimeInterval(-3600)
+                let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
+                let descriptor = FetchDescriptor<EPGProgram>(
+                    predicate: #Predicate<EPGProgram> {
+                        $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < windowEnd
+                    },
+                    sortBy: [SortDescriptor(\.startTime)]
+                )
+                guard let cachedRows = try? bgContext.fetch(descriptor), !cachedRows.isEmpty else {
+                    return nil
+                }
+                var dict: [String: [GuideProgram]] = [:]
+                for ep in cachedRows {
+                    let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
+                                          description: ep.programDescription,
+                                          start: ep.startTime, end: ep.endTime,
+                                          category: ep.category)
+                    dict[ep.channelID, default: []].append(gp)
+                }
+                let newestFetch = cachedRows.map(\.fetchedAt).max() ?? .distantPast
+                let isFresh = now.timeIntervalSince(newestFetch) < stalenessThreshold
+                return (dict, cachedRows.count, isFresh, Int(now.timeIntervalSince(newestFetch)))
+            }.value
+
+            guard let loaded else {
+                debugLog("📺 GuideStore.loadFromCache: no cached programs for server \(serverID)")
+                self.lastLoadFromCacheResult = (serverID: serverID, isFresh: false)
+                return false
+            }
+
+            // Back on the MainActor. The only remaining main-thread
+            // work is the `programs` assignment (fires @Published)
+            // plus two log lines. The 97k-row fetch + dict build
+            // already happened off-main.
+            self.programs = loaded.dict
+            debugLog("📺 GuideStore.loadFromCache: loaded \(loaded.programCount) programs across \(loaded.dict.count) channels (server \(serverID))")
+            debugLog("📺 GuideStore.loadFromCache: newest fetch \(loaded.newestFetchAgoSec)s ago, threshold \(Int(stalenessThreshold))s, fresh=\(loaded.isFresh)")
+            self.lastLoadFromCacheResult = (serverID: serverID, isFresh: loaded.isFresh)
+            return loaded.isFresh
+        }
+        inFlightLoadTask = (serverID: serverID, task: fetchTask)
+        let result = await fetchTask.value
+        // Only clear if we're still the registered in-flight task
+        // for this serverID. If a caller with a different serverID
+        // overwrote us mid-fetch (extreme edge case — server switch
+        // during initial sync), we leave their entry alone.
+        if inFlightLoadTask?.serverID == serverID {
+            inFlightLoadTask = nil
+        }
+        return result
     }
 
     /// Save current programs to SwiftData for persistent caching.
@@ -115,6 +226,14 @@ final class GuideStore: ObservableObject {
         let snapshot = programs
         let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
         let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
+
+        // Invalidate the loadFromCache idempotency cache — a fresh
+        // network fetch is landing, so the next loadFromCache caller
+        // should re-read SwiftData and observe the updated fetchedAt
+        // (which will flip `fresh=true`). Runs synchronously on the
+        // MainActor before the detached save so there's no race
+        // between a subsequent caller and the stale cached verdict.
+        lastLoadFromCacheResult = nil
 
         Task.detached(priority: .utility) {
             let bgContext = ModelContext(container)
@@ -163,6 +282,7 @@ final class GuideStore: ObservableObject {
     /// Phase 1 — instant: build guide rows from data that's already in memory.
     func seedFromChannels(_ channels: [ChannelDisplayItem]) {
         var result: [String: [GuideProgram]] = programs // preserve cached data
+        var mutated = false
         for ch in channels {
             guard let title = ch.currentProgram, !title.isEmpty,
                   let start = ch.currentProgramStart,
@@ -173,6 +293,7 @@ final class GuideStore: ObservableObject {
             if result[ch.id] == nil || result[ch.id]?.isEmpty == true {
                 // No programs yet for this channel — seed it
                 result[ch.id] = [gp]
+                mutated = true
             } else if !desc.isEmpty, var list = result[ch.id] {
                 // Channel has programs but check if current one is missing its description
                 var updated = false
@@ -184,10 +305,23 @@ final class GuideStore: ObservableObject {
                         updated = true
                     }
                 }
-                if updated { result[ch.id] = list }
+                if updated {
+                    result[ch.id] = list
+                    mutated = true
+                }
             }
         }
-        programs = result
+        // Only fire @Published if we actually changed anything. On
+        // warm relaunch where loadFromCache already populated 97k
+        // programs with descriptions, the loop above does nothing
+        // useful — but the unconditional `programs = result`
+        // re-assignment still triggers SwiftUI invalidations on
+        // three observers (MainTabView, EPGGuideView,
+        // ChannelListView). Skipping the assignment when nothing
+        // changed eliminates that spurious re-render.
+        if mutated {
+            programs = result
+        }
     }
 
     /// Phase 2 — async: fetch upcoming programs to fill in the timeline beyond "now playing."
@@ -530,6 +664,41 @@ final class GuideStore: ObservableObject {
     /// read from one unified dataset.
     func fetchXMLTVFromURL(url: URL, channels: [ChannelDisplayItem],
                                     windowStart: Date, windowEnd: Date) async {
+        // In-flight coalescing — see `inFlightXMLTVTask` doc. On
+        // cold install two call sites hit this method with the
+        // same URL back-to-back; without dedupe we pay the XMLTV
+        // download + parse twice (~3 min each on the 98k-program
+        // torture playlist).
+        if let inFlight = inFlightXMLTVTask, inFlight.url == url {
+            debugLog("📺 GuideStore.fetchXMLTVFromURL: joining in-flight parse (url=\(url.host ?? "?"))")
+            await inFlight.task.value
+            return
+        }
+
+        // Wrap the fetch+parse+merge body in a Task so a concurrent
+        // caller with the same URL can join via `inFlightXMLTVTask`.
+        // Inherits @MainActor from the enclosing GuideStore, which
+        // matters for the `beginBatch`/`endBatch` + `mergeProgram`
+        // calls that follow.
+        let fetchTask = Task<Void, Never> { [self] in
+            await performXMLTVFetch(url: url, channels: channels,
+                                    windowStart: windowStart, windowEnd: windowEnd)
+        }
+        inFlightXMLTVTask = (url: url, task: fetchTask)
+        await fetchTask.value
+        // Only clear if we're still the registered in-flight task
+        // for this URL. A different URL starting later would have
+        // overwritten the entry; don't stomp it.
+        if inFlightXMLTVTask?.url == url {
+            inFlightXMLTVTask = nil
+        }
+    }
+
+    /// Body of `fetchXMLTVFromURL`, split out so the outer function
+    /// can wrap it in an in-flight-coalescing `Task`. See
+    /// `inFlightXMLTVTask` for the rationale.
+    private func performXMLTVFetch(url: URL, channels: [ChannelDisplayItem],
+                                   windowStart: Date, windowEnd: Date) async {
         guard let parsed = try? await XMLTVParser.fetchAndParse(url: url) else {
             debugLog("📺 XMLTV fetch/parse failed for \(url.host ?? "?")")
             return
@@ -601,6 +770,59 @@ final class GuideStore: ObservableObject {
     /// so the user could never recover without switching views).
     private var fetchedChannelIDs: Set<String> = []
 
+    /// Tail of the serial prefetch chain. Each new prefetch awaits
+    /// the previous one before issuing its own network call, which
+    /// caps in-flight per-cell fetches at one. Needed because cells
+    /// fire `.onAppear` in bursts on Guide open (3-8 at once on tvOS,
+    /// more on iOS), and without this gate every burst turned into
+    /// that many concurrent `/api/epg/programs/?tvg_id=...` requests
+    /// — enough to pin every uwsgi worker on large Dispatcharr
+    /// instances and freeze the whole container.
+    private var lastPrefetchTask: Task<Void, Never>?
+
+    /// Debounced, per-channel prefetch entry. Each call to
+    /// `prefetchIfNeeded` cancels any prior in-flight entry for the
+    /// same channel id, then schedules a 250ms-delayed task. A cell
+    /// that appears and disappears faster than the debounce never
+    /// issues a network request; only rows that stay visible long
+    /// enough to actually be read enter the serial chain above.
+    ///
+    /// The per-entry `id` is a submission token used by the task's
+    /// own cleanup block to distinguish "I'm still the current task
+    /// for this channel" from "a newer prefetchIfNeeded replaced me
+    /// while I was running". Without this identity guard the task
+    /// would remove whatever entry happened to be under the key,
+    /// including a newer submission's entry — which would then
+    /// leak (no way to cancel it on disappear) and could run
+    /// concurrently with a subsequent submission, defeating the
+    /// serialization goal.
+    private struct PendingPrefetch {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+    private var pendingPrefetchTasks: [String: PendingPrefetch] = [:]
+
+    /// Circuit breaker state. On servers that genuinely can't answer
+    /// per-cell `/api/epg/programs/` requests (overloaded large
+    /// Dispatcharr instance, upstream EPG provider flaking, etc.),
+    /// the prior behaviour was to fire a 5s-timeout request for every
+    /// visible cell — uselessly burning the server's uwsgi workers
+    /// AND our radio for hundreds of guaranteed-to-fail requests.
+    /// Once three per-cell fetches in a row time out we trip the
+    /// breaker and stop firing until `resetPrefetchCache()` clears
+    /// it (pull-to-refresh / bulk re-fetch).
+    private var consecutivePrefetchTimeouts: Int = 0
+    private var prefetchCircuitBreakerTripped: Bool = false
+    /// Timestamp of the most recent breaker trip. `resetPrefetchCache`
+    /// consults this to apply a cooldown — if the breaker tripped
+    /// recently (within `prefetchBreakerCooldown`), a view-reappear-
+    /// triggered reset keeps the breaker tripped instead of giving
+    /// the server another round of 3 timeouts. Only a "long enough"
+    /// reset (after the cooldown OR explicit user refresh) lets the
+    /// breaker clear.
+    private var prefetchBreakerTrippedAt: Date? = nil
+    private let prefetchBreakerCooldown: TimeInterval = 30
+
     /// Called by the outer Guide task after a bulk re-fetch or a
     /// pull-to-refresh so that subsequent per-cell `.onAppear`
     /// handlers are free to re-check. Without this, channels that
@@ -609,6 +831,55 @@ final class GuideStore: ObservableObject {
     /// when the bulk fetch has since populated data.
     func resetPrefetchCache() {
         fetchedChannelIDs.removeAll(keepingCapacity: true)
+        // Also drop any pending debounce tasks — they're about to
+        // fire against stale state. Active in-flight fetches stay
+        // and finish naturally; the serial chain just drains.
+        for entry in pendingPrefetchTasks.values { entry.task.cancel() }
+        pendingPrefetchTasks.removeAll(keepingCapacity: true)
+        // Breaker reset is gated on a cooldown. This function fires
+        // on every `.task(id: channels.count)` activation — which
+        // includes view re-appear after backing out of playback, not
+        // just genuine pull-to-refresh. Without the cooldown, we'd
+        // un-trip the breaker every time the user stops a stream
+        // and then immediately fire three fresh timeouts against
+        // the still-unresponsive server. Skipping the breaker clear
+        // inside the cooldown window keeps the app quiet until the
+        // server has had time to recover (or the user waits long
+        // enough that the server probably has).
+        if let trippedAt = prefetchBreakerTrippedAt,
+           Date().timeIntervalSince(trippedAt) < prefetchBreakerCooldown {
+            return
+        }
+        consecutivePrefetchTimeouts = 0
+        prefetchCircuitBreakerTripped = false
+        prefetchBreakerTrippedAt = nil
+    }
+
+    /// Timeout detector shared with the fetch task. Matches
+    /// `VODStore.isTimeoutError` — kept locally so we don't
+    /// introduce a new cross-file shared helper just yet. Marked
+    /// `nonisolated` so it can be called from inside `withTaskGroup`
+    /// closures (which run off the MainActor).
+    nonisolated fileprivate static func isTimeoutError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorTimedOut {
+            return true
+        }
+        if let urlError = error as? URLError, urlError.code == .timedOut {
+            return true
+        }
+        return nsError.localizedDescription.lowercased().contains("timed out")
+    }
+
+    /// Cancel the pending (debounced, not-yet-fired) prefetch for a
+    /// channel. Called from the cell's `.onDisappear` so a row that
+    /// scrolls off-screen before its 250ms timer elapses doesn't
+    /// waste a server request. In-flight fetches (past the debounce)
+    /// are allowed to finish — their data is still useful when the
+    /// user scrolls back.
+    func cancelPrefetch(channelID: String) {
+        pendingPrefetchTasks[channelID]?.task.cancel()
+        pendingPrefetchTasks.removeValue(forKey: channelID)
     }
 
     /// Called when a guide row appears on screen. Fetches EPG for
@@ -616,6 +887,11 @@ final class GuideStore: ObservableObject {
     /// already populate its future programs.
     func prefetchIfNeeded(channel: ChannelDisplayItem, servers: [ServerConnection]) {
         guard !fetchedChannelIDs.contains(channel.id) else { return }
+        // Circuit breaker — don't fire more per-cell requests once
+        // we've seen three consecutive timeouts. The serial chain
+        // would otherwise keep working its way through the entire
+        // visible channel list, each cell taking 5s to fail.
+        guard !prefetchCircuitBreakerTripped else { return }
 
         // Skip the per-channel network fetch when we already have
         // upcoming program data for this channel from the bulk
@@ -657,66 +933,177 @@ final class GuideStore: ObservableObject {
         let channelID = channel.id
         let tvgID = channel.tvgID
 
-        Task {
-            // Fetch programs with a 15-second timeout
-            let fetched: [GuideProgram] = await withTaskGroup(of: [GuideProgram].self) { group in
+        // Cancel any previous debounced task for this same channel
+        // so a quickly-repeating `.onAppear` (e.g. SwiftUI diffing a
+        // reused cell) restarts the 250ms timer instead of piling
+        // two tasks into the serial chain.
+        pendingPrefetchTasks[channelID]?.task.cancel()
+
+        // Tail of the serial chain as of this call. We capture it
+        // here so each new prefetch awaits the previous one's
+        // completion before issuing its own network request —
+        // effectively max-concurrency=1 across all prefetches.
+        let previousTail = lastPrefetchTask
+
+        // Submission token for this specific prefetch. Used by the
+        // cleanup block at the end of the Task to verify we're still
+        // the entry under `pendingPrefetchTasks[channelID]` before
+        // removing it — a newer prefetchIfNeeded for the same
+        // channel could have replaced us while our fetch was running.
+        let submissionID = UUID()
+
+        let task = Task { [weak self] in
+            // Debounce: drop the request if the cell scrolls off
+            // screen (triggering `cancelPrefetch`) before this
+            // timer elapses. 250ms is enough to filter out cells
+            // that flicker in/out during fast scroll, but short
+            // enough that users who stop scrolling don't perceive
+            // a stall before "now airing" text starts appearing.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if Task.isCancelled { return }
+
+            // Serial gate. Waiting on `previousTail.value` chains
+            // this fetch behind every earlier-submitted prefetch.
+            // If the tail was cancelled, its `value` resolves
+            // immediately — we don't care about its result here,
+            // just the ordering barrier.
+            await previousTail?.value
+            if Task.isCancelled { return }
+
+            // Fetch programs with a 15-second timeout (race against
+            // a sleep task). Task-group result is now a tuple
+            // (programs, didTimeout) so the circuit breaker below can
+            // distinguish "server answered empty" from "server didn't
+            // answer" — we only count the latter against the breaker.
+            let fetchResult: ([GuideProgram], Bool) = await withTaskGroup(of: ([GuideProgram], Bool).self) { group in
                 group.addTask {
                     switch serverType {
                     case .dispatcharrAPI:
                         let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
                         let hasTvgID = tvgID != nil && !tvgID!.isEmpty
                         let chID = Int(channelID)
-                        guard hasTvgID || chID != nil else { return [] }
-                        let upcoming = (try? await api.getUpcomingPrograms(
-                            tvgIDs: hasTvgID ? [tvgID!] : nil,
-                            channelIDs: hasTvgID ? nil : (chID.map { [$0] })
-                        )) ?? []
-                        return upcoming.compactMap { prog in
-                            guard let start = prog.startTime?.toDate(),
-                                  let end = prog.endTime?.toDate(),
-                                  end > windowStart && start < windowEnd else { return nil }
-                            let desc = prog.description.isEmpty ? prog.subTitle : prog.description
-                            return GuideProgram(channelID: channelID, title: prog.title,
-                                                description: desc, start: start, end: end, category: "")
+                        guard hasTvgID || chID != nil else { return ([], false) }
+                        do {
+                            let upcoming = try await api.getUpcomingPrograms(
+                                tvgIDs: hasTvgID ? [tvgID!] : nil,
+                                channelIDs: hasTvgID ? nil : (chID.map { [$0] })
+                            )
+                            let programs: [GuideProgram] = upcoming.compactMap { prog in
+                                guard let start = prog.startTime?.toDate(),
+                                      let end = prog.endTime?.toDate(),
+                                      end > windowStart && start < windowEnd else { return nil }
+                                let desc = prog.description.isEmpty ? prog.subTitle : prog.description
+                                return GuideProgram(channelID: channelID, title: prog.title,
+                                                    description: desc, start: start, end: end, category: "")
+                            }
+                            return (programs, false)
+                        } catch {
+                            return ([], GuideStore.isTimeoutError(error))
                         }
                     case .xtreamCodes:
                         let api = XtreamCodesAPI(baseURL: baseURL, username: username, password: password)
-                        let response = try? await api.getEPG(streamID: channelID, limit: 12)
-                        return (response?.epgListings ?? []).compactMap { item in
-                            guard let start = Self.parseXtreamDate(item.start),
-                                  let end = Self.parseXtreamDate(item.end),
-                                  end > windowStart && start < windowEnd else { return nil }
-                            return GuideProgram(channelID: channelID, title: item.title,
-                                                description: item.description,
-                                                start: start, end: end, category: "")
+                        do {
+                            let response = try await api.getEPG(streamID: channelID, limit: 12)
+                            let programs: [GuideProgram] = response.epgListings.compactMap { item in
+                                guard let start = Self.parseXtreamDate(item.start),
+                                      let end = Self.parseXtreamDate(item.end),
+                                      end > windowStart && start < windowEnd else { return nil }
+                                return GuideProgram(channelID: channelID, title: item.title,
+                                                    description: item.description,
+                                                    start: start, end: end, category: "")
+                            }
+                            return (programs, false)
+                        } catch {
+                            return ([], GuideStore.isTimeoutError(error))
                         }
                     case .m3uPlaylist:
-                        return []
+                        return ([], false)
                     }
                 }
                 group.addTask {
+                    // Hard outer ceiling. Each underlying request also
+                    // enforces its own timeout (5s for Dispatcharr's
+                    // `getUpcomingPrograms`), so this mostly catches
+                    // pathological network stalls where even socket
+                    // close takes forever. If this branch wins, treat
+                    // it as a timeout signal.
                     try? await Task.sleep(nanoseconds: 15_000_000_000)
-                    return []
+                    return ([], true)
                 }
-                let result = await group.next() ?? []
+                let result = await group.next() ?? ([], false)
                 group.cancelAll()
                 return result
             }
+            let (fetched, didTimeout) = fetchResult
+            if Task.isCancelled { return }
             // Merge results back on main actor
-            for prog in fetched {
-                mergeProgram(prog, for: channelID)
-            }
-            // Mark this channel as fetched ONLY if we actually got
-            // programs back. Previously the id was inserted BEFORE
-            // the fetch ran, so a timeout / transient failure left
-            // the channel flagged but empty forever (GH #3 symptom
-            // "scroll past and back and the cell stays empty").
-            // Deferring the insert until we have data means a later
-            // scroll into the same row will retry the fetch.
-            if !fetched.isEmpty {
-                self.fetchedChannelIDs.insert(channelID)
+            await MainActor.run {
+                guard let self else { return }
+                for prog in fetched {
+                    self.mergeProgram(prog, for: channelID)
+                }
+                // Mark this channel as fetched ONLY if we actually got
+                // programs back. Previously the id was inserted BEFORE
+                // the fetch ran, so a timeout / transient failure left
+                // the channel flagged but empty forever (GH #3 symptom
+                // "scroll past and back and the cell stays empty").
+                // Deferring the insert until we have data means a later
+                // scroll into the same row will retry the fetch.
+                if !fetched.isEmpty {
+                    self.fetchedChannelIDs.insert(channelID)
+                }
+                // Update the circuit breaker. A timeout here increments
+                // the consecutive counter; any other outcome (success,
+                // empty success, non-timeout error) resets it. Three in
+                // a row trips the breaker — subsequent prefetchIfNeeded
+                // calls short-circuit until resetPrefetchCache clears
+                // it (pull-to-refresh / bulk re-fetch).
+                if didTimeout {
+                    self.consecutivePrefetchTimeouts += 1
+                    if self.consecutivePrefetchTimeouts >= 3 && !self.prefetchCircuitBreakerTripped {
+                        self.prefetchCircuitBreakerTripped = true
+                        self.prefetchBreakerTrippedAt = Date()
+                        debugLog("📺 GuideStore.prefetchIfNeeded: CIRCUIT BREAKER tripped — 3 consecutive per-cell timeouts, stopping per-cell prefetch for \(Int(self.prefetchBreakerCooldown))s cooldown")
+                        // Cancel every already-queued task in the
+                        // serial chain. By the time we trip, the
+                        // chain is usually dozens deep (every
+                        // visible cell's `.onAppear` from initial
+                        // guide paint queued a task before the
+                        // first three timeouts came back). Without
+                        // this, those queued tasks keep walking the
+                        // chain one by one, each firing a fresh
+                        // 5-second request against a server we've
+                        // already decided is unresponsive. The
+                        // `Task.isCancelled` checks inside the task
+                        // body catch the cancellation — cancelled
+                        // tasks skip their fetch and return early.
+                        let cancelledCount = self.pendingPrefetchTasks.count
+                        for entry in self.pendingPrefetchTasks.values {
+                            entry.task.cancel()
+                        }
+                        self.pendingPrefetchTasks.removeAll(keepingCapacity: true)
+                        if cancelledCount > 0 {
+                            debugLog("📺 GuideStore.prefetchIfNeeded: cancelled \(cancelledCount) queued prefetch task(s) on breaker trip")
+                        }
+                    }
+                } else {
+                    self.consecutivePrefetchTimeouts = 0
+                }
+                // Clear our slot in the pending map — but only if
+                // we're still the registered task for this channel.
+                // A newer `.onAppear` may have replaced our entry
+                // while our fetch was running; in that case leaving
+                // its entry in place keeps it cancellable on disappear
+                // and prevents two in-flight fetches for the same
+                // channel from racing.
+                if self.pendingPrefetchTasks[channelID]?.id == submissionID {
+                    self.pendingPrefetchTasks.removeValue(forKey: channelID)
+                }
             }
         }
+
+        pendingPrefetchTasks[channelID] = PendingPrefetch(id: submissionID, task: task)
+        lastPrefetchTask = task
     }
 
     // MARK: - Merge Helper
@@ -770,6 +1157,20 @@ final class GuideStore: ObservableObject {
     /// don't care about completion can ignore the await.
     func seedEPGCache(channels: [ChannelDisplayItem], server: ServerConnection?) async {
         guard let server else { return }
+
+        // Dedupe — see `lastSeedEPGCacheSignature` doc. On warm
+        // relaunch three call sites fire this back-to-back with
+        // identical inputs. The signature is set synchronously
+        // BEFORE the `await Task.detached` suspension so concurrent
+        // MainActor callers don't race past the check.
+        let programCount = programs.values.reduce(0) { $0 + $1.count }
+        let signature = "\(server.id.uuidString)|\(channels.count)|\(programCount)"
+        if lastSeedEPGCacheSignature == signature {
+            debugLog("📺 GuideStore.seedEPGCache: skip duplicate (signature=\(signature))")
+            return
+        }
+        lastSeedEPGCacheSignature = signature
+
         let serverType = server.type
         let baseURL = server.effectiveBaseURL
         // Snapshot the programs dictionary (MainActor-isolated) before detaching
@@ -964,7 +1365,7 @@ struct EPGGuideView: View {
             // Phase 0: load from persistent SwiftData cache (scoped to active
             // server so orphaned rows from a deleted server can't populate
             // the guide with mismatched channel IDs).
-            let cacheIsFresh = guideStore.loadFromCache(modelContext: modelContext, channels: channels, serverID: activeServerID)
+            let cacheIsFresh = await guideStore.loadFromCache(modelContext: modelContext, channels: channels, serverID: activeServerID)
             // Phase 1: seed from current-program data on channels (fills gaps)
             guideStore.seedFromChannels(channels)
             // Seed EPGCache so List-view card expansion is instant
@@ -973,9 +1374,19 @@ struct EPGGuideView: View {
             // Phase 2: fetch from network only if cache is stale.
             // Also fetch if the cache has no future programs (e.g., fresh install with only
             // seedFromChannels data — only current programs, nothing upcoming).
-            let hasFuturePrograms = guideStore.programs.values
-                .flatMap { $0 }
-                .contains { $0.end > Date().addingTimeInterval(1800) }
+            //
+            // The previous form (`.values.flatMap { $0 }.contains { … }`)
+            // eagerly allocated a flattened Array across every cached
+            // program on the main thread — on the 97k-row torture-test
+            // playlist that's a 15+ MB alloc and a ~2-3s hang per call.
+            // The nested-contains form short-circuits twice: outer on
+            // the first channel with any future program, inner on the
+            // first future program in that channel. On a healthy EPG
+            // cache this is effectively O(1).
+            let futureCutoff = Date().addingTimeInterval(1800)
+            let hasFuturePrograms = guideStore.programs.contains { _, progs in
+                progs.contains { $0.end > futureCutoff }
+            }
             guard !cacheIsFresh || !hasFuturePrograms else {
                 debugLog("📺 EPG cache is fresh with future programs — skipping network fetch")
                 return
@@ -1272,6 +1683,14 @@ struct EPGGuideView: View {
         }
         .onAppear {
             guideStore.prefetchIfNeeded(channel: channel, servers: servers)
+        }
+        .onDisappear {
+            // Cancel the debounced (not-yet-fired) prefetch for this
+            // row. If it hasn't slept past its 250ms timer yet, no
+            // network request goes out — which is the whole point on
+            // fast scrolls where rows flicker on and off screen
+            // faster than a human could read them.
+            guideStore.cancelPrefetch(channelID: channel.id)
         }
     }
 

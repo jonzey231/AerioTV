@@ -750,10 +750,35 @@ struct ChannelListView: View {
             return
         }
         prefetchTask = Task(priority: .utility) {
-            for item in channels.prefix(20) {
+            // Circuit breaker: if the server is slow/down, three
+            // consecutive 5s timeouts chew up 15 seconds of a uwsgi
+            // worker AND delay everything queued behind us in the
+            // serial loop. Bail early so we stop hammering a server
+            // we've already proven unresponsive. Threshold of 4.5s
+            // sits comfortably below `getUpcomingPrograms`'s 5s
+            // timeout and well above any realistic success latency
+            // (successes normally land in 100–500ms on a healthy
+            // server). Makes this independent of GuideStore's own
+            // breaker so either path alone is enough to protect
+            // Dispatcharr.
+            var consecutiveSlow = 0
+            let slowThreshold: TimeInterval = 4.5
+            let maxConsecutiveSlow = 3
+            for (idx, item) in channels.prefix(20).enumerated() {
                 guard !Task.isCancelled else { return }
+                if consecutiveSlow >= maxConsecutiveSlow {
+                    debugLog("📺 EPG prefetch: CIRCUIT BREAKER tripped — \(maxConsecutiveSlow) consecutive slow fetches, aborting after \(idx)/20 channels")
+                    return
+                }
                 guard let fetch = makeFetchUpcoming(for: item) else { continue }
+                let start = Date()
                 _ = await fetch()
+                let elapsed = Date().timeIntervalSince(start)
+                if elapsed >= slowThreshold {
+                    consecutiveSlow += 1
+                } else {
+                    consecutiveSlow = 0
+                }
             }
         }
     }

@@ -55,6 +55,24 @@ final class VODStore: ObservableObject {
         return URL(string: base + separator + raw)
     }
 
+    /// Detects whether an error is specifically a request timeout
+    /// (URLError.timedOut / NSURLErrorTimedOut). Used by the VOD
+    /// circuit breaker so we only abort on server-unresponsive signals
+    /// and keep going through transient 4xx/5xx-style failures.
+    fileprivate static func isTimeoutError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorTimedOut {
+            return true
+        }
+        if let urlError = error as? URLError, urlError.code == .timedOut {
+            return true
+        }
+        // APIError doesn't wrap URLError directly; fall back on the
+        // description string for its `.serverError`/`.networkError`
+        // cases that get constructed from underlying URLErrors.
+        return nsError.localizedDescription.lowercased().contains("timed out")
+    }
+
     func refresh(servers: [ServerConnection]) {
         refreshMovies(servers: servers)
         refreshSeries(servers: servers)
@@ -264,9 +282,27 @@ final class VODStore: ObservableObject {
             var seenUUIDs: Set<String> = []
             var lastPublishTime = Date.distantPast
             let publishInterval: TimeInterval = 0.5
-            debugLog("🎬 VODStore.loadMovies: starting per-category stream fetch")
+            // Circuit breaker: if the server is genuinely down or
+            // overloaded, we'll see the first few categories time out
+            // in a row. Keep firing 1,258 per-category requests in
+            // that state uselessly burns the server's uwsgi pool and
+            // our own radio/battery for ~40 minutes. Cut out after
+            // three consecutive timeouts instead — partial results
+            // beat a full grind, and the user can retry by reopening
+            // the tab or pull-to-refresh later.
+            var consecutiveTimeouts = 0
+            let maxConsecutiveTimeouts = 3
+            var processedCats = 0
+            debugLog("🎬 VODStore.loadMovies: starting per-category stream fetch (\(enabledMovieCats.count) categories)")
             for cat in enabledMovieCats {
                 guard !Task.isCancelled else { isLoadingMovies = false; return }
+                if consecutiveTimeouts >= maxConsecutiveTimeouts {
+                    let remaining = enabledMovieCats.count - processedCats
+                    debugLog("🎬 VODStore.loadMovies: CIRCUIT BREAKER tripped — \(maxConsecutiveTimeouts) consecutive timeouts, aborting \(remaining) remaining categories")
+                    moviesError = "Server unresponsive — loaded \(accumulated.count) movies from \(processedCats) categories before giving up. Pull to refresh to retry."
+                    break
+                }
+                processedCats += 1
                 do {
                     for try await batch in api.getVODMoviesStream(category: cat.name) {
                         guard !Task.isCancelled else { isLoadingMovies = false; return }
@@ -308,14 +344,28 @@ final class VODStore: ObservableObject {
                         }
                         if isLoadingMovies { isLoadingMovies = false }
                     }
+                    // Stream completed without throwing — reset the
+                    // timeout counter. An empty category is still a
+                    // "success" for server-responsiveness purposes.
+                    consecutiveTimeouts = 0
                 } catch let err as APIError {
                     // Per-category failure: log it but don't abort the
                     // whole load. Other categories may still succeed —
                     // partial results beat a blank screen on a flaky
                     // backend.
+                    if Self.isTimeoutError(err) {
+                        consecutiveTimeouts += 1
+                    } else {
+                        consecutiveTimeouts = 0
+                    }
                     DebugLogger.shared.logError(err, context: "VODStore.loadMovies(\(server.name))[\(cat.name)]")
                     continue
                 } catch {
+                    if Self.isTimeoutError(error) {
+                        consecutiveTimeouts += 1
+                    } else {
+                        consecutiveTimeouts = 0
+                    }
                     DebugLogger.shared.log(
                         "VODStore.loadMovies(\(server.name))[\(cat.name)] error: \(error.localizedDescription)",
                         category: "Movies", level: .warning
@@ -326,7 +376,7 @@ final class VODStore: ObservableObject {
             // Final publish to ensure all items visible
             movies = accumulated
             isLoadingMovies = false
-            debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) unique movies across \(enabledMovieCats.count) categories")
+            debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) unique movies across \(processedCats)/\(enabledMovieCats.count) categories (consecutiveTimeouts=\(consecutiveTimeouts))")
             return
         }
 
@@ -409,8 +459,21 @@ final class VODStore: ObservableObject {
             var seenUUIDs: Set<String> = []
             var lastPublishTime = Date.distantPast
             let publishInterval: TimeInterval = 0.5
+            // Circuit breaker — see the matching block in loadMovies
+            // for the rationale. Abort after 3 consecutive timeouts
+            // so we don't grind on an unresponsive server.
+            var consecutiveTimeouts = 0
+            let maxConsecutiveTimeouts = 3
+            var processedCats = 0
             for cat in enabledSeriesCats {
                 guard !Task.isCancelled else { isLoadingSeries = false; return }
+                if consecutiveTimeouts >= maxConsecutiveTimeouts {
+                    let remaining = enabledSeriesCats.count - processedCats
+                    debugLog("📺 VODStore.loadSeries: CIRCUIT BREAKER tripped — \(maxConsecutiveTimeouts) consecutive timeouts, aborting \(remaining) remaining categories")
+                    seriesError = "Server unresponsive — loaded \(accumulated.count) series from \(processedCats) categories before giving up. Pull to refresh to retry."
+                    break
+                }
+                processedCats += 1
                 do {
                     for try await batch in api.getVODSeriesStream(category: cat.name) {
                         guard !Task.isCancelled else { isLoadingSeries = false; return }
@@ -436,10 +499,21 @@ final class VODStore: ObservableObject {
                         }
                         if isLoadingSeries { isLoadingSeries = false }
                     }
+                    consecutiveTimeouts = 0
                 } catch let err as APIError {
+                    if Self.isTimeoutError(err) {
+                        consecutiveTimeouts += 1
+                    } else {
+                        consecutiveTimeouts = 0
+                    }
                     DebugLogger.shared.logError(err, context: "VODStore.loadSeries(\(server.name))[\(cat.name)]")
                     continue
                 } catch {
+                    if Self.isTimeoutError(error) {
+                        consecutiveTimeouts += 1
+                    } else {
+                        consecutiveTimeouts = 0
+                    }
                     DebugLogger.shared.log(
                         "VODStore.loadSeries(\(server.name))[\(cat.name)] error: \(error.localizedDescription)",
                         category: "TVShows", level: .warning
@@ -449,7 +523,7 @@ final class VODStore: ObservableObject {
             }
             series = accumulated
             isLoadingSeries = false
-            debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) unique series across \(enabledSeriesCats.count) categories")
+            debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) unique series across \(processedCats)/\(enabledSeriesCats.count) categories (consecutiveTimeouts=\(consecutiveTimeouts))")
             return
         }
 
@@ -1285,11 +1359,29 @@ final class ChannelStore: ObservableObject {
         let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
         let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
 
-        // Fire channels + groups + EPG all concurrently.
+        // Fire channels + groups concurrently. Current-programs was
+        // previously fetched here too (as `async let programsFetch =
+        // dAPI.getCurrentPrograms()`) to populate `currentProgram`
+        // on each ChannelDisplayItem up-front. That call became a
+        // major source of server-side load on large Dispatcharr
+        // instances — the endpoint does a full-table scan of
+        // epg_programs for every channel's now-airing row, which
+        // can pin a uwsgi worker for 30-60+s on playlists with
+        // thousands of channels. Combined with the 60s URLSession
+        // default timeout on our side, a single app launch would
+        // hold a worker for the full minute while building a
+        // response the client had already given up on.
+        //
+        // Now: skip it entirely at fetch time. `GuideStore.loadBulkEPG`
+        // uses the much cheaper `/api/epg/grid/` endpoint (-1h to
+        // +24h in one indexed range query), which also populates
+        // EPGCache for the Guide view. The channel list's
+        // "now airing" row starts blank and fills in lazily as
+        // per-cell prefetch runs (throttled — see
+        // EPGGuideView.prefetchIfNeeded).
         debugLog("🔷 ChannelStore.fetchDispatcharr: launching concurrent fetches")
         async let groupsFetch   = dAPI.getChannelGroups()
         async let channelsFetch = dAPI.getChannels()
-        async let programsFetch = dAPI.getCurrentPrograms()
 
         let dGroups: [DispatcharrChannelGroup]
         do {
@@ -1307,8 +1399,6 @@ final class ChannelStore: ObservableObject {
             debugLog("🔷 ChannelStore.fetchDispatcharr: channels FAILED: \(error.localizedDescription)")
             throw error
         }
-        let programs  = try? await programsFetch   // EPG — failure is non-fatal
-        debugLog("🔷 ChannelStore.fetchDispatcharr: programs=\(programs?.count ?? 0)")
 
         let groupNameByID = Dictionary(uniqueKeysWithValues: dGroups.map { ($0.id, $0.name) })
         let usedGroupIDs  = Set(dChannels.compactMap { $0.channelGroupID })
@@ -1355,29 +1445,11 @@ final class ChannelStore: ObservableObject {
         }
         items = sortChannels(items, groupOrder: groupOrder)
 
-        // Apply EPG data.
-        if let programs, !programs.isEmpty {
-            var epgByTvgID: [String: (title: String, description: String, start: Date?, end: Date?, category: String?)] = [:]
-            for prog in programs {
-                guard let tvgID = prog.tvgID, !tvgID.isEmpty, !prog.title.isEmpty else { continue }
-                let desc = prog.description.isEmpty ? prog.subTitle : prog.description
-                // Dispatcharr's EPG grid response doesn't currently include a
-                // category field, so we carry nil through — the channel card
-                // stripe will simply fall through to the neutral fallback.
-                epgByTvgID[tvgID] = (prog.title, desc, prog.startTime?.toDate(), prog.endTime?.toDate(), nil)
-            }
-            items = items.map { item in
-                guard let tvgID = item.tvgID, !tvgID.isEmpty,
-                      let info = epgByTvgID[tvgID] else { return item }
-                var updated = item
-                updated.currentProgram             = info.title
-                updated.currentProgramDescription  = info.description
-                updated.currentProgramStart        = info.start
-                updated.currentProgramEnd          = info.end
-                updated.currentProgramCategory     = info.category
-                return updated
-            }
-        }
+        // Current-program enrichment used to live here (populated
+        // from the removed `getCurrentPrograms()` call above). It
+        // now happens lazily via the EPG guide's bulk grid fetch
+        // plus per-cell prefetch, so we just return the channels
+        // without now-airing data at load time.
 
         return (items, derivedGroupOrder(from: items))
     }
@@ -1912,6 +1984,12 @@ struct MainTabView: View {
     @ObservedObject private var multiviewStore = MultiviewStore.shared
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
+    /// CFAbsoluteTime captured when the initial-sync cover is first
+    /// shown. Consumed (and cleared) when the cover dismisses so the
+    /// dismissal log line can report total duration. Kept as an
+    /// instance var rather than a local so the show/dismiss callbacks
+    /// (which happen on separate runloop ticks) can share it.
+    @State private var initialLoadingStartedAt: CFAbsoluteTime? = nil
     /// Flipped true after the first DVR reconcile completes so the
     /// initial loading screen knows it can dismiss. Only gates the
     /// dismiss when a Dispatcharr server is configured — other server
@@ -1981,9 +2059,18 @@ struct MainTabView: View {
     }
 
     /// Hashable digest that flips whenever ANY of the initial sync
-    /// signals change (channels, EPG, VOD movies, VOD series, DVR
-    /// reconcile, OR a channel-load error). `.onChange(of: initialSyncKey)`
-    /// listens to it and calls `tryDismissInitialLoading()` each time.
+    /// signals change (channels, EPG, DVR reconcile, OR a channel-
+    /// load error). `.onChange(of: initialSyncKey)` listens to it and
+    /// calls `tryDismissInitialLoading()` each time.
+    ///
+    /// VOD is intentionally **not** part of the key. VOD loading does
+    /// not block entering Live TV — the loading cover dismisses as
+    /// soon as channels + EPG are ready, and the On Demand tab shows
+    /// its own spinner while VOD continues loading in the background.
+    /// Previously VOD was gating the cover, which on servers with
+    /// hundreds of enabled VOD categories kept the cover up for
+    /// minutes even though the Live TV path was long ready.
+    ///
     /// Including the error field is the thing that unsticks the
     /// loading screen when credentials are wrong: channels stay empty,
     /// `channelsDone` stays false, but flipping error from nil → message
@@ -1998,10 +2085,9 @@ struct MainTabView: View {
         // "partial guide appears, then pops in more content" UX that
         // users reported as "no loading indicator, took forever."
         let epgDone      = !channelStore.isEPGLoading && !guideStore.isLoading
-        let vodDone      = !vodStore.isLoadingMovies && !vodStore.isLoadingSeries
         let dvrDone      = didInitialDVRReconcile || !needsInitialDVRSync
         let errorPresent = channelStore.error != nil
-        return "\(channelsDone)|\(epgDone)|\(vodDone)|\(dvrDone)|\(errorPresent)"
+        return "\(channelsDone)|\(epgDone)|\(dvrDone)|\(errorPresent)"
     }
 
     /// Derived stage list for the initial-sync loading cover, passed
@@ -2099,13 +2185,19 @@ struct MainTabView: View {
         guard !allServers.isEmpty else { return }
         guard channelStore.channels.isEmpty else { return }
         showInitialEPGLoading = true
+        initialLoadingStartedAt = CFAbsoluteTimeGetCurrent()
         debugLog("🔶 Initial sync starting — showing loading screen (servers=\(allServers.count))")
     }
 
     /// Called whenever `initialSyncKey` changes. Dismisses the
-    /// Loading Guide screen only when every initial sync signal is
-    /// finished, so the user lands in fully-loaded List / Guide
-    /// views instead of a half-populated app.
+    /// Loading Guide screen once the Live-TV-critical signals are
+    /// done — channels loaded, EPG loaded, DVR reconciled. **VOD is
+    /// deliberately NOT gated here**: on servers with hundreds of
+    /// enabled VOD categories (real-world user case: 779 movie + 479
+    /// series categories) VOD loading takes minutes, and the user
+    /// shouldn't wait on On Demand before they can watch a channel.
+    /// The On Demand tab has its own loading state and will spin
+    /// while `vodStore.isLoadingMovies` / `.isLoadingSeries` are true.
     private func tryDismissInitialLoading() {
         guard showInitialEPGLoading else { return }
 
@@ -2125,13 +2217,23 @@ struct MainTabView: View {
         guard !channelStore.isEPGLoading else { return }
         // XMLTV parse must also complete — see `initialSyncKey` doc comment.
         guard !guideStore.isLoading else { return }
-        guard !vodStore.isLoadingMovies, !vodStore.isLoadingSeries else { return }
+        // VOD loading intentionally NOT gated here. VOD can take
+        // minutes on large libraries and the user shouldn't wait on
+        // On Demand before they can watch Live TV. The On Demand tab
+        // shows its own spinner while `vodStore.isLoadingMovies` /
+        // `.isLoadingSeries` are true.
         if needsInitialDVRSync && !didInitialDVRReconcile { return }
 
         withAnimation(.easeOut(duration: 0.4)) {
             showInitialEPGLoading = false
         }
-        debugLog("🔶 Initial sync complete — dismissing loading screen")
+        let elapsed = initialLoadingStartedAt.map {
+            Int((CFAbsoluteTimeGetCurrent() - $0) * 1000)
+        }
+        initialLoadingStartedAt = nil
+        let vodStillLoading = vodStore.isLoadingMovies || vodStore.isLoadingSeries
+        let elapsedStr = elapsed.map { " \($0)ms" } ?? ""
+        debugLog("🔶 Initial sync complete — dismissing loading screen (total=\(elapsedStr), vodStillLoadingInBackground=\(vodStillLoading))")
     }
     /// Shared drag offset — MiniPlayerBar writes it, PlayerView reads it to slide in from below.
     @State private var miniPlayerDragOffset: CGFloat = 0
@@ -2608,12 +2710,102 @@ struct MainTabView: View {
             if !allServers.isEmpty {
                 channelStore.isEPGLoading = true
             }
-            // Wait for channels to finish loading, then load ALL EPG upfront
+
+            // Kick off the SwiftData EPG-cache load IN PARALLEL with
+            // the channel network fetch. `loadFromCache` doesn't read
+            // the `channels` parameter — it only needs `serverID` +
+            // modelContext — so there's no dependency that requires
+            // serializing it behind the `while channelStore.isLoading`
+            // poll. Channel fetch is network-bound and EPG cache
+            // load is disk-bound (SwiftData on a background
+            // ModelContext), so they don't compete for the same
+            // resource on the client, and the server has no
+            // visibility into the local SwiftData work. On the
+            // torture playlist this overlap saves ~2-3s off the
+            // "Initial sync complete" dismiss. The
+            // `inFlightLoadTask` coalescer inside `loadFromCache`
+            // keeps EPGGuideView.task's later call from re-doing
+            // the work.
+            let activeServer = allServers.first(where: { $0.isActive }) ?? allServers.first
+            let activeServerID = activeServer?.id.uuidString ?? "unknown"
+            // Use a regular `Task` (inherits MainActor from this
+            // SwiftUI `.task` scope) rather than `async let` because
+            // `ModelContext` is non-Sendable and `async let` wants
+            // to hand it across an implicit concurrency boundary.
+            // The captured `modelContext` stays on MainActor through
+            // the entire chain — `loadFromCache` is @MainActor-
+            // isolated and dispatches its own off-main work via
+            // `Task.detached` using only the Sendable container.
+            let cacheLoadHandle = Task { () -> Bool in
+                await guideStore.loadFromCache(
+                    modelContext: modelContext,
+                    channels: [],  // unused inside loadFromCache (kept for API shape)
+                    serverID: activeServerID
+                )
+            }
+
+            // Wait for channels to finish loading.
             while channelStore.isLoading {
                 try? await Task.sleep(for: .milliseconds(200))
             }
+
+            // Collect the parallel cache-load verdict. If the
+            // channel fetch took longer than the SwiftData load
+            // (the typical case — network RTT vs. local disk) this
+            // await resolves immediately.
+            let cacheIsFresh = await cacheLoadHandle.value
+
             if !channelStore.channels.isEmpty {
-                await channelStore.loadAllEPG()
+                // Try to short-circuit the expensive `loadAllEPG`
+                // path by checking the SwiftData EPG cache first. On
+                // warm relaunches within the 24-hour freshness
+                // window, the cache already has everything the guide
+                // needs. Re-running `loadAllEPG` would fire
+                // `getEPGGrid` (68k+ programs, multi-MB JSON) AND an
+                // awaited `primeXMLTVFromURL` (98k+ programs, full
+                // XMLTV download + parse) — on a large Dispatcharr
+                // instance this easily adds 3-4 minutes to the cover
+                // dismissal despite the data already being on disk.
+                //
+                // Previously this check lived inside
+                // `EPGGuideView.task(id: channels.count)` and only
+                // gated `guideStore.fetchUpcoming`, which runs in
+                // parallel with `loadAllEPG` — so the cache hit was
+                // visible in the log ("skipping network fetch") but
+                // the cover still waited for `loadAllEPG` to
+                // complete. Running the check here instead gates the
+                // real offender.
+                //
+                // iPhone also benefits: it never mounts EPGGuideView,
+                // so its EPGCache could previously only be populated
+                // by `loadAllEPG`. We now explicitly populate it via
+                // `seedEPGCache` on the cache-hit path so List view
+                // card expansions don't trigger per-card network
+                // fetches.
+                //
+                // Nested short-circuiting contains — see the matching
+                // comment in EPGGuideView.swift. The previous
+                // `.values.flatMap { $0 }.contains` form allocated a
+                // full flattened Array of all cached programs on the
+                // main thread (97k+ entries on the torture playlist),
+                // costing a 2-3s hang. Double short-circuit eliminates
+                // both the allocation and the scan on a fresh cache.
+                let futureCutoff = Date().addingTimeInterval(1800)
+                let hasFuturePrograms = guideStore.programs.contains { _, progs in
+                    progs.contains { $0.end > futureCutoff }
+                }
+                if cacheIsFresh && hasFuturePrograms {
+                    debugLog("🔶 MainTabView.task(channelServerKey): EPG cache is fresh + has future programs — skipping loadAllEPG")
+                    // Seed EPGCache from GuideStore.programs so the
+                    // List view has per-channel EPG data. Awaited so
+                    // the cover doesn't dismiss before EPGCache has
+                    // the entries it needs.
+                    await guideStore.seedEPGCache(channels: channelStore.channels, server: activeServer)
+                    channelStore.isEPGLoading = false
+                } else {
+                    debugLog("🔶 MainTabView.task(channelServerKey): EPG cache stale or empty (fresh=\(cacheIsFresh), hasFuture=\(hasFuturePrograms)) — running loadAllEPG")
+                    await channelStore.loadAllEPG()
+                }
             } else {
                 // Channel load failed (auth, server down). Reset
                 // the flag we pre-set above so the cover can
