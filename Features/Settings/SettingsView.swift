@@ -4,6 +4,15 @@ import SwiftData
 struct SettingsView: View {
     #if os(tvOS)
     @Binding var selectedTab: AppTab
+    /// Mirrors "is a Settings subview currently pushed" up to
+    /// MainTabView so its outer `.onExitCommand` handler knows when
+    /// to request a pop (`popRequested`) vs. when to fall through to
+    /// its default behaviour (switch to Live TV).
+    @Binding var isSubviewPushed: Bool
+    /// MainTabView flips this to `true` on a Menu press while a
+    /// Settings subview is pushed. We watch it via `.onChange` and
+    /// pop the innermost level, then reset the binding.
+    @Binding var popRequested: Bool
     #endif
     @Query private var servers: [ServerConnection]
     @Environment(\.modelContext) private var modelContext
@@ -17,43 +26,95 @@ struct SettingsView: View {
     @AppStorage("syncLastDate") private var syncLastDate: Double = 0
     #if os(tvOS)
     @State private var navPath = NavigationPath()
+    /// Tracks classic-`NavigationLink` pushes that bypass `navPath`
+    /// (ServerDetailView, MyRecordingsView). Combined with `navPath`
+    /// to compute `isSubviewPushed`.
+    @StateObject private var dismissStack = SettingsDismissStack()
     #endif
 
     var body: some View {
-        #if os(tvOS)
-        // Attach .onExitCommand directly to SettingsView. tvOS dispatches
-        // Menu-button events to the innermost .onExitCommand in the focus
-        // path, so this handler runs BEFORE MainTabView's outer handler
-        // whenever focus is anywhere inside Settings (including pushed
-        // detail pages like EditServerPage, Appearance, Network, etc.).
-        // When the nav stack is non-empty we pop directly here — no
-        // ping-pong through @Binding, no dependence on SwiftUI update
-        // ordering. When the nav stack is empty, we fall through to
-        // MainTabView's default "return to Live TV" behavior by switching
-        // the selected tab ourselves.
+        // Menu-button routing on tvOS:
+        //
+        // MainTabView's `.onExitCommand { handleMenuPress() }` on the
+        // outer TabView intercepts every Menu press before the inner
+        // NavigationStack — or any per-destination `.onExitCommand` —
+        // can react. (Same constraint that drives the VOD
+        // `isVODDetailPushed` pattern.) So we don't attach a handler
+        // here; we let MainTabView detect the pushed state and drive
+        // pops explicitly.
+        //
+        // Coordination:
+        //   • `isSubviewPushed` (binding up to MainTabView) mirrors
+        //     `navPath.count > 0 || dismissStack.depth > 0`.
+        //   • MainTabView's `handleMenuPress()` sees `isSubviewPushed`
+        //     and flips `popRequested` instead of switching tabs.
+        //   • The `.onChange(of: popRequested)` in
+        //     `settingsNavigationStack` pops the innermost level —
+        //     classic dismiss stack first, then navPath — and resets
+        //     the flag. Repeated Menu presses peel levels off one at
+        //     a time until we're back at the Settings root, at which
+        //     point MainTabView's fallthrough switches to Live TV.
+        //
+        // See also `SettingsDismissStack` and
+        // `trackedAsClassicSettingsChild()` at the bottom of this file
+        // for how classic-`NavigationLink(destination:)` pushes
+        // (ServerDetailView, DVR → MyRecordingsView) opt into the
+        // same pop mechanism despite bypassing `navPath`.
         settingsNavigationStack
-            .onExitCommand {
-                if !navPath.isEmpty {
-                    debugLog("🎮 Menu (Settings): popping nav stack")
-                    navPath.removeLast()
-                } else {
-                    debugLog("🎮 Menu (Settings): at root → switch to Live TV")
-                    selectedTab = .liveTV
-                }
-            }
-        #else
-        settingsNavigationStack
-        #endif
     }
 
     @ViewBuilder
     private var settingsNavigationStack: some View {
         #if os(tvOS)
         NavigationStack(path: $navPath) { settingsContent }
+            // Expose the dismiss stack to any classic-pushed destination
+            // that opts in via `.trackedAsClassicSettingsChild()`.
+            .environmentObject(dismissStack)
+            // Mirror "is any subview pushed" up to MainTabView. Both
+            // sources update independently: navPath via SwiftUI state
+            // change, dismissStack.depth via its own @Published.
+            .onChange(of: navPath.count) { _, _ in
+                syncIsSubviewPushed()
+            }
+            .onReceive(dismissStack.$depth) { _ in
+                syncIsSubviewPushed()
+            }
+            // MainTabView's Menu handler flips `popRequested` true
+            // when a Settings subview is pushed. Pop the innermost
+            // level — classic stack first (LIFO), then navPath.
+            .onChange(of: popRequested) { _, requested in
+                guard requested else { return }
+                performOnePop()
+                popRequested = false
+            }
         #else
         NavigationStack { settingsContent }
         #endif
     }
+
+    #if os(tvOS)
+    /// Computes `isSubviewPushed` from both navPath and the classic
+    /// dismiss stack and writes it through the binding only when the
+    /// value actually changes (avoids invalidating MainTabView on
+    /// every navPath mutation of the same emptiness).
+    private func syncIsSubviewPushed() {
+        let pushed = !navPath.isEmpty || dismissStack.depth > 0
+        if isSubviewPushed != pushed {
+            isSubviewPushed = pushed
+        }
+    }
+
+    /// Pops one level. Classic stack takes priority so nested
+    /// scenarios (DVR navPath → MyRecordings classic) peel off the
+    /// innermost view first, matching user expectation.
+    private func performOnePop() {
+        if dismissStack.depth > 0 {
+            dismissStack.popTop()
+        } else if !navPath.isEmpty {
+            navPath.removeLast()
+        }
+    }
+    #endif
 
     @ViewBuilder
     private var settingsContent: some View {
@@ -520,7 +581,7 @@ struct SettingsView: View {
                             .fill(Color.cardBackground))
                     } else {
                         ForEach(servers) { server in
-                            TVSettingsNavRow(destination: ServerDetailView(server: server)) {
+                            TVSettingsNavRow(destination: ServerDetailView(server: server).trackedAsClassicSettingsChild()) {
                                 // Only offer the "set active" radio when there's
                                 // more than one playlist — with one playlist
                                 // it's always the active one, so the circle is
@@ -3232,4 +3293,97 @@ struct CustomCategoryEditor: View {
 }
 #endif
 
+#if os(tvOS)
+// MARK: - tvOS Menu-button pop support
+//
+// MainTabView's `.onExitCommand { handleMenuPress() }` on the outer
+// TabView intercepts every Menu press before the inner NavigationStack
+// (or any per-destination `.onExitCommand`) can react. That's the
+// documented behaviour on tvOS and the reason
+// `isVODDetailPushed`/`vodNavPopRequested` exist for the VOD detail
+// pane. Settings needs the same pattern: MainTabView must know when a
+// Settings subview is pushed, and it must have a way to request a pop
+// from the outside. We expose both via bindings (see SettingsView's
+// `isSubviewPushed` / `popRequested`).
+//
+// Pop sources we have to cover:
+//   1. `navPath` pushes — Appearance, Guide Display, Network, DVR,
+//      Developer, Edit Server. `navPath.count > 0` detects these;
+//      `navPath.removeLast()` pops them.
+//   2. Classic `NavigationLink(destination:)` pushes — ServerDetailView
+//      (from the Settings root via TVSettingsNavRow) and
+//      MyRecordingsView (pushed from inside DVRSettingsView via
+//      TVSettingsNavRow). These bypass `navPath` entirely, so we track
+//      them with a LIFO stack of dismiss actions registered on appear
+//      and unregistered on disappear.
+//
+// When MainTabView sets `popRequested = true`, SettingsView prefers
+// popping the classic stack first (LIFO, innermost wins) and falls
+// back to `navPath.removeLast()` when the classic stack is empty.
+
+@MainActor
+final class SettingsDismissStack: ObservableObject {
+    /// LIFO stack of registered classic-pushed destinations. Keyed by
+    /// a per-view UUID so we can unregister reliably even if appears
+    /// and disappears interleave during a transition.
+    private var entries: [(id: UUID, dismiss: () -> Void)] = []
+
+    /// Mirrors `entries.count`. Published so SettingsView can react
+    /// via `.onReceive`.
+    @Published fileprivate(set) var depth: Int = 0
+
+    func register(id: UUID, dismiss: @escaping () -> Void) {
+        // Replace any existing entry for this id so re-registrations
+        // (e.g. onAppear firing again after a view re-mount) don't
+        // duplicate. Keep stack order stable by leaving the position.
+        if let idx = entries.firstIndex(where: { $0.id == id }) {
+            entries[idx] = (id, dismiss)
+        } else {
+            entries.append((id, dismiss))
+        }
+        depth = entries.count
+    }
+
+    func unregister(id: UUID) {
+        entries.removeAll { $0.id == id }
+        depth = entries.count
+    }
+
+    /// Pops the innermost registered destination (LIFO). Safe no-op
+    /// when empty.
+    func popTop() {
+        guard let last = entries.last else { return }
+        last.dismiss()
+    }
+}
+
+/// Registers the view with the parent SettingsView's
+/// `SettingsDismissStack` on appear so the Menu-button handler can
+/// pop it even though it was pushed via classic `NavigationLink`
+/// (which bypasses `navPath`).
+struct TrackClassicSettingsChild: ViewModifier {
+    @EnvironmentObject var stack: SettingsDismissStack
+    @Environment(\.dismiss) private var dismiss
+    @State private var id = UUID()
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                stack.register(id: id) { dismiss() }
+            }
+            .onDisappear {
+                stack.unregister(id: id)
+            }
+    }
+}
+
+extension View {
+    /// Attach to a classic-`NavigationLink(destination:)` destination
+    /// pushed within SettingsView's tvOS NavigationStack so the Menu
+    /// button can pop it via the `popRequested` binding.
+    func trackedAsClassicSettingsChild() -> some View {
+        modifier(TrackClassicSettingsChild())
+    }
+}
+#endif
 

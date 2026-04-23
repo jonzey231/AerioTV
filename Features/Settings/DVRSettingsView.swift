@@ -319,7 +319,7 @@ struct DVRSettingsView: View {
                 }
 
                 tvSection("Recordings") {
-                    TVSettingsNavRow(destination: MyRecordingsView()) {
+                    TVSettingsNavRow(destination: MyRecordingsView().trackedAsClassicSettingsChild()) {
                         SettingsRow(icon: "film.stack", iconColor: .red,
                                     title: "My Recordings",
                                     subtitle: "\(recordingCount) recordings")

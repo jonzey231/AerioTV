@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.6.4.1 — 2026-04-22
+
+### Fixed
+
+- **Apple TV: Menu button in a Settings subview now pops back to the
+  Settings root instead of dumping to the Live TV tab.** Affected
+  every pushed subview — Appearance, Guide Display, Network, DVR,
+  Developer, the per-playlist detail page, and DVR → My Recordings.
+  Root cause: MainTabView's `.onExitCommand` on the outer TabView
+  consumes Menu before the inner NavigationStack — or any per-
+  destination `.onExitCommand` — can react, so the Menu handler fell
+  through to its "switch to Live TV" fallback regardless of how deep
+  the user was inside Settings. Fixed with the same state-binding
+  pattern the VOD detail view uses: SettingsView mirrors
+  `navPath.count > 0 || classicPushStack.depth > 0` up to MainTabView
+  via `isSettingsSubviewPushed`, MainTabView flips
+  `settingsPopRequested` on Menu, and SettingsView pops the innermost
+  level (classic stack first, LIFO; then navPath). Repeated Menu
+  presses peel the Settings hierarchy off one level at a time;
+  Menu at the Settings root falls through to the existing "switch to
+  Live TV" behaviour. Classic `NavigationLink(destination:)` pushes
+  (playlist detail, DVR → My Recordings) opt into the pop via a new
+  `.trackedAsClassicSettingsChild()` modifier so they behave
+  identically to the navPath-based pushes.
+
 ## v1.6.4 — 2026-04-18
 
 ### New — EPG category colors (Jellyfin-style)

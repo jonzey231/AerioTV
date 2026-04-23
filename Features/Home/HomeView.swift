@@ -1874,6 +1874,18 @@ struct MainTabView: View {
     @State private var isVODDetailPushed = false
     /// Signal to VOD views to pop their navigation stack.
     @State private var vodNavPopRequested = false
+    #if os(tvOS)
+    /// Mirrors "is a Settings subview pushed" from SettingsView.
+    /// `.onExitCommand` on the outer TabView intercepts Menu before
+    /// the inner NavigationStack can pop, so we need to know from
+    /// here whether a Settings subview is on top before falling
+    /// through to the "switch to Live TV" default.
+    @State private var isSettingsSubviewPushed = false
+    /// Signal to SettingsView to pop its innermost pushed subview
+    /// (classic stack first, then navPath). Reset by SettingsView
+    /// after consuming.
+    @State private var settingsPopRequested = false
+    #endif
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
     @ObservedObject private var favoritesStore = FavoritesStore.shared
     @StateObject private var vodStore = VODStore()
@@ -2470,7 +2482,9 @@ struct MainTabView: View {
             }
 
             #if os(tvOS)
-            SettingsView(selectedTab: $selectedTab)
+            SettingsView(selectedTab: $selectedTab,
+                         isSubviewPushed: $isSettingsSubviewPushed,
+                         popRequested: $settingsPopRequested)
                 .tabItem { Label(AppTab.settings.title, systemImage: AppTab.settings.icon) }
                 .tag(AppTab.settings)
             #else
@@ -2710,6 +2724,15 @@ struct MainTabView: View {
             debugLog("🎮 Menu pressed: VOD detail pushed → popping to browse list")
             isVODDetailPushed = false
             vodNavPopRequested = true
+        } else if isSettingsSubviewPushed {
+            // Same problem as VOD: our `.onExitCommand` intercepts Menu
+            // before SettingsView's NavigationStack can pop. Signal
+            // SettingsView to pop its innermost pushed level — classic
+            // stack first (ServerDetailView, MyRecordingsView), then
+            // navPath (Appearance, Guide Display, Network, DVR,
+            // Developer, Edit Server). SettingsView resets the flag.
+            debugLog("🎮 Menu pressed: Settings subview pushed → popping")
+            settingsPopRequested = true
         } else if selectedTab == .liveTV {
             // Menu on the guide (nothing playing, no mini) =
             // "take me back to the top of the list". Matches the
