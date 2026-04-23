@@ -1049,8 +1049,30 @@ struct ChannelRow: View {
     @State private var isLoadingUpcoming = false
     @State private var reminderTarget: EPGEntry?
     @State private var showReminderDialog = false
-    @State private var recordTarget: EPGEntry?
-    @State private var showRecordSheet = false
+    /// Unified sheet/cover driver for this channel row. Replaces the
+    /// previous triple of `recordTarget: EPGEntry?` +
+    /// `showRecordSheet: Bool` + `programInfoTarget:
+    /// ProgramInfoTarget?` plus two `.sheet` / `.fullScreenCover`
+    /// modifiers on the row body.
+    ///
+    /// Why: chaining multiple `.sheet(...)` modifiers on the same
+    /// view causes SwiftUI to rebuild the hierarchy while the
+    /// *other* sheet's binding is observed, which cascaded back
+    /// into the contextMenu / confirmationDialog presentation and
+    /// visibly flashed those on iPad when the user long-pressed a
+    /// program row. One `.sheet(item:)` driven by an enum payload
+    /// removes the cross-modifier invalidation path entirely.
+    fileprivate enum ChannelRowSheet: Identifiable {
+        case record(EPGEntry)
+        case programInfo(ProgramInfoTarget)
+        var id: String {
+            switch self {
+            case .record(let e):      return "record-\(e.id)"
+            case .programInfo(let t): return "info-\(t.id)"
+            }
+        }
+    }
+    @State private var activeSheet: ChannelRowSheet? = nil
     /// Tracks which upcoming-program row currently owns the popover
     /// shown in response to a long-press. `EPGEntry.id` is
     /// deterministic (title + start + end) so the binding is stable
@@ -1177,10 +1199,12 @@ struct ChannelRow: View {
             debugLog("🎮 Back pressed: collapsing expanded card for \(item.name)")
             withAnimation(.spring(response: 0.25)) { isExpanded = false }
         }
-        // tvOS: .fullScreenCover because .sheet presents a cramped
-        // centered modal on tvOS that clips the record form.
-        .fullScreenCover(isPresented: $showRecordSheet) {
-            if let entry = recordTarget {
+        // tvOS: single .fullScreenCover(item:) — see `ChannelRowSheet`
+        // doc for why we consolidated away from the dual-modifier
+        // setup.
+        .fullScreenCover(item: $activeSheet) { sheet in
+            switch sheet {
+            case .record(let entry):
                 RecordProgramSheet(
                     programTitle: entry.title,
                     programDescription: entry.description,
@@ -1190,14 +1214,19 @@ struct ChannelRow: View {
                     scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
                     isLive: (entry.startTime ?? Date()) <= Date()
                 )
+            case .programInfo(let target):
+                ProgramInfoView(target: target)
             }
         }
         #else
-        // iOS: attach at the outer body so this works whether the card
-        // is collapsed (long-press dialog trigger) or expanded (tap on
-        // an upcoming-schedule row trigger).
-        .sheet(isPresented: $showRecordSheet) {
-            if let entry = recordTarget {
+        // iOS: attached at the outer body so this works whether the
+        // card is collapsed (long-press dialog trigger) or expanded
+        // (tap on an upcoming-schedule row trigger). Single
+        // `.sheet(item:)` to keep the contextMenu / popover from
+        // flickering during presentation (see `ChannelRowSheet` doc).
+        .sheet(item: $activeSheet) { sheet in
+            switch sheet {
+            case .record(let entry):
                 RecordProgramSheet(
                     programTitle: entry.title,
                     programDescription: entry.description,
@@ -1207,6 +1236,8 @@ struct ChannelRow: View {
                     scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
                     isLive: (entry.startTime ?? Date()) <= Date()
                 )
+            case .programInfo(let target):
+                ProgramInfoView(target: target)
             }
         }
         #endif
@@ -1483,17 +1514,40 @@ struct ChannelRow: View {
                 favoritesStore.toggle(item)
             }
 
+            // Program Info — surface the current program's full
+            // description + category metadata in a modal. Only shown
+            // when we actually have a current program to describe;
+            // otherwise this button would be misleading (it would
+            // open an info sheet with a blank title).
+            if let program = item.currentProgram,
+               let start = item.currentProgramStart,
+               let end = item.currentProgramEnd {
+                Button("Program Info") {
+                    activeSheet = .programInfo(
+                        ProgramInfoTarget(
+                            channelName: item.name,
+                            title: program,
+                            start: start,
+                            end: end,
+                            description: item.currentProgramDescription ?? "",
+                            category: item.currentProgramCategory ?? ""
+                        )
+                    )
+                }
+            }
+
             // Record the currently-airing program
             if let program = item.currentProgram,
                let end = item.currentProgramEnd, end > Date() {
                 Button("Record from Now") {
-                    recordTarget = EPGEntry(
-                        title: program,
-                        description: item.currentProgramDescription ?? "",
-                        startTime: item.currentProgramStart,
-                        endTime: end
+                    activeSheet = .record(
+                        EPGEntry(
+                            title: program,
+                            description: item.currentProgramDescription ?? "",
+                            startTime: item.currentProgramStart,
+                            endTime: end
+                        )
                     )
-                    showRecordSheet = true
                 }
             }
         }
@@ -1578,9 +1632,36 @@ struct ChannelRow: View {
 
             Divider()
 
-            // Actions — reminder + record, conditional on whether
-            // the program is still in the future / currently airing.
+            // Actions — info + reminder + record. Program Info is
+            // always available (unlike reminder/record which gate on
+            // future/live state) so it's the first button; users can
+            // inspect a past-aired program's metadata too.
             VStack(spacing: 0) {
+                popoverActionButton(
+                    title: "Program Info",
+                    systemImage: "info.circle",
+                    isDestructive: false
+                ) {
+                    let start = entry.startTime ?? Date()
+                    let end = entry.endTime ?? start.addingTimeInterval(3600)
+                    activePopoverEntryID = nil
+                    // Slight delay so the popover dismiss animation
+                    // finishes before the sheet presents — iOS
+                    // sometimes swallows the sheet without this,
+                    // matching the pattern used for Record below.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        activeSheet = .programInfo(
+                            ProgramInfoTarget(
+                                channelName: item.name,
+                                title: entry.title,
+                                start: start,
+                                end: end,
+                                description: entry.description,
+                                category: entry.category
+                            )
+                        )
+                    }
+                }
                 if let start = entry.startTime, start > Date() {
                     let key = ReminderManager.programKey(
                         channelName: item.name,
@@ -1617,13 +1698,12 @@ struct ChannelRow: View {
                         systemImage: "record.circle",
                         isDestructive: false
                     ) {
-                        recordTarget = entry
                         activePopoverEntryID = nil
                         // Slight delay so the popover dismiss animation
                         // finishes before the sheet presents — without
                         // this iOS sometimes swallows the sheet.
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                            showRecordSheet = true
+                            activeSheet = .record(entry)
                         }
                     }
                 }
@@ -1826,11 +1906,24 @@ struct ChannelRow: View {
                     titleVisibility: .visible
                 ) {
                     if let entry = ctxDialogEntry {
+                        Button("Program Info") {
+                            let start = entry.startTime ?? Date()
+                            let end = entry.endTime ?? start.addingTimeInterval(3600)
+                            activeSheet = .programInfo(
+                                ProgramInfoTarget(
+                                    channelName: item.name,
+                                    title: entry.title,
+                                    start: start,
+                                    end: end,
+                                    description: entry.description,
+                                    category: entry.category
+                                )
+                            )
+                        }
                         if let end = entry.endTime, end > Date() {
                             let isLive = (entry.startTime ?? Date()) <= Date()
                             Button(isLive ? "Record from Now" : "Record") {
-                                recordTarget = entry
-                                showRecordSheet = true
+                                activeSheet = .record(entry)
                             }
                         }
                         if let start = entry.startTime, start > Date() {

@@ -4,6 +4,11 @@ import SwiftData
 import NetworkExtension
 import Network
 import CoreLocation
+#elseif os(tvOS)
+// tvOS doesn't expose NetworkExtension or the SSID APIs, but Network
+// (NWPathMonitor) is available — used by `TVLANProbe` below to
+// re-probe the home-server on network-change transitions.
+import Network
 #endif
 
 // MARK: - Main Thread Watchdog (DEBUG)
@@ -240,8 +245,13 @@ struct AerioApp: App {
                 // Start iCloud sync if enabled (pull happens during EPG loading)
                 SyncManager.shared.startObserving()
                 #if os(tvOS)
-                // Re-probe LAN on every foreground so switching networks is detected
-                // (servers read from SwiftData in RootView, probed there on change)
+                // Re-probe LAN on every foreground transition — covers
+                // the "user took the Apple TV / iPad to a different
+                // network and came back" case that the launch-only
+                // probe missed. `reprobe()` reuses the candidate
+                // snapshot from the most recent `probe(servers:)`
+                // call, so no modelContext access is required here.
+                TVLANProbe.shared.reprobe()
                 #endif
             case .inactive:    DebugLogger.shared.logLifecycle("Scene → inactive")
             case .background:
@@ -585,13 +595,109 @@ private class LocationDelegate: NSObject, CLLocationManagerDelegate {
 #endif
 
 // MARK: - tvOS LAN Probe
-// tvOS has no SSID detection API. Instead, we probe the local URL at startup —
-// if it responds, the device is on the home network.
+// tvOS has no SSID detection API (Apple doesn't expose
+// NetworkExtension's `NEHotspotNetwork` family on tvOS). Instead, we
+// probe the configured `localURL` and treat "the server responded" as
+// proof that we're on the home LAN. `ServerConnection.isOnLANNetwork`
+// reads the `"tvosLANDetected"` UserDefaults key this probe writes,
+// which `effectiveBaseURL` consults to decide LAN vs WAN routing.
+//
+// Reliability hardening (v1.6.7):
+//
+//   1. Retry: a single HEAD request can lose to transient DNS/ARP
+//      flakiness on first boot (the router's ARP cache doesn't yet
+//      know the Apple TV's MAC). Up to 3 attempts with a 500ms delay
+//      between — first success wins.
+//
+//   2. Re-probe on foreground: old behaviour only probed at app
+//      launch and on servers.count change, which missed the
+//      "travel" case where a user takes a MacBook / Apple TV to a
+//      friend's place and comes back. Now `scenePhase == .active`
+//      fires a re-probe.
+//
+//   3. Re-probe on network change: `NWPathMonitor` transitions to
+//      `.satisfied` (debounced 200ms to coalesce reconnect storms)
+//      also trigger a re-probe. Covers Ethernet plug-in mid-session
+//      and Wi-Fi handoff between access points.
+//
+//   4. Rich result metadata: UI can surface the last-probed host,
+//      latency, and timestamp so users on a tvOS Settings screen
+//      can see "last checked 5 min ago, 42 ms" without guessing.
+//      Persisted to UserDefaults for cold-launch read-before-probe.
+//
+// The class is an `ObservableObject` singleton so `ServerDetailView`
+// can `@ObservedObject` it to drive the "Refresh LAN Detection"
+// button state + the last-probe labels. Callers remain
+// `TVLANProbe.shared.probe(servers:)` — the old static call sites
+// in `RootView.onAppear` + `onChange(servers.count)` are updated to
+// the new form.
 #if os(tvOS)
 @MainActor
-enum TVLANProbe {
-    /// Probes each server's localURL. If ANY responds within 2s, sets tvosLANDetected = true.
-    static func probe(servers: [ServerConnection]) {
+final class TVLANProbe: ObservableObject {
+    static let shared = TVLANProbe()
+
+    // MARK: Published state (for Settings UI)
+
+    @Published private(set) var isProbing: Bool = false
+    @Published private(set) var lastDetected: Bool = false
+    @Published private(set) var lastHost: String? = nil
+    @Published private(set) var lastLatencyMs: Int? = nil
+    @Published private(set) var lastTimestamp: Date? = nil
+
+    // MARK: Persistence keys (also read externally by
+    // `ServerConnection.isOnLANNetwork` for the `detected` bool)
+
+    private static let detectedKey = "tvosLANDetected"
+    private static let timestampKey = "tvosLastProbeTimestamp"
+    private static let hostKey = "tvosLastProbeHost"
+    private static let latencyKey = "tvosLastProbeLatencyMS"
+
+    // MARK: Internal state
+
+    /// Snapshot of URL candidates from the most recent `probe(servers:)`
+    /// call. Reused by `reprobe()` on scenePhase foreground + NWPath
+    /// `.satisfied` transitions so we don't need to re-plumb the
+    /// SwiftData @Query all the way down from RootView.
+    private var candidateURLs: [URL] = []
+
+    /// Cancels the in-flight probe when a newer call arrives, so two
+    /// overlapping probes (e.g., scenePhase .active landing at the
+    /// same moment NWPath fires) don't race each other to
+    /// UserDefaults.
+    private var currentProbeTask: Task<Void, Never>? = nil
+
+    private let pathMonitor = NWPathMonitor()
+    /// Debounce timer for NWPath updates — network-change storms
+    /// (Ethernet renegotiation, Wi-Fi roam) emit several .satisfied
+    /// transitions in quick succession; we only want to probe once
+    /// per storm.
+    private var pathDebounce: Task<Void, Never>? = nil
+
+    private init() {
+        // Hydrate from UserDefaults so the Settings UI can render the
+        // last-known state immediately on cold launch, before the
+        // first probe even fires. A probe landing after this will
+        // overwrite with fresh values via `record(...)`.
+        let defaults = UserDefaults.standard
+        self.lastDetected = defaults.bool(forKey: Self.detectedKey)
+        let host = defaults.string(forKey: Self.hostKey)
+        self.lastHost = (host?.isEmpty == false) ? host : nil
+        let latency = defaults.integer(forKey: Self.latencyKey)
+        self.lastLatencyMs = latency > 0 ? latency : nil
+        let ts = defaults.double(forKey: Self.timestampKey)
+        self.lastTimestamp = ts > 0 ? Date(timeIntervalSince1970: ts) : nil
+
+        startPathMonitor()
+    }
+
+    // MARK: Public entry points
+
+    /// Primary entry — called from RootView.onAppear, RootView
+    /// `onChange(servers.count)`, and the Settings "Refresh LAN
+    /// Detection" button. Extracts candidate `localURL` values from
+    /// the passed servers, remembers them for future `reprobe()`
+    /// calls, and kicks off the probe.
+    func probe(servers: [ServerConnection]) {
         let serversWithoutLocal = servers.filter { $0.localURL.isEmpty }.count
         let candidates = servers.compactMap { s -> URL? in
             guard !s.localURL.isEmpty else { return nil }
@@ -600,48 +706,143 @@ enum TVLANProbe {
             if !url.hasPrefix("http://") && !url.hasPrefix("https://") { url = "http://" + url }
             return URL(string: url)
         }
+        self.candidateURLs = candidates
+
         guard !candidates.isEmpty else {
-            // No `localURL` configured on any server. `effectiveBaseURL`
-            // will always return the external URL — this is a CONFIG
-            // issue, not a network issue. Log visibly so the user can
-            // see why their Ethernet-connected Apple TV is going
-            // through WAN even when the server is on the LAN.
-            UserDefaults.standard.set(false, forKey: "tvosLANDetected")
+            // No `localURL` on any server — this is a CONFIG issue,
+            // not a network issue. Record a failed probe so the
+            // Settings UI shows "No local URL configured" instead
+            // of a stale pre-config true value.
+            record(detected: false, host: nil, latencyMs: nil)
             print("📡 tvOS LAN probe: SKIPPED — no local URL configured on any server (\(serversWithoutLocal) server(s) missing `localURL`). Set Settings → Server → Local URL to enable LAN routing.")
             return
         }
         print("📡 tvOS LAN probe: starting — \(candidates.count) candidate local URL(s), \(serversWithoutLocal) server(s) without local URL")
-        Task {
-            var detected = false
-            var attemptedLog: [String] = []
+        startProbeTask(candidates: candidates)
+    }
+
+    /// Re-probe with the most recently remembered candidate set. Used
+    /// by scenePhase `.active` and `NWPathMonitor`'s `.satisfied`
+    /// transition — neither has a fresh servers array handy, so we
+    /// reuse the snapshot from the last `probe(servers:)` call.
+    func reprobe() {
+        let candidates = self.candidateURLs
+        guard !candidates.isEmpty else {
+            // First probe hasn't happened yet (rare — would mean
+            // scenePhase .active fired before RootView.onAppear).
+            // Skip silently; the imminent onAppear probe will hydrate
+            // our candidate snapshot.
+            return
+        }
+        print("📡 tvOS LAN probe: re-probing (\(candidates.count) candidate(s))")
+        startProbeTask(candidates: candidates)
+    }
+
+    // MARK: Probe core
+
+    private func startProbeTask(candidates: [URL]) {
+        // Cancel any probe that's still running. The newer call's
+        // result should win — a user tapping "Refresh" during a
+        // slow in-flight probe shouldn't wait for the old one to
+        // time out before their explicit request takes effect.
+        currentProbeTask?.cancel()
+        currentProbeTask = Task {
+            await runProbe(candidates: candidates)
+        }
+    }
+
+    private func runProbe(candidates: [URL]) async {
+        isProbing = true
+        defer { isProbing = false }
+
+        let maxAttempts = 3
+        let retryDelayNs: UInt64 = 500_000_000 // 500ms
+        var allLogs: [String] = []
+
+        for attempt in 1...maxAttempts {
             for baseURL in candidates {
-                // Quick HEAD request with short timeout. Bumped
-                // from 2s → 3s because some home routers respond
-                // slowly to the first connection to a host the ARP
-                // table doesn't know yet (observed on Ubiquiti
-                // setups when the TV just came off standby).
+                guard !Task.isCancelled else { return }
+                // Per-candidate HEAD request with a 3s timeout.
+                // Bumped from 2s historically because some home
+                // routers respond slowly to the first connection to
+                // a host the ARP table doesn't know yet (observed
+                // on Ubiquiti setups when the TV just came off
+                // standby).
                 var request = URLRequest(url: baseURL, timeoutInterval: 3.0)
                 request.httpMethod = "HEAD"
+                let start = Date()
                 do {
-                    let start = Date()
                     let (_, response) = try await URLSession.shared.data(for: request)
                     let ms = Int(Date().timeIntervalSince(start) * 1000)
                     if let http = response as? HTTPURLResponse, http.statusCode < 500 {
-                        attemptedLog.append("\(baseURL.host ?? baseURL.absoluteString)=\(http.statusCode)/\(ms)ms ✓")
-                        detected = true
-                        break
+                        // SUCCESS — any 2xx/3xx/4xx response proves
+                        // the TCP+HTTP path is alive. 5xx could be
+                        // a hung upstream so we don't treat that as
+                        // proof of LAN reachability.
+                        let host = baseURL.host ?? baseURL.absoluteString
+                        allLogs.append("\(host)=\(http.statusCode)/\(ms)ms ✓ (attempt \(attempt)/\(maxAttempts))")
+                        record(detected: true, host: host, latencyMs: ms)
+                        print("📡 tvOS LAN probe: DETECTED — \(allLogs.joined(separator: ", "))")
+                        return
                     } else if let http = response as? HTTPURLResponse {
-                        attemptedLog.append("\(baseURL.host ?? baseURL.absoluteString)=\(http.statusCode)/\(ms)ms ✗")
+                        allLogs.append("\(baseURL.host ?? "?")=\(http.statusCode)/\(ms)ms ✗ (attempt \(attempt))")
                     }
                 } catch {
-                    // Short error tag — `.timedOut`, `.cannotConnectToHost`, etc.
                     let nsErr = error as NSError
-                    attemptedLog.append("\(baseURL.host ?? baseURL.absoluteString)=err(\(nsErr.code))")
+                    allLogs.append("\(baseURL.host ?? "?")=err(\(nsErr.code)) (attempt \(attempt))")
                 }
             }
-            UserDefaults.standard.set(detected, forKey: "tvosLANDetected")
-            print("📡 tvOS LAN probe: detected=\(detected) results=[\(attemptedLog.joined(separator: ", "))]. LAN routing \(detected ? "ENABLED — streams will use local URL" : "DISABLED — streams will use external URL")")
+            if attempt < maxAttempts {
+                try? await Task.sleep(nanoseconds: retryDelayNs)
+                guard !Task.isCancelled else { return }
+            }
         }
+
+        // All attempts failed — record a definitive false so
+        // `effectiveBaseURL` falls back to the external URL and the
+        // UI reflects the failure with a timestamp the user can
+        // cross-reference against their network state.
+        record(detected: false, host: nil, latencyMs: nil)
+        print("📡 tvOS LAN probe: FAILED after \(maxAttempts) attempts — [\(allLogs.joined(separator: ", "))]. Streams will use external URL.")
+    }
+
+    /// Commits a probe result to both UserDefaults (so the rest of
+    /// the app + cold-launch state can read it synchronously) and
+    /// `@Published` state (so the Settings UI can re-render).
+    private func record(detected: Bool, host: String?, latencyMs: Int?) {
+        let timestamp = Date()
+        let defaults = UserDefaults.standard
+        defaults.set(detected, forKey: Self.detectedKey)
+        defaults.set(timestamp.timeIntervalSince1970, forKey: Self.timestampKey)
+        defaults.set(host ?? "", forKey: Self.hostKey)
+        defaults.set(latencyMs ?? 0, forKey: Self.latencyKey)
+
+        self.lastDetected = detected
+        self.lastHost = host
+        self.lastLatencyMs = latencyMs
+        self.lastTimestamp = timestamp
+    }
+
+    // MARK: NWPathMonitor
+
+    private func startPathMonitor() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            // We only care about the "just came online" transition
+            // — `.satisfied` means the OS has a usable default
+            // route. Partial-connectivity and offline states would
+            // only waste a probe round-trip.
+            guard path.status == .satisfied else { return }
+            Task { @MainActor in
+                self.pathDebounce?.cancel()
+                self.pathDebounce = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    guard !Task.isCancelled else { return }
+                    self.reprobe()
+                }
+            }
+        }
+        pathMonitor.start(queue: DispatchQueue.global(qos: .utility))
     }
 }
 #endif
@@ -738,7 +939,7 @@ struct RootView: View {
                 // up with orphaned EPG data that left the guide empty.
                 pruneOrphanedEPGPrograms()
                 #if os(tvOS)
-                TVLANProbe.probe(servers: servers)
+                TVLANProbe.shared.probe(servers: servers)
                 // If the user has no server configured (fresh install,
                 // uninstall+reinstall, or manually cleared), wipe any
                 // stale Top Shelf data from a previous install. Keychain
@@ -771,7 +972,7 @@ struct RootView: View {
                 debugLog("🟡 RootView.onChange(servers.count): count=\(count), isMergingRemote=\(isMergingRemote)")
                 #if os(tvOS)
                 // Re-probe LAN whenever servers change (e.g., iCloud sync delivers a server with localURL)
-                TVLANProbe.probe(servers: servers)
+                TVLANProbe.shared.probe(servers: servers)
                 #endif
                 guard !isMergingRemote else {
                     debugLog("🟡 RootView.onChange(servers.count): SKIPPED (isMergingRemote)")
@@ -850,6 +1051,16 @@ struct RootView: View {
         // loop to a background `ModelContext` and narrow the fetch
         // via a predicate so SQLite only returns the rows we're
         // actually going to delete — which is almost always zero.
+        //
+        // Note: the v1.6.7 XMLTV category-fix migration USED to live
+        // here too, but moved into `GuideStore.loadFromCache` so the
+        // purge + the SwiftData fetch happen on the same background
+        // ModelContext in strict order. Running them as two separate
+        // detached tasks at different priorities raced — the higher-
+        // priority loadFromCache read the old rows before the
+        // lower-priority prune could delete them, and those old
+        // concatenated-category strings landed in GuideStore.programs
+        // and persisted through the session.
         let liveServerIDArray = servers.map { $0.id.uuidString }
         let container = modelContext.container
         Task.detached(priority: .utility) {

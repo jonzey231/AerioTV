@@ -1146,6 +1146,7 @@ struct SettingsRow: View {
 // MARK: - Server Detail View
 struct ServerDetailView: View {
     let server: ServerConnection
+    @Query private var servers: [ServerConnection]
     @State private var isTestingConnection = false
     @State private var connectionResult: String? = nil
     @State private var connectionSuccess = false
@@ -1153,9 +1154,28 @@ struct ServerDetailView: View {
     @ObservedObject private var networkMonitor = NetworkMonitor.shared
     @State private var ssidRefreshed = false
     #endif
+    #if os(tvOS)
+    // tvOS has no SSID detection, so LAN detection runs through
+    // `TVLANProbe` (see AerioApp.swift). Observing the singleton
+    // lets this view surface the last probe result + drive the
+    // "Refresh LAN Detection" button's in-flight state without
+    // polling.
+    @ObservedObject private var tvLANProbe = TVLANProbe.shared
+    @State private var lanRefreshAcked = false
+    #endif
 
     private var hasLANConfigured: Bool {
-        server.type != .m3uPlaylist && !server.localURL.isEmpty && !server.homeSSIDs.isEmpty
+        #if os(tvOS)
+        // tvOS never populates `homeSSIDs` (no CoreLocation / NEHS
+        // APIs available), so the SSID guard was rendering the
+        // Active Connection section permanently hidden on tvOS even
+        // when the user had a `localURL` set. Relax the check on
+        // tvOS to just `localURL` — the probe-based LAN detection
+        // doesn't need an SSID match to function.
+        return server.type != .m3uPlaylist && !server.localURL.isEmpty
+        #else
+        return server.type != .m3uPlaylist && !server.localURL.isEmpty && !server.homeSSIDs.isEmpty
+        #endif
     }
 
     private var isOnLAN: Bool {
@@ -1269,6 +1289,67 @@ struct ServerDetailView: View {
                             }
                         }
                         #endif
+
+                        // tvOS LAN detection — no SSID API on tvOS, so
+                        // `TVLANProbe` (AerioApp.swift) decides LAN vs
+                        // WAN by probing `localURL`. These rows surface
+                        // the last probe result so users can see WHY
+                        // the mode badge above says what it says, and
+                        // the Refresh button re-runs the probe on
+                        // demand (e.g., after the user fixes a
+                        // misconfigured local URL without relaunching
+                        // the app).
+                        #if os(tvOS)
+                        if let host = tvLANProbe.lastHost, tvLANProbe.lastDetected {
+                            infoRow("Last Probe Host", value: host, isMonospaced: true)
+                        }
+                        if let ms = tvLANProbe.lastLatencyMs, tvLANProbe.lastDetected {
+                            infoRow("Last Probe Latency", value: "\(ms) ms")
+                        }
+                        if let ts = tvLANProbe.lastTimestamp {
+                            infoRow(
+                                "Last Checked",
+                                value: ts.formatted(.relative(presentation: .named))
+                            )
+                        }
+                        Button {
+                            // Prefer probing the full server roster
+                            // so all candidate local URLs get a
+                            // fresh attempt, not just this detail
+                            // view's server. The probe is
+                            // inherently global (one
+                            // `tvosLANDetected` flag) — mirroring
+                            // that in the refresh action avoids the
+                            // user wondering why toggling refresh
+                            // on one server fixed another.
+                            tvLANProbe.probe(servers: Array(servers))
+                        } label: {
+                            HStack(spacing: 8) {
+                                if tvLANProbe.isProbing {
+                                    ProgressView().tint(.accentPrimary).scaleEffect(0.8)
+                                } else {
+                                    Image(systemName: lanRefreshAcked ? "checkmark.circle.fill" : "wifi.circle")
+                                        .foregroundColor(lanRefreshAcked ? .statusOnline : .accentPrimary)
+                                }
+                                Text(tvLANProbe.isProbing ? "Probing…"
+                                     : lanRefreshAcked ? "Up to date"
+                                     : "Refresh LAN Detection")
+                                    .foregroundColor(tvLANProbe.isProbing ? .textSecondary
+                                                     : lanRefreshAcked ? .statusOnline : .accentPrimary)
+                            }
+                        }
+                        .disabled(tvLANProbe.isProbing)
+                        .listRowBackground(Color.cardBackground)
+                        .onChange(of: tvLANProbe.isProbing) { _, nowProbing in
+                            if !nowProbing {
+                                lanRefreshAcked = true
+                                Task {
+                                    try? await Task.sleep(for: .seconds(2))
+                                    lanRefreshAcked = false
+                                }
+                            }
+                        }
+                        #endif
                     } header: {
                         Text("Active Connection").sectionHeaderStyle()
                     } footer: {
@@ -1291,6 +1372,23 @@ struct ServerDetailView: View {
                                 .foregroundColor(.textTertiary)
                         } else {
                             Text("Not on a configured home WiFi network — using remote URL.")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                        }
+                        #endif
+                        #if os(tvOS)
+                        // tvOS equivalent of the iOS footer's plain-
+                        // English explanation. We cannot show "which
+                        // SSID" because tvOS has no SSID API; instead
+                        // we point the user at the probe as the
+                        // source of truth, with a nudge toward the
+                        // Refresh button when it's stale.
+                        if tvLANProbe.lastDetected {
+                            Text("Local server reachable — streams will use local URL.")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                        } else {
+                            Text("Local server not reachable — streams will use remote URL. Tap Refresh LAN Detection after a network change.")
                                 .font(.labelSmall)
                                 .foregroundColor(.textTertiary)
                         }

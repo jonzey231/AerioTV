@@ -14,11 +14,26 @@ final class VODStore: ObservableObject {
     @Published private(set) var movies: [VODDisplayItem] = []
     @Published private(set) var movieCategories: [VODCategory] = []
     @Published private(set) var isLoadingMovies = false
+    /// True for the FULL duration of a `loadMovies` call, including
+    /// the per-category streaming pass that keeps running after the
+    /// first partial results publish. Distinct from `isLoadingMovies`
+    /// (which intentionally flips to `false` at the first batch so
+    /// `MoviesView` can drop its spinner and start showing items).
+    /// Drives the top-level "Syncing…" indicator so users know the
+    /// background fetch is still chewing through categories — we
+    /// saw the indicator hide while 700+ categories were still
+    /// loading, which left no signal that the cascade of
+    /// `@Published movies =` writes would keep triggering view
+    /// invalidations for another minute-plus.
+    @Published private(set) var isRefillingMovies = false
     @Published private(set) var moviesError: String?
 
     @Published private(set) var series: [VODDisplayItem] = []
     @Published private(set) var seriesCategories: [VODCategory] = []
     @Published private(set) var isLoadingSeries = false
+    /// Series equivalent of `isRefillingMovies` — true for the whole
+    /// `loadSeries` run.
+    @Published private(set) var isRefillingSeries = false
     @Published private(set) var seriesError: String?
 
     /// Server name last used for movies — shown in error/empty state for diagnosis.
@@ -218,6 +233,12 @@ final class VODStore: ObservableObject {
         }
         currentMoviesServerID = server.id
         isLoadingMovies = true
+        // `defer` guarantees `isRefillingMovies` returns to false on
+        // every exit path — normal loop completion, circuit-breaker
+        // abort, `Task.isCancelled` early return, per-server-type
+        // branches — without sprinkling resets across each one.
+        isRefillingMovies = true
+        defer { isRefillingMovies = false }
         moviesError = nil
         DebugLogger.shared.log("VODStore loadMovies — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "Movies", level: .info)
@@ -427,6 +448,10 @@ final class VODStore: ObservableObject {
         }
         currentSeriesServerID = server.id
         isLoadingSeries = true
+        // See `isRefillingMovies` for the rationale. `defer`
+        // guarantees we return to false on every exit path.
+        isRefillingSeries = true
+        defer { isRefillingSeries = false }
         seriesError = nil
         DebugLogger.shared.log("VODStore loadSeries — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "TVShows", level: .info)
@@ -1990,6 +2015,25 @@ struct MainTabView: View {
     /// instance var rather than a local so the show/dismiss callbacks
     /// (which happen on separate runloop ticks) can share it.
     @State private var initialLoadingStartedAt: CFAbsoluteTime? = nil
+    /// Tracks the start time of the current "any background work
+    /// active" period so the heartbeat logger can report elapsed
+    /// seconds. Set when `isAnyBackgroundWork` transitions
+    /// false → true, cleared on true → false.
+    @State private var bgWorkStartedAt: CFAbsoluteTime? = nil
+    /// Periodic logger Task that ticks every 15s while background
+    /// work is active, printing which tasks are still running.
+    /// Lets a user / developer watching a stuck "Syncing…" for
+    /// minutes figure out WHICH of the six possible background
+    /// tasks is responsible. Cancelled + nilled on the true → false
+    /// transition so the logger stops cleanly.
+    @State private var bgWorkHeartbeatTask: Task<Void, Never>? = nil
+    /// Presents the user-facing background-activity details popover
+    /// (iOS) / fullScreenCover (tvOS). The "Syncing…" badge is a
+    /// tappable Button that flips this true — users open it to see
+    /// exactly which background task is holding the indicator
+    /// visible (e.g. a 779-category VOD refill that's been churning
+    /// for 5 minutes on a slow server).
+    @State private var showBackgroundWorkDetails = false
     /// Flipped true after the first DVR reconcile completes so the
     /// initial loading screen knows it can dismiss. Only gates the
     /// dismiss when a Dispatcharr server is configured — other server
@@ -2238,9 +2282,67 @@ struct MainTabView: View {
     /// Shared drag offset — MiniPlayerBar writes it, PlayerView reads it to slide in from below.
     @State private var miniPlayerDragOffset: CGFloat = 0
 
+    /// Drives the top-of-screen "Syncing…" indicator so the user
+    /// knows background work is ongoing that may still be publishing
+    /// `@Published` updates (which can cause visible view churn on
+    /// the Live TV tab — e.g. the contextMenu pulse we diagnosed in
+    /// v1.6.7 before switching to the popover).
+    ///
+    /// Includes both `isLoadingMovies`/`isLoadingSeries` (cover the
+    /// "first-partial-data" window) AND
+    /// `isRefillingMovies`/`isRefillingSeries` (cover the rest of the
+    /// per-category streaming loop, which can run for minutes on
+    /// large VOD libraries with slow servers). Also includes the
+    /// server-side search flags so users searching a huge library
+    /// see the ongoing background activity.
     private var isAnyBackgroundWork: Bool {
         channelStore.isLoading || channelStore.isEPGLoading || guideStore.isLoading
             || vodStore.isLoadingMovies || vodStore.isLoadingSeries
+            || vodStore.isRefillingMovies || vodStore.isRefillingSeries
+            || vodStore.isSearchingMovies || vodStore.isSearchingSeries
+    }
+
+    /// Short identifier labels used by the heartbeat log. Terse
+    /// by design — the log consumer needs grep-friendly tokens.
+    /// User-facing strings live in
+    /// `humanReadableBackgroundTaskLabels`.
+    private var activeBackgroundTaskLabels: [String] {
+        var labels: [String] = []
+        if channelStore.isLoading        { labels.append("channels") }
+        if channelStore.isEPGLoading     { labels.append("epg") }
+        if guideStore.isLoading          { labels.append("xmltv-parse") }
+        if vodStore.isLoadingMovies      { labels.append("vod-movies-initial") }
+        if vodStore.isLoadingSeries      { labels.append("vod-series-initial") }
+        if vodStore.isRefillingMovies    { labels.append("vod-movies-refill") }
+        if vodStore.isRefillingSeries    { labels.append("vod-series-refill") }
+        if vodStore.isSearchingMovies    { labels.append("vod-movies-search") }
+        if vodStore.isSearchingSeries    { labels.append("vod-series-search") }
+        return labels
+    }
+
+    /// Friendly labels shown in the user-facing
+    /// `BackgroundWorkDetailsView` when the user taps / selects the
+    /// "Syncing…" badge. Deduplicates `isLoading*` + `isRefilling*`
+    /// (both are typically true at load start — the refill flag
+    /// stays true through the category loop, the load flag flips
+    /// false at first partial data) so users see a single "Loading
+    /// Movies" row rather than two confusingly-named ones. Search
+    /// flags are separate because they're user-initiated and
+    /// worth distinguishing from the initial library load.
+    private var humanReadableBackgroundTaskLabels: [String] {
+        var labels: [String] = []
+        if channelStore.isLoading        { labels.append("Loading channel list") }
+        if channelStore.isEPGLoading     { labels.append("Loading EPG") }
+        if guideStore.isLoading          { labels.append("Parsing guide data") }
+        if vodStore.isLoadingMovies || vodStore.isRefillingMovies {
+            labels.append("Loading Movies")
+        }
+        if vodStore.isLoadingSeries || vodStore.isRefillingSeries {
+            labels.append("Loading Series")
+        }
+        if vodStore.isSearchingMovies    { labels.append("Searching Movies") }
+        if vodStore.isSearchingSeries    { labels.append("Searching Series") }
+        return labels
     }
 
     var body: some View {
@@ -2272,29 +2374,75 @@ struct MainTabView: View {
                 )
                 #endif
 
-            // Background activity indicator — top left
+            // Background activity indicator — top left. Tappable on
+            // iOS, focusable/selectable on tvOS so users can see
+            // WHICH background task is still running when the badge
+            // sits "Syncing…" for minutes. Opens a platform-native
+            // detail view (popover on iOS, fullScreenCover on tvOS)
+            // listing the active tasks + elapsed time.
             if isAnyBackgroundWork, !nowPlaying.isActive || nowPlaying.isMinimized {
                 VStack {
-                    HStack(spacing: 6) {
-                        ProgressView()
+                    Button {
+                        showBackgroundWorkDetails = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                #if os(tvOS)
+                                .scaleEffect(0.6)
+                                #else
+                                .scaleEffect(0.5)
+                                #endif
                             #if os(tvOS)
-                            .scaleEffect(0.6)
+                            Text("Syncing… · select for info")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundColor(.white.opacity(0.8))
                             #else
-                            .scaleEffect(0.5)
+                            Text("Syncing | Tap for Info")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundColor(.white.opacity(0.7))
                             #endif
-                        Text("Syncing…")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.white.opacity(0.7))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.black.opacity(0.5).clipShape(Capsule()))
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(Color.black.opacity(0.5).clipShape(Capsule()))
+                    .buttonStyle(.plain)
+                    #if os(tvOS)
+                    // `.focusSection()` keeps this badge out of the
+                    // default D-pad navigation path — it sits in its
+                    // own focus region in the top-left corner, so
+                    // users navigating the main content grid don't
+                    // accidentally land here. They have to
+                    // deliberately drive focus up-and-left to reach
+                    // it.
+                    .focusSection()
+                    #endif
                     .padding(.leading, 16)
                     .padding(.top, 8)
+                    #if os(iOS)
+                    .popover(isPresented: $showBackgroundWorkDetails,
+                             attachmentAnchor: .rect(.bounds)) {
+                        BackgroundWorkDetailsView(
+                            labels: humanReadableBackgroundTaskLabels,
+                            elapsedSeconds: bgWorkStartedAt.map {
+                                Int(CFAbsoluteTimeGetCurrent() - $0)
+                            } ?? 0
+                        )
+                        .presentationCompactAdaptation(.popover)
+                    }
+                    #else
+                    .fullScreenCover(isPresented: $showBackgroundWorkDetails) {
+                        BackgroundWorkDetailsView(
+                            labels: humanReadableBackgroundTaskLabels,
+                            elapsedSeconds: bgWorkStartedAt.map {
+                                Int(CFAbsoluteTimeGetCurrent() - $0)
+                            } ?? 0
+                        )
+                    }
+                    #endif
                     Spacer()
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .allowsHitTesting(false)
                 .zIndex(1)
             }
 
@@ -2652,6 +2800,47 @@ struct MainTabView: View {
         // on-screen state honest. The key is a Hashable digest of
         // every signal; onChange fires each time any of them flip.
         .onChange(of: initialSyncKey) { _, _ in tryDismissInitialLoading() }
+        // Background-work heartbeat logger. When `isAnyBackgroundWork`
+        // transitions false → true we start a 15s-tick Task that
+        // prints the currently-active task labels. The user-visible
+        // "Syncing…" badge at the top-left is one bit — the log
+        // says WHICH of the six (channels, epg, xmltv-parse, vod-
+        // movies-initial/-refill/-search, vod-series-initial/-refill
+        // /-search) is responsible. Particularly useful for
+        // understanding why a warm relaunch on a large VOD library
+        // sits "Syncing…" for 5+ minutes (answer: 1,258 sequential
+        // per-category VOD fetches).
+        .onChange(of: isAnyBackgroundWork) { wasActive, nowActive in
+            if nowActive && !wasActive {
+                let start = CFAbsoluteTimeGetCurrent()
+                bgWorkStartedAt = start
+                debugLog("⏳ Background work STARTED — \(activeBackgroundTaskLabels.joined(separator: ", "))")
+                bgWorkHeartbeatTask?.cancel()
+                bgWorkHeartbeatTask = Task { @MainActor in
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .seconds(15))
+                        if Task.isCancelled { break }
+                        // Re-read the current labels on each tick —
+                        // individual tasks finish mid-session (e.g.
+                        // EPG cache load completes while VOD refill
+                        // is still going), so the label set
+                        // evolves.
+                        let labels = activeBackgroundTaskLabels
+                        guard !labels.isEmpty else { break }
+                        let elapsed = Int(CFAbsoluteTimeGetCurrent() - start)
+                        debugLog("⏳ Background work ongoing (\(elapsed)s elapsed) — \(labels.joined(separator: ", "))")
+                    }
+                }
+            } else if wasActive && !nowActive {
+                bgWorkHeartbeatTask?.cancel()
+                bgWorkHeartbeatTask = nil
+                let elapsed = bgWorkStartedAt.map {
+                    Int(CFAbsoluteTimeGetCurrent() - $0)
+                } ?? 0
+                bgWorkStartedAt = nil
+                debugLog("✅ Background work COMPLETE (total \(elapsed)s)")
+            }
+        }
         .fullScreenCover(isPresented: $showInitialEPGLoading) {
             // Reuse the same cover that fires after onboarding so users
             // see a consistent "Setting Up …" experience whether they
@@ -2961,6 +3150,124 @@ struct MainTabView: View {
         UITabBar.appearance().scrollEdgeAppearance = appearance
 #endif
     }
+}
+
+// MARK: - Background Work Details View
+//
+// Presented (iOS popover / tvOS fullScreenCover) when the user
+// taps / selects the top-left "Syncing…" badge. Shows each active
+// task on its own row with a subtle progress dot, plus the total
+// elapsed-seconds counter for the background-work window. The
+// content is a plain value-type snapshot — labels + elapsed are
+// passed in by the caller at present-time; the view doesn't
+// observe anything, so if the background state changes while the
+// modal is open the user sees the moment-of-open snapshot rather
+// than a live-updating list. Dismissing and re-opening shows the
+// fresh state. Keeps the view stateless and avoids any chance of
+// re-triggering the very invalidation cascade we were trying to
+// surface.
+private struct BackgroundWorkDetailsView: View {
+    let labels: [String]
+    let elapsedSeconds: Int
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        #if os(tvOS)
+        tvBody
+        #else
+        iOSBody
+        #endif
+    }
+
+    #if os(iOS)
+    private var iOSBody: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                ProgressView().scaleEffect(0.7)
+                Text("Background Activity")
+                    .font(.headline)
+                Spacer()
+            }
+
+            if labels.isEmpty {
+                Text("Nothing running right now.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(labels, id: \.self) { label in
+                        HStack(spacing: 10) {
+                            Image(systemName: "circle.dotted")
+                                .font(.system(size: 11))
+                                .foregroundColor(.accentPrimary)
+                            Text(label)
+                                .font(.body)
+                                .foregroundColor(.textPrimary)
+                        }
+                    }
+                }
+            }
+
+            Divider()
+            Text("Elapsed: \(elapsedSeconds)s")
+                .font(.caption)
+                .foregroundColor(.textTertiary)
+        }
+        .padding(16)
+        .frame(minWidth: 260, idealWidth: 300, maxWidth: 340, alignment: .leading)
+    }
+    #endif
+
+    #if os(tvOS)
+    private var tvBody: some View {
+        ZStack(alignment: .topTrailing) {
+            Color.appBackground.ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 32) {
+                HStack(spacing: 16) {
+                    ProgressView().scaleEffect(1.4)
+                    Text("Background Activity")
+                        .font(.system(size: 44, weight: .bold))
+                        .foregroundColor(.textPrimary)
+                }
+
+                if labels.isEmpty {
+                    Text("Nothing running right now.")
+                        .font(.system(size: 24))
+                        .foregroundColor(.textSecondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 18) {
+                        ForEach(labels, id: \.self) { label in
+                            HStack(spacing: 18) {
+                                Image(systemName: "circle.dotted")
+                                    .font(.system(size: 22))
+                                    .foregroundColor(.accentPrimary)
+                                Text(label)
+                                    .font(.system(size: 28))
+                                    .foregroundColor(.textPrimary)
+                            }
+                        }
+                    }
+                }
+
+                Text("Elapsed: \(elapsedSeconds)s")
+                    .font(.system(size: 20))
+                    .foregroundColor(.textTertiary)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 80)
+            .padding(.vertical, 72)
+            .frame(maxWidth: 900, alignment: .leading)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+
+            Button("Close") { dismiss() }
+                .padding(.top, 48)
+                .padding(.trailing, 64)
+        }
+        .onExitCommand { dismiss() }
+    }
+    #endif
 }
 
 

@@ -68,6 +68,18 @@ final class GuideStore: ObservableObject {
     /// `serverID`, the new caller awaits its `.value` instead.
     private var inFlightLoadTask: (serverID: String, task: Task<Bool, Never>)? = nil
 
+    /// Result payload returned by the off-main XMLTV merge task in
+    /// `performXMLTVFetch`. `Sendable` so the compiler lets us
+    /// cross the `Task.detached` boundary; all field types are
+    /// value types of `Sendable` primitives (`String`, `Date`, `Int`
+    /// — `GuideProgram` itself is a struct of these).
+    fileprivate struct XMLTVMergeResult: Sendable {
+        let dict: [String: [GuideProgram]]
+        let matched: Int
+        let missed: Int
+        let currentCategoriesByChannelID: [String: String]
+    }
+
     /// Coalesces concurrent `fetchXMLTVFromURL` calls. On cold
     /// install with a Dispatcharr playlist, two separate code paths
     /// each kick off an XMLTV download+parse against the same
@@ -164,6 +176,44 @@ final class GuideStore: ObservableObject {
         let fetchTask = Task<Bool, Never> { [self] in
             let loaded: (dict: [String: [GuideProgram]], programCount: Int, isFresh: Bool, newestFetchAgoSec: Int)? = await Task.detached(priority: .userInitiated) {
                 let bgContext = ModelContext(container)
+
+                // v1.6.7 one-shot migration: the pre-v1.6.7 XMLTV
+                // parser concatenated multiple `<category>` tags
+                // into a single string with no separator (bug:
+                // `"EpisodeSeriesRealityLaw"` instead of four
+                // distinct tokens). Upgrading users have those
+                // broken strings persisted in SwiftData; the
+                // title+time dedupe in `performXMLTVFetch` would
+                // preserve the old rows even after a fresh parse.
+                // We purge ALL EPGProgram rows here — inside the
+                // same detached task that's about to fetch them —
+                // so there's no race with a concurrent fetch
+                // starting before the prune finishes. Returning
+                // `nil` makes the caller treat the cache as empty,
+                // which triggers the full XMLTV re-fetch through
+                // the fixed parser. One-shot: the UserDefaults key
+                // gates the purge so subsequent launches skip it.
+                //
+                // Key version bumped to v2 because an earlier
+                // attempt ran the migration in
+                // `pruneOrphanedEPGPrograms` as a separate
+                // lower-priority detached task, which raced the
+                // `loadFromCache` fetch — the fetch won, populated
+                // `programs` with concatenated strings, and the
+                // v1 flag was already set. Bumping the key forces
+                // a clean re-run on devices that participated in
+                // that race.
+                let migrationKey = "xmltvCategoryFixMigrationV2"
+                if !UserDefaults.standard.bool(forKey: migrationKey) {
+                    if let allRows = try? bgContext.fetch(FetchDescriptor<EPGProgram>()) {
+                        for ep in allRows { bgContext.delete(ep) }
+                        try? bgContext.save()
+                        debugLog("🗑️ v1.6.7 XMLTV category-fix migration: purged \(allRows.count) rows for fresh re-parse")
+                    }
+                    UserDefaults.standard.set(true, forKey: migrationKey)
+                    return nil
+                }
+
                 let now = Date()
                 let windowStart = now.addingTimeInterval(-3600)
                 let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
@@ -697,15 +747,42 @@ final class GuideStore: ObservableObject {
     /// Body of `fetchXMLTVFromURL`, split out so the outer function
     /// can wrap it in an in-flight-coalescing `Task`. See
     /// `inFlightXMLTVTask` for the rationale.
+    ///
+    /// The merge loop runs on a detached task. On the torture
+    /// playlist a full XMLTV parse yields ~98k programs, each
+    /// triggering an O(m) duplicate scan over the target channel's
+    /// current list (m ≈ 45 programs/channel). That's ~4–5 million
+    /// comparison ops plus 98k `list.sort` calls — a 5+ second
+    /// main-thread freeze at the end of cold-install setup
+    /// (observed as `MAIN THREAD FROZEN >5s!` in the watchdog logs
+    /// right before the initial-sync cover dismissed).
+    ///
+    /// Off-main, the merge becomes invisible to the user. The
+    /// `@Published programs` property fires exactly once — the
+    /// single `programs = result.dict` assignment after the
+    /// detached task returns — so SwiftUI invalidations land the
+    /// same way they did with the old `beginBatch`/`endBatch`
+    /// pattern, just without blocking the main thread in between.
+    ///
+    /// Trade-off / race: between snapshot time and re-assignment,
+    /// a concurrent caller (practically: `seedFromChannels` firing
+    /// from `EPGGuideView.task` right after channels publish) may
+    /// write stub entries into `programs`. Those stubs get
+    /// overwritten when we assign. In practice with a comprehensive
+    /// Dispatcharr XMLTV feed the stubs cover the same channels
+    /// the XMLTV feed does, so the overwrite is a no-op. Channels
+    /// with partial XMLTV coverage lose their stub until the next
+    /// per-cell prefetch lands — acceptable given the alternative
+    /// is a multi-second frozen UI.
     private func performXMLTVFetch(url: URL, channels: [ChannelDisplayItem],
                                    windowStart: Date, windowEnd: Date) async {
         guard let parsed = try? await XMLTVParser.fetchAndParse(url: url) else {
             debugLog("📺 XMLTV fetch/parse failed for \(url.host ?? "?")")
             return
         }
-        beginBatch()
-        defer { endBatch() }
 
+        // Build channel-lookup dictionaries on the MainActor. All
+        // three are small (one entry per channel) and cheap.
         let tvgIDToChannelID: [String: String] = Dictionary(
             channels.compactMap { ch in
                 guard let tvg = ch.tvgID, !tvg.isEmpty else { return nil }
@@ -724,40 +801,79 @@ final class GuideStore: ObservableObject {
             },
             uniquingKeysWith: { first, _ in first }
         )
+        let hostLabel = url.host ?? "?"
+        // Snapshot the current programs dict. Swift dict COW — this
+        // is an O(1) reference bump, not a full copy. The detached
+        // task below mutates its own local copy; the first write
+        // triggers the deep copy, off-main. `self.programs` itself
+        // stays untouched until the final assignment.
+        let snapshot = programs
 
-        var matched = 0
-        var missed = 0
-        // Collect currently-airing categories keyed by channel id so we
-        // can push them back to ChannelStore after the loop — that makes
-        // the Live TV list view's "Tint Channel Cards" stripe work off
-        // the same XMLTV source as the guide itself.
-        let now = Date()
-        var currentCategoriesByChannelID: [String: String] = [:]
-        for prog in parsed {
-            guard prog.endTime > windowStart && prog.startTime < windowEnd else { continue }
-            let key = prog.channelID.lowercased()
-            let channelID = tvgIDToChannelID[key]
-                ?? numberToChannelID[prog.channelID]
-                ?? uuidToChannelID[key]
-            guard let cid = channelID else {
-                missed += 1
-                continue
+        // Run the 98k-iteration merge off the MainActor.
+        let result = await Task.detached(priority: .userInitiated) { () -> XMLTVMergeResult in
+            var dict = snapshot
+            var matched = 0
+            var missed = 0
+            // Collect currently-airing categories keyed by channel
+            // id so we can push them back to ChannelStore after the
+            // loop — that makes the Live TV list view's "Tint
+            // Channel Cards" stripe work off the same XMLTV source
+            // as the guide itself.
+            let now = Date()
+            var currentCategoriesByChannelID: [String: String] = [:]
+            // Track which channels received at least one insert so
+            // we only sort their lists at the end (avoids 98k
+            // redundant sort calls on channels whose lists never
+            // grew beyond what was in the snapshot).
+            var touchedChannelIDs = Set<String>()
+
+            for prog in parsed {
+                guard prog.endTime > windowStart && prog.startTime < windowEnd else { continue }
+                let key = prog.channelID.lowercased()
+                let channelID = tvgIDToChannelID[key]
+                    ?? numberToChannelID[prog.channelID]
+                    ?? uuidToChannelID[key]
+                guard let cid = channelID else {
+                    missed += 1
+                    continue
+                }
+                matched += 1
+                let gp = GuideProgram(channelID: cid, title: prog.title,
+                                      description: prog.description,
+                                      start: prog.startTime, end: prog.endTime,
+                                      category: prog.category)
+                // deferSort: true — a 98k-iteration loop over ~2,100
+                // channels means each channel gets ~46 inserts on
+                // average; sorting per insert is 46× more work than
+                // sorting each list once at the end.
+                GuideStore.mergeProgramInto(&dict, program: gp, for: cid, deferSort: true)
+                touchedChannelIDs.insert(cid)
+                // Track currently-airing program category.
+                if !prog.category.isEmpty, prog.startTime <= now, prog.endTime > now {
+                    currentCategoriesByChannelID[cid] = prog.category
+                }
             }
-            matched += 1
-            let gp = GuideProgram(channelID: cid, title: prog.title,
-                                  description: prog.description,
-                                  start: prog.startTime, end: prog.endTime,
-                                  category: prog.category)
-            mergeProgram(gp, for: cid)
-            // Track the currently-airing program per channel.
-            if !prog.category.isEmpty, prog.startTime <= now, prog.endTime > now {
-                currentCategoriesByChannelID[cid] = prog.category
+            // Sort the lists we actually modified.
+            for cid in touchedChannelIDs {
+                dict[cid]?.sort { $0.start < $1.start }
             }
-        }
-        debugLog("📺 XMLTV \(url.host ?? "?"): \(matched) programs matched, \(missed) skipped (no channel)")
-        // Back-fill ChannelStore so Tint Channel Cards reflects the
-        // XMLTV categories on every channel row.
-        ChannelStore.shared.applyXMLTVCategories(currentCategoriesByChannelID)
+            return XMLTVMergeResult(
+                dict: dict,
+                matched: matched,
+                missed: missed,
+                currentCategoriesByChannelID: currentCategoriesByChannelID
+            )
+        }.value
+
+        // Single @Published write on MainActor. SwiftUI sees one
+        // invalidation instead of 98k (which is what the old
+        // beginBatch/endBatch pair was also designed to do — but
+        // that version still ran the merge loop on main).
+        programs = result.dict
+        debugLog("📺 XMLTV \(hostLabel): \(result.matched) programs matched, \(result.missed) skipped (no channel)")
+        // Back-fill ChannelStore so Tint Channel Cards reflects
+        // the XMLTV categories on every channel row.
+        ChannelStore.shared.applyXMLTVCategories(result.currentCategoriesByChannelID)
     }
 
     // MARK: - Rolling Prefetch
@@ -1107,11 +1223,43 @@ final class GuideStore: ObservableObject {
     }
 
     // MARK: - Merge Helper
-    /// Adds a program to the store, avoiding duplicates, and keeps sorted by start time.
+    /// Adds a program to the store, avoiding duplicates, and keeps
+    /// sorted by start time. MainActor-isolated wrapper — picks the
+    /// right backing store (`_pendingPrograms` during a batch,
+    /// `programs` otherwise) and delegates to the nonisolated static
+    /// implementation so the logic can be shared with the
+    /// `performXMLTVFetch` off-main merge path.
     private func mergeProgram(_ prog: GuideProgram, for channelID: String) {
-        let target = _isBatching ? _pendingPrograms : programs
-        var list = target[channelID] ?? []
-        // Check for duplicate: same title+time or >80% overlap
+        if _isBatching {
+            Self.mergeProgramInto(&_pendingPrograms, program: prog, for: channelID)
+        } else {
+            Self.mergeProgramInto(&programs, program: prog, for: channelID)
+        }
+    }
+
+    /// Pure data-manipulation version of `mergeProgram`. `nonisolated`
+    /// + `static` so the XMLTV off-main merge loop can call it from
+    /// inside a `Task.detached` against a local dictionary, without
+    /// crossing the @MainActor boundary per iteration. Produces
+    /// identical results to the instance method above.
+    ///
+    /// `deferSort: true` lets bulk callers (the 98k-iteration XMLTV
+    /// merge) postpone sorting each channel's list until after all
+    /// inserts land — one sort per channel instead of one per
+    /// insert. For the single-item callers (Dispatcharr JSON fallback,
+    /// Xtream per-channel fetch) the default `false` preserves the
+    /// pre-refactor contract of "list is sorted on return."
+    nonisolated static func mergeProgramInto(
+        _ dict: inout [String: [GuideProgram]],
+        program prog: GuideProgram,
+        for channelID: String,
+        deferSort: Bool = false
+    ) {
+        var list = dict[channelID] ?? []
+        // Check for duplicate: same title + similar start time, OR
+        // >80% time overlap. The overlap check catches feeds that
+        // re-emit the same program with slightly-shifted timestamps
+        // (e.g. 6 PM vs. 6:01 PM from two mirrored XMLTV sources).
         if let idx = list.firstIndex(where: { existing in
             if existing.title == prog.title && abs(existing.start.timeIntervalSince(prog.start)) < 60 {
                 return true
@@ -1122,23 +1270,22 @@ final class GuideStore: ObservableObject {
             let progDuration = prog.end.timeIntervalSince(prog.start)
             return progDuration > 0 && overlap > 0 && overlap / progDuration > 0.8
         }) {
-            // Duplicate found — always replace if the new version has a longer description
-            // (e.g., seedFromChannels created a placeholder without description,
-            // then fetchUpcoming returned the same program with a description).
+            // Duplicate found — always replace if the new version
+            // has a longer description (e.g., seedFromChannels
+            // created a placeholder without description, then
+            // fetchUpcoming returned the same program with a
+            // description).
             if prog.description.count > list[idx].description.count {
                 list[idx] = prog
-                if _isBatching { _pendingPrograms[channelID] = list }
-                else { programs[channelID] = list }
+                dict[channelID] = list
             }
             return
         }
         list.append(prog)
-        list.sort { $0.start < $1.start }
-        if _isBatching {
-            _pendingPrograms[channelID] = list
-        } else {
-            programs[channelID] = list
+        if !deferSort {
+            list.sort { $0.start < $1.start }
         }
+        dict[channelID] = list
     }
 
     // MARK: - Seed EPGCache for List-View Cards
@@ -2120,7 +2267,31 @@ private struct GuideProgramButton: View {
         prog.end > Date()
     }
 
-    @State private var showRecordSheet = false
+    /// Unified sheet/cover driver for the program cell. Replaces the
+    /// previous `showRecordSheet: Bool` + `programInfoTarget:
+    /// ProgramInfoTarget?` pair of separate `.sheet` modifiers.
+    ///
+    /// Why: chaining two `.sheet(...)` modifiers on the same view
+    /// (or two `.fullScreenCover(...)` on tvOS) is a known SwiftUI
+    /// foot-gun — presenting one rebuilds the view hierarchy while
+    /// the other's binding is observed, which cascades back and
+    /// visibly flashes any active `contextMenu` during the open
+    /// animation. User report on iPad (v1.6.7 Debug): "Long press
+    /// on any program → Context menu flickers in and out of focus."
+    /// Consolidating to one `.sheet(item:)` (or `.fullScreenCover
+    /// (item:)`) + an enum payload keeps a single presentation
+    /// channel and eliminates the cross-modifier invalidation.
+    fileprivate enum GuideCellSheet: Identifiable {
+        case record
+        case programInfo(ProgramInfoTarget)
+        var id: String {
+            switch self {
+            case .record:               return "record"
+            case .programInfo(let t):   return "info-\(t.id)"
+            }
+        }
+    }
+    @State private var activeSheet: GuideCellSheet? = nil
     #if os(tvOS)
     // tvOS uses a confirmationDialog instead of .contextMenu because SwiftUI's
     // .contextMenu on tvOS rebuilds its UIMenu items every time the backing
@@ -2128,6 +2299,30 @@ private struct GuideProgramButton: View {
     // route is a self-contained modal that is not re-evaluated from cell
     // updates, so the highlight stays stable.
     @State private var showCtxDialog = false
+    #endif
+    #if os(iOS)
+    /// iOS long-press menu. Mirrors the mechanism ChannelListView
+    /// already uses on upcoming-schedule rows (`.popover` over
+    /// `.onLongPressGesture`) rather than `.contextMenu(menuItems:)`.
+    ///
+    /// Why: `.contextMenu` compiles to a UIKit `UIMenu` whose elements
+    /// are rebuilt every time SwiftUI re-evaluates the cell body. Any
+    /// ancestor `@Published` fire (VODStore still churning through
+    /// its 779+479 categories on a slow server, for instance)
+    /// cascades down to the cell, rebuilds the UIMenuElement array,
+    /// and UIKit's "menu appearing" animation fades each item in —
+    /// which the user sees as the four menu rows dimming and
+    /// brightening over and over while the menu sits open. We
+    /// proved this via Equatable + `.equatable()` (didn't help
+    /// because `@EnvironmentObject favoritesStore` on the cell is a
+    /// second re-render trigger that Equatable can't gate) before
+    /// switching to this pure-SwiftUI popover approach.
+    ///
+    /// The popover renders a custom action-list view (see
+    /// `guideProgramActionPopover`). It's SwiftUI all the way down,
+    /// so SwiftUI's own diffing handles any ancestor re-renders
+    /// without visible animation churn.
+    @State private var showGuidePopover = false
     #endif
 
     var body: some View {
@@ -2165,9 +2360,21 @@ private struct GuideProgramButton: View {
                        : "Add to Favorites") {
                     favoritesStore.toggle(channelItem)
                 }
+                Button("Program Info") {
+                    activeSheet = .programInfo(
+                        ProgramInfoTarget(
+                            channelName: channelItem.name,
+                            title: prog.title,
+                            start: prog.start,
+                            end: prog.end,
+                            description: prog.description,
+                            category: prog.category
+                        )
+                    )
+                }
                 if isRecordable {
                     Button(prog.isLive ? "Record from Now" : "Record") {
-                        showRecordSheet = true
+                        activeSheet = .record
                     }
                 }
                 if isFutureProgram {
@@ -2186,140 +2393,224 @@ private struct GuideProgramButton: View {
                     }
                 }
             }
-            // tvOS: .sheet presents a small centred modal that cramps the
-            // Form rows and clips focus halos. Use .fullScreenCover so the
-            // record form gets real estate comparable to the rest of the
-            // app's tvOS UI.
-            .fullScreenCover(isPresented: $showRecordSheet) {
-                RecordProgramSheet(
-                    programTitle: prog.title,
-                    programDescription: prog.description,
-                    channelID: channelItem.id,
-                    channelName: channelItem.name,
-                    scheduledStart: prog.start,
-                    scheduledEnd: prog.end,
-                    isLive: prog.isLive
-                )
+            // tvOS: .fullScreenCover (single, item-driven) — see
+            // `GuideCellSheet` doc for why we consolidated.
+            .fullScreenCover(item: $activeSheet) { sheet in
+                switch sheet {
+                case .record:
+                    RecordProgramSheet(
+                        programTitle: prog.title,
+                        programDescription: prog.description,
+                        channelID: channelItem.id,
+                        channelName: channelItem.name,
+                        scheduledStart: prog.start,
+                        scheduledEnd: prog.end,
+                        isLive: prog.isLive
+                    )
+                case .programInfo(let target):
+                    ProgramInfoView(target: target)
+                }
             }
         #else
         cellContent
             .contentShape(Rectangle())
             .onTapGesture { onSelect(channelItem) }
-            // `.contextMenu(menuItems:preview:)` — the preview form is
-            // REQUIRED here. Program cells are sized to the
-            // program's on-guide duration (often hundreds of pixels
-            // wide for a 90-minute show), which made the default
-            // auto-generated preview enormous; iOS couldn't fit it
-            // next to the touch and anchored the whole menu at the
-            // screen bottom instead. Supplying a compact 320-pt
-            // preview lets the system place the menu right next to
-            // the user's finger, which is what #23 asked for.
-            .contextMenu(menuItems: {
-                // Favorite toggle — same action as long-pressing the
-                // channel column on the left. Placed first so users
-                // can manage favorites without hunting for the
-                // narrow channel cell.
-                Button {
+            .onLongPressGesture(minimumDuration: 0.4) {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                showGuidePopover = true
+            }
+            .popover(isPresented: $showGuidePopover, attachmentAnchor: .rect(.bounds)) {
+                guideProgramActionPopover
+                    .presentationCompactAdaptation(.popover)
+            }
+            // iOS: single .sheet(item:) — see `GuideCellSheet` doc
+            // for why presenting both Record + Program Info through
+            // separate sheet modifiers was bad.
+            .sheet(item: $activeSheet) { sheet in
+                switch sheet {
+                case .record:
+                    RecordProgramSheet(
+                        programTitle: prog.title,
+                        programDescription: prog.description,
+                        channelID: channelItem.id,
+                        channelName: channelItem.name,
+                        scheduledStart: prog.start,
+                        scheduledEnd: prog.end,
+                        isLive: prog.isLive
+                    )
+                case .programInfo(let target):
+                    ProgramInfoView(target: target)
+                }
+            }
+        #endif
+    }
+
+    #if os(iOS)
+    /// SwiftUI-native long-press menu content for iOS guide cells.
+    /// Replaces the old `.contextMenu(menuItems:preview:)` because
+    /// that form re-compiled its UIMenuElement array on every cell
+    /// body re-eval, which made the menu items visibly pulse while
+    /// the menu was open (the UIKit "menu appearing" fade fires per
+    /// rebuild). This popover stays in SwiftUI land end-to-end, so
+    /// SwiftUI's own diffing handles any ancestor re-renders without
+    /// animation churn. Mirrors `ChannelListView.programActionPopover`
+    /// both in structure and visual weight for UX consistency.
+    @ViewBuilder
+    private var guideProgramActionPopover: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header — channel + program title + time range. The
+            // iOS context menu used to do this via its
+            // `preview:` closure; doing it inline here gives the
+            // same "what am I about to act on?" affordance without
+            // needing the now-gone preview slot.
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    if prog.isLive {
+                        Text("LIVE")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.statusLive)
+                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                    }
+                    Text(channelItem.name)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.textSecondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
+                Text(prog.title)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.textPrimary)
+                    .lineLimit(2)
+                Text("\(shortTimeFormatter.string(from: prog.start)) – \(shortTimeFormatter.string(from: prog.end))")
+                    .font(.system(size: 12))
+                    .foregroundColor(.textTertiary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
+
+            Divider()
+
+            VStack(spacing: 0) {
+                // Favorite toggle first — most frequent action on a
+                // program cell that isn't "just play it."
+                guidePopoverActionButton(
+                    title: favoritesStore.isFavorite(channelItem.id)
+                        ? "Remove from Favorites"
+                        : "Add to Favorites",
+                    systemImage: favoritesStore.isFavorite(channelItem.id)
+                        ? "star.slash"
+                        : "star",
+                    isDestructive: false
+                ) {
                     favoritesStore.toggle(channelItem)
-                } label: {
-                    if favoritesStore.isFavorite(channelItem.id) {
-                        Label("Remove from Favorites", systemImage: "star.slash")
-                    } else {
-                        Label("Add to Favorites", systemImage: "star")
+                    showGuidePopover = false
+                }
+                guidePopoverActionButton(
+                    title: "Program Info",
+                    systemImage: "info.circle",
+                    isDestructive: false
+                ) {
+                    showGuidePopover = false
+                    // Slight delay so the popover dismiss animation
+                    // finishes before the sheet presents — iOS
+                    // sometimes swallows the sheet without this.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        activeSheet = .programInfo(
+                            ProgramInfoTarget(
+                                channelName: channelItem.name,
+                                title: prog.title,
+                                start: prog.start,
+                                end: prog.end,
+                                description: prog.description,
+                                category: prog.category
+                            )
+                        )
                     }
                 }
                 if isRecordable {
-                    Button {
-                        showRecordSheet = true
-                    } label: {
-                        Label(prog.isLive ? "Record from Now" : "Record", systemImage: "record.circle")
+                    guidePopoverActionButton(
+                        title: prog.isLive ? "Record from Now" : "Record",
+                        systemImage: "record.circle",
+                        isDestructive: false
+                    ) {
+                        showGuidePopover = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            activeSheet = .record
+                        }
                     }
                 }
                 if isFutureProgram {
                     if reminderManager.hasReminder(forKey: reminderKey) {
-                        Button(role: .destructive) {
+                        guidePopoverActionButton(
+                            title: "Cancel Reminder",
+                            systemImage: "bell.slash",
+                            isDestructive: true
+                        ) {
                             reminderManager.cancelReminder(forKey: reminderKey)
-                        } label: {
-                            Label("Cancel Reminder", systemImage: "bell.slash")
+                            showGuidePopover = false
                         }
                     } else {
-                        Button {
+                        guidePopoverActionButton(
+                            title: "Set Reminder",
+                            systemImage: "bell.badge",
+                            isDestructive: false
+                        ) {
                             reminderManager.scheduleReminder(
                                 programTitle: prog.title,
                                 channelName: channelItem.name,
                                 startTime: prog.start
                             )
-                        } label: {
-                            Label("Set Reminder", systemImage: "bell")
+                            showGuidePopover = false
                         }
                     }
                 }
-            }, preview: {
-                programPreviewCard
-            })
-            .sheet(isPresented: $showRecordSheet) {
-                RecordProgramSheet(
-                    programTitle: prog.title,
-                    programDescription: prog.description,
-                    channelID: channelItem.id,
-                    channelName: channelItem.name,
-                    scheduledStart: prog.start,
-                    scheduledEnd: prog.end,
-                    isLive: prog.isLive
-                )
-            }
-        #endif
-    }
-
-    #if !os(tvOS)
-    /// Compact preview card used by `.contextMenu(menuItems:preview:)`
-    /// so the iOS system can anchor the long-press menu next to the
-    /// finger. Sized small enough (320 pt wide, 2-line title, 4-line
-    /// description) that iOS never has to punt the menu to the screen
-    /// bottom — which was the symptom user Veldmuus called out in #23.
-    private var programPreviewCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                if prog.isLive {
-                    Text("LIVE")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.statusLive)
-                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                }
-                Text(channelItem.name)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.textSecondary)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-
-            Text(prog.title)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(.textPrimary)
-                .lineLimit(2)
-                .multilineTextAlignment(.leading)
-
-            Text("\(shortTimeFormatter.string(from: prog.start)) – \(shortTimeFormatter.string(from: prog.end))")
-                .font(.system(size: 12))
-                .foregroundColor(.textTertiary)
-
-            if !prog.description.isEmpty {
-                Text(prog.description)
-                    .font(.system(size: 13))
-                    .foregroundColor(.textSecondary)
-                    .lineLimit(4)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(14)
-        .frame(width: 320, alignment: .leading)
-        .background(Color.cardBackground)
+        .frame(minWidth: 260, idealWidth: 300, maxWidth: 340)
+    }
+
+    /// One row inside `guideProgramActionPopover`. Same visual
+    /// contract as `ChannelListView.popoverActionButton` —
+    /// full-width tap target with leading icon + label — but the
+    /// two views live in different modules so they can't share a
+    /// private implementation. Small enough that the duplication
+    /// is cheaper than plumbing a shared helper.
+    private func guidePopoverActionButton(
+        title: String,
+        systemImage: String,
+        isDestructive: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(isDestructive ? .red : .accentPrimary)
+                    .frame(width: 20)
+                Text(title)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(isDestructive ? .red : .textPrimary)
+                Spacer()
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 11)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
     #endif
+
+    // `programPreviewCard` removed — previously fed the iOS
+    // `.contextMenu(menuItems:preview:)` preview slot (#23 fix in
+    // v1.6.4). The header strip inside `guideProgramActionPopover`
+    // now carries the same "what am I about to act on?" affordance
+    // (channel name + LIVE badge + program title + time range)
+    // inside the popover itself, so the separate preview card is
+    // no longer needed.
 
     #if os(tvOS)
     /// Focused = bright highlight, live = lighter gray, future = dark.

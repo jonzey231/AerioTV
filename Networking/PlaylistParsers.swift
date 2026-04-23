@@ -121,10 +121,31 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
     private var currentChannelID = ""
     private var currentTitle = ""
     private var currentDesc = ""
-    private var currentCategory = ""
+    /// Accumulated as a list instead of a single string because real
+    /// XMLTV feeds (Schedules Direct, Zap2it via Dispatcharr) emit
+    /// one `<category>` element per tag — e.g. `<category>Episode
+    /// </category><category>Series</category><category>Reality
+    /// </category><category>Law</category>` — and the previous
+    /// `currentCategory += trimmed` form concatenated all four into
+    /// the single string `"EpisodeSeriesRealityLaw"`. That surfaced
+    /// in the Program Info modal as one absurd merged pill. Joining
+    /// with a comma at programme-close time lets the pill renderer
+    /// (which already splits on `,/;`) produce one pill per tag.
+    private var currentCategories: [String] = []
     private var currentStart = ""
     private var currentStop = ""
     private var currentElement = ""
+    /// Text accumulator for the currently-open text-bearing element
+    /// (`<title>`, `<desc>`, or `<category>`). Reset by
+    /// `didStartElement` and consumed by `didEndElement`. The old
+    /// parser trimmed each `foundCharacters` fragment before
+    /// appending, which silently dropped word-internal boundaries
+    /// when `Foundation.XMLParser` chose to yield text in multiple
+    /// chunks — e.g. `<title>Hello World</title>` could surface as
+    /// `"HelloWorld"` if the parser split on the space. Codex C1
+    /// flagged this; accumulating raw text and trimming once at
+    /// close time fixes it.
+    private var currentText = ""
     private var insideProgramme = false
 
     // MARK: - Public entry points
@@ -155,33 +176,65 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
                 qualifiedName qName: String?,
                 attributes attributeDict: [String: String] = [:]) {
         currentElement = elementName
+        // Reset the per-element text accumulator on every new
+        // element so the previous element's trailing content /
+        // inter-element whitespace doesn't leak in. This is
+        // independent of `insideProgramme` — we want `currentText`
+        // clean even for structural elements like `<tv>` that
+        // don't have consumed text.
+        currentText = ""
         if elementName == "programme" {
-            insideProgramme  = true
-            currentChannelID = attributeDict["channel"] ?? ""
-            currentStart     = attributeDict["start"] ?? ""
-            currentStop      = attributeDict["stop"] ?? ""
-            currentTitle     = ""
-            currentDesc      = ""
-            currentCategory  = ""
+            insideProgramme   = true
+            currentChannelID  = attributeDict["channel"] ?? ""
+            currentStart      = attributeDict["start"] ?? ""
+            currentStop       = attributeDict["stop"] ?? ""
+            currentTitle      = ""
+            currentDesc       = ""
+            currentCategories = []
         }
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
         guard insideProgramme else { return }
-        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        switch currentElement {
-        case "title":    currentTitle    += trimmed
-        case "desc":     currentDesc     += trimmed
-        case "category": currentCategory += trimmed
-        default: break
-        }
+        // Accumulate the raw fragment. Trimming happens once in
+        // `didEndElement` so multi-chunk text (e.g. "Hello " +
+        // "World" from a single `<title>Hello World</title>`) stays
+        // intact. See `currentText` doc for the bug this fixes.
+        currentText += string
     }
 
     func parser(_ parser: XMLParser,
                 didEndElement elementName: String,
                 namespaceURI: String?,
                 qualifiedName qName: String?) {
+        if insideProgramme {
+            let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
+            switch elementName {
+            case "title":
+                // First non-empty `<title>` wins — XMLTV in the wild
+                // sometimes emits a second localised title element
+                // per programme; the first is the canonical one.
+                if currentTitle.isEmpty && !trimmed.isEmpty {
+                    currentTitle = trimmed
+                }
+            case "desc":
+                // Same "first wins" policy as title — localised
+                // `<desc lang="...">` duplicates would otherwise
+                // collide.
+                if currentDesc.isEmpty && !trimmed.isEmpty {
+                    currentDesc = trimmed
+                }
+            case "category":
+                // Each `<category>` is a separate entry. Empty
+                // elements (rare but seen) are skipped so the
+                // joined output doesn't get `",,"` noise the pill
+                // splitter would have to clean up.
+                if !trimmed.isEmpty {
+                    currentCategories.append(trimmed)
+                }
+            default: break
+            }
+        }
         if elementName == "programme" {
             insideProgramme = false
             if let start = parseXMLTVDate(currentStart),
@@ -193,7 +246,7 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
                     description: currentDesc,
                     startTime:   start,
                     endTime:     stop,
-                    category:    currentCategory
+                    category:    currentCategories.joined(separator: ",")
                 ))
             }
         }
