@@ -28,18 +28,3 @@ If a user launches Aerio from a Top Shelf VOD entry while the active
 server has no VOD library, the tab selection is set internally but
 the tab isn't mounted. Either force a VOD re-fetch before switching,
 or surface a brief toast explaining why the tap did nothing.
-
-## Under consideration
-
-### Per-tile audio picker in multiview
-Today multiview assigns audio to whichever tile was added last. Let
-users explicitly pick the audio tile from a multiview action sheet.
-
-### Simulator-aware WiFi detection warning
-The "Wi-Fi detected but SSID unknown" warning assumes Location
-permission is the cause. Detect iOS Simulator and airplane-mode edge
-cases so the warning points users at the real fix.
-
-## Recently shipped
-
-See [CHANGELOG.md](CHANGELOG.md) for everything that's already landed.
