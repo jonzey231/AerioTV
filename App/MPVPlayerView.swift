@@ -540,6 +540,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// shadow the NowPlaying lockscreen/Dynamic Island UI).
         fileprivate var pipAutoEligible: Bool = false
 
+        /// Tracks whether the app is currently in the iOS background
+        /// state. Set true in `didEnterBackground`, false in
+        /// `willEnterForeground`. v1.6.8: read by `renderAndPresent`
+        /// to decide whether to auto-pause mpv when the sample-buffer
+        /// layer enters `.failed` status — see the screen-lock fix
+        /// in that function for the full rationale.
+        fileprivate var isInBackground: Bool = false
+
         /// Weak reference to the `AVPictureInPictureController`
         /// built for this coordinator's VC. Used for diagnostic
         /// logging; the actual build/teardown cycle in
@@ -1079,6 +1087,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         @objc private func didEnterBackground() {
             guard let mpv else { return }
             #if os(iOS)
+            // v1.6.8: track background state so `renderAndPresent`
+            // can decide whether to auto-pause mpv when the sample-
+            // buffer layer flips to `.failed`. Set early so the
+            // flag is honoured even if any of the policy branches
+            // below short-circuit before the end of the function.
+            isInBackground = true
             // Background-audio discipline — audio plays with the app closed
             // ONLY when:
             //   (1) PiP is engaged (iOS drives the floating window),
@@ -1166,6 +1180,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         @objc private func willEnterForeground() {
             guard let mpv else { return }
+            // v1.6.8: clear the background flag immediately so any
+            // in-flight render callback that fires after this point
+            // doesn't redundantly auto-pause. The actual pause/resume
+            // logic below uses `autoPausedOnBackground` (separate
+            // flag) to decide whether mpv needs to be unpaused.
+            isInBackground = false
             // Re-enable video if the background handler disabled it.
             let vid = mpv_get_property_string(mpv, "vid")
             let vidStr = vid.flatMap { String(cString: $0) }
@@ -1542,9 +1562,55 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let layerReady = sampleBufferLayer?.sampleBufferRenderer.isReadyForMoreMediaData ?? false
             let layerStatus = sampleBufferLayer?.sampleBufferRenderer.status
 
-            // Enqueue — the renderPixelBuffer IS the rendered frame (zero copy via IOSurface)
+            // v1.6.8 lock-cycle fix: when the sample-buffer layer
+            // is in `.failed` state, skip the enqueue entirely —
+            // iOS will reject every buffer we hand it, and the
+            // render callback would otherwise spin uselessly,
+            // logging a 🔴 LAYER FAILED line per frame for the
+            // duration of the failure.
+            //
+            // Why this happens (the screen-lock case):
+            //   1. User locks iPhone during live playback.
+            //   2. `didEnterBackground` fires; `pipAutoEligible`
+            //      is true (auto-PiP is armed), so the policy
+            //      keeps mpv producing frames in case iOS
+            //      engages PiP.
+            //   3. Screen is OFF, so PiP doesn't actually engage.
+            //      VideoToolbox loses its session a few seconds
+            //      later (`-12903 invalid session`), mpv falls
+            //      back to software decode.
+            //   4. AVSampleBufferDisplayLayer transitions to
+            //      `.failed` because there's no display surface
+            //      to render to.
+            //   5. Render loop keeps shipping frames into the
+            //      failed layer for ~30 seconds until unlock.
+            //      CPU stays warm, battery wasted.
+            //
+            // The fix: when we detect `.failed` AND we're in
+            // background, auto-pause mpv (set `pause=1`). This
+            // stops mpv's decode loop, so no more wasted CPU on
+            // frames that can't be displayed. The existing
+            // `willEnterForeground` handler unpauses via the
+            // shared `autoPausedOnBackground` flag and flushes
+            // the layer to recover, so the resume path is
+            // already wired up.
+            //
+            // Foreground failures (rare; e.g. transient decoder
+            // glitch with the screen on) just skip the enqueue —
+            // we don't pause mpv because the user is watching
+            // and a brief blank frame is preferable to a
+            // surprise pause they didn't ask for.
             var enqueued = false
-            if let sampleBuffer = Self.makeSampleBuffer(from: renderPixelBuffer, presentationTime: presentationTime) {
+            if layerStatus == .failed {
+                if isInBackground && !autoPausedOnBackground, let mpvHandle = mpv {
+                    autoPausedOnBackground = true
+                    var pauseFlag: Int32 = 1
+                    mpv_set_property(mpvHandle, "pause", MPV_FORMAT_FLAG, &pauseFlag)
+                    #if DEBUG
+                    print("[MPV-BG] Background: sampleBufferRenderer FAILED — auto-paused mpv to stop wasted decode work")
+                    #endif
+                }
+            } else if let sampleBuffer = Self.makeSampleBuffer(from: renderPixelBuffer, presentationTime: presentationTime) {
                 nonisolated(unsafe) let sb = sampleBuffer
                 sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
                 enqueued = true
@@ -2428,12 +2494,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             let seekAction = self.progressStore.seekAction
                             let explicitMs = self.progressStore.explicitResumeMs
                             let vodID = self.progressStore.vodID
+                            let resumeServerID = self.progressStore.vodServerID
                             Task { @MainActor in
-                                // Prefer explicit position (from Continue Watching), fall back to DB
+                                // Prefer explicit position (from Continue Watching), fall back to DB.
+                                // v1.6.8 (Codex A1): pass serverID through so a movie/episode
+                                // ID that exists on multiple Dispatcharr servers resumes from
+                                // the right server's saved position.
                                 let resumeMs: Int32? = if let explicitMs, explicitMs > 0 {
                                     explicitMs
                                 } else if let vodID, !vodID.isEmpty {
-                                    WatchProgressManager.getResumePosition(vodID: vodID)
+                                    WatchProgressManager.getResumePosition(
+                                        vodID: vodID,
+                                        serverID: resumeServerID
+                                    )
                                 } else {
                                     nil
                                 }

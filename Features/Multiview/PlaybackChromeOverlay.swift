@@ -397,13 +397,18 @@ struct PlaybackChromeOverlay: View {
     /// saving the user a trip back to the guide + long-press.
     /// True when the audio tile has live EPG data so recording the
     /// currently-playing program is meaningful. Gates the iOS
-    /// Record pill — streams with no EPG (raw M3U / missing tvg-id)
-    /// hide the button entirely.
+    /// Record pill availability. v1.6.8 (B1 Phase 1): no longer
+    /// gates on EPG — Dispatcharr playlists don't populate
+    /// `currentProgram` at load time, so the prior gate hid the
+    /// pill permanently. We only need a stream URL to record;
+    /// `RecordProgramSheet` handles the missing-EPG case by
+    /// falling back to a generic title + default 60-minute
+    /// duration the user can override.
     private var canRecordCurrentProgram_iOS: Bool {
         guard let audioID = store.audioTileID,
               let audio = store.tiles.first(where: { $0.id == audioID })
         else { return false }
-        return audio.item.currentProgram?.isEmpty == false
+        return audio.item.streamURL != nil
     }
 
     #endif
@@ -683,16 +688,14 @@ struct PlaybackBottomChrome_tvOS: View {
 
     @EnvironmentObject private var chromeState: MultiviewChromeState
 
-    /// True when the audio tile has live EPG data so recording the
-    /// currently-playing program is meaningful. Gates the Record
-    /// pill — streams with no EPG (raw M3U / missing tvg-id) hide
-    /// the pill entirely rather than presenting a sheet with blank
-    /// program metadata.
+    /// Record pill availability (tvOS). v1.6.8 (B1 Phase 1): no
+    /// longer gates on EPG — see `canRecordCurrentProgram_iOS`
+    /// for full rationale. We only need a stream URL.
     private var canRecordCurrentProgram: Bool {
         guard let audioID = store.audioTileID,
               let audio = store.tiles.first(where: { $0.id == audioID })
         else { return false }
-        return audio.item.currentProgram?.isEmpty == false
+        return audio.item.streamURL != nil
     }
 
     var body: some View {

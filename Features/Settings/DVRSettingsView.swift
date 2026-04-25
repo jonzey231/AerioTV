@@ -7,6 +7,10 @@ struct DVRSettingsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var servers: [ServerConnection]
     @StateObject private var coordinator = RecordingCoordinator.shared
+    /// See SettingsView. Without this, accent-tinted icons and
+    /// destructive-action buttons freeze at the theme that was
+    /// active when DVRSettingsView was first pushed.
+    @ObservedObject private var theme = ThemeManager.shared
 
     // Buffers
     @AppStorage("dvrDefaultPreRollMins") private var defaultPreRoll = 0

@@ -4,6 +4,15 @@ import SwiftData
 import NetworkExtension
 import Network
 import CoreLocation
+// CoreWLAN is the native macOS Wi-Fi API and is reachable from Mac
+// Catalyst. We use it as a fallback when `NEHotspotNetwork.fetchCurrent()`
+// returns nil on Catalyst (a documented-but-misbehaving path: Apple
+// claims Catalyst support, but in practice the iOS NetworkExtension
+// SSID resolver only reliably reports a value on iPhone/iPad even
+// when the wifi-info entitlement + Location are both granted).
+#if targetEnvironment(macCatalyst)
+import CoreWLAN
+#endif
 #elseif os(tvOS)
 // tvOS doesn't expose NetworkExtension or the SSID APIs, but Network
 // (NWPathMonitor) is available — used by `TVLANProbe` below to
@@ -244,15 +253,15 @@ struct AerioApp: App {
                 #endif
                 // Start iCloud sync if enabled (pull happens during EPG loading)
                 SyncManager.shared.startObserving()
-                #if os(tvOS)
                 // Re-probe LAN on every foreground transition — covers
-                // the "user took the Apple TV / iPad to a different
-                // network and came back" case that the launch-only
-                // probe missed. `reprobe()` reuses the candidate
-                // snapshot from the most recent `probe(servers:)`
-                // call, so no modelContext access is required here.
+                // the "user took the Apple TV / iPad / Mac to a
+                // different network and came back" case that the
+                // launch-only probe missed. `reprobe()` reuses the
+                // candidate snapshot from the most recent
+                // `probe(servers:)` call, so no modelContext access
+                // is required here. v1.6.8: now runs on iOS too,
+                // not just tvOS — see TVLANProbe header.
                 TVLANProbe.shared.reprobe()
-                #endif
             case .inactive:    DebugLogger.shared.logLifecycle("Scene → inactive")
             case .background:
                 DebugLogger.shared.logLifecycle("Scene → background")
@@ -452,7 +461,44 @@ final class NetworkMonitor: ObservableObject {
     private func fetchSSID() {
         isRefreshing = true
         Task { @MainActor in
-            let ssid = await NEHotspotNetwork.fetchCurrent()?.ssid
+            // Primary path: NEHotspotNetwork.fetchCurrent() — the
+            // documented iOS / iPadOS / Mac Catalyst API. On
+            // iPhone + iPad with the wifi-info entitlement and
+            // Location granted, this reliably returns the current
+            // SSID. On Mac Catalyst it's documented as supported
+            // but ships with a long-standing behavioural gap: the
+            // call resolves to nil even when the underlying Wi-Fi
+            // interface is connected to a known network and the
+            // app has Location authorised. v1.6.8 user report
+            // (Mac Catalyst, MacBook on "4OH4") surfaced this:
+            // app showed "Detected SSID: Not detected" even though
+            // the Mac was actively on the configured home
+            // network.
+            var ssid = await NEHotspotNetwork.fetchCurrent()?.ssid
+
+            #if targetEnvironment(macCatalyst)
+            // Fallback path: CoreWLAN. `CWWiFiClient.shared().interface()?.ssid()`
+            // is the native macOS resolver and is reachable from
+            // Mac Catalyst (linker pulls in CoreWLAN.framework
+            // when imported under the `targetEnvironment(macCatalyst)`
+            // gate). It's synchronous, gated by the same
+            // wifi-info entitlement, and on macOS 14+ also
+            // requires Location — both of which are already in
+            // place. We only consult it when the NetworkExtension
+            // path returned nil, so on the (theoretical) Catalyst
+            // build where Apple eventually fixes NEHotspotNetwork,
+            // CoreWLAN stays out of the way.
+            if ssid == nil {
+                if let coreWLANSSID = CWWiFiClient.shared().interface()?.ssid(),
+                   !coreWLANSSID.isEmpty {
+                    DebugLogger.shared.log(
+                        "NetworkMonitor: NEHotspotNetwork returned nil, CoreWLAN fallback resolved SSID = \(coreWLANSSID)",
+                        category: "Network", level: .info)
+                    ssid = coreWLANSSID
+                }
+            }
+            #endif
+
             self.currentSSID = ssid
             UserDefaults.standard.set(ssid, forKey: "cachedCurrentSSID")
             self.isRefreshing = false
@@ -594,13 +640,36 @@ private class LocationDelegate: NSObject, CLLocationManagerDelegate {
 }
 #endif
 
-// MARK: - tvOS LAN Probe
-// tvOS has no SSID detection API (Apple doesn't expose
-// NetworkExtension's `NEHotspotNetwork` family on tvOS). Instead, we
-// probe the configured `localURL` and treat "the server responded" as
-// proof that we're on the home LAN. `ServerConnection.isOnLANNetwork`
-// reads the `"tvosLANDetected"` UserDefaults key this probe writes,
-// which `effectiveBaseURL` consults to decide LAN vs WAN routing.
+// MARK: - LAN Probe (cross-platform)
+//
+// History:
+//   • Originally tvOS-only because tvOS doesn't expose
+//     NetworkExtension's `NEHotspotNetwork` family — no SSID API
+//     means we had to fall back to "can we reach the configured
+//     localURL?" as the LAN detection signal.
+//   • v1.6.8: promoted to iOS / iPadOS / Mac Catalyst as well.
+//     Two reasons:
+//        1. Mac Catalyst's `NEHotspotNetwork.fetchCurrent()`
+//           returns nil even with the wifi-info entitlement +
+//           Location granted (long-standing Apple bug). SSID
+//           detection on Mac is effectively broken.
+//        2. Ethernet has no SSID at all. A user with a wired
+//           iPad / Mac would never get LAN routing under the
+//           SSID-only path even when the local server is on
+//           the same subnet.
+//     Probe-based detection works in both cases — if HEAD on the
+//     local URL succeeds, we're on the LAN, period.
+//
+// The class name (`TVLANProbe`) is kept for now to avoid touching
+// every call site; the legacy "tvosLANDetected" UserDefaults key is
+// likewise preserved so existing installs don't lose their last-known
+// LAN state across the update.
+//
+// `ServerConnection.isOnLANNetwork` reads this probe's result and OR's
+// it with the iOS SSID-match path, so iPhone / iPad still get the
+// fast SSID-only signal when NEHotspotNetwork works, but ALSO get the
+// probe-based fallback when it doesn't (Mac Catalyst, Ethernet, or any
+// case where SSID resolution returns nil).
 //
 // Reliability hardening (v1.6.7):
 //
@@ -631,7 +700,6 @@ private class LocationDelegate: NSObject, CLLocationManagerDelegate {
 // `TVLANProbe.shared.probe(servers:)` — the old static call sites
 // in `RootView.onAppear` + `onChange(servers.count)` are updated to
 // the new form.
-#if os(tvOS)
 @MainActor
 final class TVLANProbe: ObservableObject {
     static let shared = TVLANProbe()
@@ -845,7 +913,6 @@ final class TVLANProbe: ObservableObject {
         pathMonitor.start(queue: DispatchQueue.global(qos: .utility))
     }
 }
-#endif
 
 // MARK: - App Entry View (Splash → Root)
 // splashFinished is @State (in-memory only), so it resets to false on every
@@ -938,8 +1005,28 @@ struct RootView: View {
                 // re-added the same server via a different type would end
                 // up with orphaned EPG data that left the guide empty.
                 pruneOrphanedEPGPrograms()
-                #if os(tvOS)
+                // v1.6.8 (Codex D1): one-shot KVS → iCloud Keychain
+                // credential migration. For every server, copy any
+                // local-Keychain credential into the iCloud-synchronizable
+                // Keychain so a user's existing v1.6.7 install rolls
+                // forward without re-auth and so brand-new devices
+                // signed into the same Apple ID get credentials via
+                // Keychain (E2E encrypted) instead of relying on KVS
+                // plaintext. Idempotent: `migrateToSynchronizable`
+                // skips keys already in iCloud Keychain. The
+                // `kvsToKeychainMigrationDoneV1` flag prevents the
+                // (cheap) walk on every launch — the migration only
+                // needs to run once per device, since
+                // `mergeRemoteServers` and `saveCredentialsSynced`
+                // both write to iCloud Keychain on every save going
+                // forward.
+                migrateCredentialsToICloudKeychainIfNeeded()
+                // Cross-platform LAN probe (formerly tvOS-only). On
+                // iOS this complements the SSID-based detection so
+                // hardwired iPads / Mac Catalyst still get LAN
+                // routing even when SSID resolution returns nil.
                 TVLANProbe.shared.probe(servers: servers)
+                #if os(tvOS)
                 // If the user has no server configured (fresh install,
                 // uninstall+reinstall, or manually cleared), wipe any
                 // stale Top Shelf data from a previous install. Keychain
@@ -970,10 +1057,10 @@ struct RootView: View {
             }
             .onChange(of: servers.count) { _, count in
                 debugLog("🟡 RootView.onChange(servers.count): count=\(count), isMergingRemote=\(isMergingRemote)")
-                #if os(tvOS)
-                // Re-probe LAN whenever servers change (e.g., iCloud sync delivers a server with localURL)
+                // Re-probe LAN whenever servers change (e.g., iCloud
+                // sync delivers a server with localURL). Cross-
+                // platform as of v1.6.8 — see TVLANProbe header.
                 TVLANProbe.shared.probe(servers: servers)
-                #endif
                 guard !isMergingRemote else {
                     debugLog("🟡 RootView.onChange(servers.count): SKIPPED (isMergingRemote)")
                     return
@@ -1043,6 +1130,62 @@ struct RootView: View {
     /// AND scoping `loadFromCache` to the active server so orphaned rows
     /// can't leak in. This function handles users who are UPGRADING from
     /// a buggy build and still have orphans sitting in their storage.
+    /// v1.6.8 (Codex D1): one-shot launch migration that walks every
+    /// `ServerConnection` and copies its local-Keychain credentials
+    /// into the iCloud-synchronizable Keychain via
+    /// `KeychainHelper.migrateToSynchronizable`. Gated by a UserDefaults
+    /// flag so the (cheap) walk runs at most once per device.
+    ///
+    /// Why it's safe to run unconditionally idempotent:
+    ///   • `migrateToSynchronizable` reads the local Keychain item
+    ///     and skips writing to iCloud Keychain when an iCloud item
+    ///     already exists for the same key. So re-running can't
+    ///     corrupt or downgrade an already-migrated credential.
+    ///   • Local Keychain items remain in place — we don't delete
+    ///     them. `effectivePassword`/`effectiveApiKey`'s read order
+    ///     (local → iCloud → SwiftData) makes the local copy a
+    ///     valid fallback if the user later disables iCloud Sync.
+    ///
+    /// Why we keep KVS plaintext through `SyncManager.serialize`:
+    ///   v1.6.7 devices read credentials from the KVS payload's
+    ///   `_password` / `_apiKey` fields. If we stop pushing those
+    ///   now, any device still on v1.6.7 in the user's fleet stops
+    ///   getting credential updates. The KVS plaintext is scheduled
+    ///   for removal in v1.7.x once the v1.6.7 install base has
+    ///   rolled forward.
+    private func migrateCredentialsToICloudKeychainIfNeeded() {
+        let flagKey = "kvsToKeychainMigrationDoneV1"
+        if UserDefaults.standard.bool(forKey: flagKey) { return }
+        // Migration only does useful work when iCloud Sync is on —
+        // otherwise the local Keychain is the only intended store
+        // and copying to iCloud Keychain would defy the user's
+        // explicit "no iCloud" preference. The flag is still set
+        // so we don't re-walk on every launch; if the user enables
+        // iCloud Sync later, `saveCredentialsSynced` writes to both
+        // stores on every credential save and `mergeRemoteServers`
+        // fills in iCloud Keychain when remote servers arrive.
+        guard SyncManager.shared.isSyncEnabled else {
+            UserDefaults.standard.set(true, forKey: flagKey)
+            return
+        }
+        var migrated = 0
+        for server in servers {
+            let id = server.id.uuidString
+            if KeychainHelper.migrateToSynchronizable(key: "password_\(id)") {
+                migrated += 1
+            }
+            if KeychainHelper.migrateToSynchronizable(key: "apiKey_\(id)") {
+                migrated += 1
+            }
+        }
+        UserDefaults.standard.set(true, forKey: flagKey)
+        if migrated > 0 {
+            DebugLogger.shared.log(
+                "Credential migration: copied \(migrated) credential(s) to iCloud Keychain across \(servers.count) server(s)",
+                category: "Sync", level: .info)
+        }
+    }
+
     private func pruneOrphanedEPGPrograms() {
         // Fetch + iterate all EPGProgram rows on the main MainActor
         // context WAS the dominant cost of warm-relaunch startup on
@@ -1166,12 +1309,26 @@ struct RootView: View {
 
         // Save credentials to Keychain (must stay on main thread — Security
         // framework can trigger dispatch_assert_queue when called off-main).
+        //
+        // v1.6.8 (Codex D1): also write to the iCloud-synchronizable
+        // Keychain so a credential merged in from one device propagates
+        // to every other device on the same Apple ID without going
+        // through the KVS plaintext path. The local-only write stays
+        // for the case where the user later disables iCloud Sync —
+        // they still need a copy of their credentials on this device.
+        // `effectivePassword` / `effectiveApiKey` already prefer local,
+        // then iCloud, then SwiftData, so the dual write is invisible
+        // to readers. v1.6.7 devices keep working because we still
+        // include plaintext in the KVS payload (see
+        // `SyncManager.serialize`); the KVS plaintext gets phased out
+        // in v1.7.x once the v1.6.7 install base has rolled forward.
         for cred in pendingCredentials {
             debugLog("🔑 Saving credential: \(cred.key)")
             KeychainHelper.save(cred.value, for: cred.key)
+            KeychainHelper.save(cred.value, for: cred.key, synchronizable: true)
         }
         if !pendingCredentials.isEmpty {
-            debugLog("🔑 All \(pendingCredentials.count) credentials saved")
+            debugLog("🔑 All \(pendingCredentials.count) credentials saved (local + iCloud)")
         }
     }
 }

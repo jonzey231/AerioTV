@@ -267,6 +267,101 @@ final class GuideStore: ObservableObject {
         return result
     }
 
+    /// User-facing cache reset. Resets the in-memory state to a
+    /// pristine "no programs loaded" condition so the next
+    /// `loadFromCache` call performs a real SwiftData read instead
+    /// of replaying a stale idempotency entry, and so any pending
+    /// in-flight loads / parses get cancelled rather than landing
+    /// their results into freshly-purged state.
+    ///
+    /// Caller is responsible for actually clearing SwiftData (see
+    /// `purgeAllPrograms(modelContext:)`). Used by:
+    /// - The Settings → Guide Display → "Refresh EPG Data" action,
+    ///   so users can recover from corrupted cache rows that
+    ///   sometimes ship in mid-fetch interrupts (observed user
+    ///   report: program cells render as 1-pixel slivers because
+    ///   stop-times got truncated mid-parse, leaving rows with
+    ///   ~1-minute durations).
+    /// - The v1.6.7 one-shot migration inside `loadFromCache`'s
+    ///   detached task (which already does the SwiftData purge
+    ///   inline; just calls this for the in-memory side).
+    func invalidateCache() {
+        programs = [:]
+        lastLoadFromCacheResult = nil
+        inFlightLoadTask?.task.cancel()
+        inFlightLoadTask = nil
+        inFlightXMLTVTask?.task.cancel()
+        inFlightXMLTVTask = nil
+        lastSeedEPGCacheSignature = nil
+    }
+
+    /// User-facing "nuke the EPG cache" action. Clears the in-memory
+    /// state via `invalidateCache()` and deletes every `EPGProgram`
+    /// row in SwiftData on a background context (matches the
+    /// `pruneOrphanedEPGPrograms` pattern in `AerioApp.swift`). The
+    /// `await … .value` form means callers can sequence a fresh
+    /// fetch right after — typical pattern is
+    /// `await purgeAllPrograms(...)` followed by
+    /// `await ChannelStore.shared.forceRefresh(servers:)`.
+    func purgeAllPrograms(modelContext: ModelContext) async {
+        invalidateCache()
+        let container = modelContext.container
+        await Task.detached(priority: .userInitiated) {
+            let bgContext = ModelContext(container)
+            let all = (try? bgContext.fetch(FetchDescriptor<EPGProgram>())) ?? []
+            for ep in all { bgContext.delete(ep) }
+            try? bgContext.save()
+            debugLog("🗑️ User-initiated EPG cache purge: removed \(all.count) EPGProgram rows")
+        }.value
+    }
+
+    /// Per-playlist EPG purge. Deletes only the `EPGProgram` rows
+    /// whose `serverID` matches the given playlist UUID string, so
+    /// the user can scrub a single misbehaving playlist's cached
+    /// guide data without touching the others. v1.6.8: replaces
+    /// the global `purgeAllPrograms` action that used to live in
+    /// Settings → Appearance → EPG Cache; the per-playlist surface
+    /// is `ServerDetailView`'s "EPG Cache" section.
+    ///
+    /// In-memory state is only flushed when the purged server is
+    /// the currently-active one — `programs` is a single dictionary
+    /// scoped to whichever server `ChannelStore` last loaded, so
+    /// blowing it away while a different server is active would
+    /// hide a fresh guide that has nothing to do with the user's
+    /// purge target. Callers who need an immediate re-fetch should
+    /// pair this with `ChannelStore.shared.forceRefresh(servers:)`
+    /// when (and only when) the purge target is active.
+    ///
+    /// - Parameters:
+    ///   - serverID: stringified `ServerConnection.id.uuidString`.
+    ///     Matches the `EPGProgram.serverID` field written by the
+    ///     normal fetch path.
+    ///   - isActiveServer: callers know whether this purge applies
+    ///     to the currently-loaded server; only that case wipes the
+    ///     in-memory `programs` dictionary.
+    ///   - modelContext: any `MainActor` context — used to grab the
+    ///     `ModelContainer` so the actual delete can run on a
+    ///     background context.
+    func purgePrograms(
+        for serverID: String,
+        isActiveServer: Bool,
+        modelContext: ModelContext
+    ) async {
+        if isActiveServer {
+            invalidateCache()
+        }
+        let container = modelContext.container
+        await Task.detached(priority: .userInitiated) {
+            let bgContext = ModelContext(container)
+            let predicate = #Predicate<EPGProgram> { $0.serverID == serverID }
+            let descriptor = FetchDescriptor<EPGProgram>(predicate: predicate)
+            let matched = (try? bgContext.fetch(descriptor)) ?? []
+            for ep in matched { bgContext.delete(ep) }
+            try? bgContext.save()
+            debugLog("🗑️ Per-playlist EPG cache purge (server=\(serverID)): removed \(matched.count) EPGProgram rows")
+        }.value
+    }
+
     /// Save current programs to SwiftData for persistent caching.
     /// Runs on a background ModelContext (Task.detached) to avoid blocking the main thread.
     /// For 4000+ programs, a main-thread save can cause a 700ms+ hang.
@@ -2079,7 +2174,7 @@ private struct GuideChannelButton: View {
         // Emby-style: channel number on left, logo + name on right
         HStack(spacing: 8) {
             Text(channel.number)
-                .font(.system(size: 22, weight: .medium, design: .monospaced))
+                .font(.system(size: 22, weight: .bold, design: .monospaced))
                 .foregroundColor(.textTertiary)
                 .lineLimit(1)
                 .fixedSize(horizontal: true, vertical: false)
@@ -2129,7 +2224,7 @@ private struct GuideChannelButton: View {
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
                 Text(channel.number)
-                    .font(.system(size: 8))
+                    .font(.system(size: 8, weight: .bold))
                     .foregroundColor(.textTertiary)
             }
             .multilineTextAlignment(.center)
@@ -2405,7 +2500,9 @@ private struct GuideProgramButton: View {
                         channelName: channelItem.name,
                         scheduledStart: prog.start,
                         scheduledEnd: prog.end,
-                        isLive: prog.isLive
+                        isLive: prog.isLive,
+                        dispatcharrChannelID: channelItem.dispatcharrChannelID,
+                        streamURL: channelItem.streamURL
                     )
                 case .programInfo(let target):
                     ProgramInfoView(target: target)
@@ -2436,7 +2533,9 @@ private struct GuideProgramButton: View {
                         channelName: channelItem.name,
                         scheduledStart: prog.start,
                         scheduledEnd: prog.end,
-                        isLive: prog.isLive
+                        isLive: prog.isLive,
+                        dispatcharrChannelID: channelItem.dispatcharrChannelID,
+                        streamURL: channelItem.streamURL
                     )
                 case .programInfo(let target):
                     ProgramInfoView(target: target)

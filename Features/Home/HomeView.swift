@@ -1466,6 +1466,11 @@ final class ChannelStore: ObservableObject {
             // tagged with `tvg_id = str(channel.uuid)` by the server
             // (see `fetchDispatcharr` in `EPGGuideView.swift`).
             item.uuid = ch.uuid
+            // v1.6.8 (Codex A2): carry the numeric channel ID
+            // explicitly so `RecordProgramSheet` doesn't have to
+            // string-parse `item.id` to build a Dispatcharr
+            // recording request.
+            item.dispatcharrChannelID = ch.id
             return item
         }
         items = sortChannels(items, groupOrder: groupOrder)
@@ -2406,8 +2411,18 @@ struct MainTabView: View {
                         .padding(.vertical, 5)
                         .background(Color.black.opacity(0.5).clipShape(Capsule()))
                     }
-                    .buttonStyle(.plain)
+                    // iOS gets `.plain` (no chrome, just the label).
+                    // tvOS gets `TVNoHighlightButtonStyle` which
+                    // replaces the default system focus halo — the
+                    // bright-white outline the system applies to
+                    // `.plain` buttons is visually overwhelming on
+                    // a tiny capsule badge (user-reported v1.6.8).
+                    // `TVNoHighlightButtonStyle` uses the same gentle
+                    // accent-tinted scale + shadow pattern as every
+                    // other tvOS row in the app so focus feedback
+                    // stays consistent across the UI.
                     #if os(tvOS)
+                    .buttonStyle(TVNoHighlightButtonStyle())
                     // `.focusSection()` keeps this badge out of the
                     // default D-pad navigation path — it sits in its
                     // own focus region in the top-left corner, so
@@ -2416,6 +2431,8 @@ struct MainTabView: View {
                     // deliberately drive focus up-and-left to reach
                     // it.
                     .focusSection()
+                    #else
+                    .buttonStyle(.plain)
                     #endif
                     .padding(.leading, 16)
                     .padding(.top, 8)

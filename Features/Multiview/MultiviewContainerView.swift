@@ -136,6 +136,18 @@ struct MultiviewContainerView: View {
     /// call `reportInteraction()` from their button actions.
     @StateObject private var chromeState = MultiviewChromeState()
 
+    /// Settings → Multiview → "Padding Between Tiles". v1.6.8 —
+    /// false (default) keeps adjacent tiles meeting flush like the
+    /// original multiview design; true inserts an 8pt gap between
+    /// tiles so each stream stands on its own.
+    @AppStorage(multiviewTilePaddingKey)
+    private var paddingEnabled: Bool = false
+
+    /// Resolved spacing for the grid math, derived from the user's
+    /// preference. 0pt is the legacy flush layout; 8pt is the
+    /// "padded" layout introduced in v1.6.8.
+    private var tileSpacing: CGFloat { paddingEnabled ? 8 : 0 }
+
     var body: some View {
         // N=1 treatment — "this is effectively PlayerView" — is
         // gated on the unified-playback feature flag. Without the
@@ -701,16 +713,30 @@ struct MultiviewContainerView: View {
     /// reflects the current audio tile — if the user changed audio
     /// focus between tapping Record and the sheet animating in,
     /// they see the latest channel's program, not a stale snapshot.
-    /// Renders `EmptyView` if the audio tile has no EPG data (the
-    /// Record pill is gated on `canRecordCurrentProgram`, so this
-    /// path is usually unreachable; it's a safety net).
+    /// Renders `EmptyView` only when there's no audio tile or no
+    /// stream URL on it — both are unreachable in practice because
+    /// the parent `canRecordCurrentProgram*` gate already requires
+    /// a stream URL. v1.6.8 (B1 Phase 1): no longer falls through
+    /// to `EmptyView` when EPG metadata is missing — Dispatcharr
+    /// playlists routinely have no `currentProgram` populated, and
+    /// the prior gate left users on those playlists with an
+    /// invisible / empty record sheet. The fallback path uses
+    /// generic title + a 60-minute default duration that the user
+    /// can override via `RecordProgramSheet`'s pre/post-roll
+    /// controls.
     @ViewBuilder
     private var recordSheetContent: some View {
         if let audioID = store.audioTileID,
            let audio = store.tiles.first(where: { $0.id == audioID }),
-           let programTitle = audio.item.currentProgram, !programTitle.isEmpty,
-           let start = audio.item.currentProgramStart,
-           let end = audio.item.currentProgramEnd {
+           audio.item.streamURL != nil {
+            let now = Date()
+            let hasEPG = (audio.item.currentProgram?.isEmpty == false)
+            let programTitle: String = audio.item.currentProgram
+                ?? "\(audio.item.name) live recording"
+            let start: Date = audio.item.currentProgramStart ?? now
+            let end: Date = (audio.item.currentProgramEnd
+                .flatMap { $0 > now ? $0 : nil })
+                ?? now.addingTimeInterval(3600)
             RecordProgramSheet(
                 programTitle: programTitle,
                 // `RecordProgramSheet.programDescription` is a
@@ -724,11 +750,16 @@ struct MultiviewContainerView: View {
                 channelName: audio.item.name,
                 scheduledStart: start,
                 scheduledEnd: end,
-                // Current program is by definition live (start ≤
-                // now < end). `RecordProgramSheet`'s `isLive` flag
-                // drives the "Record from Now" wording + the
-                // current-time seek.
-                isLive: true
+                // The chrome's Record pill is only enabled when the
+                // user is actively watching, so the recording is
+                // always "from now" — `isLive: true` drives the
+                // "Record from Now" wording + the current-time seek.
+                // `hasEPG` only affects the title fallback above
+                // (use the program name when known, otherwise the
+                // generic "<channel> live recording" string).
+                isLive: true,
+                dispatcharrChannelID: audio.item.dispatcharrChannelID,
+                streamURL: audio.item.streamURL
             )
         } else {
             EmptyView()
@@ -789,7 +820,7 @@ struct MultiviewContainerView: View {
             // they're already at live edge.
             MultiviewTileView(tile: fullscreenTile, store: store)
         } else {
-            let grid = MultiviewLayoutView(tiles: store.tiles) { tile in
+            let grid = MultiviewLayoutView(tiles: store.tiles, spacing: tileSpacing) { tile in
                 #if os(tvOS)
                 MultiviewTileView(tile: tile, store: store, isSoleTile: isSole)
                     .prefersDefaultFocus(store.audioTileID == tile.id, in: focusNS)

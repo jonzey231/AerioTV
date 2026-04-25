@@ -1,0 +1,38 @@
+// Aerio — project-wide build settings
+//
+// Forks: this is the ONE place to change the Apple Developer team
+// and bundle-identifier prefix. Edit the values below and rebuild —
+// no Xcode UI clicking, no pbxproj surgery required.
+//
+// Notes:
+//   • DEVELOPMENT_TEAM resolves to the 10-character team ID Apple
+//     issues to your Developer Program account. Find it via Apple
+//     Developer → Membership → Team ID.
+//   • BUNDLE_ID_PREFIX is the reverse-DNS prefix used by every
+//     target's PRODUCT_BUNDLE_IDENTIFIER. Each target appends its
+//     own suffix (e.g. `.aerio`, `.aerio.TopShelf`) so changing
+//     the prefix here automatically updates all of them.
+//   • You will ALSO need to update the iCloud KVS store identifier
+//     in SupportingFiles/Aerio.entitlements and Aerio_tvOS.entitlements
+//     to match your bundle ID, plus the App Group identifier in
+//     SupportingFiles/Info.plist for Top Shelf to work in your fork.
+//     Those four strings live outside this xcconfig because Apple
+//     entitlement files don't accept variable substitution.
+//
+// Wiring:
+//   This file is the project-level baseConfigurationReference for
+//   both Debug and Release configurations (see Aerio.xcodeproj's
+//   PBXProject XCConfigurationList). Target-level builds inherit
+//   these settings through the build-setting hierarchy unless they
+//   explicitly override them — which they shouldn't, because
+//   that's what this file is for.
+//
+// CocoaPods:
+//   The target-level baseConfigurationReference slots are owned by
+//   CocoaPods (Pods-Aerio_iOS.{debug,release}.xcconfig and the tvOS
+//   counterparts), so we attach at project level instead. Pods
+//   xcconfigs don't define DEVELOPMENT_TEAM or BUNDLE_ID_PREFIX, so
+//   they don't shadow the values below.
+
+DEVELOPMENT_TEAM = 47DTJ3Q67T
+BUNDLE_ID_PREFIX = app.molinete

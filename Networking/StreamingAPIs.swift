@@ -287,18 +287,21 @@ struct XtreamCodesAPI {
             let result = try await session.data(from: url)
             let status   = (result.1 as? HTTPURLResponse)?.statusCode
             let duration = Date().timeIntervalSince(start)
-            // Redact credentials from logged URL
-            var display = url.absoluteString
-            if display.contains(password) { display = display.replacingOccurrences(of: password, with: "***") }
-            if display.contains(username) { display = display.replacingOccurrences(of: username, with: "***") }
-            DebugLogger.shared.logNetwork(method: "GET", url: display, statusCode: status,
+            // v1.6.8 (Codex D4): the manual `replacingOccurrences`
+            // redaction that used to live here was fragile — it
+            // missed percent-encoded passwords and leaked the
+            // username regardless. `logNetwork` already routes
+            // through `DebugLogger.sanitize()` which handles the
+            // Xtream query-param pattern (`?username=X&password=Y`)
+            // uniformly, so we hand the raw URL to the logger and
+            // let the centralised sanitizer do the work.
+            DebugLogger.shared.logNetwork(method: "GET", url: url.absoluteString, statusCode: status,
                                           duration: duration, bytesReceived: result.0.count)
             return result
         } catch {
             let duration = Date().timeIntervalSince(start)
-            var display = url.absoluteString
-            if display.contains(password) { display = display.replacingOccurrences(of: password, with: "***") }
-            DebugLogger.shared.logNetwork(method: "GET", url: display, duration: duration, error: error)
+            DebugLogger.shared.logNetwork(method: "GET", url: url.absoluteString,
+                                          duration: duration, error: error)
             throw error
         }
     }

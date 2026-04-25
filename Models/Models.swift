@@ -223,14 +223,31 @@ final class ServerConnection {
         return localEPGURL
     }
 
-    /// The matched home SSID currently in use, if on LAN.
+    /// Human-readable label for "what put us on the LAN" — used by
+    /// Settings → Server Detail to explain LAN routing. Returns the
+    /// matched SSID when SSID detection succeeded, falls back to a
+    /// synthetic "Local Network" string when the LAN was confirmed
+    /// only via the URL probe (Ethernet, Mac Catalyst with broken
+    /// NEHotspotNetwork, etc.), and `nil` when neither signal fired.
     var activeHomeSSID: String? {
         #if os(tvOS)
-        // tvOS can't detect SSIDs — return a synthetic label if LAN is detected
+        // tvOS has no SSID API — probe is the only signal.
         return isOnLANNetwork ? "Local Network" : nil
         #else
+        // Prefer the matched-SSID label so users on iPhone / iPad with
+        // working NEHotspotNetwork see their network name.
         let current = UserDefaults.standard.string(forKey: "cachedCurrentSSID") ?? ""
-        return homeSSIDs.first(where: { $0 == current })
+        if let matched = homeSSIDs.first(where: { $0 == current }) {
+            return matched
+        }
+        // No SSID match (unknown SSID, no SSID detected, etc.) —
+        // surface the probe-based signal as a synthetic label so the
+        // UI doesn't say "Not on a home network" when LAN routing is
+        // actively in use.
+        if UserDefaults.standard.bool(forKey: "tvosLANDetected") {
+            return "Local Network"
+        }
+        return nil
         #endif
     }
 
@@ -242,12 +259,44 @@ final class ServerConnection {
     }
 
     /// Whether this device is currently on the home/LAN network.
-    /// iOS: checks cached SSID against configured home SSIDs.
-    /// tvOS: checks a reachability flag set at startup by probing the local URL.
+    /// True when the active network path looks like a LAN with this
+    /// server reachable on its local URL.
+    ///
+    /// Two independent signals are OR'd together so users on any
+    /// network medium get correct routing:
+    ///
+    ///   1. **SSID match** (iOS / iPadOS / Mac Catalyst only). The
+    ///      cached SSID — populated by `NetworkMonitor.fetchSSID()` —
+    ///      is checked against this server's configured `homeSSIDs`.
+    ///      Fast path that doesn't need a network round-trip and
+    ///      works pre-`localURL`-probe. Returns false on Ethernet
+    ///      (no SSID), on Mac Catalyst with broken NEHotspotNetwork,
+    ///      or before Location auth is granted.
+    ///
+    ///   2. **Probe result** (all platforms via `TVLANProbe`). The
+    ///      `localURL` was HEAD-probed at app launch / scenePhase
+    ///      .active / network-change and responded successfully.
+    ///      Network-medium-agnostic, so this catches Ethernet,
+    ///      VPN-bypass, and any other case where the local server
+    ///      is reachable but SSID resolution failed.
+    ///
+    /// Persistence keys are `"cachedCurrentSSID"` (NetworkMonitor)
+    /// and `"tvosLANDetected"` (TVLANProbe — legacy name kept to
+    /// avoid breaking existing installs that already have a
+    /// last-known LAN flag persisted under it).
     private var isOnLANNetwork: Bool {
+        // Probe-based signal — works on every platform, every
+        // network medium. Set by `TVLANProbe` (v1.6.8 cross-
+        // platform; class name is legacy from when it was
+        // tvOS-only).
+        let probeDetected = UserDefaults.standard.bool(forKey: "tvosLANDetected")
+        if probeDetected { return true }
+
         #if os(tvOS)
-        return UserDefaults.standard.bool(forKey: "tvosLANDetected")
+        return false
         #else
+        // SSID fast-path. Skips the lookup if the user hasn't
+        // configured any home SSIDs (would always return false).
         let ssids = homeSSIDs
         guard !ssids.isEmpty else { return false }
         let currentSSID = UserDefaults.standard.string(forKey: "cachedCurrentSSID") ?? ""

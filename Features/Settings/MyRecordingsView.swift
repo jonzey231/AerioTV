@@ -8,12 +8,36 @@ struct MyRecordingsView: View {
     @Query(sort: \Recording.createdAt, order: .reverse) private var allRecordings: [Recording]
     @Query private var servers: [ServerConnection]
     @StateObject private var coordinator = RecordingCoordinator.shared
+    /// See SettingsView. Re-renders on theme change so segmented
+    /// control + status pills + accent-tinted action buttons reflect
+    /// the active theme.
+    @ObservedObject private var theme = ThemeManager.shared
 
     @State private var selectedSegment = 0 // 0=Scheduled, 1=Recording, 2=Completed
     @State private var recordingToDelete: Recording?
     @State private var showDeleteConfirmation = false
     @State private var showDeleteFromServerAlert = false
     @State private var showDownloadConfirmation = false
+
+    // v1.6.8 (B1 Phase 1 / B2-partial): full-screen player
+    // presentation for completed recordings. Both local and
+    // Dispatcharr server playback land here — local recordings
+    // resolve to a `file://` URL pointing into
+    // `Documents/Recordings/`, server recordings to the
+    // Dispatcharr `/api/channels/recordings/<id>/file/` endpoint
+    // (which is `AllowAny` per `recordingPlaybackURL` doc, so
+    // no auth headers needed). One state variable drives both —
+    // the URL is enough for `PlayerView` to set up MPV.
+    @State private var playingRecording: PlayingRecording? = nil
+
+    /// Identifiable wrapper used by `.fullScreenCover(item:)`. Holds
+    /// just enough metadata for `PlayerView` to render a recording
+    /// (title is shown in the chrome; URL drives MPV).
+    struct PlayingRecording: Identifiable {
+        let id: UUID
+        let url: URL
+        let title: String
+    }
 
     private var scheduled: [Recording] {
         allRecordings.filter { $0.status == .scheduled }
@@ -139,6 +163,23 @@ struct MyRecordingsView: View {
         } message: {
             Text("Download this recording from the Dispatcharr server to your device's local storage.")
         }
+        // v1.6.8 (B1 Phase 1 / B2-partial): completed recording
+        // playback. Both local (`file://...`) and server
+        // (Dispatcharr `/api/channels/recordings/<id>/file/`)
+        // playback funnel through `playingRecording`. PlayerView is
+        // told `isLive: false` so transport controls show
+        // scrubbable seek instead of the live-edge UI; `urls` is
+        // a single-element array because we only have one file
+        // per recording (no failover candidates needed for
+        // file-backed playback).
+        .fullScreenCover(item: $playingRecording) { item in
+            PlayerView(
+                urls: [item.url],
+                title: item.title,
+                headers: [:],
+                isLive: false
+            )
+        }
         // Pull Dispatcharr server state whenever the view shows, then
         // keep it honest on a 30s tick while visible. SwiftUI cancels the
         // task on view disappear so we don't burn network on inactive
@@ -200,7 +241,7 @@ struct MyRecordingsView: View {
         if rec.isCompleted || rec.status == .stopped {
             if rec.destination == .local, let path = rec.localFilePath {
                 Button {
-                    playRecording(path: path)
+                    playRecording(rec, path: path)
                 } label: {
                     Label("Play", systemImage: "play.fill")
                 }
@@ -348,23 +389,50 @@ struct MyRecordingsView: View {
     private func playIfCompleted(_ rec: Recording) {
         guard rec.isCompleted || rec.status == .stopped else { return }
         if rec.destination == .local, let path = rec.localFilePath {
-            playRecording(path: path)
+            playRecording(rec, path: path)
         } else if rec.destination == .dispatcharrServer, rec.remoteRecordingID != nil {
             playServerRecording(rec)
         }
     }
 
-    private func playRecording(path: String) {
-        // TODO: Push PlayerView with local file URL
+    /// v1.6.8 (B1 Phase 1): plays a completed local recording from
+    /// disk. The on-disk path is the absolute filesystem path
+    /// written by `LocalRecordingSession`; we wrap it in a
+    /// `file://` URL and hand it to `PlayerView` via the
+    /// `playingRecording` state, which drives the
+    /// `.fullScreenCover` below. No headers needed — MPV reads
+    /// local files directly.
+    private func playRecording(_ rec: Recording, path: String) {
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: path) else {
+            debugLog("⚠️ Local recording file missing on disk: \(path) — id=\(rec.id)")
+            DebugLogger.shared.log(
+                "Local recording file missing — \(rec.programTitle) at \(path)",
+                category: "DVR", level: .warning)
+            return
+        }
         debugLog("▶️ Play local recording: \(path)")
+        playingRecording = PlayingRecording(
+            id: rec.id, url: url, title: rec.programTitle
+        )
     }
 
+    /// v1.6.8 (B2-partial): plays a completed Dispatcharr server
+    /// recording. The `/api/channels/recordings/<id>/file/`
+    /// endpoint is `AllowAny` (per `DispatcharrAPI.recordingPlaybackURL`
+    /// docstring) and supports HTTP Range, so we hand the URL
+    /// directly to `PlayerView` without auth headers.
     private func playServerRecording(_ rec: Recording) {
         guard let api = apiForRecording(rec),
               let remoteID = rec.remoteRecordingID,
-              let _ = api.recordingPlaybackURL(id: remoteID) else { return }
-        // TODO: Push PlayerView with server URL
-        debugLog("▶️ Play server recording: \(rec.remoteRecordingID ?? -1)")
+              let url = api.recordingPlaybackURL(id: remoteID) else {
+            debugLog("⚠️ Cannot play server recording — missing api / remoteID / URL for \(rec.programTitle)")
+            return
+        }
+        debugLog("▶️ Play server recording: id=\(remoteID) url=\(url.absoluteString)")
+        playingRecording = PlayingRecording(
+            id: rec.id, url: url, title: rec.programTitle
+        )
     }
 
     private func stopRecording(_ rec: Recording) {

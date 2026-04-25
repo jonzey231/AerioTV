@@ -14,6 +14,17 @@ struct SettingsView: View {
     /// pop the innermost level, then reset the binding.
     @Binding var popRequested: Bool
     #endif
+    /// Observes ThemeManager so SettingsView's body re-evaluates on
+    /// every `selectedTheme` / `useCustomAccent` / `customAccentHex`
+    /// change. Without this, child rows that pass `iconColor: .accentPrimary`
+    /// (a computed property that reads `ThemeManager.shared.accent`)
+    /// keep the old Color value because SettingsView never invalidates
+    /// — the rows are reconstructed only when SettingsView itself
+    /// re-renders. v1.6.8 user report: switching themes left
+    /// stale-coloured icons on App Settings + iCloud rows. Adding
+    /// the observer fixes the cascade by forcing re-render on every
+    /// theme mutation.
+    @ObservedObject private var theme = ThemeManager.shared
     @Query private var servers: [ServerConnection]
     @Environment(\.modelContext) private var modelContext
     @State private var showAddServer = false
@@ -216,14 +227,14 @@ struct SettingsView: View {
                     Section {
                         NavigationLink(destination: AppearanceSettingsView()) {
                             SettingsRow(icon: "paintbrush.fill", iconColor: .accentPrimary,
-                                        title: "Appearance", subtitle: "Theme & display options")
+                                        title: "Appearance", subtitle: "Theme, scale & category colors")
                         }
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
-                        NavigationLink(destination: GuideDisplaySettingsView()) {
-                            SettingsRow(icon: "calendar", iconColor: .accentPrimary,
-                                        title: "Guide Display", subtitle: "Category colors, channel stripe & guide size")
+                        NavigationLink(destination: MultiviewSettingsView()) {
+                            SettingsRow(icon: "rectangle.split.2x2.fill", iconColor: .accentPrimary,
+                                        title: "Multiview", subtitle: "Audio focus, tile spacing & corners")
                         }
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
@@ -404,6 +415,19 @@ struct SettingsView: View {
                 }
                 .listStyle(.insetGrouped)
                 .scrollContentBackground(.hidden)
+                // v1.6.8 fix: SwiftUI's List on Mac Catalyst (and to a
+                // lesser extent iPad) caches cell content rendering at
+                // the UIKit (UITableView) layer. When the theme
+                // changes, parent view body re-evaluation isn't enough
+                // to force every cell — particularly section headers,
+                // footers, and `SettingsRow` subtitle text — to pick
+                // up the new accent-derived `Color.textSecondary` /
+                // `.textTertiary`. Keying the List's identity on the
+                // active theme name forces a full teardown + rebuild
+                // on theme switches, guaranteeing every cell renders
+                // with the new palette. Trade-off is scroll position
+                // resets to top, which is acceptable for Settings.
+                .id("settings-list-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
                 #endif
             }
             #if os(iOS)
@@ -415,7 +439,7 @@ struct SettingsView: View {
             .navigationDestination(for: String.self) { route in
                 switch route {
                 case "appearance":      AppearanceSettingsView()
-                case "guide-display":   GuideDisplaySettingsView()
+                case "multiview":       MultiviewSettingsView()
                 case "network":         NetworkSettingsView()
                 case "dvr-settings": DVRSettingsView()
                 case "developer":  DeveloperSettingsView()
@@ -590,6 +614,36 @@ struct SettingsView: View {
                                               onSetActive: servers.count > 1 ? { setActiveServer(server) } : nil)
                             }
                             .contextMenu {
+                                // "Use This Playlist" — primary tvOS
+                                // path for switching between playlists.
+                                // The on-row "○ → ●" checkmark button
+                                // exists but uses
+                                // `TVNoHighlightButtonStyle()` and
+                                // sits inside the outer
+                                // `TVSettingsNavRow`'s
+                                // `NavigationLink`, which consumes
+                                // every tap to push the detail view —
+                                // so tvOS focus never reaches the
+                                // checkmark and users had no way to
+                                // switch playlists from the list.
+                                // Adding the action to the long-press
+                                // context menu (which tvOS users
+                                // already know to use for Edit /
+                                // Delete) lets them activate without
+                                // touching the row's primary tap
+                                // behaviour.
+                                if servers.count > 1 {
+                                    Button {
+                                        setActiveServer(server)
+                                    } label: {
+                                        if server.isActive {
+                                            Label("Active Playlist", systemImage: "checkmark.circle.fill")
+                                        } else {
+                                            Label("Use This Playlist", systemImage: "checkmark.circle")
+                                        }
+                                    }
+                                    .disabled(server.isActive)
+                                }
                                 Button { serverToEdit = server } label: {
                                     Label("Edit", systemImage: "pencil")
                                 }
@@ -610,10 +664,13 @@ struct SettingsView: View {
                 }
                 if !servers.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("Tap ○ to set the active playlist", systemImage: "checkmark.circle")
-                            .font(.system(size: 24, weight: .medium))
-                            .foregroundColor(.textPrimary.opacity(0.7))
-                        Label("Long press to edit or delete", systemImage: "hand.tap")
+                        // The "Tap ○" hint that used to live here was
+                        // misleading on tvOS — the checkmark button
+                        // is rendered but the focus engine can't
+                        // reach it through the outer NavigationLink.
+                        // Long-press is the actual path now (set
+                        // active / edit / delete all live there).
+                        Label("Long press for options: switch playlist, edit, or delete", systemImage: "hand.tap")
                             .font(.system(size: 24, weight: .medium))
                             .foregroundColor(.textPrimary.opacity(0.7))
                     }
@@ -625,12 +682,12 @@ struct SettingsView: View {
                 tvSettingsHeader("App Settings").padding(.top, 36)
                 VStack(spacing: 8) {
                     TVSettingsNavButton(label: "Appearance", icon: "paintbrush.fill",
-                                        iconColor: .accentPrimary, subtitle: "Theme & display options") {
+                                        iconColor: .accentPrimary, subtitle: "Theme, scale & category colors") {
                         navPath.append("appearance")
                     }
-                    TVSettingsNavButton(label: "Guide Display", icon: "calendar",
-                                        iconColor: .accentPrimary, subtitle: "Category colors, channel stripe & guide size") {
-                        navPath.append("guide-display")
+                    TVSettingsNavButton(label: "Multiview", icon: "rectangle.split.2x2.fill",
+                                        iconColor: .accentPrimary, subtitle: "Audio focus, tile spacing & corners") {
+                        navPath.append("multiview")
                     }
                     TVSettingsNavButton(label: "Network", icon: "network",
                                         iconColor: .accentSecondary, subtitle: "Timeout, buffer, home WiFi & refresh") {
@@ -1102,6 +1159,18 @@ struct SettingsRow: View {
     let iconColor: Color
     let title: String
     var subtitle: String? = nil
+    /// Observe ThemeManager so the subtitle's `.textSecondary`
+    /// (computed as `theme.accent.opacity(0.65)`) re-evaluates on
+    /// theme changes. v1.6.8: parent SettingsView observes
+    /// ThemeManager too, but SwiftUI's List + UITableView cell
+    /// diff skips re-rendering a row's body unless one of its
+    /// observed inputs changes — and Settings rows are
+    /// constructed with the same prop values across themes
+    /// (icon name + title + subtitle string). Subscribing the
+    /// row directly forces a body refresh on every theme push,
+    /// which is what makes `.textSecondary` actually pick up the
+    /// new opacity-tinted accent.
+    @ObservedObject private var theme = ThemeManager.shared
 
     #if os(tvOS)
     private let iconBoxSize: CGFloat = 48
@@ -1146,36 +1215,46 @@ struct SettingsRow: View {
 // MARK: - Server Detail View
 struct ServerDetailView: View {
     let server: ServerConnection
+    /// See SettingsView for the rationale — observing ThemeManager
+    /// makes every accent-tinted row in this detail page reactive to
+    /// theme changes (icons, status pills, action buttons).
+    @ObservedObject private var theme = ThemeManager.shared
     @Query private var servers: [ServerConnection]
+    /// Used by the per-playlist "Refresh EPG Data" action so the
+    /// detached delete can grab a `ModelContainer` from this context.
+    @Environment(\.modelContext) private var modelContext
     @State private var isTestingConnection = false
     @State private var connectionResult: String? = nil
     @State private var connectionSuccess = false
+    /// Per-playlist EPG-purge UX. v1.6.8: replaces the global
+    /// "Refresh EPG Data" action that used to live on
+    /// `AppearanceSettingsView`. Each playlist now owns its own
+    /// EPG-purge action so users with multiple servers can fix one
+    /// playlist's corrupted cache without nuking the others.
+    @State private var showPurgeConfirmation = false
+    @State private var isPurgingEPG = false
     #if os(iOS)
     @ObservedObject private var networkMonitor = NetworkMonitor.shared
     @State private var ssidRefreshed = false
     #endif
-    #if os(tvOS)
-    // tvOS has no SSID detection, so LAN detection runs through
-    // `TVLANProbe` (see AerioApp.swift). Observing the singleton
-    // lets this view surface the last probe result + drive the
-    // "Refresh LAN Detection" button's in-flight state without
-    // polling.
+    /// Cross-platform LAN-probe observer. `TVLANProbe` is the
+    /// (legacy-named) cross-platform reachability checker — see
+    /// `AerioApp.swift` for the v1.6.8 rationale. Observing the
+    /// singleton lets ServerDetailView surface the last probe
+    /// result on every platform so users on Ethernet / Mac Catalyst
+    /// (where SSID detection is broken) can still see WHY the app
+    /// thinks it's on LAN, plus drive the "Refresh LAN Detection"
+    /// button.
     @ObservedObject private var tvLANProbe = TVLANProbe.shared
     @State private var lanRefreshAcked = false
-    #endif
 
     private var hasLANConfigured: Bool {
-        #if os(tvOS)
-        // tvOS never populates `homeSSIDs` (no CoreLocation / NEHS
-        // APIs available), so the SSID guard was rendering the
-        // Active Connection section permanently hidden on tvOS even
-        // when the user had a `localURL` set. Relax the check on
-        // tvOS to just `localURL` — the probe-based LAN detection
-        // doesn't need an SSID match to function.
+        // v1.6.8: dropped the iOS-only `!homeSSIDs.isEmpty` guard.
+        // LAN now means "we have a localURL we can probe" on every
+        // platform — Ethernet users on iPad / Mac Catalyst have no
+        // SSID to configure but still want LAN routing when the
+        // probe succeeds.
         return server.type != .m3uPlaylist && !server.localURL.isEmpty
-        #else
-        return server.type != .m3uPlaylist && !server.localURL.isEmpty && !server.homeSSIDs.isEmpty
-        #endif
     }
 
     private var isOnLAN: Bool {
@@ -1290,16 +1369,22 @@ struct ServerDetailView: View {
                         }
                         #endif
 
-                        // tvOS LAN detection — no SSID API on tvOS, so
-                        // `TVLANProbe` (AerioApp.swift) decides LAN vs
-                        // WAN by probing `localURL`. These rows surface
-                        // the last probe result so users can see WHY
-                        // the mode badge above says what it says, and
-                        // the Refresh button re-runs the probe on
-                        // demand (e.g., after the user fixes a
-                        // misconfigured local URL without relaunching
-                        // the app).
-                        #if os(tvOS)
+                        // Cross-platform LAN probe rows. v1.6.8 promoted
+                        // `TVLANProbe` from tvOS-only to all platforms,
+                        // so these surface on iOS / iPad / Mac Catalyst
+                        // too. Two reasons it matters on iOS:
+                        //   • Ethernet has no SSID — the SSID rows
+                        //     above are useless on a wired iPad / Mac.
+                        //   • Mac Catalyst's NEHotspotNetwork is broken
+                        //     (returns nil even with wifi-info +
+                        //     Location); the probe is the actual
+                        //     source of truth there.
+                        // The "Refresh LAN Detection" button kicks a
+                        // fresh probe of every server's localURL —
+                        // matches the tvOS pattern, and the global
+                        // `tvosLANDetected` UserDefaults flag means a
+                        // refresh on one server's detail page picks
+                        // up the result for all of them.
                         if let host = tvLANProbe.lastHost, tvLANProbe.lastDetected {
                             infoRow("Last Probe Host", value: host, isMonospaced: true)
                         }
@@ -1313,15 +1398,6 @@ struct ServerDetailView: View {
                             )
                         }
                         Button {
-                            // Prefer probing the full server roster
-                            // so all candidate local URLs get a
-                            // fresh attempt, not just this detail
-                            // view's server. The probe is
-                            // inherently global (one
-                            // `tvosLANDetected` flag) — mirroring
-                            // that in the refresh action avoids the
-                            // user wondering why toggling refresh
-                            // on one server fixed another.
                             tvLANProbe.probe(servers: Array(servers))
                         } label: {
                             HStack(spacing: 8) {
@@ -1349,7 +1425,6 @@ struct ServerDetailView: View {
                                 }
                             }
                         }
-                        #endif
                     } header: {
                         Text("Active Connection").sectionHeaderStyle()
                     } footer: {
@@ -1427,6 +1502,48 @@ struct ServerDetailView: View {
                 } header: {
                     Text("Actions").sectionHeaderStyle()
                 }
+
+                // MARK: EPG Cache (per-playlist)
+                //
+                // Per-playlist "nuke + re-fetch" action. Lives here
+                // (instead of a single global toggle in Appearance)
+                // so users with multiple playlists can scrub one
+                // playlist's corrupted guide data without touching
+                // the others. The SwiftData delete is filtered by
+                // `EPGProgram.serverID == server.id`, and we only
+                // call `ChannelStore.forceRefresh` when the purged
+                // playlist is the active one — purging a non-active
+                // playlist just clears the cache, and the next time
+                // the user activates it the normal load path will
+                // refetch fresh EPG data.
+                Section {
+                    Button(role: .destructive) {
+                        showPurgeConfirmation = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            if isPurgingEPG {
+                                ProgressView().scaleEffect(0.8)
+                                    .frame(width: 14)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                            Text(isPurgingEPG ? "Refreshing EPG Data…" : "Refresh EPG Data")
+                                .font(.bodyMedium)
+                            Spacer()
+                        }
+                        .foregroundColor(isPurgingEPG ? .textSecondary : .statusWarning)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                    .disabled(isPurgingEPG)
+                } header: {
+                    Text("EPG Cache").sectionHeaderStyle()
+                } footer: {
+                    Text(server.isActive
+                         ? "Clears this playlist's cached guide data and downloads it fresh from the server. Use this if program cells look wrong or are missing. Takes a few minutes on large playlists."
+                         : "Clears this playlist's cached guide data. The fresh fetch will run automatically the next time you make this playlist active.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
             }
             #if os(iOS)
             .listStyle(.insetGrouped)
@@ -1440,6 +1557,39 @@ struct ServerDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
+        // Per-playlist EPG-purge confirmation. The action handler:
+        //   1. Always calls `GuideStore.shared.purgePrograms(for:…)`
+        //      to delete this playlist's EPGProgram rows on a
+        //      background context.
+        //   2. Only triggers `ChannelStore.shared.forceRefresh(...)`
+        //      when this playlist is the active one — refreshing a
+        //      non-active server would either no-op (forceRefresh
+        //      bails on non-active first(where:isActive)) or, worse,
+        //      hijack the user's currently-loaded data with a
+        //      different server's payload. For non-active purges we
+        //      just clear the cache and let the next activation
+        //      refetch normally.
+        .alert("Refresh EPG Data?", isPresented: $showPurgeConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Refresh", role: .destructive) {
+                Task {
+                    isPurgingEPG = true
+                    await GuideStore.shared.purgePrograms(
+                        for: server.id.uuidString,
+                        isActiveServer: server.isActive,
+                        modelContext: modelContext
+                    )
+                    if server.isActive {
+                        await ChannelStore.shared.forceRefresh(servers: Array(servers))
+                    }
+                    isPurgingEPG = false
+                }
+            }
+        } message: {
+            Text(server.isActive
+                 ? "All cached guide data for \"\(server.name)\" will be cleared and reloaded from the server. This may take a few minutes on large playlists."
+                 : "All cached guide data for \"\(server.name)\" will be cleared. The next time you make this playlist active, fresh guide data will load automatically.")
+        }
     }
 
     // MARK: - About computed properties
@@ -1569,6 +1719,8 @@ struct PlaylistListRow: View {
 struct EditPlaylistSheet: View {
     @Bindable var playlist: M3UPlaylist
     @Environment(\.dismiss) private var dismiss
+    /// See SettingsView for rationale.
+    @ObservedObject private var theme = ThemeManager.shared
 
     var body: some View {
         NavigationStack {
@@ -1627,6 +1779,8 @@ struct EditPlaylistSheet: View {
 struct EditServerSheet: View {
     @Bindable var server: ServerConnection
     @Environment(\.dismiss) private var dismiss
+    /// See SettingsView for rationale.
+    @ObservedObject private var theme = ThemeManager.shared
 
     // XMLTV validation state for the Dispatcharr EPG Source row. Mirrors
     // AddServerView's XMLTVTestState so the edit flow can also validate
@@ -1711,9 +1865,21 @@ struct EditServerSheet: View {
                     Text("Authentication").sectionHeaderStyle()
                 }
                 Section {
+                    // `Text(verbatim:)` (not the implicit
+                    // `LocalizedStringKey` initializer) so the
+                    // placeholder URL renders as plain gray
+                    // placeholder text instead of getting
+                    // Markdown-auto-linkified into a blue
+                    // underlined hyperlink. The default
+                    // `Text("https://...")` initializer parses
+                    // its argument as a localized markdown
+                    // string and SwiftUI's data-detector turns
+                    // bare URL patterns into clickable
+                    // `[autolink]` references — same on iOS
+                    // and Mac Catalyst (user-reported v1.6.8).
                     TextField("Custom XMLTV URL (optional)",
                               text: $server.dispatcharrXMLTVURL,
-                              prompt: Text("https://example.com/xmltv.xml"))
+                              prompt: Text(verbatim: "https://example.com/xmltv.xml"))
                         .keyboardType(.URL)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
@@ -2012,6 +2178,10 @@ struct EditServerSheet: View {
 struct EditServerPage: View {
     @Bindable var server: ServerConnection
     @Environment(\.dismiss) private var dismiss
+    /// See SettingsView. Tvos edit page uses accent-tinted Save
+    /// button + form field underlines; without this they freeze at
+    /// whichever theme was active when the page was first pushed.
+    @ObservedObject private var theme = ThemeManager.shared
 
     var body: some View {
         ZStack {
@@ -2303,9 +2473,10 @@ struct NetworkSettingsView: View {
                     }
                 }
 
-                // Guide Display moved to its own top-level page —
-                // `GuideDisplaySettingsView`, reachable from the
-                // main Settings → App Settings section.
+                // Category-colour palette + EPG cache controls moved
+                // to `AppearanceSettingsView` in v1.6.8 — Settings →
+                // App Settings → Appearance — alongside the theme +
+                // scale sliders, since they're all visual concerns.
             }
             .padding(48)
         }
@@ -2424,12 +2595,14 @@ struct NetworkSettingsView: View {
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
 
-                // Guide Display moved to its own top-level page —
-                // `GuideDisplaySettingsView`, reachable from the main
-                // Settings → App Settings section. Reason: users
-                // couldn't find category colours here buried under
-                // Network; and "Guide Display" isn't really a
-                // networking concern anyway.
+                // Category-colour palette + EPG cache controls moved
+                // to `AppearanceSettingsView` in v1.6.8 — Settings →
+                // App Settings → Appearance. They were originally
+                // here under Network, then briefly had their own
+                // top-level "Guide Display" page; consolidating into
+                // Appearance removes the duplication and matches the
+                // user's mental model (visual customisation in one
+                // place).
 
                 // MARK: Home WiFi (LAN Switching)
                 #if os(iOS)
@@ -2679,7 +2852,7 @@ struct NetworkSettingsView: View {
 
 // MARK: - Category Color Picker Row (iOS only)
 //
-// One row in Settings → Guide Display that binds a SwiftUI
+// One row in Settings → Appearance (Palette section) that binds a SwiftUI
 // `ColorPicker` to the hex-string stored at the bucket's
 // `storageKey`. The binding converts between `Color` (what
 // ColorPicker speaks) and the hex string (what UserDefaults
@@ -2693,7 +2866,7 @@ struct NetworkSettingsView: View {
 // trackpad). We surface only the on/off toggle there and point
 // users to iPhone/iPad for palette customisation.
 #if os(iOS)
-private struct CategoryColorPickerRow: View {
+struct CategoryColorPickerRow: View {
     let category: ProgramCategory
 
     /// Bound to the UserDefaults-backed hex string via
@@ -2767,256 +2940,11 @@ private struct CategoryColorPickerRow: View {
 }
 #endif
 
-// MARK: - Guide Display Settings
-//
-// Standalone top-level settings page for guide-related visual controls:
-// the program-category colour palette, the channel-card stripe toggle,
-// per-bucket colour overrides (iOS), and the Guide Size slider.
-//
-// Previously these lived as a Section inside NetworkSettingsView, which
-// users couldn't find — category colours aren't really a networking
-// concern, and burying them two levels deep behind "Network" made the
-// feature effectively invisible. Lifting it to its own page at the
-// App Settings level (alongside Appearance / Network / DVR) matches the
-// user's mental model.
-struct GuideDisplaySettingsView: View {
-    @ObservedObject private var theme = ThemeManager.shared
-    @AppStorage(CategoryColor.enabledKey) private var enableCategoryColors = true
-    @AppStorage("tintChannelCards")       private var tintChannelCards = false
-    @AppStorage("guideScale")             private var guideScale: Double = 1.0
-
-    /// Summary text for the "Add more categories" disclosure row —
-    /// shows "Off", "3 extra", "Custom", or "5 extra + Custom" so
-    /// the user can see at a glance whether they've enabled
-    /// anything beyond the four default buckets.
-    fileprivate var moreCategoriesSummary: String {
-        let extraOn = CategoryColor.additionalBuckets.filter { CategoryColor.isBucketEnabled($0) }.count
-        let customCount = CategoryColor.loadCustomCategories().count
-        switch (extraOn, customCount) {
-        case (0, 0): return "Off"
-        case (let e, 0): return "\(e) extra"
-        case (0, let c): return "\(c) custom"
-        case (let e, let c): return "\(e) extra · \(c) custom"
-        }
-    }
-
-    var body: some View {
-        ZStack {
-            Color.appBackground.ignoresSafeArea()
-            #if os(tvOS)
-            tvOSBody
-            #else
-            iOSBody
-            #endif
-        }
-        .navigationTitle("Guide Display")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.large)
-        #else
-        .toolbar(.hidden, for: .navigationBar)
-        #endif
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
-    }
-
-    // MARK: - iOS Body
-    #if !os(tvOS)
-    private var iOSBody: some View {
-        List {
-            // Master toggle + channel-card companion toggle.
-            //
-            // iPhone's Live TV tab is List-only (Guide view is iPad /
-            // Mac / Apple TV). The master toggle still matters on
-            // iPhone because it unlocks the "Tint Channel Cards"
-            // feature below — but "tint guide cells" was misleading
-            // copy that made iPhone testers think nothing happens
-            // when they flip it (they looked for a Guide view that
-            // doesn't exist). Device-aware text resolves that.
-            Section {
-                Toggle(isOn: $enableCategoryColors) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Color Programs by Category")
-                            .font(.bodyMedium).foregroundColor(.textPrimary)
-                        Text(UIDevice.current.userInterfaceIdiom == .phone
-                             ? "Unlocks category-based coloring. On iPhone this drives the Tint Channel Cards stripe below."
-                             : "Tint guide cells by program type — tap any color below to customise.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
-                    }
-                }
-                .tint(theme.accent)
-                .listRowBackground(Color.cardBackground)
-                .onChange(of: enableCategoryColors) { _, _ in
-                    SyncManager.shared.pushPreferencesImmediate()
-                }
-
-                Toggle(isOn: $tintChannelCards) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Tint Channel Cards")
-                            .font(.bodyMedium).foregroundColor(.textPrimary)
-                        Text("Adds a colored stripe to Live TV channel cards (list view) based on what's currently airing.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
-                    }
-                }
-                .tint(theme.accent)
-                .listRowBackground(Color.cardBackground)
-                .disabled(!enableCategoryColors)
-                .opacity(enableCategoryColors ? 1.0 : 0.4)
-                .onChange(of: tintChannelCards) { _, _ in
-                    SyncManager.shared.pushPreferencesImmediate()
-                }
-            } header: {
-                Text("Category Colors").sectionHeaderStyle()
-            } footer: {
-                Text(UIDevice.current.userInterfaceIdiom == .phone
-                     ? "iPhone's Live TV tab only renders the List view. Cards tint with a gradient that fades from the leading edge toward the center — based on the currently-airing program on the main row, and the individual program on each expanded schedule row. Dispatcharr and M3U+XMLTV work out of the box; Xtream Codes doesn't expose category data."
-                     : "Programs with a category tag in the EPG source get a leading-edge gradient — on channel cards in the List view (using the currently-airing program), on each row in the expanded schedule (using that program's own category), and on cells in the Guide grid. Dispatcharr and M3U+XMLTV work out of the box; Xtream Codes doesn't expose category data.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
-            }
-
-            // Default palette — the four buckets that have shipped
-            // since v1.0. Always visible; the new "Add more
-            // categories" row below progressively discloses the
-            // extra buckets + a Custom editor without cluttering
-            // the default Settings view.
-            Section {
-                ForEach(CategoryColor.defaultBuckets, id: \.rawValue) { cat in
-                    CategoryColorPickerRow(category: cat)
-                        .listRowBackground(Color.cardBackground)
-                        .disabled(!enableCategoryColors)
-                        .opacity(enableCategoryColors ? 1.0 : 0.4)
-                }
-
-                NavigationLink {
-                    MoreCategoriesView()
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "plus.circle.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.accentPrimary)
-                        Text("Add more categories")
-                            .font(.bodyMedium)
-                            .foregroundColor(.textPrimary)
-                        Spacer()
-                        Text(moreCategoriesSummary)
-                            .font(.labelSmall)
-                            .foregroundColor(.textTertiary)
-                    }
-                }
-                .listRowBackground(Color.cardBackground)
-                .disabled(!enableCategoryColors)
-                .opacity(enableCategoryColors ? 1.0 : 0.4)
-
-                Button(role: .destructive) {
-                    CategoryColor.resetPaletteToDefaults()
-                    // Palette reset is a user action — push immediately
-                    // so other devices don't keep showing the old
-                    // custom colours for up to 60 seconds.
-                    SyncManager.shared.pushPreferencesImmediate()
-                } label: {
-                    HStack {
-                        Image(systemName: "arrow.uturn.backward")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text("Reset Colors to Defaults").font(.bodyMedium)
-                    }
-                    .foregroundColor(.statusWarning)
-                }
-                .listRowBackground(Color.cardBackground)
-                .disabled(!enableCategoryColors)
-                .opacity(enableCategoryColors ? 1.0 : 0.4)
-            } header: {
-                Text("Palette").sectionHeaderStyle()
-            } footer: {
-                Text("Tap a swatch to customise the color used for that program bucket. Kids > Sports > News > Movie priority when a program matches multiple.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
-            }
-
-            // Guide size slider — iPad + Mac only (iPhone uses the list
-            // view; no grid to scale). Writes through the shared
-            // `guideScale` AppStorage key that EPGGuideView observes, so
-            // dragging resizes the live guide instantly.
-            if UIDevice.current.userInterfaceIdiom != .phone {
-                Section {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Guide Size")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
-                            Spacer()
-                            Text("\(Int(guideScale * 100))%")
-                                .font(.labelSmall).foregroundColor(.textTertiary)
-                        }
-                        HStack(spacing: 8) {
-                            Image(systemName: "textformat.size.smaller")
-                                .foregroundColor(.textTertiary)
-                                .font(.system(size: 12))
-                            Slider(value: $guideScale, in: 0.75...1.5, step: 0.05)
-                                .tint(theme.accent)
-                            Image(systemName: "textformat.size.larger")
-                                .foregroundColor(.textTertiary)
-                                .font(.system(size: 14))
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("Guide Size").sectionHeaderStyle()
-                } footer: {
-                    Text("Scale the guide grid on iPad and Mac.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-    }
-    #endif
-
-    // MARK: - tvOS Body
-    #if os(tvOS)
-    private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                tvSection("Category Colors") {
-                    TVSettingsToggleRow(
-                        icon: "paintpalette.fill",
-                        iconColor: .accentPrimary,
-                        title: "Color Programs by Category",
-                        subtitle: "Tint guide cells by program type. Customise the palette on iPhone / iPad — Settings → Guide Display.",
-                        isOn: $enableCategoryColors,
-                        onChange: { _ in }
-                    )
-                    TVSettingsToggleRow(
-                        icon: "tv.fill",
-                        iconColor: .accentPrimary,
-                        title: "Tint Channel Cards",
-                        subtitle: "Adds a colored stripe to Live TV channel cards based on what's airing now.",
-                        isOn: $tintChannelCards,
-                        onChange: { _ in }
-                    )
-                    .disabled(!enableCategoryColors)
-                    .opacity(enableCategoryColors ? 1.0 : 0.4)
-                }
-            }
-            .padding(48)
-        }
-    }
-
-    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title.uppercased())
-                .font(.system(size: 22, weight: .bold))
-                .foregroundColor(.textTertiary)
-                .tracking(1)
-                .padding(.leading, 20)
-            VStack(alignment: .leading, spacing: 8) {
-                content()
-            }
-        }
-    }
-    #endif
-}
-
 // MARK: - More Categories View
 //
-// Disclosure target for "Add more categories" on the Guide Display
-// settings screen. Presents the seven additional built-in buckets
+// Disclosure target for "Add more categories" in the Appearance
+// settings screen (Palette section). Presents the seven additional
+// built-in buckets
 // (Documentary / Drama / Comedy / Reality / Educational / Sci-Fi /
 // Music) with an enable toggle + color picker on each row, plus a
 // "Custom" navigation link for user-defined category → color
@@ -3405,8 +3333,8 @@ struct CustomCategoryEditor: View {
 // `isSubviewPushed` / `popRequested`).
 //
 // Pop sources we have to cover:
-//   1. `navPath` pushes — Appearance, Guide Display, Network, DVR,
-//      Developer, Edit Server. `navPath.count > 0` detects these;
+//   1. `navPath` pushes — Appearance, Network, DVR, Developer,
+//      Edit Server. `navPath.count > 0` detects these;
 //      `navPath.removeLast()` pops them.
 //   2. Classic `NavigationLink(destination:)` pushes — ServerDetailView
 //      (from the Settings root via TVSettingsNavRow) and

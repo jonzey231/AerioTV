@@ -7,6 +7,10 @@ import UIKit
 // MARK: - Developer Settings View
 
 struct DeveloperSettingsView: View {
+    /// See SettingsView. Re-renders this page on every theme change
+    /// so accent-tinted toggles and section headers don't freeze at
+    /// the theme that was active when the page was first pushed.
+    @ObservedObject private var theme = ThemeManager.shared
     @AppStorage("debugLoggingEnabled") private var debugLoggingEnabled = false
 
     /// Mirrors `PlaybackFeatureFlags.useUnifiedPlayback`. The toggle

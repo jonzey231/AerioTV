@@ -6,7 +6,19 @@ import SwiftData
 
 @Model
 final class WatchProgress {
-    @Attribute(.unique) var vodID: String
+    /// VOD identifier (movie / episode ID). v1.6.8 (Codex A1):
+    /// dropped the `@Attribute(.unique)` constraint so the same
+    /// `vodID` can coexist for different `serverID`s — two
+    /// Dispatcharr servers will routinely use overlapping numeric
+    /// IDs for unrelated content, and the prior global-uniqueness
+    /// constraint was silently overwriting one server's resume
+    /// progress whenever the other server happened to use the
+    /// same ID. Uniqueness is now enforced in code by
+    /// `WatchProgressManager` via `(vodID, serverID)` lookups.
+    /// Removing the constraint is a SwiftData lightweight migration
+    /// — existing data is preserved, the underlying SQLite index
+    /// is just relaxed.
+    var vodID: String
     var title: String
     var positionMs: Int32
     var durationMs: Int32
@@ -48,17 +60,29 @@ enum WatchProgressManager {
     static var modelContext: ModelContext?
 
     /// Save or update watch progress. Call from main thread.
+    ///
     /// Merge semantics: optional fields (posterURL, streamURL, serverID,
     /// seriesID) only overwrite existing values when they are non-nil, so
     /// periodic save calls from the player don't stomp on the seriesID
     /// that was set once from the detail view when playback started.
+    ///
+    /// v1.6.8 (Codex A1): uniqueness is now enforced in code by the
+    /// `(vodID, serverID)` lookup below rather than the SwiftData
+    /// `@Attribute(.unique)` constraint. Two servers can have
+    /// independent resume positions for the same `vodID`. Legacy
+    /// rows from before A1 (no `serverID` populated) are adopted by
+    /// the first save that supplies a `serverID` — the same row gets
+    /// its `serverID` field set rather than a duplicate being
+    /// inserted.
     static func save(vodID: String, title: String, positionMs: Int32, durationMs: Int32,
                      posterURL: String? = nil, vodType: String = "movie", isFinished: Bool = false,
                      streamURL: String? = nil, serverID: String? = nil,
                      seriesID: String? = nil) {
         guard let context = modelContext else { return }
-        let descriptor = FetchDescriptor<WatchProgress>(predicate: #Predicate { $0.vodID == vodID })
-        if let existing = try? context.fetch(descriptor).first {
+        let matches = matchingProgress(context: context, vodID: vodID)
+        let existing = pickMatch(matches, serverID: serverID, claimLegacy: true)
+
+        if let existing {
             existing.positionMs = positionMs
             existing.durationMs = durationMs
             existing.updatedAt = Date()
@@ -80,23 +104,72 @@ enum WatchProgressManager {
     }
 
     /// Get saved position for a VOD item. Returns nil if no progress or already finished.
-    static func getResumePosition(vodID: String) -> Int32? {
+    ///
+    /// v1.6.8 (Codex A1): pass `serverID` so cross-server collisions
+    /// resolve to the right progress entry. Calls without a
+    /// `serverID` fall back to the first matching `vodID` row, which
+    /// covers legacy code paths and pre-A1 rows where `serverID` was
+    /// never populated.
+    static func getResumePosition(vodID: String, serverID: String? = nil) -> Int32? {
         guard let context = modelContext else { return nil }
-        let descriptor = FetchDescriptor<WatchProgress>(predicate: #Predicate { $0.vodID == vodID })
-        guard let progress = try? context.fetch(descriptor).first,
+        let matches = matchingProgress(context: context, vodID: vodID)
+        guard let progress = pickMatch(matches, serverID: serverID, claimLegacy: false),
               !progress.isFinished, progress.positionMs > 0 else { return nil }
         return progress.positionMs
     }
 
     /// Delete a specific watch progress entry.
-    static func delete(vodID: String) {
+    ///
+    /// v1.6.8 (Codex A1): pass `serverID` to delete only that
+    /// server's row. Without `serverID`, every `vodID`-matching row
+    /// is removed (legacy behaviour preserved for callers that
+    /// haven't been updated). When `serverID` is supplied the
+    /// matching row plus any pre-A1 legacy nil-`serverID` row are
+    /// removed together so old rows don't linger after the user
+    /// clears progress on the same item.
+    static func delete(vodID: String, serverID: String? = nil) {
         guard let context = modelContext else { return }
+        let matches = matchingProgress(context: context, vodID: vodID)
+        let toDelete: [WatchProgress] = {
+            if let serverID {
+                return matches.filter { $0.serverID == serverID || $0.serverID == nil }
+            }
+            return matches
+        }()
+        guard !toDelete.isEmpty else { return }
+        for row in toDelete { context.delete(row) }
+        try? context.save()
+        NotificationCenter.default.post(name: .watchProgressDidChange, object: nil)
+    }
+
+    // MARK: - Private helpers
+
+    /// Fetch every `WatchProgress` row matching `vodID`. With the
+    /// post-A1 schema this can return more than one row (one per
+    /// server). `pickMatch` narrows to the right one.
+    private static func matchingProgress(context: ModelContext, vodID: String) -> [WatchProgress] {
         let descriptor = FetchDescriptor<WatchProgress>(predicate: #Predicate { $0.vodID == vodID })
-        if let existing = try? context.fetch(descriptor).first {
-            context.delete(existing)
-            try? context.save()
-            NotificationCenter.default.post(name: .watchProgressDidChange, object: nil)
+        return (try? context.fetch(descriptor)) ?? []
+    }
+
+    /// Resolve the right row out of a `vodID`-matching set using
+    /// `serverID`. Preference order:
+    ///   1. Exact `serverID` match.
+    ///   2. Legacy nil-`serverID` row (pre-A1 data) — when
+    ///      `claimLegacy` is true the caller is responsible for
+    ///      setting the row's `serverID` so it stops being legacy
+    ///      on subsequent reads.
+    ///   3. When the caller passed no `serverID`, fall back to the
+    ///      first row regardless of its `serverID` (legacy callers).
+    private static func pickMatch(_ rows: [WatchProgress],
+                                  serverID: String?,
+                                  claimLegacy: Bool) -> WatchProgress? {
+        guard let serverID else { return rows.first }
+        if let exact = rows.first(where: { $0.serverID == serverID }) { return exact }
+        if claimLegacy, let legacy = rows.first(where: { $0.serverID == nil }) {
+            return legacy
         }
+        return nil
     }
 }
 
@@ -152,7 +225,14 @@ struct ContinueWatchingSection: View {
                             #endif
                             .contextMenu {
                                 Button(role: .destructive) {
-                                    WatchProgressManager.delete(vodID: progress.vodID)
+                                    // v1.6.8 (Codex A1): pass serverID so we
+                                    // delete only this server's row when the
+                                    // user has progress on the same vodID
+                                    // from another playlist.
+                                    WatchProgressManager.delete(
+                                        vodID: progress.vodID,
+                                        serverID: progress.serverID
+                                    )
                                 } label: {
                                     Label("Remove from Continue Watching", systemImage: "trash")
                                 }

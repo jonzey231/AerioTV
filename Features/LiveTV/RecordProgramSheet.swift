@@ -17,6 +17,24 @@ struct RecordProgramSheet: View {
     let scheduledEnd: Date
     /// Whether the program is already live (disables pre-roll).
     let isLive: Bool
+    /// Dispatcharr-only: the numeric channel ID for the Dispatcharr
+    /// recording API. `nil` for M3U / Xtream channels, or for
+    /// Dispatcharr channels that haven't loaded a numeric ID yet.
+    /// v1.6.8 (Codex A2) — replaces the prior `Int(channelID) ?? 0`
+    /// fallback, which silently sent `0` to Dispatcharr's recording
+    /// endpoint when the string `channelID` wasn't parseable. Now the
+    /// "Record on Server" path is hard-disabled when this is nil so
+    /// the user gets a clear error path instead of a corrupted
+    /// recording schedule.
+    var dispatcharrChannelID: Int? = nil
+    /// The channel's playable stream URL. v1.6.8 (B1 Phase 1):
+    /// added so the local-recording path can hand a URL to
+    /// `RecordingCoordinator.startLocalRecording(_:streamURL:modelContext:)`
+    /// without needing to look the channel up again. `nil` is
+    /// tolerated (the Local destination row is then disabled),
+    /// but every UI surface that presents this sheet now passes
+    /// `ChannelDisplayItem.streamURL` through.
+    var streamURL: URL? = nil
 
     @AppStorage("dvrDefaultPreRollMins") private var defaultPreRoll = 0
     @AppStorage("dvrDefaultPostRollMins") private var defaultPostRoll = 0
@@ -56,7 +74,18 @@ struct RecordProgramSheet: View {
         .onAppear {
             preRoll = isLive ? 0 : defaultPreRoll
             postRoll = defaultPostRoll
-            destination = activeServer?.defaultRecordingDestination ?? .local
+            // v1.6.8 (B1 Phase 1 final): future-scheduled recordings
+            // always go to Dispatcharr server — local recording is
+            // foreground-only and can't reliably wake at a future
+            // start time (we deliberately don't use background
+            // tasks for DVR). Force the destination accordingly so
+            // a server-defaulted "local" preference doesn't leak
+            // into a no-op scheduled-local row.
+            if !isLive && isDispatcharr {
+                destination = .dispatcharrServer
+            } else {
+                destination = activeServer?.defaultRecordingDestination ?? .local
+            }
         }
         .sheet(isPresented: $showCustomPreRoll) {
             customSheet { preRoll = customValue }
@@ -108,7 +137,16 @@ struct RecordProgramSheet: View {
             }
 
             // Destination
-            if isDispatcharr {
+            //
+            // v1.6.8 (B1 Phase 1 final): the "This device" (local)
+            // option only appears when the program is live. Future
+            // scheduled local recordings aren't supported — iOS
+            // can't reliably wake an idle app at an exact time, so
+            // a "scheduled local" recording would routinely miss
+            // its start by minutes-to-hours. Server-side recording
+            // (Dispatcharr) is always running and reliable for
+            // future recordings; offer it exclusively in that case.
+            if isDispatcharr && isLive {
                 Section("Destination") {
                     Picker("Record to", selection: $destination) {
                         Text("Dispatcharr server").tag(RecordingDestination.dispatcharrServer)
@@ -140,6 +178,32 @@ struct RecordProgramSheet: View {
                 }
             }
 
+            // v1.6.8 (B1 Phase 1 final): Aerio deliberately doesn't
+            // run background tasks for DVR — local recording is only
+            // available while the app is foregrounded ("Record from
+            // Now"). Future-scheduled recordings always route to
+            // Dispatcharr server, which is always running and
+            // doesn't depend on the app being open. If the user is
+            // on a non-Dispatcharr playlist (M3U / Xtream) AND
+            // picks a future program, there's no recording path at
+            // all — explain that here so the action doesn't appear
+            // to silently fail.
+            if !isLive && !isDispatcharr {
+                Section {
+                    Label {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Scheduled recordings need a Dispatcharr playlist")
+                                .font(.footnote.bold())
+                            Text("Aerio doesn't run in the background to record on your device — that would drain battery and use storage while you're not watching. Future-scheduled recordings happen on a Dispatcharr server, which keeps running on its own. Switch to a Dispatcharr playlist to schedule this recording, or wait until the program is airing to record it locally.")
+                                .font(.footnote)
+                        }
+                    } icon: {
+                        Image(systemName: "clock.badge.exclamationmark.fill")
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+
             if destination == .local && coordinator.isApproachingQuotaLimit {
                 Section {
                     Label {
@@ -159,6 +223,11 @@ struct RecordProgramSheet: View {
                 Button("Record") { scheduleRecording() }
                     .bold()
                     .foregroundColor(.red)
+                    // Disabled when there's no recording path
+                    // available: future program + non-Dispatcharr
+                    // playlist. The orange info section above tells
+                    // the user why.
+                    .disabled(!isLive && !isDispatcharr)
             }
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }
@@ -208,7 +277,12 @@ struct RecordProgramSheet: View {
                         label: { $0 == 0 ? "None" : "\($0) min" }
                     )
 
-                    if isDispatcharr {
+                    // Same logic as the iOS form: hide the
+                    // local-vs-server picker for future programs —
+                    // local recording is foreground-only by design,
+                    // so future programs go to Dispatcharr server
+                    // exclusively.
+                    if isDispatcharr && isLive {
                         destinationRow
                     }
 
@@ -235,12 +309,18 @@ struct RecordProgramSheet: View {
                     tintColor: .textSecondary,
                     action: { dismiss() }
                 )
-                RecordActionPill(
-                    label: "Record",
-                    systemImage: "record.circle",
-                    tintColor: .red,
-                    action: { scheduleRecording() }
-                )
+                // No-recording-path case: future program on a
+                // non-Dispatcharr playlist. The orange info card
+                // above explains; hide Record so the user can't
+                // tap into a no-op.
+                if isLive || isDispatcharr {
+                    RecordActionPill(
+                        label: "Record",
+                        systemImage: "record.circle",
+                        tintColor: .red,
+                        action: { scheduleRecording() }
+                    )
+                }
             }
             .padding(.horizontal, 80)
             .padding(.vertical, 32)
@@ -472,13 +552,28 @@ struct RecordProgramSheet: View {
         // Kick off the recording
         Task {
             if destination == .dispatcharrServer, let server = activeServer {
+                // v1.6.8 (Codex A2): use the explicit numeric ID
+                // plumbed through `ChannelDisplayItem.dispatcharrChannelID`
+                // — populated at Dispatcharr load time in
+                // `HomeView.fetchDispatcharr` from `DispatcharrChannel.id`.
+                // Fall back to a string-parse of the legacy `channelID`
+                // for any caller that hasn't migrated yet, but bail
+                // loudly (no API call, log a warning) rather than
+                // silently sending `0` and corrupting the user's
+                // recording schedule on the server.
+                guard let channelIntID = dispatcharrChannelID ?? Int(channelID),
+                      channelIntID > 0 else {
+                    debugLog("⚠️ RecordProgramSheet: cannot start Dispatcharr recording — no numeric channel ID resolved (dispatcharrChannelID=\(String(describing: dispatcharrChannelID)), channelID=\(channelID))")
+                    DebugLogger.shared.log(
+                        "Dispatcharr recording skipped: channel \"\(channelName)\" has no resolvable numeric ID",
+                        category: "DVR", level: .warning)
+                    return
+                }
                 let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                          auth: .apiKey(server.effectiveApiKey),
                                          userAgent: server.effectiveUserAgent)
                 // If user has custom buffers, don't let server double-apply offsets.
                 let applyServerOffsets = (preRoll == 0 && postRoll == 0)
-                // TODO: resolve Dispatcharr integer channel ID from channelID
-                let channelIntID = Int(channelID) ?? 0
                 try? await coordinator.scheduleDispatcharrRecording(
                     api: api, recording: rec,
                     channelIntID: channelIntID,
@@ -487,11 +582,38 @@ struct RecordProgramSheet: View {
                     modelContext: modelContext
                 )
             }
-            // Local recordings that should start now
-            // (for future programs, a scheduler will need to trigger at effectiveStart)
+            // v1.6.8 (B1 Phase 1): wired up local recording for
+            // immediate-start cases ("Record from Now" on the
+            // currently-airing program). The pipeline below uses
+            // the `streamURL` that callers now plumb through from
+            // `ChannelDisplayItem.streamURL`. The actual recording
+            // I/O lives in `RecordingCoordinator.startLocalRecording`
+            // which constructs a `LocalRecordingSession`, writes
+            // to `Documents/Recordings/<UUID>.ts`, and auto-stops
+            // at `effectiveEnd`.
+            //
+            // FUTURE-SCHEDULED LOCAL RECORDINGS are deliberately
+            // NOT started here — the per-platform scheduler that
+            // would wake up at `effectiveStart` doesn't exist yet
+            // (Phase 2 = tvOS, Phase 3 = iOS). The recording row
+            // is still inserted into SwiftData with status
+            // `.scheduled`, but it stays scheduled-and-idle until
+            // the user manually starts it from MyRecordings or
+            // until the future scheduler ships. The sheet's
+            // destination footer warns the user about this so
+            // expectations are set up-front rather than at
+            // missed-start time.
             if destination == .local && rec.effectiveStart <= Date() {
-                // TODO: resolve stream URL from channel
-                // await coordinator.startLocalRecording(rec, streamURL: url, modelContext: modelContext)
+                guard let streamURL else {
+                    debugLog("⚠️ RecordProgramSheet: cannot start local recording — no streamURL plumbed in for channel \"\(channelName)\"")
+                    DebugLogger.shared.log(
+                        "Local recording skipped: channel \"\(channelName)\" has no stream URL on the ChannelDisplayItem (caller didn't plumb)",
+                        category: "DVR", level: .warning)
+                    return
+                }
+                await coordinator.startLocalRecording(
+                    rec, streamURL: streamURL, modelContext: modelContext
+                )
             }
         }
 

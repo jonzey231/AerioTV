@@ -1,5 +1,156 @@
 # Changelog
 
+## v1.6.8 — 2026-04-25
+
+### New
+
+- **Local DVR — "Record from Now" on every platform.** Tap Record on
+  any currently-airing program (Live TV list long-press, EPG cell
+  long-press, or the Record pill in the player overflow) and Aerio
+  starts capturing the stream to local storage immediately. Recording
+  auto-stops at the program's end time, lands in **Settings → DVR →
+  My Recordings** under "Completed", and plays back from disk by
+  tapping the row. Works on iPhone, iPad, Mac Catalyst, and Apple TV.
+  Local DVR is foreground-only by design — Aerio doesn't run
+  background tasks for recording, so the existing yellow "Keep AerioTV
+  open" warning still applies. Future-scheduled recordings continue
+  to route to Dispatcharr server (always running, always reliable).
+- **Server recording playback in My Recordings.** Tapping a completed
+  Dispatcharr server-side recording now plays it back via the
+  `/api/channels/recordings/<id>/file/` endpoint with full scrubbing
+  + transport controls. Previously the row was tappable but a no-op.
+- **Settings → Multiview submenu** with three new preferences:
+  - **Audio Focus Indicator** — choose how the audio-active tile is
+    marked: a center speaker icon (default, current behavior), a
+    persistent muted-gray border (YouTube TV-style), or an
+    accent-colored border that fades with the rest of the chrome
+    after 5 s of inactivity.
+  - **Padding Between Tiles** — toggle an 8 pt gap between tiles for
+    a cards-on-a-grid look. Off by default keeps the legacy flush
+    layout.
+  - **Tile Corners** — Square (default) or Rounded (12 pt). Pairs
+    nicely with padding-on for a polished card aesthetic.
+- **"Currently Watching" / "Watched" pill on series episode rows.**
+  When you've started or finished an episode of a series, the row in
+  the series detail view now shows a clear status pill plus a thin
+  progress timeline showing how far in you were. Saves a guess-and-
+  check trip into the player to find your spot. iPhone / iPad pills
+  are subtle; Apple TV pills are 50 % larger so they're legible from
+  10 ft. Synced across devices via iCloud — start an episode on
+  iPhone, pick it up on Apple TV from the Top Shelf or the series
+  detail page.
+- **Per-playlist EPG cache refresh.** Each playlist's detail page
+  (Settings → tap a playlist) now has a "Refresh EPG Data" action
+  that clears just that playlist's cached guide data and reloads it
+  from the server. Solves the rare "guide cells render as 1-pixel
+  slivers" symptom from a corrupted cache without affecting your
+  other playlists. Removed the global EPG-purge action that briefly
+  lived in Appearance after the Guide Display merge.
+- **Cross-platform LAN switching.** Aerio now does direct local-
+  server reachability probing on every platform (formerly Apple TV
+  only). On Mac Catalyst — where Apple's Wi-Fi SSID API doesn't
+  return reliable values even with full entitlements — and on
+  Ethernet-connected iPad / Mac (where there's no SSID at all),
+  the LAN-vs-WAN switch now works correctly without requiring SSID
+  detection. CoreWLAN fallback added for true Mac Catalyst builds.
+- **Bolder channel numbers** in both Live TV List and Guide views,
+  iPhone / iPad / Apple TV / Mac. Easier to read at a glance,
+  especially in dense lists.
+
+### Changed
+
+- **Settings → Guide Display merged into Settings → Appearance.**
+  Category-color toggles, palette picker, and the master "Color
+  Programs by Category" switch all now live alongside Theme and
+  Display Scale in one consolidated visual-customization page. The
+  separate Guide Display page is gone — every setting it had now
+  lives in Appearance instead.
+- **Multi-server VOD watch progress no longer collides.** When you
+  use the same Dispatcharr movie/episode ID on two servers (e.g.
+  two Dispatcharr instances that happen to share a numeric ID),
+  resume positions are now tracked independently per server.
+  Previously, watching the same vodID on a second server silently
+  overwrote the first server's saved position. Composite uniqueness
+  enforced via `(vodID, serverID)`. Existing data preserved — first
+  save with a server ID adopts pre-v1.6.8 rows.
+- **Top Shelf episode deep-links work cross-device.** Synced
+  WatchProgress entries now carry their parent `seriesID` across the
+  iCloud-sync boundary, so an episode you started on iPhone surfaces
+  on the Apple TV Top Shelf and tapping it lands on the series
+  detail page (not a dead-end episode URL).
+- **iCloud Keychain credential migration.** Server passwords and API
+  keys now sync via iCloud Keychain (end-to-end encrypted) instead
+  of iCloud KVS plaintext. Silent migration on first launch — no
+  re-auth prompts, no setup change. v1.6.7 devices stay working
+  during the cross-version window because v1.6.8 still pushes
+  plaintext to KVS for backward compatibility (scheduled for
+  removal in a future release).
+- **Theme switching now updates everything reliably.** Switching
+  between themes used to leave stale-colored elements (subtitles,
+  section headers, info-row labels) behind on List-backed Settings
+  pages until you closed and reopened them. Resolved with theme-keyed
+  `.id()` on the Settings list + reactive `sectionHeaderStyle` +
+  observing `ThemeManager` from every Settings sub-page. iOS, iPad,
+  Mac Catalyst, Apple TV.
+- **Tappable Settings → Playlist row on Apple TV** now offers "Use
+  This Playlist" alongside Edit / Delete in the long-press menu so
+  you can switch active playlists without going through Edit.
+- **Privacy hardening for debug logs.** The credential sanitizer that
+  redacts secrets in debug-log output now covers more vectors:
+  Xtream `?username=…&password=…` query params, `Authorization` /
+  `X-API-Key` / `X-Plex-Token` headers, JWT tokens in JSON response
+  bodies, and Emby `Token="…"` fragments. Routed through every log
+  path, not just the network logger.
+- **Forks / open-source builds:** team ID and bundle-ID prefix
+  extracted into a dedicated `Config/Aerio.xcconfig` file. Edit one
+  file to fork; no more pbxproj surgery. Existing build is
+  byte-identical to before the change.
+
+### Fixed
+
+- **App stops wasting battery during locked-screen playback.** When
+  the iPhone screen locked during live playback, the hardware video
+  decoder lost its session, the AVSampleBufferDisplayLayer flipped
+  to FAILED, and the render loop continued shipping ~50 frames per
+  second into a dead pipeline for the entire duration of the lock
+  — burning CPU + battery for nothing. Fix: detect the FAILED state
+  in the render loop while in background, auto-pause mpv, let the
+  existing foreground handler flush + resume on unlock. Audio in
+  background follows your existing policy (Audio Only / AirPlay / PiP
+  modes are unaffected).
+- **Channel placeholder URLs no longer auto-linkify.** The "EPG
+  Source" field in Edit Playlist showed `https://example.com/xmltv.xml`
+  as a clickable blue underlined link on iOS and Mac Catalyst because
+  SwiftUI's default `Text` initializer parses arguments as
+  Markdown. Switched to `Text(verbatim:)` so it renders as
+  ordinary placeholder text.
+- **`MPMediaItemArtwork` deprecation warning silenced properly.**
+  Wrapped the legacy `init(image:)` call in an Objective-C shim
+  with `#pragma clang diagnostic` markers, eliminating the warning
+  without resorting to the closure-based init that triggered
+  `_dispatch_assert_queue_fail` on lockscreen artwork updates.
+- **Apple TV: Syncing-indicator focus halo no longer screams white.**
+  The top-left "Syncing… · select for info" badge previously got
+  the default tvOS bright-white focus chrome, which dominated the
+  screen while focused. Now uses the same gentle accent-tinted
+  scale + shadow as every other tvOS row.
+- **Categories no longer concatenate on Program Info pills.** The
+  XMLTV parser correctly splits multiple `<category>` tags into
+  distinct tokens (was rendering as e.g. "EpisodeSeriesRealityLaw").
+  Also picks up Codex's whitespace-trim fix.
+- **Channel numbers on the parent List view tile now appear** for
+  Dispatcharr playlists even before visiting the Guide. Same fix
+  also surfaces the Record action in the long-press menu and the
+  player overflow menu, both of which previously hid until EPG
+  metadata had been loaded by the Guide view.
+
+### Under the hood
+
+- Cleaned `build/` directory: 63 GB → 1.5 GB by deleting 28
+  redundant `DerivedData_*` directories and stale staging dirs from
+  earlier agent runs. All shipped IPAs and dSYM-bearing xcarchives
+  preserved.
+
 ## v1.6.5 — 2026-04-22
 
 ### Fixed

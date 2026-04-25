@@ -24,6 +24,40 @@ struct AppearanceSettingsView: View {
     /// list slider is only shown to iPhone / iPad / Mac users.
     @AppStorage("listScale") private var listScale: Double = 1.0
 
+    // MARK: Guide Display state — folded in from the former
+    // standalone `Settings → Guide Display` page in v1.6.8. The page
+    // shipped two related concerns (category colour palette, channel
+    // card tint) that overlapped with Appearance's existing theme +
+    // scale section enough that splitting them confused users —
+    // they'd flip the master "Color Programs by Category" toggle in
+    // Guide Display, then head to Appearance looking for a way to
+    // change the palette colour and not find it. Consolidating into
+    // one screen keeps every visual customisation in one place. The
+    // duplicate guideScale slider that used to live in Guide Display
+    // is dropped here — the existing Display Scale section below
+    // already exposes it. The EPG Cache "Refresh EPG Data" action
+    // also briefly lived on this page after the merge, but moved
+    // again in v1.6.8 (later iteration) to per-playlist surfaces in
+    // `ServerDetailView` so users can refresh one playlist without
+    // nuking every server's cached guide data.
+    @AppStorage(CategoryColor.enabledKey) private var enableCategoryColors = true
+    @AppStorage("tintChannelCards")       private var tintChannelCards = false
+
+    /// Summary text for the "Add more categories" disclosure row —
+    /// shows "Off", "3 extra", "Custom", or "5 extra + Custom" so
+    /// the user can see at a glance whether they've enabled
+    /// anything beyond the four default buckets.
+    fileprivate var moreCategoriesSummary: String {
+        let extraOn = CategoryColor.additionalBuckets.filter { CategoryColor.isBucketEnabled($0) }.count
+        let customCount = CategoryColor.loadCustomCategories().count
+        switch (extraOn, customCount) {
+        case (0, 0): return "Off"
+        case (let e, 0): return "\(e) extra"
+        case (0, let c): return "\(c) custom"
+        case (let e, let c): return "\(e) extra · \(c) custom"
+        }
+    }
+
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
@@ -149,6 +183,33 @@ struct AppearanceSettingsView: View {
                 tvAppearanceSection("Preview") {
                     swatchPreview
                         .padding(.horizontal, 20)
+                }
+
+                // Category Colors — folded in from the former
+                // standalone Guide Display page (v1.6.8). The tvOS
+                // page never offered a palette editor (palette
+                // tweaks are iPhone / iPad only because they need a
+                // colour picker keyboard) so we just expose the
+                // master toggle + the channel-card stripe toggle.
+                tvAppearanceSection("Category Colors") {
+                    TVSettingsToggleRow(
+                        icon: "paintpalette.fill",
+                        iconColor: .accentPrimary,
+                        title: "Color Programs by Category",
+                        subtitle: "Tint guide cells by program type. Customise the palette on iPhone / iPad — Settings → Appearance.",
+                        isOn: $enableCategoryColors,
+                        onChange: { _ in }
+                    )
+                    TVSettingsToggleRow(
+                        icon: "tv.fill",
+                        iconColor: .accentPrimary,
+                        title: "Tint Channel Cards",
+                        subtitle: "Adds a colored stripe to Live TV channel cards based on what's airing now.",
+                        isOn: $tintChannelCards,
+                        onChange: { _ in }
+                    )
+                    .disabled(!enableCategoryColors)
+                    .opacity(enableCategoryColors ? 1.0 : 0.4)
                 }
             }
             .padding(48)
@@ -458,9 +519,126 @@ struct AppearanceSettingsView: View {
                     Text("Preview").sectionHeaderStyle()
                 }
                 .listSectionSeparator(.hidden)
+
+                // MARK: Category Colors (formerly Settings → Guide Display)
+                //
+                // Master toggle + channel-card companion toggle.
+                //
+                // iPhone's Live TV tab is List-only (Guide view is iPad /
+                // Mac / Apple TV). The master toggle still matters on
+                // iPhone because it unlocks the "Tint Channel Cards"
+                // feature below — but "tint guide cells" was misleading
+                // copy that made iPhone testers think nothing happens
+                // when they flip it (they looked for a Guide view that
+                // doesn't exist). Device-aware text resolves that.
+                Section {
+                    Toggle(isOn: $enableCategoryColors) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Color Programs by Category")
+                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                            Text(UIDevice.current.userInterfaceIdiom == .phone
+                                 ? "Unlocks category-based coloring. On iPhone this drives the Tint Channel Cards stripe below."
+                                 : "Tint guide cells by program type — tap any color below to customise.")
+                                .font(.labelSmall).foregroundColor(.textTertiary)
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+                    .onChange(of: enableCategoryColors) { _, _ in
+                        SyncManager.shared.pushPreferencesImmediate()
+                    }
+
+                    Toggle(isOn: $tintChannelCards) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Tint Channel Cards")
+                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                            Text("Adds a colored stripe to Live TV channel cards (list view) based on what's currently airing.")
+                                .font(.labelSmall).foregroundColor(.textTertiary)
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+                    .disabled(!enableCategoryColors)
+                    .opacity(enableCategoryColors ? 1.0 : 0.4)
+                    .onChange(of: tintChannelCards) { _, _ in
+                        SyncManager.shared.pushPreferencesImmediate()
+                    }
+                } header: {
+                    Text("Category Colors").sectionHeaderStyle()
+                } footer: {
+                    Text(UIDevice.current.userInterfaceIdiom == .phone
+                         ? "iPhone's Live TV tab only renders the List view. Cards tint with a gradient that fades from the leading edge toward the center — based on the currently-airing program on the main row, and the individual program on each expanded schedule row. Dispatcharr and M3U+XMLTV work out of the box; Xtream Codes doesn't expose category data."
+                         : "Programs with a category tag in the EPG source get a leading-edge gradient — on channel cards in the List view (using the currently-airing program), on each row in the expanded schedule (using that program's own category), and on cells in the Guide grid. Dispatcharr and M3U+XMLTV work out of the box; Xtream Codes doesn't expose category data.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+                .listSectionSeparator(.hidden)
+
+                // MARK: Palette (formerly Settings → Guide Display)
+                //
+                // Default palette — the four buckets that have shipped
+                // since v1.0. Always visible; the "Add more
+                // categories" row below progressively discloses the
+                // extra buckets + a Custom editor without cluttering
+                // the default Settings view.
+                Section {
+                    ForEach(CategoryColor.defaultBuckets, id: \.rawValue) { cat in
+                        CategoryColorPickerRow(category: cat)
+                            .listRowBackground(Color.cardBackground)
+                            .disabled(!enableCategoryColors)
+                            .opacity(enableCategoryColors ? 1.0 : 0.4)
+                    }
+
+                    NavigationLink {
+                        MoreCategoriesView()
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(theme.accent)
+                            Text("Add more categories")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Spacer()
+                            Text(moreCategoriesSummary)
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                        }
+                    }
+                    .listRowBackground(Color.cardBackground)
+                    .disabled(!enableCategoryColors)
+                    .opacity(enableCategoryColors ? 1.0 : 0.4)
+
+                    Button(role: .destructive) {
+                        CategoryColor.resetPaletteToDefaults()
+                        SyncManager.shared.pushPreferencesImmediate()
+                    } label: {
+                        HStack {
+                            Image(systemName: "arrow.uturn.backward")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("Reset Colors to Defaults").font(.bodyMedium)
+                        }
+                        .foregroundColor(.statusWarning)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                    .disabled(!enableCategoryColors)
+                    .opacity(enableCategoryColors ? 1.0 : 0.4)
+                } header: {
+                    Text("Palette").sectionHeaderStyle()
+                } footer: {
+                    Text("Tap a swatch to customise the color used for that program bucket. Kids > Sports > News > Movie priority when a program matches multiple.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+                .listSectionSeparator(.hidden)
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            // See SettingsView for rationale — SwiftUI List cells
+            // cache their rendered content even when the parent
+            // re-renders, leaving accent-derived text colors
+            // (.textSecondary, .textTertiary) and section header
+            // tints stuck on the previous theme. Keying the List
+            // identity to the active theme forces a clean rebuild.
+            .id("appearance-list-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
     }
 
     /// iOS scale-slider row. Single horizontal HStack shared by the

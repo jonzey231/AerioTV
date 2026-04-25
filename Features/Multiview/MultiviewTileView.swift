@@ -120,6 +120,41 @@ struct MultiviewTileView: View {
     @State private var showAudioTrackMenu: Bool = false
     @State private var showSubtitleTrackMenu: Bool = false
 
+    // MARK: - User-configurable multiview appearance (Settings → Multiview)
+    //
+    // v1.6.8: three @AppStorage-backed prefs control the tile's
+    // visual treatment. Defaults preserve pre-v1.6.8 behaviour
+    // (centerIcon focus indicator, no padding, square corners).
+
+    /// Audio-focus indicator style — center icon (default), gray
+    /// persistent stroke, or accent fading stroke.
+    @AppStorage(MultiviewAudioFocusStyle.storageKey)
+    private var audioFocusStyleRaw: String = MultiviewAudioFocusStyle.centerIcon.rawValue
+
+    /// `true` when the user wants 12pt rounded tile corners.
+    @AppStorage(multiviewTileCornersRoundedKey)
+    private var cornersRounded: Bool = false
+
+    /// Resolved focus style (with fallback to `.centerIcon` for any
+    /// future-or-corrupted raw values).
+    private var audioFocusStyle: MultiviewAudioFocusStyle {
+        MultiviewAudioFocusStyle(rawValue: audioFocusStyleRaw) ?? .centerIcon
+    }
+
+    /// Tile corner radius driven by the user's preference. 0pt
+    /// (square) is the legacy default; 12pt (rounded) softens the
+    /// edges so the grid reads as a stack of cards rather than a
+    /// continuous mosaic.
+    private var tileCornerRadius: CGFloat { cornersRounded ? 12 : 0 }
+
+    /// Tile shape — recomputed per render off the user's preference
+    /// rather than a `static let` constant so toggling "Rounded
+    /// Tiles" in Settings updates a live multiview session without
+    /// requiring a re-mount.
+    private var tileShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: tileCornerRadius, style: .continuous)
+    }
+
     var isAudioActive: Bool { store.audioTileID == tile.id }
 
     /// Computed: a tile should freeze its mpv decode when:
@@ -534,12 +569,13 @@ struct MultiviewTileView: View {
                 // Focus ring (tvOS) / relocate-amber. Audio-active is
                 // signalled by the audioBadge (speaker icon top-left),
                 // not a ring — see `ring` docstring.
-                Self.tileShape
+                tileShape
                     .stroke(ring.color, lineWidth: ring.width)
             )
-            .clipShape(Self.tileShape)
+            .overlay(audioFocusStrokeOverlay)
+            .clipShape(tileShape)
             // Black underlay so letterbox bars aren't transparent.
-            .background(Self.tileShape.fill(Color.black))
+            .background(tileShape.fill(Color.black))
             // tvOS focus lift: scale + outer shadow combine with the
             // white ring above to create the full "card lifts on focus"
             // feedback. iPad uses hoverEffect below (no-op on touch).
@@ -716,16 +752,46 @@ struct MultiviewTileView: View {
 
     // MARK: - Shape
 
-    /// Shared rectangle used for clip, background, and stroke.
-    /// cornerRadius=0 so adjacent tiles meet flush at edges without
-    /// black lens-shaped gaps where two rounded corners would miss
-    /// each other. Previously radius=12 — matched Settings cards but
-    /// read as visible padding between streams in a tight multiview
-    /// grid, which the user flagged.
-    private static let tileShape = RoundedRectangle(
-        cornerRadius: 0,
-        style: .continuous
-    )
+    /// Audio-active tile stroke overlay. v1.6.8 — drives the user's
+    /// chosen `MultiviewAudioFocusStyle`:
+    ///
+    ///   • `.centerIcon` — returns nothing; the existing
+    ///     `TVCenterAudioFocusIcon` middle-of-tile speaker
+    ///     indicator stays the only signal (legacy behaviour).
+    ///   • `.grayPersistent` — a 3pt muted-gray border on the
+    ///     audio tile, always visible. Matches YouTube TV's
+    ///     "this tile owns audio" UX.
+    ///   • `.themeFading` — a 3pt accent stroke that piggybacks
+    ///     on `MultiviewChromeState.focusIndicatorVisible` so it
+    ///     fades in / out with the rest of the tile chrome on
+    ///     the existing 5-second auto-hide timer. Visible while
+    ///     the user is interacting with the grid; hidden when
+    ///     they're just watching.
+    ///
+    /// Non-audio tiles always render `EmptyView`; only the
+    /// `audioTileID` tile gets the overlay.
+    @ViewBuilder
+    private var audioFocusStrokeOverlay: some View {
+        if isAudioActive {
+            switch audioFocusStyle {
+            case .centerIcon:
+                EmptyView()
+            case .grayPersistent:
+                tileShape
+                    .stroke(Color(white: 0.55), lineWidth: 3)
+                    .allowsHitTesting(false)
+            case .themeFading:
+                tileShape
+                    .stroke(ThemeManager.shared.accent, lineWidth: 3)
+                    .opacity(chromeState.focusIndicatorVisible ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.25),
+                               value: chromeState.focusIndicatorVisible)
+                    .allowsHitTesting(false)
+            }
+        } else {
+            EmptyView()
+        }
+    }
 
     // MARK: - iPadOS focus-ring helpers
 
@@ -833,11 +899,24 @@ struct MultiviewTileView: View {
     /// can read `@Environment(\.isFocused)` — environment values
     /// aren't available inside computed-property view builders on
     /// the enclosing struct, but they propagate into child views.
+    ///
+    /// v1.6.8: gated on the user's `MultiviewAudioFocusStyle`
+    /// preference — the icon only renders for `.centerIcon`. Other
+    /// styles use the stroke overlay (`audioFocusStrokeOverlay`)
+    /// instead and skip this view entirely. The "Make Audio" hint
+    /// (rendered for non-audio tiles via `CenterAudioIconView`'s
+    /// inactive branch) is preserved across all styles, so users
+    /// can still see which tiles are tappable to take audio focus.
+    @ViewBuilder
     private var centerAudioIcon: some View {
-        CenterAudioIconView(
-            isAudioActive: isAudioActive,
-            channelName: tile.item.name
-        )
+        if audioFocusStyle == .centerIcon || !isAudioActive {
+            CenterAudioIconView(
+                isAudioActive: isAudioActive,
+                channelName: tile.item.name
+            )
+        } else {
+            EmptyView()
+        }
     }
     #endif
 
@@ -1253,12 +1332,17 @@ struct MultiviewTileButtonStyle: ButtonStyle {
     /// have idle-faded.
     let isChromeVisible: Bool
 
-    // cornerRadius=0 so adjacent tiles' edges touch with zero visual
-    // gap. See `MultiviewTileView.tileShape` for the rationale.
-    private static let shape = RoundedRectangle(
-        cornerRadius: 0,
-        style: .continuous
-    )
+    /// Mirror of the `multiviewTileCornersRoundedKey` preference so
+    /// the iPad button-style clip shape matches the tile body's
+    /// rounding. v1.6.8 — recomputed per render, not a `static let`,
+    /// so toggling "Rounded Tiles" updates a live multiview session
+    /// without re-mount.
+    @AppStorage(multiviewTileCornersRoundedKey)
+    private var cornersRounded: Bool = false
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cornersRounded ? 12 : 0, style: .continuous)
+    }
 
     /// Scale, largest → smallest priority:
     /// - Relocating: 1.04 (clearly off the grid surface)
@@ -1287,7 +1371,7 @@ struct MultiviewTileButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         let s = shadowSpec
         return configuration.label
-            .clipShape(Self.shape)
+            .clipShape(shape)
             .scaleEffect(scale)
             .shadow(color: s.color, radius: s.radius, y: s.y)
             .opacity(configuration.isPressed ? 0.85 : 1.0)

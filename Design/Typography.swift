@@ -75,7 +75,41 @@ struct SectionHeaderStyle: ViewModifier {
     }
 }
 
+/// Theme-reactive wrapper that observes `ThemeManager` and re-applies
+/// `SectionHeaderStyle` with the current accent-derived `.textSecondary`
+/// every time the theme changes.
+///
+/// We can't put `@ObservedObject` on a `ViewModifier`, so the older
+/// `.sectionHeaderStyle()` extension would freeze its `Color` argument
+/// inside SwiftUI List cells — the cell content didn't refresh on theme
+/// changes (Mac Catalyst especially). Wrapping the styled `Text` in a
+/// `View` struct lets us subscribe to `ThemeManager.objectWillChange`,
+/// which forces a body re-evaluation that picks up the fresh accent.
+private struct ThemeReactiveSectionHeader<Content: View>: View {
+    @ObservedObject private var theme = ThemeManager.shared
+    let content: Content
+    var body: some View {
+        // Read theme.accent so SwiftUI's dependency tracker registers
+        // the property — opacity is applied here (not via the static
+        // `Color.textSecondary` accessor) so the resulting `Color`
+        // changes structurally on every theme push, ensuring the
+        // .foregroundColor modifier re-applies inside cached cells.
+        let derived: Color = {
+            #if os(tvOS)
+            return theme.accent.opacity(0.75)
+            #else
+            return theme.accent.opacity(0.65)
+            #endif
+        }()
+        return content.modifier(SectionHeaderStyle(color: derived))
+    }
+}
+
 extension View {
     func displayStyle() -> some View { modifier(DisplayTextStyle()) }
-    func sectionHeaderStyle() -> some View { modifier(SectionHeaderStyle(color: .textSecondary)) }
+    /// Theme-reactive section header. See `ThemeReactiveSectionHeader`
+    /// for why this is a wrapping `View` rather than a plain modifier.
+    func sectionHeaderStyle() -> some View {
+        ThemeReactiveSectionHeader(content: self)
+    }
 }

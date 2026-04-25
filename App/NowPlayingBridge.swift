@@ -265,13 +265,17 @@ final class NowPlayingBridge {
 
                 await MainActor.run {
                     guard let self else { return }
-                    // `init(image:)` is deprecated since iOS 10 but still
-                    // functional. It retains the UIImage directly — NO
-                    // closure for iOS's Media framework to resolve on its
-                    // internal queue. That's what avoids the
-                    // `_dispatch_assert_queue_fail` path the closure-based
-                    // init triggers. Worth the deprecation warning.
-                    let artwork = MPMediaItemArtwork(image: thumbnail)
+                    // v1.6.8: routed through `AerioMakeMPMediaItemArtwork`
+                    // (Shared/AerioObjC/MPMediaItemArtworkShim.{h,m}). The
+                    // Objective-C shim wraps `-[MPMediaItemArtwork
+                    // initWithImage:]` inside `#pragma clang diagnostic`
+                    // so the deprecation warning is silenced at the source.
+                    // We continue to use the deprecated init on purpose:
+                    // the closure-based replacement
+                    // `+initWithBoundsSize:requestHandler:` triggers
+                    // `_dispatch_assert_queue_fail` on lockscreen artwork
+                    // updates. The shim header documents this in detail.
+                    let artwork = AerioMakeMPMediaItemArtwork(thumbnail)
                     self.infoDict[MPMediaItemPropertyArtwork] = artwork
                     self.publishInfo()
                     #if DEBUG

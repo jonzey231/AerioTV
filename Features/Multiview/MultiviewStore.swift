@@ -1,6 +1,69 @@
 import Foundation
 import SwiftUI
 
+// MARK: - User-configurable multiview appearance
+//
+// v1.6.8: three new prefs surfaced in `Settings → Multiview`:
+//   • Audio Focus Indicator — how the active-audio tile is marked.
+//   • Padding Between Tiles — flush-meeting tiles vs. small gaps.
+//   • Tile Corners            — square-edge tiles vs. rounded.
+//
+// Defaults preserve pre-v1.6.8 behaviour (`.centerIcon`, no padding,
+// square corners) so existing users see no visual change unless they
+// opt into one. Storage keys are `@AppStorage`-driven across the
+// multiview views so a user toggling a setting sees the change live
+// without leaving Settings.
+
+/// How the audio-active tile is highlighted in multiview.
+///
+/// • `centerIcon` (default, pre-v1.6.8 behaviour) — a speaker icon
+///   in the centre of the active tile fades in / out with the rest
+///   of the tile chrome.
+/// • `grayPersistent` — a muted gray border around the active tile
+///   that's always visible, similar to YouTube TV's multiview UX.
+/// • `themeFading` — an accent-colored border that rides the
+///   existing 5-second focus-indicator auto-hide, so it appears
+///   when the user is interacting with the grid and fades when
+///   they're just watching.
+enum MultiviewAudioFocusStyle: String, CaseIterable, Identifiable, Sendable {
+    case centerIcon
+    case grayPersistent
+    case themeFading
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .centerIcon:     return "Center Icon"
+        case .grayPersistent: return "Gray Outline"
+        case .themeFading:    return "Accent Outline (Fading)"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .centerIcon:     return "A speaker icon shows in the center of the active tile."
+        case .grayPersistent: return "A muted gray border around the active tile, always visible."
+        case .themeFading:    return "An accent-colored border that fades after 5 seconds of inactivity."
+        }
+    }
+
+    /// Storage key used by `@AppStorage` everywhere in the multiview
+    /// views. Centralised here so the views and the Settings submenu
+    /// reference the same string.
+    static let storageKey = "multiviewAudioFocusStyle"
+}
+
+/// Storage key for the boolean "padding between tiles" preference.
+/// `false` (default) keeps tiles meeting flush at edges (legacy);
+/// `true` inserts an 8pt gap on every grid axis.
+let multiviewTilePaddingKey = "multiviewTilePadding"
+
+/// Storage key for the boolean "rounded tile corners" preference.
+/// `false` (default) keeps the square-cornered shape that's been the
+/// look since multiview shipped; `true` rounds every tile to 12pt.
+let multiviewTileCornersRoundedKey = "multiviewTileCornersRounded"
+
 /// Source of truth for the multiview grid's dynamic state:
 /// the ordered tile list, which tile has audio, which tile (if any)
 /// is temporarily promoted to full-screen-within-grid, the relocate

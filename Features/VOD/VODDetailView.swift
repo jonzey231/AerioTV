@@ -5,6 +5,19 @@ import SwiftData
 struct VODDetailView: View {
     let item: VODDisplayItem
     @Query private var servers: [ServerConnection]
+    /// Every episode-typed `WatchProgress` row. Filtered in memory by
+    /// `seriesID == item.id` inside `progressByEpisodeID`. v1.6.8:
+    /// drives the "Currently Watching" / "Watched" pill on each
+    /// episode row so users arriving at the series detail page (for
+    /// example from a tvOS Top Shelf deep-link after cross-device
+    /// sync) can see at a glance which episode they were in the
+    /// middle of. SwiftData `#Predicate` can capture primitives from
+    /// the surrounding scope, but binding `seriesID` at query-init
+    /// time would require a custom `init` just to reassign
+    /// `_watchProgress`; the episode-count fits comfortably in
+    /// memory so we take the simpler filter-on-read path.
+    @Query(filter: #Predicate<WatchProgress> { $0.vodType == "episode" })
+    private var allEpisodeProgress: [WatchProgress]
     @Environment(\.dismiss) private var dismiss
 
     @State private var fullMovie: VODMovie?
@@ -191,9 +204,28 @@ struct VODDetailView: View {
     }
 
     private func episodeRow(_ ep: VODEpisode) -> some View {
-        TVEpisodeRowButton(ep: ep, headers: serverHeaders()) {
+        TVEpisodeRowButton(
+            ep: ep,
+            headers: serverHeaders(),
+            progress: progressByEpisodeID[ep.id]
+        ) {
             playEpisode(ep)
         }
+    }
+
+    /// Lookup from `episode.id` → `WatchProgress` for episodes of
+    /// this series. Only populated for series detail pages; a movie
+    /// item never returns any rows because `allEpisodeProgress` is
+    /// already filtered to `vodType == "episode"` and movies don't
+    /// have a matching `seriesID`.
+    private var progressByEpisodeID: [String: WatchProgress] {
+        guard item.type == .series else { return [:] }
+        let seriesID = item.id
+        var map: [String: WatchProgress] = [:]
+        for wp in allEpisodeProgress where wp.seriesID == seriesID {
+            map[wp.vodID] = wp
+        }
+        return map
     }
 
     // MARK: - Helpers
@@ -211,6 +243,8 @@ struct VODDetailView: View {
         // The Top Shelf extension uses this to build a deep link that
         // navigates back to the series detail — the episode itself doesn't
         // have a standalone detail view to return to.
+        // v1.6.8 (Codex A1): pass serverID through too so resume positions
+        // don't collide across servers that share an episode ID.
         WatchProgressManager.save(
             vodID: ep.id,
             title: ep.title,
@@ -218,6 +252,7 @@ struct VODDetailView: View {
             durationMs: 0,
             posterURL: ep.posterURL?.absoluteString,
             vodType: "episode",
+            serverID: ep.serverID.uuidString,
             seriesID: ep.seriesID
         )
         Task {
@@ -298,6 +333,12 @@ struct VODDetailView: View {
 private struct TVEpisodeRowButton: View {
     let ep: VODEpisode
     let headers: [String: String]
+    /// Optional resume/watched state. v1.6.8: lets the row surface a
+    /// "Currently Watching" / "Watched" pill badge so users arriving
+    /// at a series detail page (especially from a Top Shelf
+    /// deep-link after cross-device sync) can see at a glance which
+    /// episode they're in the middle of without scrubbing the list.
+    let progress: WatchProgress?
     let action: () -> Void
 
     #if os(tvOS)
@@ -320,6 +361,75 @@ private struct TVEpisodeRowButton: View {
                         Text(ep.plot)
                             .font(.labelSmall).foregroundColor(.textSecondary)
                             .lineLimit(2)
+                    }
+                    // Progress pill + timeline — only rendered when
+                    // there's a WatchProgress row for this episode.
+                    // Finished episodes get a muted "Watched" chip
+                    // (no timeline — the pill itself communicates
+                    // completion); in-progress episodes get the
+                    // accent "Currently Watching" chip plus a thin
+                    // accent-tinted progress bar + percentage so
+                    // users can tell how far in they were without
+                    // resuming. Sizes are platform-specific —
+                    // v1.6.8 feedback bumped the tvOS font +
+                    // padding 50% larger for 10-foot readability.
+                    if let progress {
+                        #if os(tvOS)
+                        let iconSize: CGFloat = 15
+                        let textSize: CGFloat = 17
+                        let hPadding: CGFloat = 12
+                        let vPadding: CGFloat = 5
+                        let barMaxWidth: CGFloat = 360
+                        let barHeight: CGFloat = 5
+                        let pctTextSize: CGFloat = 15
+                        #else
+                        let iconSize: CGFloat = 10
+                        let textSize: CGFloat = 11
+                        let hPadding: CGFloat = 8
+                        let vPadding: CGFloat = 3
+                        let barMaxWidth: CGFloat = 240
+                        let barHeight: CGFloat = 3
+                        let pctTextSize: CGFloat = 10
+                        #endif
+
+                        HStack(spacing: 4) {
+                            Image(systemName: progress.isFinished
+                                  ? "checkmark.circle.fill"
+                                  : "play.circle.fill")
+                                .font(.system(size: iconSize, weight: .semibold))
+                            Text(progress.isFinished ? "Watched" : "Currently Watching")
+                                .font(.system(size: textSize, weight: .semibold))
+                        }
+                        .foregroundColor(progress.isFinished ? .textSecondary : .white)
+                        .padding(.horizontal, hPadding)
+                        .padding(.vertical, vPadding)
+                        .background(
+                            Capsule().fill(progress.isFinished
+                                           ? Color.elevatedBackground
+                                           : Color.accentPrimary)
+                        )
+
+                        // Linear timeline. Shown only for in-progress
+                        // episodes with a usable duration — some
+                        // episode rows persist with `durationMs == 0`
+                        // because playback was stopped before mpv
+                        // reported a duration, and rendering a 0-based
+                        // percentage would lie to the user.
+                        if !progress.isFinished, progress.durationMs > 0 {
+                            let pct = max(0.0, min(1.0,
+                                Double(progress.positionMs) / Double(progress.durationMs)))
+                            HStack(spacing: 8) {
+                                ProgressView(value: pct)
+                                    .progressViewStyle(.linear)
+                                    .tint(.accentPrimary)
+                                    .frame(maxWidth: barMaxWidth)
+                                    .scaleEffect(x: 1.0, y: barHeight / 3.0, anchor: .center)
+                                Text("\(Int(pct * 100))%")
+                                    .font(.system(size: pctTextSize, weight: .semibold))
+                                    .foregroundColor(.textSecondary)
+                            }
+                            .padding(.top, 2)
+                        }
                     }
                 }
 

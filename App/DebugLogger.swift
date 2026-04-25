@@ -103,23 +103,72 @@ final class DebugLogger: @unchecked Sendable {
     private init() {}
 
     // MARK: - Credential Sanitization
+    //
+    // Defence-in-depth for the debug log file. Every string path that
+    // reaches `appendToFile` is now routed through `sanitize()` so no
+    // credential — embedded in a URL, a header, a JSON body snippet,
+    // or an error message — can land on disk. Patterns below are
+    // ordered by risk; extending the list means adding one `NSRegular`
+    // pattern plus one replacement line in `sanitize()`.
+    //
+    // If you add a new auth surface (e.g. OAuth, a new media server),
+    // audit call sites with `grep -R "DebugLogger.shared.log\|debugLog"`
+    // for any new vector and extend this list accordingly.
 
-    /// Replaces password-like path segments in Xtream Codes stream URLs with "***".
-    /// Xtream URL format: /movie/<user>/<password>/<id>.ext  or /series/… or /live/…
-    /// Also strips API key query parameters.
+    /// Xtream path-segment credentials: `/live/<user>/<pass>/<id>.ts`
+    /// etc. Catches the three stream-type prefixes Xtream supports.
+    /// Preserves `<user>` on purpose so operators can correlate log
+    /// lines with specific accounts when debugging — only the password
+    /// slot is redacted.
     private static let xtreamPathRegex = try! NSRegularExpression(
         pattern: #"/(movie|series|live)/([^/]+)/([^/]+)/"#)
+    /// Xtream query-param credentials — used by the `/player_api.php`
+    /// and `/get.php` endpoints: `?username=X&password=Y&action=…`.
+    /// Separate from the path-segment regex above because Xtream's
+    /// API and stream endpoints use different auth encodings.
+    private static let xtreamQueryParamRegex = try! NSRegularExpression(
+        pattern: #"([?&](?:username|password)=)[^&\s]+"#, options: .caseInsensitive)
+    /// `?api_key=...` query param. Used by Emby/Jellyfin + some
+    /// legacy Dispatcharr paths.
     private static let apiKeyRegex = try! NSRegularExpression(
         pattern: #"(api[_-]?key=)[^&\s]+"#, options: .caseInsensitive)
+    /// HTTP authorisation header values — defensive for the case where
+    /// URLSession stringifies a failed request (header + URL both land
+    /// in `error.localizedDescription`). Covers the three schemes the
+    /// app uses: `Authorization: Bearer …` (Dispatcharr JWT),
+    /// `Authorization: ApiKey …` / `X-API-Key: …` (Dispatcharr API
+    /// key), and `X-Plex-Token: …` (Plex). Header value is bounded by
+    /// whitespace, comma, semicolon, or quote so we don't eat past
+    /// the value.
+    private static let authHeaderRegex = try! NSRegularExpression(
+        pattern: #"(?i)(Authorization|X-API-Key|X-Plex-Token):\s*([^\s,;"]+)"#)
+    /// Emby/Jellyfin "Token=..." fragment inside
+    /// `X-Emby-Authorization: MediaBrowser Client="…", Token="…"`.
+    /// Separate from `authHeaderRegex` because the token sits inside
+    /// a comma-separated value list rather than being the entire
+    /// header value.
+    private static let embyTokenRegex = try! NSRegularExpression(
+        pattern: #"(?i)(Token=)"[^"]+""#)
+    /// JWT `access`/`refresh` pairs in JSON response bodies. Triggers
+    /// primarily from `logDecodeError(payloadSnippet:)` when a login
+    /// response fails to decode — the raw JSON would otherwise include
+    /// the tokens in plaintext. The 20-char minimum avoids false
+    /// positives on short unrelated fields.
+    private static let jwtInJsonRegex = try! NSRegularExpression(
+        pattern: #""(access|refresh)"\s*:\s*"[^"]{20,}""#)
 
     static func sanitize(_ message: String) -> String {
         var result = message
-        let r1 = NSRange(result.startIndex..., in: result)
-        result = xtreamPathRegex.stringByReplacingMatches(in: result, range: r1,
-                                                          withTemplate: "/$1/$2/***/")
-        let r2 = NSRange(result.startIndex..., in: result)
-        result = apiKeyRegex.stringByReplacingMatches(in: result, range: r2,
-                                                      withTemplate: "$1***")
+        func apply(_ regex: NSRegularExpression, _ template: String) {
+            let range = NSRange(result.startIndex..., in: result)
+            result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: template)
+        }
+        apply(xtreamPathRegex,       "/$1/$2/***/")
+        apply(xtreamQueryParamRegex, "$1***")
+        apply(apiKeyRegex,           "$1***")
+        apply(authHeaderRegex,       "$1: ***")
+        apply(embyTokenRegex,        #"$1"***""#)
+        apply(jwtInJsonRegex,        #""$1": "***""#)
         return result
     }
 
@@ -162,6 +211,14 @@ final class DebugLogger: @unchecked Sendable {
     }
 
     /// Log a caught error with full context.
+    ///
+    /// v1.6.8 (Codex D4): both the localized description and the
+    /// `String(describing: error)` dump can embed the full URL
+    /// that failed (URLSession typically formats
+    /// `NSErrorFailingURLStringKey` into its description), which on
+    /// an Xtream stream URL would include user + password. Route the
+    /// composed message through `sanitize` so those slots get
+    /// redacted before disk.
     func logError(_ error: Error,
                   context: String,
                   file: String = #file,
@@ -170,7 +227,8 @@ final class DebugLogger: @unchecked Sendable {
         guard isEnabled else { return }
         let src = "\(URL(fileURLWithPath: file).lastPathComponent):\(line) \(function)"
         let msg = "[\(context)] \(error.localizedDescription) | \(String(describing: error))"
-        let entry = formatEntry(level: .error, category: "Error", message: msg, source: src)
+        let entry = formatEntry(level: .error, category: "Error",
+                                message: DebugLogger.sanitize(msg), source: src)
         queue.async { [weak self] in self?.appendToFile(entry) }
     }
 
@@ -195,16 +253,28 @@ final class DebugLogger: @unchecked Sendable {
     }
 
     /// Log a stream playback event.
+    ///
+    /// v1.6.8 (Codex D4): URLs passed here can include Xtream
+    /// path-segment credentials (`/live/<user>/<pass>/…`) when the
+    /// app falls back to legacy Xtream streaming endpoints, or
+    /// query-param credentials on M3U playlists. Route through
+    /// `sanitize` so those get redacted before disk.
     func logPlayback(event: String, url: String? = nil, detail: String? = nil) {
         guard isEnabled else { return }
         var msg = event
         if let u = url    { msg += " | \(u)" }
         if let d = detail { msg += " | \(d)" }
-        let entry = formatEntry(level: .lifecycle, category: "Playback", message: msg)
+        let entry = formatEntry(level: .lifecycle, category: "Playback",
+                                message: DebugLogger.sanitize(msg))
         queue.async { [weak self] in self?.appendToFile(entry) }
     }
 
     /// Log an EPG operation.
+    ///
+    /// v1.6.8 (Codex D4): `error.localizedDescription` on a URLSession
+    /// fetch failure can embed the full XMLTV URL — potentially an
+    /// Xtream `/xmltv.php?username=…&password=…` endpoint. Sanitize
+    /// the composed message.
     func logEPG(event: String,
                 channelID: String? = nil,
                 count: Int? = nil,
@@ -217,11 +287,15 @@ final class DebugLogger: @unchecked Sendable {
         if let ms  = duration  { msg += " | \(String(format: "%.0f ms", ms * 1_000))" }
         if let err = error     { msg += " | \(err.localizedDescription)" }
         let level: LogLevel = error != nil ? .warning : .info
-        let entry = formatEntry(level: level, category: "EPG", message: msg)
+        let entry = formatEntry(level: level, category: "EPG",
+                                message: DebugLogger.sanitize(msg))
         queue.async { [weak self] in self?.appendToFile(entry) }
     }
 
     /// Log a channel list load operation.
+    ///
+    /// v1.6.8 (Codex D4): sanitized for the same reason as `logEPG`
+    /// — the error description can expose the playlist URL.
     func logChannelLoad(serverType: String,
                         channelCount: Int? = nil,
                         duration: TimeInterval? = nil,
@@ -232,7 +306,8 @@ final class DebugLogger: @unchecked Sendable {
         if let ms = duration     { msg += " | \(String(format: "%.0f ms", ms * 1_000))" }
         if let err = error       { msg += " | \(err.localizedDescription)" }
         let level: LogLevel = error != nil ? .error : .info
-        let entry = formatEntry(level: level, category: "Channels", message: msg)
+        let entry = formatEntry(level: level, category: "Channels",
+                                message: DebugLogger.sanitize(msg))
         queue.async { [weak self] in self?.appendToFile(entry) }
     }
 
@@ -244,15 +319,25 @@ final class DebugLogger: @unchecked Sendable {
     }
 
     /// Log a timed operation for performance tracking.
+    ///
+    /// v1.6.8 (Codex D4): sanitised — callers sometimes include URLs
+    /// or auth headers in the `detail` field.
     func logPerformance(operation: String, duration: TimeInterval, detail: String? = nil) {
         guard isEnabled else { return }
         var msg = "\(operation): \(String(format: "%.2f ms", duration * 1_000))"
         if let d = detail { msg += " | \(d)" }
-        let entry = formatEntry(level: .perf, category: "Performance", message: msg)
+        let entry = formatEntry(level: .perf, category: "Performance",
+                                message: DebugLogger.sanitize(msg))
         queue.async { [weak self] in self?.appendToFile(entry) }
     }
 
     /// Log a decoding / parsing error with the raw payload snippet.
+    ///
+    /// v1.6.8 (Codex D4): **highest-risk sanitizer target** — the
+    /// raw payload prefix can be the first 200 characters of a
+    /// Dispatcharr login response which contains
+    /// `{"access":"<jwt>","refresh":"<jwt>"}`. The JWT regex in
+    /// `sanitize()` specifically handles this case.
     func logDecodeError(type: String, error: Error, payloadSnippet: String? = nil) {
         guard isEnabled else { return }
         var msg = "Decode failed for \(type): \(error.localizedDescription)"
@@ -260,7 +345,8 @@ final class DebugLogger: @unchecked Sendable {
             let preview = snippet.prefix(200)
             msg += " | payload: \(preview)"
         }
-        let entry = formatEntry(level: .error, category: "Decode", message: msg)
+        let entry = formatEntry(level: .error, category: "Decode",
+                                message: DebugLogger.sanitize(msg))
         queue.async { [weak self] in self?.appendToFile(entry) }
     }
 

@@ -958,6 +958,17 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// though Dispatcharr's own web UI shows them. `nil` for XC
     /// and M3U where there's no server-side UUID concept.
     var uuid: String? = nil
+    /// Dispatcharr-only: the channel's numeric server-side ID
+    /// (`DispatcharrChannel.id`). v1.6.8 (Codex A2): added so
+    /// `RecordProgramSheet` can pass an explicit, type-safe int
+    /// to `RecordingCoordinator.scheduleDispatcharrRecording`
+    /// instead of doing `Int(channelID) ?? 0` against the string
+    /// `id`. The previous approach worked by accident — Dispatcharr's
+    /// `ChannelDisplayItem.id` happens to be `String(ch.id)` — but
+    /// returned a silent `0` for any provider whose `id` is a UUID
+    /// (M3U) or any future format change. `nil` for non-Dispatcharr
+    /// providers; record-to-server is gated on this being non-nil.
+    var dispatcharrChannelID: Int? = nil
     var currentProgram: String? = nil
     var currentProgramDescription: String? = nil
     var currentProgramStart: Date? = nil
@@ -1212,7 +1223,9 @@ struct ChannelRow: View {
                     channelName: item.name,
                     scheduledStart: entry.startTime ?? Date(),
                     scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
-                    isLive: (entry.startTime ?? Date()) <= Date()
+                    isLive: (entry.startTime ?? Date()) <= Date(),
+                    dispatcharrChannelID: item.dispatcharrChannelID,
+                    streamURL: item.streamURL
                 )
             case .programInfo(let target):
                 ProgramInfoView(target: target)
@@ -1234,7 +1247,9 @@ struct ChannelRow: View {
                     channelName: item.name,
                     scheduledStart: entry.startTime ?? Date(),
                     scheduledEnd: entry.endTime ?? Date().addingTimeInterval(3600),
-                    isLive: (entry.startTime ?? Date()) <= Date()
+                    isLive: (entry.startTime ?? Date()) <= Date(),
+                    dispatcharrChannelID: item.dispatcharrChannelID,
+                    streamURL: item.streamURL
                 )
             case .programInfo(let target):
                 ProgramInfoView(target: target)
@@ -1295,7 +1310,7 @@ struct ChannelRow: View {
             } label: {
                 HStack(spacing: 14) {
                     Text(item.number)
-                        .font(.system(size: 24, weight: .medium, design: .monospaced))
+                        .font(.system(size: 24, weight: .bold, design: .monospaced))
                         .lineLimit(1)
                         .foregroundColor(.textTertiary)
                         .frame(width: 42, alignment: .trailing)
@@ -1405,7 +1420,7 @@ struct ChannelRow: View {
         let s = listScaleClamped
         return HStack(spacing: (isWide ? 14 : 10) * s) {
             Text(item.number)
-                .font(.system(size: (isWide ? 17 : 13) * s, design: .monospaced))
+                .font(.system(size: (isWide ? 17 : 13) * s, weight: .bold, design: .monospaced))
                 .lineLimit(1)
                 .foregroundColor(.textTertiary)
                 .frame(width: (isWide ? 36 : 26) * s, alignment: .trailing)
@@ -1536,15 +1551,29 @@ struct ChannelRow: View {
                 }
             }
 
-            // Record the currently-airing program
-            if let program = item.currentProgram,
-               let end = item.currentProgramEnd, end > Date() {
-                Button("Record from Now") {
+            // Record the currently-airing program. v1.6.8 (B1 Phase 1):
+            // dropped the `currentProgram != nil && end > now` gate.
+            // For Dispatcharr playlists, `ChannelDisplayItem.currentProgram`
+            // is never populated at load time (the load path leaves
+            // EPG enrichment to the Guide view's per-cell prefetch),
+            // so the gate hid the Record action permanently for users
+            // who hadn't visited the Guide first. Now we always offer
+            // "Record" — when EPG is missing we fall back to a generic
+            // title + a 60-minute default duration that the user can
+            // override in `RecordProgramSheet`.
+            if item.streamURL != nil {
+                let hasEPG = (item.currentProgram?.isEmpty == false)
+                Button(hasEPG ? "Record from Now" : "Record") {
+                    let now = Date()
+                    let title = item.currentProgram ?? "\(item.name) live recording"
+                    let start = item.currentProgramStart ?? now
+                    let end = (item.currentProgramEnd.flatMap { $0 > now ? $0 : nil })
+                        ?? now.addingTimeInterval(3600)
                     activeSheet = .record(
                         EPGEntry(
-                            title: program,
+                            title: title,
                             description: item.currentProgramDescription ?? "",
-                            startTime: item.currentProgramStart,
+                            startTime: start,
                             endTime: end
                         )
                     )

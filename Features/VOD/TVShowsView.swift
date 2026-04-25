@@ -81,7 +81,7 @@ struct TVShowsView: View {
                 Color.appBackground.ignoresSafeArea()
 
                 if vodStore.isLoadingSeries && vodStore.series.isEmpty {
-                    LoadingView(message: "Loading TV shows…")
+                    LoadingView(message: "Loading series…")
                 } else if let err = vodStore.seriesError, vodStore.series.isEmpty {
                     errorView(err)
                 } else if vodStore.series.isEmpty {

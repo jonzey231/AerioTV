@@ -640,6 +640,14 @@ final class SyncManager: ObservableObject {
         if let v = p.posterURL  { dict["posterURL"]  = v }
         if let v = p.streamURL  { dict["streamURL"]  = v }
         if let v = p.serverID   { dict["serverID"]   = v }
+        // v1.6.8 (Codex A3): Carry `seriesID` across the iCloud-sync
+        // boundary so Top Shelf episode deep-links work after a
+        // cross-device hand-off. Without this, a resume started on
+        // iPhone would sync to Apple TV with `seriesID = nil`, which
+        // fell through to the `aerio://vod/episode/...` fallback in
+        // the Top Shelf extension (no standalone episode detail
+        // view exists, so that deep link dead-ended).
+        if let v = p.seriesID   { dict["seriesID"]   = v }
         return dict
     }
 
@@ -654,6 +662,10 @@ final class SyncManager: ObservableObject {
         let isFinished: Bool
         let streamURL: String?
         let serverID: String?
+        /// Parent series ID for episode-type progress entries (nil for
+        /// movies). Carried through iCloud sync as of v1.6.8 — see
+        /// `serializeWatchProgress` comment for context.
+        let seriesID: String?
     }
 
     nonisolated private func deserializeWatchProgress(_ dict: [String: Any]) -> SyncedWatchProgress? {
@@ -669,7 +681,8 @@ final class SyncManager: ObservableObject {
             updatedAt: Date(timeIntervalSince1970: ts),
             isFinished: dict["isFinished"] as? Bool ?? false,
             streamURL: dict["streamURL"] as? String,
-            serverID: dict["serverID"] as? String
+            serverID: dict["serverID"] as? String,
+            seriesID: dict["seriesID"] as? String
         )
     }
 
@@ -728,6 +741,7 @@ final class SyncManager: ObservableObject {
                     local.isFinished = remote.isFinished
                     local.streamURL = remote.streamURL
                     local.serverID = remote.serverID
+                    local.seriesID = remote.seriesID
                 }
             } else {
                 // Insert new
@@ -736,7 +750,8 @@ final class SyncManager: ObservableObject {
                     positionMs: remote.positionMs, durationMs: remote.durationMs,
                     posterURL: remote.posterURL, vodType: remote.vodType,
                     updatedAt: remote.updatedAt, isFinished: remote.isFinished,
-                    streamURL: remote.streamURL, serverID: remote.serverID
+                    streamURL: remote.streamURL, serverID: remote.serverID,
+                    seriesID: remote.seriesID
                 )
                 context.insert(wp)
             }
