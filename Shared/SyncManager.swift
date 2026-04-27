@@ -711,6 +711,24 @@ final class SyncManager: ObservableObject {
     }
 
     /// Merge remote watch progress into local SwiftData.
+    ///
+    /// **v1.6.11 crash fix.** Previously this method keyed both
+    /// the remote and local lookups by `vodID` alone via
+    /// `Dictionary(uniqueKeysWithValues:)`, which traps on
+    /// duplicate keys. v1.6.8 (Codex A1) dropped the
+    /// `@Attribute(.unique)` constraint on `WatchProgress.vodID`
+    /// because two different servers will routinely use the same
+    /// numeric ID for unrelated content — uniqueness moved into
+    /// `(vodID, serverID)`. The merge path was never updated to
+    /// match: any user with resume progress on the same `vodID`
+    /// across two servers (i.e., two Dispatcharr instances pulling
+    /// from overlapping providers) hit a hard crash inside
+    /// `pullFromCloud` the first time iCloud KVS pushed those
+    /// entries down. Keys are now composite (`serverID|vodID`) and
+    /// dictionary construction uses `uniquingKeysWith:` so neither
+    /// path can ever trap on a duplicate again — if two payloads
+    /// share a composite key (corrupted state, double-push race),
+    /// the most recently updated wins.
     private func mergeRemoteWatchProgress(_ remoteEntries: [[String: Any]]?) {
         guard let remoteEntries, !remoteEntries.isEmpty else { return }
         guard let context = WatchProgressManager.modelContext else { return }
@@ -718,18 +736,36 @@ final class SyncManager: ObservableObject {
         isMerging = true
         defer { isMerging = false }
 
+        // Composite key: same vodID across different servers is a
+        // legitimate post-A1 state and must not collide. Empty
+        // string when serverID is nil so legacy rows still hash
+        // deterministically. Helper takes the two strings directly
+        // because `remotes` is `[SyncedWatchProgress]` (the DTO)
+        // while `locals` is `[WatchProgress]` (SwiftData model)
+        // — both expose `vodID` + `serverID` but aren't the same
+        // type.
+        func compositeKey(_ vodID: String, _ serverID: String?) -> String {
+            "\(serverID ?? "")|\(vodID)"
+        }
+
         let remotes = remoteEntries.compactMap { deserializeWatchProgress($0) }
-        let remoteByID = Dictionary(uniqueKeysWithValues: remotes.map { ($0.vodID, $0) })
-        let remoteIDs = Set(remoteByID.keys)
+        let remoteByID = Dictionary(
+            remotes.map { (compositeKey($0.vodID, $0.serverID), $0) },
+            uniquingKeysWith: { a, b in a.updatedAt >= b.updatedAt ? a : b }
+        )
+        let remoteKeys = Set(remoteByID.keys)
 
         // Fetch all local entries
         let descriptor = FetchDescriptor<WatchProgress>()
         guard let locals = try? context.fetch(descriptor) else { return }
-        let localByID = Dictionary(uniqueKeysWithValues: locals.map { ($0.vodID, $0) })
+        let localByID = Dictionary(
+            locals.map { (compositeKey($0.vodID, $0.serverID), $0) },
+            uniquingKeysWith: { a, b in a.updatedAt >= b.updatedAt ? a : b }
+        )
 
         // Upsert remote → local
         for remote in remotes {
-            if let local = localByID[remote.vodID] {
+            if let local = localByID[compositeKey(remote.vodID, remote.serverID)] {
                 // Conflict: most recent updatedAt wins
                 if remote.updatedAt > local.updatedAt {
                     local.title = remote.title
@@ -759,7 +795,7 @@ final class SyncManager: ObservableObject {
 
         // Delete locals that are absent from remote (deleted on other device)
         for local in locals {
-            if !remoteIDs.contains(local.vodID) {
+            if !remoteKeys.contains(compositeKey(local.vodID, local.serverID)) {
                 context.delete(local)
             }
         }

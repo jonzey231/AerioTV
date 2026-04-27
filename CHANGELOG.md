@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.6.11 — 2026-04-27
+
+### Fixed
+
+- **App no longer crashes during iCloud sync when the same VOD ID
+  exists on more than one server.** v1.6.8 dropped the global
+  uniqueness constraint on `WatchProgress.vodID` so two servers
+  could keep independent resume positions for content that
+  happens to share an ID — but the iCloud KVS merge path was
+  never updated to match. It still keyed both the remote and
+  local lookups by `vodID` alone via
+  `Dictionary(uniqueKeysWithValues:)`, which traps on duplicate
+  keys. The first iCloud pull where the user had resume progress
+  on the same `vodID` across two servers (very common with two
+  Dispatcharr instances pulling from overlapping providers) hit a
+  hard crash inside `SyncManager.pullFromCloud` immediately on
+  launch — the crash report fingered
+  `Dictionary.init(uniqueKeysWithValues:)` →
+  `_NativeDictionary.merge` → `_assertionFailure`. Keys are now
+  composite (`serverID|vodID`) and dictionary construction uses
+  `uniquingKeysWith:` so neither path can ever trap on a duplicate
+  again. If two payloads share a composite key (corrupted state
+  from a double-push race), the most recently updated wins.
+- **Defensive: same crash class fixed in two more places.** The
+  channel-sort helper and the favorites-order index were also
+  using `Dictionary(uniqueKeysWithValues:)` against data that
+  could realistically duplicate (group names from server data,
+  favorite IDs persisted in UserDefaults). Both switched to
+  `uniquingKeysWith: { first, _ in first }` so a duplicate just
+  collapses to the first occurrence's display position instead
+  of crashing.
+
 ## v1.6.10 — 2026-04-27
 
 ### Fixed

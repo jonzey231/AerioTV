@@ -204,7 +204,7 @@ struct AppearanceSettingsView: View {
                         icon: "tv.fill",
                         iconColor: .accentPrimary,
                         title: "Tint Channel Cards",
-                        subtitle: "Adds a colored stripe to Live TV channel cards based on what's airing now.",
+                        subtitle: "Adds a colored gradient to Live TV channel cards based on what's airing now.",
                         isOn: $tintChannelCards,
                         onChange: { _ in }
                     )

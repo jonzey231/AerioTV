@@ -1243,7 +1243,14 @@ final class ChannelStore: ObservableObject {
     }
 
     private func sortChannels(_ items: [ChannelDisplayItem], groupOrder: [String]) -> [ChannelDisplayItem] {
-        let idx = Dictionary(uniqueKeysWithValues: groupOrder.enumerated().map { ($1, $0) })
+        // `uniquingKeysWith: { first, _ in first }` so duplicate
+        // group names in `groupOrder` (some IPTV resellers ship
+        // multiple categories with identical display names) don't
+        // trap the way `uniqueKeysWithValues:` would. First
+        // occurrence wins — the duplicate just collapses onto
+        // the same display position.
+        let idx = Dictionary(groupOrder.enumerated().map { ($1, $0) },
+                             uniquingKeysWith: { first, _ in first })
         return items.sorted {
             let n0 = numericChannelValue($0.number), n1 = numericChannelValue($1.number)
             if n0 != n1 { return n0 < n1 }
@@ -1556,7 +1563,12 @@ final class FavoritesStore: ObservableObject {
     func register(items: [ChannelDisplayItem]) {
         let filtered = items.filter { favoriteIDs.contains($0.id) }
         let orderedIDs = UserDefaults.standard.stringArray(forKey: Self.orderKey) ?? []
-        let orderIndex = Dictionary(uniqueKeysWithValues: orderedIDs.enumerated().map { ($1, $0) })
+        // `uniquingKeysWith: { first, _ in first }` so a corrupted
+        // saved order array (duplicate IDs from a reorder race or
+        // older bad write) sorts deterministically instead of
+        // crashing. First occurrence's index wins.
+        let orderIndex = Dictionary(orderedIDs.enumerated().map { ($1, $0) },
+                                    uniquingKeysWith: { first, _ in first })
         favoriteItems = filtered.sorted { (a, b) in
             // Items present in the saved order honor that order. Anything not
             // yet ordered (newly favorited on another device, or pre-existing
