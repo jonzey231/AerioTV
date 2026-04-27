@@ -759,8 +759,8 @@ struct MultiviewTileView: View {
     ///     `TVCenterAudioFocusIcon` middle-of-tile speaker
     ///     indicator stays the only signal (legacy behaviour).
     ///   • `.grayPersistent` — a 3pt muted-gray border on the
-    ///     audio tile, always visible. Matches YouTube TV's
-    ///     "this tile owns audio" UX.
+    ///     audio tile, always visible. Persistent "this tile owns
+    ///     audio" cue.
     ///   • `.themeFading` — a 3pt accent stroke that piggybacks
     ///     on `MultiviewChromeState.focusIndicatorVisible` so it
     ///     fades in / out with the rest of the tile chrome on

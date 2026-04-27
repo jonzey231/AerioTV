@@ -3496,10 +3496,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // removing the delegate fixed the placeholder — but the user
         // confirmed the placeholder+zoom bug persists in every shipped
         // build since PiP was introduced (commit 791d813, 2026-04-07).
-        // Other mpv-backed iOS IPTV players using the same
-        // AVSampleBufferDisplayLayer architecture (iMPlayer, UHF) DO
-        // produce a clean restore, which means our root cause is
-        // different from what the prior note diagnosed.
+        // Other mpv-backed iOS players using the same
+        // AVSampleBufferDisplayLayer architecture DO produce a clean
+        // restore, which means our root cause is different from what
+        // the prior note diagnosed.
         //
         // Correct diagnosis (higher confidence):
         //   * When the user taps ⤢ maximize, iOS fires

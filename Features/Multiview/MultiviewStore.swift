@@ -20,7 +20,7 @@ import SwiftUI
 ///   in the centre of the active tile fades in / out with the rest
 ///   of the tile chrome.
 /// • `grayPersistent` — a muted gray border around the active tile
-///   that's always visible, similar to YouTube TV's multiview UX.
+///   that's always visible, regardless of chrome auto-hide state.
 /// • `themeFading` — an accent-colored border that rides the
 ///   existing 5-second focus-indicator auto-hide, so it appears
 ///   when the user is interacting with the grid and fades when

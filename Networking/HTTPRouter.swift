@@ -18,9 +18,8 @@
 //      `NSAllowsArbitraryLoads`.
 //    • Many IPTV reseller panels run on `.app` (Cloudflare-friendly
 //      registrar pricing, branding) without TLS on a non-standard
-//      port (`http://example.app:8080`). Competitor IPTV apps
-//      (TiviMate, iMPlayer, Dispatcharr's web UI) reach those
-//      panels by going below URLSession.
+//      port (`http://example.app:8080`). Other IPTV clients reach
+//      those panels by going below URLSession at the network layer.
 //    • Apple DTS confirmed (Quinn): ATS / HSTS apply only to
 //      URLSession. Network.framework is explicitly outside that
 //      enforcement.

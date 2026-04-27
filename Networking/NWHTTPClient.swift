@@ -10,14 +10,13 @@
 //  See https://developer.apple.com/forums/thread/100936 (Quinn).
 //
 //  Why this exists:
-//    Multiple users in this market run Xtream / Dispatcharr panels on
-//    domains under HSTS-preloaded TLDs (`http://example.app:8080`).
+//    Multiple users run Xtream / Dispatcharr panels on domains
+//    under HSTS-preloaded TLDs (`http://example.app:8080`).
 //    URLSession refuses these regardless of `NSAllowsArbitraryLoads`
 //    because HSTS preload lives one layer below ATS in URLSession's
-//    own resolver. Competitor IPTV apps (TiviMate, iMPlayer, the
-//    Dispatcharr web UI) handle the URL format because they don't
-//    use URLSession for that fetch — they go straight to BSD sockets
-//    or, on Apple platforms, NWConnection.
+//    own resolver. Other clients handle the URL format because they
+//    don't use URLSession for that fetch — they go straight to BSD
+//    sockets or, on Apple platforms, NWConnection.
 //
 //  Design constraints:
 //    • Drop-in `data(for:)` / `data(from:)` API matching URLSession's

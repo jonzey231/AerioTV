@@ -71,11 +71,12 @@
   group name when neither source has data.
 - **Expanding a channel row now starts with the program currently
   airing.** The "next programs" list filtered out anything whose
-  start time was in the past, including the in-progress show.
-  Users expanding ESPN at 12:47 PM saw the list starting at 2:00 PM
-  with no indication of what was actually on right now. The filter
-  now only drops programs that have already ended, so the row
-  expands to "what's on now → what's next → what's after that".
+  start time was in the past, including the in-progress show — so a
+  row expanded mid-program would show the next program over an hour
+  in the future with no indication of what was actually on right
+  now. The filter now only drops programs that have already ended,
+  so the row expands to "what's on now → what's next → what's after
+  that".
 
 ### Under the hood
 
@@ -154,7 +155,7 @@
 - **Settings → Multiview submenu** with three new preferences:
   - **Audio Focus Indicator** — choose how the audio-active tile is
     marked: a center speaker icon (default, current behavior), a
-    persistent muted-gray border (YouTube TV-style), or an
+    persistent muted-gray border around the active tile, or an
     accent-colored border that fades with the rest of the chrome
     after 5 s of inactivity.
   - **Padding Between Tiles** — toggle an 8 pt gap between tiles for
@@ -482,10 +483,10 @@
 ### Fixed
 
 - **tvOS Siri Remote D-pad could not focus certain program cells
-  in the EPG guide.** Specific cells (e.g. NHL Hockey on ESPN HD,
-  2026 NFL Draft Rankings: Offense and Chris Simms Unbuttoned on
-  NBC Sports NOW) rendered correctly but were permanently skipped
-  by the focus engine, making them unreachable. Root cause: each
+  in the EPG guide.** Specific cells (a small set on certain
+  channels at certain times) rendered correctly but were
+  permanently skipped by the focus engine, making them
+  unreachable. Root cause: each
   program cell had both a `TVPressOverlay` (UIKit-backed
   `PressCatcherView` that is the primary focusable element) AND a
   SwiftUI `.focused($focusedProgramID, equals: prog.id)` binding.

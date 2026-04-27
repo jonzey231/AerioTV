@@ -1853,11 +1853,12 @@ struct EPGGuideView: View {
     // routing both treated the occluded regions inconsistently: some
     // cells remained reachable (focus center happened to land clear of
     // the channel column), others disappeared from the focus graph
-    // entirely. Specifically reported: NHL Hockey on ESPN HD
+    // entirely. Specifically reported: a long-duration program
     // (3:00–5:30, overlapping the channel column) was unfocusable on
-    // tvOS while College Softball on ESPN2 HD (3:00–5:00, same clamped
-    // start and offset) worked — likely due to subtle differences in
-    // how tvOS samples focus regions across rows in the section.
+    // tvOS while a similar program on a different channel (3:00–5:00,
+    // same clamped start and offset) worked — likely due to subtle
+    // differences in how tvOS samples focus regions across rows in
+    // the section.
     //
     // The HStack below mirrors the pinned `timeHeaderRow` structure at
     // line ~807: channel column and program area are siblings, never
@@ -2065,9 +2066,8 @@ struct EPGGuideView: View {
         // targets manifested as specific program cells being
         // unreachable via Siri Remote D-pad: the tvOS focus
         // engine saw two focusable regions per cell and routed
-        // inconsistently, skipping some cells entirely (reported:
-        // NHL Hockey Eastern on ESPN HD, 2026 NFL Draft Rankings:
-        // Offense and Chris Simms Unbuttoned on NBC Sports NOW).
+        // inconsistently, skipping some cells entirely (a small
+        // set of cells on certain channels at certain times).
         // The minor regression: after mini-player minimize, focus
         // now lands on whatever cell the tvOS focus engine picks
         // by default rather than the first channel's live cell
