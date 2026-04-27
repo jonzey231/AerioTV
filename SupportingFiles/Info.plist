@@ -41,9 +41,45 @@
 	<string></string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<!--
+	  v1.6.9: Comprehensive ATS exemption.
+
+	  Aerio is a generic IPTV / VOD client — users connect to any
+	  reseller-provided server, the vast majority of which run plain
+	  HTTP without TLS. Refusing those connections at the OS layer
+	  effectively breaks the app for that audience, so we opt out of
+	  the default ATS posture entirely.
+
+	  Why every key is explicit:
+	    • NSAllowsArbitraryLoads — turns ATS off for every domain.
+	      In theory sufficient on its own.
+	    • NSAllowsArbitraryLoadsInWebContent — covers WKWebView /
+	      SFSafariViewController loads (none today, but defensive
+	      against future in-app web content; Apple has tightened
+	      web-content ATS interaction in recent iOS releases).
+	    • NSAllowsArbitraryLoadsForMedia — covers AVFoundation /
+	      AVPlayer media URLs. mpv-rendered streams don't go through
+	      AVPlayer, but iOS sometimes queries AVAssetResourceLoader
+	      for poster / thumbnail work and that path respects this
+	      flag separately from the global one.
+	    • NSAllowsLocalNetworking — keeps Bonjour / .local URLs
+	      working when a stricter ATS posture is enforced via
+	      system policy mid-session.
+
+	  v1.6.8 shipped with only NSAllowsArbitraryLoads + NSAllowsLocalNetworking.
+	  Multiple users hit `NSURLErrorAppTransportSecurityRequiresSecureConnection`
+	  (-1022) when adding Xtream Codes servers over HTTP. Adding the
+	  two arbitrary-content keys closes whichever path was still
+	  being gated. Belt-and-suspenders here is the right call —
+	  there's no upside to a narrower ATS policy in this app.
+	-->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsForMedia</key>
 		<true/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>

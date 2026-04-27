@@ -730,7 +730,10 @@ struct MultiviewContainerView: View {
            let audio = store.tiles.first(where: { $0.id == audioID }),
            audio.item.streamURL != nil {
             let now = Date()
-            let hasEPG = (audio.item.currentProgram?.isEmpty == false)
+            // Title fallback: prefer the EPG-known program name,
+            // otherwise the generic "<channel> live recording" so the
+            // sheet has something readable when Dispatcharr playlists
+            // don't have `currentProgram` populated yet.
             let programTitle: String = audio.item.currentProgram
                 ?? "\(audio.item.name) live recording"
             let start: Date = audio.item.currentProgramStart ?? now

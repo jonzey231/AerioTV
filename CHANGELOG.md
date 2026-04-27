@@ -1,5 +1,46 @@
 # Changelog
 
+## v1.6.9 — 2026-04-27
+
+### Fixed
+
+- **Adding an Xtream Codes server with an `http://` domain URL now
+  works.** Multiple users reported that Test Connection failed with
+  "The resource could not be loaded because the App Transport
+  Security policy requires the use of a secure connection" against
+  domain-based HTTP URLs (e.g. `http://reseller.example.pro`),
+  while IP-literal HTTP URLs (e.g. `http://192.168.1.10:9191`)
+  worked fine. Root cause: iOS bakes Chromium's HSTS preload list
+  into every release, and HSTS-preloaded domains get force-upgraded
+  to HTTPS at the OS layer **regardless** of the app's
+  `NSAllowsArbitraryLoads` exemption — Apple won't let an app
+  override HSTS via Info.plist. IP literals don't match HSTS rules
+  (which are domain-scoped) so they connected as typed.
+  Two fixes layered together:
+  1. **Comprehensive ATS exemption** in Info.plist —
+     `NSAllowsArbitraryLoadsInWebContent` and
+     `NSAllowsArbitraryLoadsForMedia` added on top of the existing
+     `NSAllowsArbitraryLoads` + `NSAllowsLocalNetworking`. This
+     closes any auxiliary path that was being gated separately
+     from the global flag.
+  2. **Auto-HTTPS-upgrade on verify** — when Test Connection gets
+     `NSURLErrorAppTransportSecurityRequiresSecureConnection`
+     (-1022) against an `http://<domain>` URL, the verify path
+     transparently retries with `https://`. Most reseller backends
+     serve both schemes (Cloudflare front-ends, automatic Let's
+     Encrypt) so the HTTPS retry succeeds. On success the upgraded
+     scheme persists to `baseURL` so every subsequent request —
+     channels, EPG, VOD, playback — uses the working scheme. IP
+     literals are deliberately exempted from the upgrade so
+     local-only servers that only serve HTTP keep working.
+  Covers Xtream Codes, Dispatcharr, and M3U playlist verification.
+
+### Under the hood
+
+- Cleaned up an unused `hasEPG` local variable in the multiview
+  record-sheet path that was generating a build warning. No
+  behavioural change.
+
 ## v1.6.8 — 2026-04-25
 
 ### New

@@ -248,12 +248,12 @@ struct AddServerView: View {
                             urlProtocolBadge(url: viewModel.baseURL).padding(8)
                         }
                     }
-                AppTextField("Username", placeholder: "Dispatcharr XC Username",
+                AppTextField("Username", placeholder: "XC Username",
                              text: $viewModel.username, icon: "person.fill")
-                AppTextField("Password", placeholder: "Dispatcharr XC Password",
+                AppTextField("Password", placeholder: "XC Password",
                              text: $viewModel.password, icon: "lock.fill", isSecure: true)
                 infoBox(icon: "info.circle.fill",
-                        message: "Enter your Xtream Codes server URL and credentials. Dispatcharr users: use your Dispatcharr URL with the Xtream Codes username and password from Dispatcharr's Users tab.")
+                        message: "Enter your Xtream Codes server URL and credentials. Dispatcharr users: use your Dispatcharr URL with the Xtream Codes username and password from Dispatcharr's User settings.")
 
             case .dispatcharrAPI:
                 AppTextField("Server URL", placeholder: "http://your-dispatcharr-server:9191",
