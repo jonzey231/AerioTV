@@ -147,7 +147,8 @@ struct XtreamCodesAPI {
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 180
         let vodSession = URLSession(configuration: config)
-        let (data, response) = try await vodSession.data(from: url)
+        // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
+        let (data, response) = try await HTTPRouter.data(from: url, using: vodSession)
         try validate(response: response)
         // Some panels return false/null/object for empty or unavailable VOD — treat as empty
         if let items = try? decode([XtreamVODItem].self, from: data) { return items }
@@ -183,7 +184,8 @@ struct XtreamCodesAPI {
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 180
         let seriesSession = URLSession(configuration: config)
-        let (data, response) = try await seriesSession.data(from: url)
+        // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
+        let (data, response) = try await HTTPRouter.data(from: url, using: seriesSession)
         try validate(response: response)
         // Some panels return false/null/object for empty or unavailable series — treat as empty
         if let items = try? decode([XtreamSeriesItem].self, from: data) { return items }
@@ -280,11 +282,15 @@ struct XtreamCodesAPI {
 
     // MARK: - Helpers
 
-    /// Wraps session.data(from:) with DebugLogger timing and result logging.
+    /// Wraps the data fetch with DebugLogger timing and result logging.
+    /// v1.6.10: routed through `HTTPRouter` so plain-HTTP requests against
+    /// HSTS-preloaded TLDs (`.app`, `.dev`, etc.) bypass URLSession's
+    /// HSTS layer via Network.framework. URLSession remains the path for
+    /// HTTPS, IP literals, and non-preloaded TLDs.
     private func loggedData(from url: URL) async throws -> (Data, URLResponse) {
         let start = Date()
         do {
-            let result = try await session.data(from: url)
+            let result = try await HTTPRouter.data(from: url, using: session)
             let status   = (result.1 as? HTTPURLResponse)?.statusCode
             let duration = Date().timeIntervalSince(start)
             // v1.6.8 (Codex D4): the manual `replacingOccurrences`
@@ -938,7 +944,8 @@ struct DispatcharrAPI {
         config.timeoutIntervalForResource = 180
         let session = URLSession(configuration: config)
 
-        let (data, response) = try await session.data(for: request)
+        // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
+        let (data, response) = try await HTTPRouter.data(for: request, using: session)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw APIError.serverError((response as? HTTPURLResponse)?.statusCode ?? 0)
         }
@@ -982,7 +989,8 @@ struct DispatcharrAPI {
         // once the server is proven unresponsive.
         var request = URLRequest(url: url, timeoutInterval: 5)
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-        let (data, response) = try await URLSession.shared.data(for: request)
+        // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
+        let (data, response) = try await HTTPRouter.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             return []
         }
@@ -998,7 +1006,8 @@ struct DispatcharrAPI {
                 pagesLeft -= 1
                 var req = URLRequest(url: pageURL)
                 headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
-                guard let (pageData, pageResp) = try? await URLSession.shared.data(for: req),
+                // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
+                guard let (pageData, pageResp) = try? await HTTPRouter.data(for: req),
                       let pageHttp = pageResp as? HTTPURLResponse,
                       (200..<300).contains(pageHttp.statusCode) else { break }
                 let page = try decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: pageData)
@@ -1043,7 +1052,8 @@ struct DispatcharrAPI {
             pagesLeft -= 1
             var request = URLRequest(url: url)
             headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-            let (data, response) = try await epgSession.data(for: request)
+            // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
+            let (data, response) = try await HTTPRouter.data(for: request, using: epgSession)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { break }
 
             if let list = try? JSONDecoder().decode([DispatcharrCurrentProgram].self, from: data) {
@@ -1166,7 +1176,8 @@ struct DispatcharrAPI {
                     var request = URLRequest(url: nextURL)
                     capturedHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
                     do {
-                        let (data, response) = try await sess.data(for: request)
+                        // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
+                        let (data, response) = try await HTTPRouter.data(for: request, using: sess)
                         guard let http = response as? HTTPURLResponse else {
                             continuation.finish(throwing: APIError.invalidResponse); return
                         }
@@ -1600,13 +1611,17 @@ struct DispatcharrAPI {
         }
     }
 
-    /// Wraps session.data(for:) with DebugLogger timing and result logging.
+    /// Wraps the data fetch with DebugLogger timing and result logging.
+    /// v1.6.10: routed through `HTTPRouter` so plain-HTTP requests against
+    /// HSTS-preloaded TLDs (`.app`, `.dev`, etc.) bypass URLSession's
+    /// HSTS layer via Network.framework. URLSession remains the path for
+    /// HTTPS, IP literals, and non-preloaded TLDs.
     private func loggedData(for request: URLRequest) async throws -> (Data, URLResponse) {
         let method = request.httpMethod ?? "GET"
         let urlStr = request.url?.absoluteString ?? "<unknown>"
         let start  = Date()
         do {
-            let result   = try await session.data(for: request)
+            let result   = try await HTTPRouter.data(for: request, using: session)
             let status   = (result.1 as? HTTPURLResponse)?.statusCode
             let duration = Date().timeIntervalSince(start)
             DebugLogger.shared.logNetwork(method: method, url: urlStr, statusCode: status,

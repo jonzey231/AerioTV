@@ -1,5 +1,96 @@
 # Changelog
 
+## v1.6.10 — 2026-04-27
+
+### Fixed
+
+- **Plain-HTTP server URLs that iOS refuses to send finally just
+  work.** The single biggest fix in this release. Adds a transport
+  router (`HTTPRouter` + `NWHTTPClient`) sitting in front of every
+  URLSession call. URLSession is still the default — for HTTPS, IP
+  literals, and TLDs not on the HSTS preload list. When URLSession
+  refuses with a transport-level failure (`-1022`
+  ATS-required-secure, `-1004` cannot-connect, `-1200`
+  secure-connection-failed, plus a handful of cert codes), we
+  silently retry the same request via Network.framework's
+  `NWConnection`. Per Apple Developer Technical Support, ATS only
+  governs URLSession; Network.framework is explicitly outside that
+  enforcement, so the connection actually reaches the server.
+  Result: HTTP-only IPTV panels — including ones on
+  `.app` / `.dev` / `.page` (HSTS-preloaded gTLDs Google baked into
+  Chromium and Apple inherits) and ones URLSession's dynamic ATS
+  heuristic blocks for opaque reasons — verify, load channels, fetch
+  EPG, and serve VOD without the user ever knowing the bypass
+  happened. v1.6.9's auto-HTTPS-upgrade is still in place as a
+  separate layer for servers that genuinely prefer HTTPS.
+- **HSTS-preloaded TLD panels reach the server on the first
+  attempt.** The router hard-routes `http://<host on preloaded
+  TLD>` straight to NWConnection (URLSession would always fail
+  -1022 on those). Covers the gTLDs Google preloaded as a set —
+  `.app`, `.dev`, `.page`, `.new`, `.day`, `.foo`, `.gle`, `.zip`,
+  `.mov`, `.bank`, `.insurance`, plus a handful of Google /
+  Microsoft / Amazon brand TLDs.
+- **Channel list no longer gets stuck on "Connection Error" when
+  the actual API calls succeed.** The cold-launch reachability
+  probe in `HomeView` was hitting URLSession directly, getting -1022
+  on `.pro` / `.xyz` HTTP URLs, and stopping the channel load even
+  though every other request was succeeding via the
+  router-NWConnection fallback. Probe now goes through the same
+  router as the rest, so the probe's verdict matches reality.
+- **Series + VOD payloads above 50 MB now load.** Some Xtream
+  resellers return ~52 MB on `get_series` (full library, all
+  metadata). The NWConnection client's body cap was 50 MB, so those
+  fetches failed with `bodyTooLarge`. Raised to 200 MB — comfortably
+  covers the worst-case payloads observed while still protecting
+  the device from a runaway chunked stream.
+- **Recordings now scoped to the active playlist.** "My Recordings"
+  used to show every recording in the local database, including
+  Dispatcharr server-side recordings from servers the user wasn't
+  even using. Now the list, the segment counts, and the
+  reconciliation API calls are all keyed off the currently-active
+  server (`isActive`). Switch playlists, see different recordings.
+  Mirrors how Live TV / On Demand already scope content.
+- **DVR tab disappears when the active playlist has nothing to
+  show.** Previously the DVR tab appeared whenever *any* server in
+  the user's library had recordings — a user on an Xtream Codes
+  playlist with a separate (idle) Dispatcharr server registered
+  would still see DVR. The tab is now visible only when the
+  active server has at least one recording (local or server-side,
+  scheduled / recording / completed). Schedule one from Live TV →
+  Record and the tab appears; delete the last one and it
+  disappears. Switch active playlists and the tab toggles to
+  match the new playlist's recordings.
+- **Live TV List rows show the currently-airing program, not the
+  channel's category.** The row subtitle used to fall back to
+  `channel.group` (e.g. "Sports") whenever the lightweight
+  per-item `currentProgram` field was nil — which on Dispatcharr
+  was the common case before the bulk current-programs API had
+  finished its first call. Now the row pulls a live program from
+  GuideStore (the same dataset the Guide grid uses) when the
+  per-item field is empty, and shows nothing rather than the
+  group name when neither source has data.
+- **Expanding a channel row now starts with the program currently
+  airing.** The "next programs" list filtered out anything whose
+  start time was in the past, including the in-progress show.
+  Users expanding ESPN at 12:47 PM saw the list starting at 2:00 PM
+  with no indication of what was actually on right now. The filter
+  now only drops programs that have already ended, so the row
+  expands to "what's on now → what's next → what's after that".
+
+### Under the hood
+
+- Disabled TCP Fast Open in the NWConnection client. TFO requires
+  both client and server kernel support, and several intermediate
+  firewalls drop SYN+data packets — exactly the silent-stall pattern
+  early v1.6.10 builds exhibited as "Connection timed out" 20s after
+  every API call.
+- Removed the playlist name from the "Setting Up" loading screen on
+  initial launch. Showing `allServers.first?.name` was misleading
+  on multi-server installs (the displayed playlist was arbitrary)
+  and adds nothing the "Setting Up" headline doesn't already
+  convey. The `serverName` parameter on `ServerSyncView.Mode` was
+  also dropped along with it.
+
 ## v1.6.9 — 2026-04-27
 
 ### Fixed

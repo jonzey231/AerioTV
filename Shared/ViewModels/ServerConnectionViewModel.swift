@@ -92,7 +92,11 @@ final class ServerConnectionViewModel {
             // playlists blocked by HSTS auto-promote to HTTPS.
             try await withATSSchemeUpgrade(originalURL: baseURL) { url in
                 guard let parsed = URL(string: url) else { throw APIError.invalidURL }
-                let (data, response) = try await URLSession.shared.data(from: parsed)
+                // v1.6.10: routed through HTTPRouter so M3U URLs hosted
+                // on HSTS-preloaded TLDs (`.app`, `.dev`, …) reach
+                // their servers via NWConnection rather than being
+                // blocked at the URLSession HSTS layer.
+                let (data, response) = try await HTTPRouter.data(from: parsed)
                 guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
                     throw APIError.serverError((response as? HTTPURLResponse)?.statusCode ?? -1)
                 }
@@ -147,13 +151,15 @@ final class ServerConnectionViewModel {
                                       attempt: (String) async throws -> Void) async throws {
         do {
             try await attempt(originalURL)
-        } catch let error as NSError where error.code == NSURLErrorAppTransportSecurityRequiresSecureConnection {
+        } catch let error as NSError where shouldRetryWithHTTPS(error: error) {
             // Only auto-upgrade real http:// domain URLs. IP literals
             // can't be HSTS-preloaded so falling here means something
             // else is wrong — bubble the original error up.
             guard let upgraded = httpsUpgradedURL(originalURL) else { throw error }
+            debugLog("ATS-UPGRADE: \(originalURL) failed (\(error.code) \(error.localizedDescription)) → retrying as \(upgraded)")
             do {
                 try await attempt(upgraded)
+                debugLog("ATS-UPGRADE: \(upgraded) succeeded → persisting upgraded scheme")
                 // Persist the working scheme so the saved record + every
                 // subsequent runtime API call uses HTTPS automatically.
                 // For .m3uPlaylist `baseURL` is the M3U URL; for the API
@@ -163,11 +169,35 @@ final class ServerConnectionViewModel {
                     self.baseURL = upgraded
                 }
             } catch {
+                debugLog("ATS-UPGRADE: HTTPS retry ALSO failed: \(error)")
                 // HTTPS retry also failed. Bubble whichever error is
                 // more informative — usually the HTTPS error has the
                 // real reason (e.g. cert-mismatch, server-down).
                 throw error
             }
+        }
+    }
+
+    /// True when the failure looks like "the server doesn't speak plain
+    /// HTTP on the URL the user typed" — in which case retrying with
+    /// HTTPS has a real chance of succeeding. Covers two scenarios:
+    ///   • -1022 ATS-required-secure: the original v1.6.9 case. iOS
+    ///     refuses the HTTP attempt outright.
+    ///   • -1004 cannot-connect-to-host: server is HTTPS-only (only
+    ///     listens on 443, not 80). Common with Cloudflare-fronted
+    ///     panels — the front-end serves HTTPS and never opens 80.
+    /// We deliberately do NOT include -1003 (DNS fail) or -1006 (cannot
+    /// resolve host) — those mean the host is unreachable at the name
+    /// layer, and HTTPS won't help. Same for genuine timeouts (-1001):
+    /// HTTPS retry burns another 20s without any reason to expect a
+    /// different outcome.
+    private func shouldRetryWithHTTPS(error: NSError) -> Bool {
+        switch error.code {
+        case NSURLErrorAppTransportSecurityRequiresSecureConnection,
+             NSURLErrorCannotConnectToHost:
+            return true
+        default:
+            return false
         }
     }
 

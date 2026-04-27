@@ -26,3 +26,6 @@ xcuserdata/
 .env
 *.p12
 *.mobileprovision
+
+# AI-assistant scratch / instructions — local-only
+CLAUDE.md

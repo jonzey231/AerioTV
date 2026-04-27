@@ -964,7 +964,13 @@ final class ChannelStore: ObservableObject {
         let session = URLSession(configuration: config)
 
         do {
-            let (_, response) = try await session.data(for: request)
+            // v1.6.10: route through HTTPRouter so plain-HTTP URLs that
+            // URLSession refuses (HSTS preload, ATS dynamic-upgrade,
+            // etc.) get a second chance via NWConnection. Without this,
+            // every actual API request would succeed via the router's
+            // fallback while the probe sees the URLSession -1022 and
+            // we mistakenly tell the user the server is unreachable.
+            let (_, response) = try await HTTPRouter.data(for: request, using: session)
             // Any HTTP response proves the TCP + TLS + HTTP path is
             // alive. We don't care about the status code here — even
             // a 404 / 405 means the box is up.
@@ -2209,16 +2215,7 @@ struct MainTabView: View {
         return [epgStage, vodStage, dvrStage, prefsStage]
     }
 
-    /// Name shown under "Setting Up" on the initial-launch cover.
-    /// When multiple servers are configured we surface the first
-    /// one's name — showing "2 servers" would be technically
-    /// accurate but less warm than "Your Dispatcharr Box". Empty
-    /// string resolves to "Your server" inside `ServerSyncView`.
-    private var initialLoadingServerName: String {
-        allServers.first?.name ?? ""
-    }
-
-    /// Show the initial sync loading screen when we have a server
+/// Show the initial sync loading screen when we have a server
     /// list to load from AND channels haven't populated yet. Called
     /// both on `onAppear` (normal launches) and on `onChange` of the
     /// server count (iCloud-sync onboarding, where servers arrive
@@ -2696,7 +2693,36 @@ struct MainTabView: View {
     }
 
     private var hasFavorites: Bool { !favoritesStore.favoriteItems.isEmpty }
-    private var hasRecordings: Bool { !allRecordings.isEmpty }
+
+    /// True when the **active** server has at least one recording
+    /// — local or server-side, scheduled / recording / completed —
+    /// in the SwiftData store. v1.6.10:
+    ///
+    ///   • Original (pre-v1.6.10): `!allRecordings.isEmpty` — surfaced
+    ///     the DVR tab whenever **any** server in the user's library
+    ///     had recordings, so a user on Xtream playlist A would see
+    ///     DVR because their idle Dispatcharr server B had recordings.
+    ///   • v1.6.10 first cut: also returned true for any active
+    ///     Dispatcharr server, on the reasoning "you can always
+    ///     schedule a new one." Wrong call — an active Dispatcharr
+    ///     server with zero recordings still showed an empty DVR
+    ///     tab, which the user (correctly) didn't want.
+    ///   • Now: tab visible iff the active server has at least one
+    ///     recording. Server-side scheduled recordings flow into
+    ///     `allRecordings` via the tab-bar-level
+    ///     `reconcileAllDispatcharrRecordings` task, so scheduling
+    ///     a new recording from Live TV → Record makes the tab
+    ///     appear; deleting the last recording makes it disappear.
+    ///
+    /// Mirrors the per-playlist scope applied inside
+    /// `MyRecordingsView` itself, so the tab and its contents agree.
+    private var hasRecordings: Bool {
+        guard let active = allServers.first(where: { $0.isActive }) ?? allServers.first else {
+            return false
+        }
+        let sid = active.id.uuidString
+        return allRecordings.contains { $0.serverID == sid }
+    }
     /// True when the active server has advertised ANY VOD content, OR
     /// is still loading its VOD library. Keeping the tab visible while
     /// loading prevents the flicker of "tab missing → tab appears" on
@@ -2866,7 +2892,6 @@ struct MainTabView: View {
             // store-derived stages instead of driving its own fetches.
             ServerSyncView(
                 mode: .initialLaunch(
-                    serverName: initialLoadingServerName,
                     stages: loadingStages,
                     onContinueAnyway: {
                         // User-triggered escape hatch — drops them

@@ -39,16 +39,36 @@ struct MyRecordingsView: View {
         let title: String
     }
 
+    /// v1.6.10: Recordings are scoped to the currently-active playlist
+    /// (server) so the user doesn't see Server B's Dispatcharr DVR
+    /// queue while they're using Server A. Mirrors how Live TV /
+    /// Channels / On Demand all key off `isActive`. If no server is
+    /// active (e.g. fresh install, M3U-only), `currentServerID` is
+    /// nil and the list shows nothing — the empty state then prompts
+    /// the user to pick a server.
+    private var currentServerID: String? {
+        let active = servers.first(where: { $0.isActive }) ?? servers.first
+        return active?.id.uuidString
+    }
+
+    /// Recordings tied to the currently-active server. Used as the
+    /// source for every segment so the counts in the pill selector
+    /// also reflect the per-server scope.
+    private var visibleRecordings: [Recording] {
+        guard let sid = currentServerID else { return [] }
+        return allRecordings.filter { $0.serverID == sid }
+    }
+
     private var scheduled: [Recording] {
-        allRecordings.filter { $0.status == .scheduled }
+        visibleRecordings.filter { $0.status == .scheduled }
     }
 
     private var recording: [Recording] {
-        allRecordings.filter { $0.status == .recording }
+        visibleRecordings.filter { $0.status == .recording }
     }
 
     private var completed: [Recording] {
-        allRecordings.filter { [.completed, .stopped, .interrupted, .failed, .cancelled].contains($0.status) }
+        visibleRecordings.filter { [.completed, .stopped, .interrupted, .failed, .cancelled].contains($0.status) }
     }
 
     private var activeList: [Recording] {
@@ -196,27 +216,26 @@ struct MyRecordingsView: View {
 
     // MARK: - Reconcile
 
-    /// Walks every distinct Dispatcharr `serverID` that appears in the
-    /// local recording list and asks the coordinator to reconcile each.
-    /// Handles the multi-server case (rare but supported).
+    /// Reconciles the **currently-active** server's Dispatcharr
+    /// recordings. v1.6.10: previously walked every Dispatcharr
+    /// `serverID` in the local DB and pinged each one — which spent
+    /// bandwidth (and Dispatcharr quota) keeping data fresh for
+    /// servers the user wasn't even viewing. Now scoped to the
+    /// active server, matching the per-playlist visibility filter
+    /// in `visibleRecordings`. When the user switches active server,
+    /// the next `.task { await reconcileAll() }` invocation catches
+    /// that server up.
     private func reconcileAll() async {
-        let dispatcharrServerIDs = Set(
-            allRecordings
-                .filter { $0.destination == .dispatcharrServer }
-                .map { $0.serverID }
+        guard let active = servers.first(where: { $0.isActive }) ?? servers.first,
+              active.type == .dispatcharrAPI else { return }
+        let api = DispatcharrAPI(baseURL: active.effectiveBaseURL,
+                                 auth: .apiKey(active.effectiveApiKey),
+                                 userAgent: active.effectiveUserAgent)
+        await coordinator.reconcileDispatcharrRecordings(
+            api: api,
+            serverID: active.id.uuidString,
+            modelContext: modelContext
         )
-        for sid in dispatcharrServerIDs {
-            guard let server = servers.first(where: { $0.id.uuidString == sid }),
-                  server.type == .dispatcharrAPI else { continue }
-            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                     auth: .apiKey(server.effectiveApiKey),
-                                     userAgent: server.effectiveUserAgent)
-            await coordinator.reconcileDispatcharrRecordings(
-                api: api,
-                serverID: sid,
-                modelContext: modelContext
-            )
-        }
     }
 
     // MARK: - Segment Button (shared iOS + tvOS)

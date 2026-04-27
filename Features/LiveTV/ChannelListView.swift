@@ -1041,6 +1041,40 @@ struct ChannelRow: View {
     /// Default off so existing users don't see a surprise visual change.
     @AppStorage("tintChannelCards") private var tintChannelCards: Bool = false
 
+    /// Currently-airing program for this row, picking the best
+    /// available source. v1.6.10: previously the row showed
+    /// `item.currentProgram` and silently fell back to
+    /// `item.group` (the channel's category, e.g. "Sports") when
+    /// that was nil. On Dispatcharr that fallback was the common
+    /// case — the heavy bulk current-program endpoint hadn't run
+    /// yet, so every channel rendered as just its group name.
+    /// Now we layer two sources:
+    ///
+    ///   1. `item.currentProgram*` — the lightweight per-item
+    ///      payload populated by Xtream short-EPG and Dispatcharr's
+    ///      current-programs cache when fresh. Cheapest source,
+    ///      preferred when present.
+    ///   2. `guideStore.programs[item.id]` filtered to `.isLive` —
+    ///      the same dataset the Guide grid uses, populated by the
+    ///      XMLTV parse and bulk EPG fetch. Reliable once the guide
+    ///      has loaded.
+    ///
+    /// Returns nil when neither source has anything — the row's
+    /// subtitle stays empty in that case (no more group-name
+    /// fallback). Both the inline "now playing" line in the row
+    /// and the progress bar consult this single tuple.
+    private var liveProgram: (title: String, description: String?, start: Date, end: Date)? {
+        if let title = item.currentProgram, !title.isEmpty,
+           let start = item.currentProgramStart,
+           let end = item.currentProgramEnd {
+            return (title, item.currentProgramDescription, start, end)
+        }
+        if let p = guideStore.programs[item.id]?.first(where: { $0.isLive }) {
+            return (p.title, p.description, p.start, p.end)
+        }
+        return nil
+    }
+
     /// Per-view scale slider (#21) read by the iOS channel-row text
     /// and padding. tvOS rows keep their fixed Emby metrics since
     /// they're already tuned for 10-foot viewing. 0.85–1.25 matches
@@ -1323,34 +1357,27 @@ struct ChannelRow: View {
                             .foregroundColor(.textPrimary)
                             .lineLimit(1)
 
-                        if let program = item.currentProgram, !program.isEmpty {
+                        if let prog = liveProgram {
                             HStack(spacing: 8) {
-                                MarqueeText(text: program,
+                                MarqueeText(text: prog.title,
                                             font: .system(size: 22),
                                             color: .accentPrimary.opacity(0.85),
                                             isActive: isCardFocused)
                                     .frame(height: 28)
-                                if let end = item.currentProgramEnd {
-                                    nowPlayingTimeRemaining(end: end)
-                                }
+                                nowPlayingTimeRemaining(end: prog.end)
                             }
-                            if let desc = item.currentProgramDescription, !desc.isEmpty {
+                            if let desc = prog.description, !desc.isEmpty {
                                 Text(desc)
                                     .font(.system(size: 18))
                                     .foregroundColor(.textSecondary)
                                     .lineLimit(2)
                             }
-                        } else {
-                            Text(item.group)
-                                .font(.system(size: 22))
-                                .foregroundColor(.textSecondary)
-                                .lineLimit(1)
                         }
+                        // No fallback to group/category name — see
+                        // `liveProgram` doc on ChannelRow.
 
-                        if let start = item.currentProgramStart,
-                           let end   = item.currentProgramEnd,
-                           item.currentProgram != nil {
-                            nowPlayingProgressBar(start: start, end: end)
+                        if let prog = liveProgram {
+                            nowPlayingProgressBar(start: prog.start, end: prog.end)
                                 .padding(.top, 4)
                         }
                     }
@@ -1437,34 +1464,29 @@ struct ChannelRow: View {
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
 
-                if let program = item.currentProgram, !program.isEmpty {
+                if let prog = liveProgram {
                     HStack(spacing: 8) {
-                        MarqueeText(text: program,
+                        MarqueeText(text: prog.title,
                                     font: .system(size: (isWide ? 15 : 11) * s),
                                     color: .accentPrimary.opacity(0.85),
                                     isActive: false)  // Static during scroll — saves GPU
                             .frame(height: (isWide ? 20 : 16) * s)
-                        if let end = item.currentProgramEnd {
-                            nowPlayingTimeRemaining(end: end)
-                        }
+                        nowPlayingTimeRemaining(end: prog.end)
                     }
-                    if let desc = item.currentProgramDescription, !desc.isEmpty {
+                    if let desc = prog.description, !desc.isEmpty {
                         Text(desc)
                             .font(.system(size: (isWide ? 12 : 10) * s))
                             .foregroundColor(.textSecondary)
                             .lineLimit(2)
                     }
-                } else {
-                    Text(item.group)
-                        .font(.system(size: (isWide ? 15 : 11) * s))
-                        .foregroundColor(.textSecondary)
-                        .lineLimit(1)
                 }
+                // No fallback: when no program info is available the
+                // subtitle slot stays empty rather than printing the
+                // channel's group/category name. v1.6.10 — see
+                // `liveProgram` doc.
 
-                if let start = item.currentProgramStart,
-                   let end   = item.currentProgramEnd,
-                   item.currentProgram != nil {
-                    nowPlayingProgressBar(start: start, end: end)
+                if let prog = liveProgram {
+                    nowPlayingProgressBar(start: prog.start, end: prog.end)
                 }
             }
 
@@ -1605,8 +1627,15 @@ struct ChannelRow: View {
         let now = Date()
         let fromGuideStore = guideStore.programs[item.id] ?? []
         if !fromGuideStore.isEmpty {
+            // v1.6.10: filter only by `end > now` so the currently-
+            // airing program (start ≤ now < end) is included at the
+            // top of the expanded list. Previously also required
+            // `start > now`, which silently dropped the in-progress
+            // show — users would expand a row at 12:47 PM and see
+            // the first entry start at 2:00 PM, with no indication
+            // of what was actually airing right now.
             return fromGuideStore
-                .filter { $0.end > now && $0.start > now }
+                .filter { $0.end > now }
                 .sorted { $0.start < $1.start }
                 .map {
                     EPGEntry(title: $0.title, description: $0.description,
@@ -1616,7 +1645,10 @@ struct ChannelRow: View {
         }
         return upcomingPrograms.filter { entry in
             guard let end = entry.endTime else { return true }
-            return end > now && (entry.startTime ?? now) > now
+            // Same fix on the legacy `fetchUpcoming` fallback path
+            // (Xtream short-EPG, cold-launch pre-XMLTV). Drop only
+            // programs that have already ended.
+            return end > now
         }
     }
 

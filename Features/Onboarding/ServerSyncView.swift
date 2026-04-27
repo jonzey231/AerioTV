@@ -53,7 +53,7 @@ struct SyncStage: Identifiable, Equatable {
 ///   completes. The user dismisses via a "Continue to Live TV" button
 ///   once every stage is done.
 ///
-/// - `.initialLaunch(serverName:stages:onContinueAnyway:)` — the parent
+/// - `.initialLaunch(stages:onContinueAnyway:)` — the parent
 ///   (`MainTabView`) derives stage states from its observable stores
 ///   and passes them in. This view runs no fetches itself; it simply
 ///   renders the provided stages and the long-wait banner if the
@@ -70,10 +70,14 @@ struct ServerSyncView: View {
         case onboarding(server: ServerConnection)
 
         /// After app launch, while `MainTabView`'s stores hydrate.
-        /// The parent supplies pre-derived stages + server name and
-        /// an escape-hatch callback for the "Skip" button.
+        /// The parent supplies pre-derived stages and an escape-hatch
+        /// callback for the "Skip" button. v1.6.10: dropped the
+        /// `serverName` parameter — the loading screen no longer
+        /// renders the playlist name (the "Setting Up" headline is
+        /// enough context, and the playlist label was visually noisy
+        /// on multi-server installs where the displayed name was
+        /// arbitrary anyway, just `allServers.first?.name`).
         case initialLaunch(
-            serverName: String,
             stages: [SyncStage],
             onContinueAnyway: () -> Void
         )
@@ -125,17 +129,8 @@ struct ServerSyncView: View {
         switch mode {
         case .onboarding:
             return onboardingStages
-        case .initialLaunch(_, let stages, _):
+        case .initialLaunch(let stages, _):
             return stages
-        }
-    }
-
-    private var serverName: String {
-        switch mode {
-        case .onboarding(let server):
-            return server.name
-        case .initialLaunch(let name, _, _):
-            return name
         }
     }
 
@@ -167,10 +162,6 @@ struct ServerSyncView: View {
                     Text("Setting Up")
                         .font(.headlineLarge)
                         .foregroundColor(.textPrimary)
-
-                    Text(serverName.isEmpty ? "Your server" : serverName)
-                        .font(.bodyMedium)
-                        .foregroundColor(.textSecondary)
                 }
 
                 // Progress stages
@@ -245,7 +236,7 @@ struct ServerSyncView: View {
                 .foregroundColor(.textSecondary)
             }
 
-        case .initialLaunch(_, _, let onContinueAnyway):
+        case .initialLaunch(_, let onContinueAnyway):
             // Initial launch: banner fades in at 15s if the load
             // stalls; Skip button is always available so a user
             // on a dead server isn't trapped behind a spinner.
