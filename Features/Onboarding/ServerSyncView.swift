@@ -495,10 +495,22 @@ struct ServerSyncView: View {
         }
         switch snap.type {
         case .dispatcharrAPI:
+            // v1.6.12: this stage used to call the full
+            // `getVODMovies()` + `getVODSeries()`, which paginate the
+            // entire library 25-items-per-page. On a server with
+            // 10–20k movies that's hundreds of sequential HTTP calls
+            // and 2–5 minutes of staring at "Loading VOD" — making
+            // users think the second Dispatcharr server they added
+            // had hung. Now we probe `?page_size=1` and read the
+            // DRF wrapper's total-count field, which finishes in a
+            // single round-trip regardless of library size. The
+            // returned number is only used cosmetically for the
+            // stage's done-detail label, so paginating the full
+            // library here was always wasted work.
             let api = DispatcharrAPI(baseURL: snap.baseURL, auth: .apiKey(snap.apiKey))
             var count = 0
-            if let movies = try? await api.getVODMovies() { count += movies.count }
-            if let series = try? await api.getVODSeries() { count += series.count }
+            if let movies = try? await api.getVODMovieCount() { count += movies }
+            if let series = try? await api.getVODSeriesCount() { count += series }
             return count
         case .xtreamCodes:
             let api = XtreamCodesAPI(baseURL: snap.baseURL, username: snap.username, password: snap.password)

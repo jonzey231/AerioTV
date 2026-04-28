@@ -214,7 +214,19 @@ final class VODStore: ObservableObject {
             lastMoviesServerName = nil; currentMoviesServerID = nil
             return
         }
-        let vodServers = servers.filter { $0.supportsVOD }
+        // v1.6.12: also filter by per-server `vodEnabled`. Users with
+        // a "main + sandbox" Dispatcharr setup can disable VOD on the
+        // sandbox to avoid duplicate fetches and the multi-minute
+        // grid wait. Active server with `vodEnabled == false` clears
+        // VOD content (same shape as a non-VOD-capable type).
+        if let active = activeServer, !active.vodEnabled {
+            debugLog("🎬 VODStore.loadMovies: active server has vodEnabled=false, clearing")
+            movies = []; movieCategories = []
+            isLoadingMovies = false; moviesError = nil
+            lastMoviesServerName = nil; currentMoviesServerID = nil
+            return
+        }
+        let vodServers = servers.filter { $0.supportsVOD && $0.vodEnabled }
         // Use the active VOD server; fall back to first VOD server only when there is no
         // active server at all (never fall back to an inactive VOD server when a non-VOD
         // server is explicitly active — that would show stale data from the wrong server).
@@ -433,7 +445,17 @@ final class VODStore: ObservableObject {
             lastSeriesServerName = nil; currentSeriesServerID = nil
             return
         }
-        let vodServers = servers.filter { $0.supportsVOD }
+        // v1.6.12: per-server VOD toggle — see `loadMovies` for the
+        // rationale. Active server with `vodEnabled == false` clears
+        // series state the same way a non-VOD-capable server does.
+        if let active = activeServer, !active.vodEnabled {
+            debugLog("📺 VODStore.loadSeries: active server has vodEnabled=false, clearing")
+            series = []; seriesCategories = []
+            isLoadingSeries = false; seriesError = nil
+            lastSeriesServerName = nil; currentSeriesServerID = nil
+            return
+        }
+        let vodServers = servers.filter { $0.supportsVOD && $0.vodEnabled }
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else {
             if !servers.isEmpty {
                 seriesError = "None of your configured servers support VOD. Use an Xtream Codes or Dispatcharr server to browse series."
@@ -2677,22 +2699,48 @@ struct MainTabView: View {
         }
         #endif
         #if os(tvOS)
-        // When mini player is active, pressing Menu stops it.
-        // When no mini player, Menu navigates normally (tab switch, etc.)
+        // v1.6.12: GH #11 fix (v5).
         //
-        // Under unified playback the mini is N=1 multiview-mode
-        // playback shrunk to a corner; fully stopping it requires
-        // `PlayerSession.shared.stop()` (which resets
-        // `MultiviewStore`, tears down the mpv handle, and flips mode
-        // back to `.idle`). Calling `nowPlaying.stop()` alone only
-        // clears the lockscreen entry and leaves the container still
-        // rendering. `PlayerSession.stop()` works for the legacy path
-        // too — it reduces to `NowPlayingManager.stop()` when there
-        // are no tiles to reset.
+        // History: this slot used to do
+        //   `if nowPlaying.isMinimized { PlayerSession.shared.stop() }`
+        // with **nothing** in the `!isMinimized` case. SwiftUI's
+        // `.onExitCommand` is a sink — once attached it consumes
+        // the Back/Menu press regardless of whether the body does
+        // anything. After expanding the player from mini back to
+        // full-screen via Play/Pause from the guide, the press
+        // from the still-focused guide cell bubbled here, the
+        // empty branch ran, and the press died.
+        //
+        // First fix attempt removed this entire handler thinking
+        // the inner `.onExitCommand` on `tabContentView`
+        // (`{ handleMenuPress() }`) would catch everything. It
+        // doesn't — `.onExitCommand` on a TabView only fires when
+        // focus is inside one of the tabs, and after the
+        // expand-from-mini path leaves focus in a state where the
+        // press bypasses tabContentView entirely (the player
+        // overlay's `.focusSection()` is a sibling of
+        // tabContentView in the body's outer ZStack, so its
+        // children's exit-command bubble doesn't traverse
+        // tabContentView at all). With this slot removed the press
+        // reached system level → app exited.
+        //
+        // The right fix is to make THIS handler call
+        // `handleMenuPress()` too. That mirrors the inner
+        // tabContentView handler so whichever level actually
+        // receives the press, the routing is identical:
+        //   - full-screen player  → minimize
+        //   - mini player         → stop
+        //   - VOD detail pushed   → pop
+        //   - Settings subview    → pop
+        //   - Live TV tab idle    → scroll guide to top
+        //   - other tab           → switch to Live TV
+        //
+        // Net effect: Back works correctly in every transition,
+        // including the Live TV → Guide → Live TV cycle that GH #11
+        // reported.
         .onExitCommand {
-            if nowPlaying.isMinimized {
-                PlayerSession.shared.stop()
-            }
+            debugLog("🎮 [MT-OUTER] .onExitCommand FIRED (body's outer modifier — focus was outside tabContentView's TabView)")
+            handleMenuPress()
         }
         #endif
         .environmentObject(nowPlaying)
@@ -3101,7 +3149,10 @@ struct MainTabView: View {
         // `@autoclosure` repeatedly tripped "unable to type-check this
         // expression in reasonable time"). Calling a plain method side-
         // steps the budget entirely.
-        .onExitCommand { handleMenuPress() }
+        .onExitCommand {
+            debugLog("🎮 [MT-INNER] .onExitCommand FIRED (tabContentView/TabView — focus was inside a tab)")
+            handleMenuPress()
+        }
         .onPlayPauseCommand {
             if nowPlaying.isMinimized {
                 debugLog("🎮 Play/Pause pressed: expand mini player to full screen")
@@ -3140,9 +3191,21 @@ struct MainTabView: View {
     /// tab-state additions. A plain method has its own scope so the
     /// budget resets cleanly.
     private func handleMenuPress() {
+        debugLog("🎮 [HMP] handleMenuPress | isActive=\(nowPlaying.isActive) isMinimized=\(nowPlaying.isMinimized) isVODDetailPushed=\(isVODDetailPushed) isSettingsSubviewPushed=\(isSettingsSubviewPushed) selectedTab=\(selectedTab.rawValue) playerSession.mode=\(playerSession.mode)")
         if nowPlaying.isActive && !nowPlaying.isMinimized {
-            debugLog("🎮 Menu pressed: full-screen player → minimize to corner")
-            withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() }
+            // GH #11: hand off to PlayerView's chrome cycle instead
+            // of minimizing directly. PlayerView's `.onExitCommand`
+            // would handle this correctly if it had focus, but after
+            // expanding from mini via Play/Pause focus is typically
+            // still on the guide cell — so the outer handler catches
+            // the press first, and we end up here. Posting the
+            // notification lets PlayerView run the same
+            // hidden-chrome-shows / shown-chrome-minimizes cycle it
+            // would have run for a focused press, which is what the
+            // user expects ("first Back reveals Stream UI, second
+            // Back minimizes").
+            debugLog("🎮 [HMP]   → branch: full-screen player → posting .playerBackPress")
+            NotificationCenter.default.post(name: .playerBackPress, object: nil)
         } else if nowPlaying.isActive && nowPlaying.isMinimized {
             // Under unified playback, the mini is N=1 multiview
             // collapsed to a corner. Fully stopping requires

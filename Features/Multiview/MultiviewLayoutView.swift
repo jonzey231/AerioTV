@@ -81,7 +81,23 @@ struct MultiviewLayoutView<Content: View>: View {
                             .transition(.scale(scale: 0.85).combined(with: .opacity))
                     }
                 }
-                .animation(.easeInOut(duration: 0.28), value: tiles)
+                // v1.6.12: animate on the id-order, not on the
+                // tiles array's full equality. `MultiviewTile`
+                // synthesises `Equatable` over all stored properties,
+                // so any change to any field on any tile (including
+                // benign metadata churn during reorder) used to
+                // invalidate the animation key and fire SwiftUI's
+                // layout transition. With stable ids and ForEach
+                // keyed on `\.element.0.id`, the only thing the
+                // animation should react to is **order changes** and
+                // **membership changes** — both of which the
+                // id-array captures exactly. This eliminates the
+                // path where a swap would trigger a per-tile
+                // transition that occasionally got mis-diffed as
+                // remove+insert and tore down + rebuilt the
+                // moved tile's MPVPlayerView Coordinator (causing
+                // an AudioUnit re-init "bonk" on the audio tile).
+                .animation(.easeInOut(duration: 0.28), value: tiles.map(\.id))
             }
         }
     }

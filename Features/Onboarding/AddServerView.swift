@@ -264,10 +264,10 @@ struct AddServerView: View {
                             urlProtocolBadge(url: viewModel.baseURL).padding(8)
                         }
                     }
-                AppTextField("API Key", placeholder: "••••••••••••••••",
+                AppTextField("Admin API Key", placeholder: "••••••••••••••••",
                              text: $viewModel.apiKey, icon: "key.fill", isSecure: true)
                 infoBox(icon: "info.circle.fill",
-                        message: "Use a Dispatcharr API key (System → Users → Edit User → API & XC). This enables native Dispatcharr endpoints for Live TV, Guide, Movies, and TV Shows.")
+                        message: "Use a Dispatcharr Admin API Key (System → Users → Edit User → API & XC). This enables native Dispatcharr endpoints for Live TV, Guide, Movies, and TV Shows.")
 
                 advancedXMLTVSection
             }

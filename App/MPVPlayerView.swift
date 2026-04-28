@@ -56,8 +56,45 @@ enum MPVLibraryWarmup {
     }
 
     /// `true` once the background warm-up has completed. Diagnostics
-    /// only — callers never need to wait on this.
+    /// only — most callers never need to read this directly.
     static var completed: Bool { isComplete }
+
+    /// Synchronously wait up to `timeout` seconds for the warm-up to
+    /// finish. Spin-polls `isComplete` with 50ms sleeps so the call
+    /// is safe from any non-main background queue (specifically the
+    /// per-Coordinator `renderQueue`). Returns `true` if the warm-up
+    /// completed within `timeout`, `false` if we timed out (in which
+    /// case the caller should proceed anyway and accept the cold-
+    /// path cost / decoder-error risk).
+    ///
+    /// Why this exists: v1.6.12 fix for the **multiview first-tile
+    /// decoder error**. Pre-v1.6.12, `Coordinator.start()` ran
+    /// `setupMPV()` → `loadfile` immediately on `renderQueue`, with
+    /// no synchronization to `MPVLibraryWarmup`. The first multiview
+    /// tile mounted within ~3 s of app launch would race the
+    /// background warm-up's process-wide ffmpeg / codec / protocol
+    /// registration — `mpv_initialize` returned success on the
+    /// tile's own handle, but `loadfile` arrived before the global
+    /// registration finished and the load failed with
+    /// `MPV_ERROR_LOADING_FAILED` (-13). Subsequent tiles ran after
+    /// the warm-up completed and worked fine. Gating `setupMPV()`
+    /// on this wait closes the race; the timeout is generous (5 s)
+    /// because the worst-observed warm-up is ~2.2 s on cold device
+    /// hardware.
+    @discardableResult
+    static func waitUntilComplete(timeout: TimeInterval = 5.0) -> Bool {
+        // Fast path — already done.
+        if isComplete { return true }
+        // Defensive: if `warmUp()` was somehow never called (shouldn't
+        // happen — `RootView.onAppear` triggers it), kick it now so
+        // the wait isn't pointless. Idempotent.
+        warmUp()
+        let deadline = Date().addingTimeInterval(timeout)
+        while !isComplete && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return isComplete
+    }
 
     private static func doWarmUp() {
         let totalStart = Date()
@@ -511,6 +548,29 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// observer saw.
         private var lastAppliedPause: Bool?
 
+        /// **Belt-and-suspenders** for the `aid` and `mute` writes
+        /// inside `applyAudioFocusIfChanged`. v1.6.12 fix for the
+        /// audio-bonk-on-tile-rearrange bug.
+        ///
+        /// The outer `lastAppliedAudioFocus` guard is keyed on the
+        /// SwiftUI-level `isActive` boolean, but it can desync from
+        /// mpv's actual property state in exotic circumstances (a
+        /// Coordinator rebuild that dispatches a write before the
+        /// init seed lands, a SwiftUI invalidation cycle that
+        /// re-enters the path before the previous mpvQueue dispatch
+        /// completes, etc.). Re-writing `aid=auto` when the property
+        /// is already `auto` causes mpv to re-run track selection
+        /// and tear down + re-open its AudioUnit — which on iOS
+        /// produces an audible "bonk" / brief audio dropout. These
+        /// secondary guards record the last value the mpvQueue
+        /// dispatch actually wrote and skip the
+        /// `mpv_set_property*` call when the new value matches.
+        ///
+        /// `nil` means "we have not written this property yet" —
+        /// the next write goes through unconditionally.
+        private var lastWrittenAID: String?
+        private var lastWrittenMute: Int32?
+
         /// Set true when `didEnterBackground` paused mpv because the
         /// user hadn't opted into any background-audio mode (no PiP,
         /// no Audio-Only, no AirPlay). `willEnterForeground` consults
@@ -636,11 +696,29 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // On audio-focus ACQUIRE we do the inverse: aid=auto
             // (re-runs mpv's track selection so the preferred
             // audio track plays) + mute=no.
+            //
+            // v1.6.12: each `mpv_set_property*` call is now gated on
+            // a per-property cache (`lastWrittenAID` /
+            // `lastWrittenMute`) so even if the outer
+            // `lastAppliedAudioFocus` guard somehow lets a duplicate
+            // through (Coordinator rebuild edge case, SwiftUI
+            // re-entrancy), we never re-write the same value to mpv
+            // — re-writing `aid=auto` re-runs track selection and
+            // tears down + re-opens the AudioUnit, which is the
+            // audible "bonk" users heard during tile rearrange.
+            let targetAID  = isActive ? "auto" : "no"
+            let targetMute: Int32 = isActive ? 0 : 1
             mpvQueue.async { [weak self] in
                 guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
-                mpv_set_property_string(mpv, "aid", isActive ? "auto" : "no")
-                var flag: Int32 = isActive ? 0 : 1
-                mpv_set_property(mpv, "mute", MPV_FORMAT_FLAG, &flag)
+                if self.lastWrittenAID != targetAID {
+                    mpv_set_property_string(mpv, "aid", targetAID)
+                    self.lastWrittenAID = targetAID
+                }
+                if self.lastWrittenMute != targetMute {
+                    var flag = targetMute
+                    mpv_set_property(mpv, "mute", MPV_FORMAT_FLAG, &flag)
+                    self.lastWrittenMute = targetMute
+                }
             }
         }
 
@@ -1298,6 +1376,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             bufferEnteredTime = nil
             totalBufferingDuration = 0; bufferEventCount = 0
             audioUnderrunCount = 0
+
+            // v1.6.12: gate `setupMPV()` + `loadfile` on the
+            // process-wide warm-up. Fixes the multiview first-tile
+            // decoder error where the first tile's `loadfile` raced
+            // libmpv's global ffmpeg/codec/protocol registration.
+            // See `MPVLibraryWarmup.waitUntilComplete` for the full
+            // rationale. Returns immediately for the common case
+            // (warm-up done long before the user ever opens a
+            // player).
+            MPVLibraryWarmup.waitUntilComplete()
 
             setupMPV()
             play(url: urls[currentIndex])

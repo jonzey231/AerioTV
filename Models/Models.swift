@@ -86,6 +86,27 @@ final class ServerConnection {
     /// always record locally. Stored as rawValue for SwiftData stability.
     var defaultRecordingDestinationRaw: String = RecordingDestination.dispatcharrServer.rawValue
 
+    /// v1.6.12: per-server toggle for VOD ingestion. When `false`,
+    /// `VODStore` skips this server during `loadMovies` / `loadSeries`
+    /// even if the server type technically supports VOD.
+    ///
+    /// Use case: a user runs two Dispatcharr instances — one as
+    /// their "main" server, one as a "sandbox" for trialing new IPTV
+    /// providers. Both have huge VOD libraries that overlap (same
+    /// upstream Xtream account). Without this toggle, Aerio fetches
+    /// VOD from both — adding minutes to launch (e.g. 17k movies ×
+    /// 2 servers paginated 25/page = ~1400 sequential HTTP calls
+    /// against Dispatcharr) and triggering the cross-server
+    /// duplicate-merge code path that's caused us trouble
+    /// historically. With this toggle, the user keeps Live TV from
+    /// both servers and VOD from just the main one.
+    ///
+    /// Defaults to `true` so existing servers keep their current
+    /// behavior on upgrade. The Edit Server UI hides the toggle for
+    /// server types that don't support VOD anyway (M3U-only
+    /// playlists today).
+    var vodEnabled: Bool = true
+
     init(
         name: String,
         type: ServerType,

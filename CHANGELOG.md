@@ -1,5 +1,136 @@
 # Changelog
 
+## v1.6.12 — 2026-04-27
+
+### Added
+
+- **VOD detail page now shows TMDB-rich metadata for Dispatcharr
+  servers.** Cast, director, backdrop art, runtime, full release
+  date, country, and the IMDB/TMDB IDs all flow into the detail
+  page when the Dispatcharr server's upstream Xtream provider has
+  populated them. Implementation reads the existing
+  `/api/vod/movies/<id>/provider-info/` and
+  `/api/vod/series/<id>/provider-info/` actions, with a two-phase
+  render: list-time data (poster, title, year, plot, genre)
+  appears instantly, the rich payload upgrades the view when the
+  network call returns. The `provider-info` endpoint lazy-refreshes
+  from the upstream provider on first call (24h server-side
+  throttle), so a freshly-added server may take a few seconds per
+  movie the first time it's opened. XC and M3U paths unchanged —
+  XC was already returning rich metadata via `get_vod_info` /
+  `get_series_info`.
+- **Trailer and "View on TMDB" links on movie / series detail
+  pages (iOS, Dispatcharr API only).** When a movie or series has
+  a YouTube trailer key or TMDB ID, pill-style links appear under
+  the plot. Trailer opens YouTube in Safari; TMDB opens
+  `themoviedb.org/movie/<id>` or `/tv/<id>` depending on item type.
+  tvOS hides the links since Apple TV has no system browser.
+- **Multiview picker: filter by group, tap to deselect.** The Add
+  to Multiview sheet now has a horizontal pill bar of group filters
+  matching the Live TV List style. Filter applies to all sections
+  (Favorites, Recent, All Channels). Tapping an already-added row
+  also now removes the corresponding tile — was previously a no-op
+  that forced users to dismiss the sheet, find the tile, and
+  remove it from the per-tile menu.
+- **Per-playlist VOD toggle in Edit Playlist.** New Content section
+  with a "Fetch VOD from this playlist" switch. Lets users with a
+  "main + sandbox" Dispatcharr setup keep Live TV from both
+  servers but only ingest VOD from one — avoids the multi-minute
+  serial fetch the second server would otherwise trigger and the
+  cross-server duplicate-merge edge cases that come with it.
+- **"Clear iCloud Data" button in Settings → Sync.** Wipes synced
+  playlists, preferences, watch progress, and credentials from
+  iCloud. Local state on this device is preserved and will replace
+  whatever was on iCloud the next time the app pushes. Available
+  on iOS and tvOS, with destructive confirmation alert and a
+  bottom toast on success.
+- **What's New pop-up on first launch after update.** Concise
+  release-notes modal with bullet highlights and a link to the
+  GitHub release. Two buttons: "Dismiss" (per-version) and
+  "Never show again" (permanent per-device opt-out). Fresh
+  installs skip the prompt; the upgrade-detection heuristic uses
+  existing servers / completed onboarding as the "this device has
+  run Aerio before" signal.
+
+### Changed
+
+- **Apple TV Back/Menu button now reveals stream chrome on the
+  first press, minimizes on the second** (GH #11). Previous
+  behavior either auto-hid chrome or skipped straight to mini
+  depending on focus state, which surprised users expecting a
+  consistent reveal-then-minimize cycle. Implementation uses a
+  `.playerBackPress` notification relay so the outer
+  `MainTabView.handleMenuPress` handler — which catches the press
+  when focus is on the guide cell rather than inside the player —
+  routes through the same chrome-cycle logic as the focused-player
+  path. Both code paths converge on `MultiviewContainerView.handleMenuPress`,
+  which is now the single source of truth for the Menu stack.
+- **Adding a Dispatcharr server no longer hangs on "Loading VOD."**
+  The Setting Up flow used to paginate the entire VOD library
+  (700+ pages × 25 items on a 17k-movie server) just to display a
+  count. Replaced with a single `?page_size=1` probe that reads
+  the DRF wrapper's total-count field. Setting Up now finishes in
+  ~0.5s regardless of library size. XC servers were never affected
+  because their `get_vod_streams` endpoint returns the full list
+  in a single round-trip.
+- **Server Edit form: API key field renamed "Admin API Key"** with
+  clearer footer guidance. The Dispatcharr API needs an admin-tier
+  key, which was a frequent first-time-setup confusion.
+
+### Fixed
+
+- **Options panel on tvOS no longer escapes focus** (GH #11
+  follow-up). D-pad past Stream Info used to migrate focus down
+  into the Record button below; D-pad up could escape into the
+  tile above. The chrome below and the tile above are now
+  `.disabled(showTVOptions)` while the panel is open, giving the
+  panel a true focus trap in every direction. The panel itself
+  also got `.focusSection()` for matching parity with PlayerView's
+  instance.
+- **Options panel chrome stays visible while the panel is open.**
+  Previously the 5s auto-fade timer fired regardless of the panel,
+  which left the panel hovering over a fully-faded background.
+  New `MultiviewChromeState.setPinned(true)` API suppresses the
+  timer while the panel is up; releasing the pin on dismiss
+  schedules a fresh fade clock from "now."
+- **Stranded-panel rescue.** If the user does manage to get the
+  panel into a state where its own `.onExitCommand` doesn't fire
+  (rare with the focus trap in place, but defensive), Back at the
+  outer level now also closes the panel before any other Menu
+  branch runs.
+- **Multiview first-tile decoder race.** Tapping a channel from
+  the picker before libmpv's process-wide warmup completed would
+  occasionally leave the first tile in a dropped-frames /
+  no-decoder state. The multiview entry path now explicitly waits
+  for `MPVLibraryWarmup.waitUntilComplete(timeout: 5.0)` before
+  the first `loadfile`.
+- **Audio briefly cuts during multiview tile rearrange.** Two
+  defensive fixes: (1) `MultiviewLayoutView`'s animation key now
+  uses `tiles.map(\.id)` (id-order only) instead of the full
+  `tiles` array, so swapping a tile's metadata (e.g. current
+  program updates) no longer triggers a spurious layout
+  animation; (2) the per-tile `aid` and `mute` mpv writes are
+  guarded by per-property caches so identical writes inside a
+  debounce window are skipped, removing the audio device underrun
+  spam that produced the audible bonk.
+- **VODDetailView hero image no longer bleeds past the safe-area
+  leading edge** when the backdrop loads. The
+  `.aspectRatio(.fill)` + `.frame(maxWidth: .infinity)` chain was
+  reporting the image's natural-aspect width (~498pt at 280pt
+  height for a 16:9 backdrop) as the view's preferred width,
+  which the parent VStack adopted and pushed the entire info
+  section past the visible area — clipping the first letter off
+  every text row. Hero is now wrapped in a `GeometryReader` that
+  explicitly sizes the image to the proposed width.
+- **iCloud KVS no longer stores playlist credentials in plaintext.**
+  Pre-v1.6.12 servers had passwords / API keys mirrored in iCloud
+  KVS for cross-device sync. v1.6.8 introduced iCloud Keychain
+  (synchronizable=true) as the proper storage; v1.6.12 stops the
+  KVS writes and runs a one-shot launch task to purge any existing
+  plaintext entries, leaving Keychain as the only credential-sync
+  path. Reads still tolerate legacy KVS entries during the
+  migration window.
+
 ## v1.6.11 — 2026-04-27
 
 ### Fixed

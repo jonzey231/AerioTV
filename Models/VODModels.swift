@@ -350,6 +350,14 @@ struct VODMovie: Identifiable, Hashable {
     let containerExtension: String
     let serverID: UUID
 
+    // v1.6.12: optional metadata used by VODDetailView's external
+    // links + a Country meta row. All default empty so existing
+    // initializers don't need updating; populated by the Dispatcharr
+    // provider-info path in `VODService`.
+    var tmdbID: String = ""
+    var youtubeTrailer: String = ""
+    var country: String = ""
+
     // Computed
     var displayRating: String {
         guard !rating.isEmpty, let r = Double(rating), r > 0 else { return "" }
@@ -379,6 +387,16 @@ struct VODSeries: Identifiable, Hashable {
     let serverID: UUID
     var seasons: [VODSeason]
     let episodeCount: Int
+
+    // v1.6.12: same TMDB-derived metadata vocabulary as VODMovie —
+    // tmdbID drives the "View on TMDB" deep-link, youtubeTrailer
+    // drives the trailer button, country shows up in the meta row.
+    // Default empty so existing initializers don't need updating;
+    // populated by `dispatcharrSeries(...)` (list time) and
+    // `dispatcharrSeriesDetail(...)` (provider-info enrichment).
+    var tmdbID: String = ""
+    var youtubeTrailer: String = ""
+    var country: String = ""
 
     var displayRating: String {
         guard !rating.isEmpty, let r = Double(rating), r > 0 else { return "" }

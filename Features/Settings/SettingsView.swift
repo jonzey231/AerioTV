@@ -31,6 +31,13 @@ struct SettingsView: View {
     @State private var serverToDelete: ServerConnection? = nil
     @State private var serverToEdit: ServerConnection? = nil
     @State private var showDeleteAlert = false
+    /// Drives the confirmation alert for the "Clear iCloud Data"
+    /// destructive action in the iCloud Sync section.
+    @State private var showClearICloudConfirm = false
+    /// Optional confirmation toast shown after a successful Clear
+    /// iCloud Data invocation. Auto-dismisses after a couple of
+    /// seconds so the user gets feedback without an extra tap.
+    @State private var clearICloudConfirmationVisible = false
     // Tracks whether the one-time swipe-hint peek has been shown.
     @State private var copiedAbout = false
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
@@ -287,6 +294,25 @@ struct SettingsView: View {
                             .buttonStyle(.plain)
                             #endif
                         }
+
+                        // v1.6.12: destructive action — wipe everything
+                        // this app has parked in iCloud. Always offered
+                        // (even when Sync is currently off) so a user
+                        // who toggled Sync off can still purge stale
+                        // cloud state without re-enabling first.
+                        Button(role: .destructive) {
+                            showClearICloudConfirm = true
+                        } label: {
+                            SettingsRow(icon: "trash.circle.fill",
+                                        iconColor: .statusLive,
+                                        title: "Clear iCloud Data",
+                                        subtitle: "Wipe synced playlists, preferences, watch progress, and credentials from iCloud")
+                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #else
+                        .buttonStyle(.plain)
+                        #endif
                     } header: {
                         Text("Sync").sectionHeaderStyle()
                     } footer: {
@@ -505,6 +531,32 @@ struct SettingsView: View {
                 EditServerSheet(server: server)
             }
             #endif
+            .alert("Clear iCloud Data?", isPresented: $showClearICloudConfirm) {
+                Button("Clear", role: .destructive) {
+                    debugLog("🔵 Clear iCloud Data confirmed")
+                    SyncManager.shared.clearAllICloudData(localServers: servers)
+                    clearICloudConfirmationVisible = true
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2_500_000_000)
+                        await MainActor.run { clearICloudConfirmationVisible = false }
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Wipes synced playlists, preferences, watch progress, and credentials from iCloud. This device's data is preserved. iCloud Sync stays enabled — your local state will replace whatever was on iCloud the next time the app pushes.")
+            }
+            .overlay(alignment: .bottom) {
+                if clearICloudConfirmationVisible {
+                    Text("iCloud data cleared")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .padding(.bottom, 24)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.easeInOut(duration: 0.25), value: clearICloudConfirmationVisible)
     }
 
     // MARK: - Sync computed properties
@@ -722,6 +774,17 @@ struct SettingsView: View {
                                 SyncManager.shared.pushWatchProgress(all, immediate: true)
                             }
                         }
+                    }
+                    // v1.6.12: destructive — wipe iCloud-side state.
+                    // Always offered (even when Sync is currently off)
+                    // so a user who toggled Sync off can still purge
+                    // stale cloud state without re-enabling first.
+                    TVSettingsActionRow(
+                        icon: "trash.circle.fill",
+                        label: "Clear iCloud Data",
+                        isDestructive: true
+                    ) {
+                        showClearICloudConfirm = true
                     }
                 }
 
@@ -1857,7 +1920,7 @@ struct EditServerSheet: View {
                 }
             } else if server.type == .dispatcharrAPI {
                 Section {
-                    SecureField("API Key", text: $server.apiKey)
+                    SecureField("Admin API Key", text: $server.apiKey)
                         .autocorrectionDisabled()
                         .textInputAutocapitalization(.never)
                         .listRowBackground(Color.cardBackground)
@@ -1973,6 +2036,22 @@ struct EditServerSheet: View {
                 }
             }
 
+            // v1.6.12: per-server VOD toggle. Only shown for server
+            // types that actually support VOD — M3U-only playlists
+            // don't carry it.
+            if server.supportsVOD {
+                Section {
+                    Toggle("Fetch VOD from this playlist", isOn: $server.vodEnabled)
+                        .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Content").sectionHeaderStyle()
+                } footer: {
+                    Text("When off, this playlist's movies and TV shows aren't loaded into the On Demand tab. Useful when you have a \"sandbox\" playlist for testing — keep its Live TV channels but skip the (sometimes massive) VOD library.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                }
+            }
+
             Section {
                 HStack {
                     Text("Type")
@@ -2010,7 +2089,7 @@ struct EditServerSheet: View {
                 } else if server.type == .dispatcharrAPI {
                     Group {
                         tvEditSection("Authentication") {
-                            tvEditField("API Key", text: $server.apiKey, isSecure: true)
+                            tvEditField("Admin API Key", text: $server.apiKey, isSecure: true)
                         }
                         tvEditSection("EPG Source") {
                             tvEditField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)
@@ -2042,6 +2121,22 @@ struct EditServerSheet: View {
                     tvEditSection("User-Agent") {
                         tvEditField("User-Agent", text: $server.customUserAgent)
                         Text("Shown in Dispatcharr's admin Stats panel. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.top, 4)
+                    }
+                }
+
+                // v1.6.12: per-server VOD toggle. Mirrors the iOS
+                // edit form's "Content" section. Hidden for M3U-only
+                // playlists since they don't carry VOD anyway.
+                if server.supportsVOD {
+                    tvEditSection("Content") {
+                        Toggle("Fetch VOD from this playlist", isOn: $server.vodEnabled)
+                            .font(.system(size: 28, weight: .medium))
+                            .foregroundColor(.textPrimary)
+                            .padding(.vertical, 4)
+                        Text("When off, this playlist's movies and TV shows aren't loaded into the On Demand tab. Useful when you have a \"sandbox\" playlist for testing — keep its Live TV channels but skip the (sometimes massive) VOD library.")
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.top, 4)
@@ -2203,7 +2298,7 @@ struct EditServerPage: View {
                     } else if server.type == .dispatcharrAPI {
                         Group {
                             tvSection("Authentication") {
-                                tvField("API Key", text: $server.apiKey, isSecure: true)
+                                tvField("Admin API Key", text: $server.apiKey, isSecure: true)
                             }
                             tvSection("EPG Source") {
                                 tvField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)

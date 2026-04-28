@@ -43,6 +43,8 @@
 		B1C2D3E4F5A67890ACE0001D /* MultiviewContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */; };
 		B1C2D3E4F5A67890ACE00020 /* RecentChannelsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */; };
 		B1C2D3E4F5A67890ACE00023 /* CompactChannelRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */; };
+		WHATSNEW00000000000ACE001 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
+		WHATSNEW00000000000ACE002 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
 		B1C2D3E4F5A67890ACE00026 /* AddToMultiviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */; };
 		B1C2D3E4F5A67890ACE00029 /* MultiviewCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */; };
 		B1C2D3E4F5A67890ACE0002C /* ProcessMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */; };
@@ -310,6 +312,7 @@
 		B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewContainerView.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecentChannelsStore.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CompactChannelRow.swift; sourceTree = "<group>"; };
+		WHATSNEW00000000000ACE000 /* WhatsNew.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AddToMultiviewSheet.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewCommands.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessMetrics.swift; sourceTree = "<group>"; };
@@ -694,6 +697,7 @@
 				880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */,
 				CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */,
 				5044B9CD69C05A6836588548 /* SplashView.swift */,
+				WHATSNEW00000000000ACE000 /* WhatsNew.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -975,6 +979,7 @@
 				B1C2D3E4F5A67890ACE0001D /* MultiviewContainerView.swift in Sources */,
 				B1C2D3E4F5A67890ACE00020 /* RecentChannelsStore.swift in Sources */,
 				B1C2D3E4F5A67890ACE00023 /* CompactChannelRow.swift in Sources */,
+				WHATSNEW00000000000ACE001 /* WhatsNew.swift in Sources */,
 				B1C2D3E4F5A67890ACE00026 /* AddToMultiviewSheet.swift in Sources */,
 				B1C2D3E4F5A67890ACE00029 /* MultiviewCommands.swift in Sources */,
 				B1C2D3E4F5A67890ACE0002C /* ProcessMetrics.swift in Sources */,
@@ -1054,6 +1059,7 @@
 				B1C2D3E4F5A67890ACE0001E /* MultiviewContainerView.swift in Sources */,
 				B1C2D3E4F5A67890ACE00021 /* RecentChannelsStore.swift in Sources */,
 				B1C2D3E4F5A67890ACE00024 /* CompactChannelRow.swift in Sources */,
+				WHATSNEW00000000000ACE002 /* WhatsNew.swift in Sources */,
 				B1C2D3E4F5A67890ACE00027 /* AddToMultiviewSheet.swift in Sources */,
 				B1C2D3E4F5A67890ACE0002A /* MultiviewCommands.swift in Sources */,
 				B1C2D3E4F5A67890ACE0002D /* ProcessMetrics.swift in Sources */,
@@ -1105,7 +1111,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.6.11;
+				MARKETING_VERSION = 1.6.12;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio.TopShelf";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1159,7 +1165,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.6.11;
+				MARKETING_VERSION = 1.6.12;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio";
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1186,7 +1192,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.6.11;
+				MARKETING_VERSION = 1.6.12;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio.TopShelf";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1256,7 +1262,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.6.11;
+				MARKETING_VERSION = 1.6.12;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1288,7 +1294,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.6.11;
+				MARKETING_VERSION = 1.6.12;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio";
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1359,7 +1365,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.6.11;
+				MARKETING_VERSION = 1.6.12;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

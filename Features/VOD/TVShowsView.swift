@@ -389,9 +389,9 @@ struct TVShowsView: View {
 
     private func serverContext(_ prefix: String) -> String {
         if let name = vodStore.lastSeriesServerName {
-            return "\(prefix) \(name). Pull down to retry or tap the refresh button."
+            return "\(prefix) \(name). Tap the retry button to try again."
         }
-        return "The server returned no series. Pull down to retry or tap the refresh button."
+        return "The server returned no series. Tap the retry button to try again."
     }
 }
 

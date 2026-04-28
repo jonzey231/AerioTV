@@ -41,6 +41,15 @@ struct VODDetailView: View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
             ScrollView {
+                // v1.6.12: explicit `.frame(maxWidth: .infinity, alignment: .leading)`
+                // on this outer VStack clamps the column to the
+                // ScrollView's content width. Without it, an
+                // `.frame(maxWidth: .infinity)` on a deeper child
+                // (e.g. metaRow's value Text) propagates up through
+                // the leading-aligned VStack and bleeds the layout
+                // past the safe-area's leading edge — which clipped
+                // the first letter off every plot/genre/cast line
+                // in the v1.6.12 enrichment work.
                 VStack(alignment: .leading, spacing: 0) {
                     heroSection
                     infoSection
@@ -48,6 +57,7 @@ struct VODDetailView: View {
                         episodeSection
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         #if os(iOS)
@@ -74,14 +84,39 @@ struct VODDetailView: View {
     // MARK: - Hero
     private var heroSection: some View {
         ZStack(alignment: .bottomLeading) {
-            // Backdrop or poster as hero
+            // Backdrop or poster as hero.
+            //
+            // v1.6.12: wrapped in `GeometryReader` so the image's
+            // frame is **explicitly** clamped to the container's
+            // proposed width. The previous chain
+            // (`.aspectRatio(contentMode: .fill).frame(maxWidth: .infinity).frame(height: 280)`)
+            // looked correct on a poster image (~0.67 aspect → 187pt
+            // wide at 280pt tall, fits the screen) but the moment the
+            // backdrop image loaded (~1.78 aspect → 498pt wide at
+            // 280pt tall), `.aspectRatio(.fill)` reported that 498pt
+            // as the view's preferred width. `.frame(maxWidth: .infinity)`
+            // accepts up to infinity, so the frame became 498pt —
+            // **wider than the iPhone viewport**. The parent VStack
+            // adopted 498pt, and SwiftUI's positioning of a too-wide
+            // leading-aligned frame inside a narrower ScrollView
+            // viewport bled the entire infoSection past the safe-
+            // area's leading edge, clipping the first letter of every
+            // text row. Forcing `.frame(width: geo.size.width, …)`
+            // here fully detaches the image's natural aspect from the
+            // parent's width math: the frame is exactly the proposed
+            // width, the `.aspectRatio(.fill)` content scales to
+            // fill (overflowing internally), and `.clipped()` trims
+            // the overflow. No upward width propagation, hero looks
+            // identical, layout stays inside the safe area.
             let heroURL = (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL
-            AuthPosterImage(url: heroURL, headers: serverHeaders())
-                .aspectRatio(contentMode: .fill)
-                .frame(maxWidth: .infinity)
-                .frame(height: 280)
-                .clipped()
-                .overlay(LinearGradient.heroOverlay)
+            GeometryReader { geo in
+                AuthPosterImage(url: heroURL, headers: serverHeaders())
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: geo.size.width, height: 280)
+                    .clipped()
+            }
+            .frame(height: 280)
+            .overlay(LinearGradient.heroOverlay)
 
             HStack(alignment: .bottom, spacing: 14) {
                 // Small poster thumbnail
@@ -97,8 +132,16 @@ struct VODDetailView: View {
                         .lineLimit(2)
 
                     HStack(spacing: 8) {
-                        if !item.releaseYear.isEmpty {
-                            Text(item.releaseYear)
+                        // v1.6.12: prefer the full-detail year/rating
+                        // when we have it (Dispatcharr now populates
+                        // VODMovie.releaseDate and rating from
+                        // custom_properties), falling back to the
+                        // grid-time `item` snapshot for backwards
+                        // compatibility with Xtream payloads.
+                        let detailYear = (fullMovie?.releaseYear ?? fullSeries?.releaseYear) ?? ""
+                        let displayYear = detailYear.isEmpty ? item.releaseYear : detailYear
+                        if !displayYear.isEmpty {
+                            Text(displayYear)
                                 .font(.labelSmall).foregroundColor(.textSecondary)
                         }
                         if !item.rating.isEmpty {
@@ -109,6 +152,13 @@ struct VODDetailView: View {
                                 Text(item.rating)
                                     .font(.labelSmall).foregroundColor(.textSecondary)
                             }
+                        }
+                        // v1.6.12: runtime when known (movies only —
+                        // series carry per-episode durations on the
+                        // episode rows, not at the show level).
+                        if let movie = fullMovie, !movie.duration.isEmpty {
+                            Text(movie.duration)
+                                .font(.labelSmall).foregroundColor(.textSecondary)
                         }
                         if item.type == .movie {
                             Text("MOVIE")
@@ -137,7 +187,19 @@ struct VODDetailView: View {
                     .font(.bodyMedium)
                     .foregroundColor(.textSecondary)
                     .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+
+            // v1.6.12: external-link row. Surfaces the YouTube
+            // trailer + a "View on TMDB" link when the underlying
+            // VODMovie carries those identifiers (Dispatcharr's
+            // /provider-info/ populates them; series don't have
+            // either today). Hidden entirely on tvOS — the system
+            // has no browser, and there's no in-app trailer player
+            // yet, so the buttons would be no-ops on Apple TV.
+            #if !os(tvOS)
+            externalLinks
+            #endif
 
             let genre = fullMovie?.genre ?? fullSeries?.genre ?? ""
             if !genre.isEmpty {
@@ -151,9 +213,127 @@ struct VODDetailView: View {
             if !director.isEmpty {
                 metaRow(label: "Director", value: director)
             }
+            let country = fullMovie?.country ?? fullSeries?.country ?? ""
+            if !country.isEmpty {
+                metaRow(label: "Country", value: country)
+            }
         }
-        .padding(16)
+        // v1.6.12 (third pass): clamp infoSection to fill width
+        // BEFORE padding so the .padding(.horizontal, 16) carves
+        // 16pt margins out of the screen-wide column. Earlier
+        // iterations applied `.padding(16)` to a VStack that was
+        // sizing to its natural content width — the padding was
+        // applied but produced an outer frame narrower than the
+        // screen, then the parent leading-aligned VStack pinned
+        // that narrow frame to x=0 of the screen, putting the
+        // content at x=padding (which looks correct in isolation
+        // but visually presents as a narrower column hugging the
+        // left edge with no breathing room from the safe area).
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 16)
     }
+
+    // MARK: - External links (Trailer + TMDB)
+
+    /// Horizontal row of pill-shaped links opening the YouTube
+    /// trailer and the TMDB movie/TV page in Safari. Hidden when
+    /// neither identifier is present so the row doesn't stake out
+    /// vertical space for two empty columns. iOS-only — see
+    /// `infoSection` for the platform gate rationale.
+    ///
+    /// v1.6.12: now reads from `fullSeries` as a fallback so series
+    /// detail pages get the same treatment as movies. The TMDB URL
+    /// branches on `item.type` because TMDB uses `/movie/<id>` for
+    /// films and `/tv/<id>` for shows — same `tmdb_id` namespace,
+    /// different web path.
+    #if !os(tvOS)
+    @ViewBuilder
+    private var externalLinks: some View {
+        let rawTrailer = fullMovie?.youtubeTrailer
+            ?? fullSeries?.youtubeTrailer
+            ?? ""
+        let rawTmdbID = fullMovie?.tmdbID
+            ?? fullSeries?.tmdbID
+            ?? ""
+        let trailerURL = trailerURL(from: rawTrailer)
+        let tmdbURL    = tmdbURL(from: rawTmdbID, type: item.type)
+
+        if trailerURL != nil || tmdbURL != nil {
+            HStack(spacing: 10) {
+                if let url = trailerURL {
+                    Link(destination: url) {
+                        externalLinkLabel(icon: "play.rectangle.fill",
+                                          text: "Trailer")
+                    }
+                }
+                if let url = tmdbURL {
+                    Link(destination: url) {
+                        externalLinkLabel(icon: "info.circle.fill",
+                                          text: "View on TMDB")
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    /// Pill-styled label for the external-link row — keeps the
+    /// `Trailer` and `View on TMDB` chips visually consistent and
+    /// centralises the styling so future links (IMDB, etc.) drop
+    /// in with one extra `Link { externalLinkLabel(...) }` call.
+    private func externalLinkLabel(icon: String, text: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .semibold))
+            Text(text)
+                .font(.labelMedium)
+        }
+        .foregroundStyle(Color.accentPrimary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(
+            Capsule().fill(Color.elevatedBackground)
+        )
+    }
+
+    /// Build a YouTube watch URL from whatever shape Dispatcharr
+    /// stores `youtube_trailer` in. Most providers send just the
+    /// 11-char video key (`dQw4w9WgXcQ`), but a stray full URL or
+    /// `youtu.be/<key>` shows up occasionally — handle both rather
+    /// than producing a malformed URL.
+    private func trailerURL(from raw: String) -> URL? {
+        let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return nil }
+        if key.hasPrefix("http://") || key.hasPrefix("https://") {
+            return URL(string: key)
+        }
+        if key.hasPrefix("youtu.be/") {
+            return URL(string: "https://" + key)
+        }
+        return URL(string: "https://www.youtube.com/watch?v=\(key)")
+    }
+
+    /// Compose the TMDB page URL for a VOD item. `tmdbID` is the
+    /// bare numeric ID Dispatcharr stores. TMDB uses different web
+    /// paths for films vs. shows (`themoviedb.org/movie/<id>` and
+    /// `themoviedb.org/tv/<id>`) even though both share a single
+    /// numeric namespace, so we branch on `VODItemType`. Episodes
+    /// fall back to the show's path — there's no per-episode TMDB
+    /// page, and currently the episode rows aren't surfacing the
+    /// link anyway.
+    private func tmdbURL(from id: String, type: VODItemType) -> URL? {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let pathSegment: String = {
+            switch type {
+            case .movie:           return "movie"
+            case .series, .episode: return "tv"
+            }
+        }()
+        return URL(string: "https://www.themoviedb.org/\(pathSegment)/\(trimmed)")
+    }
+    #endif
 
     // MARK: - Episodes
     private var episodeSection: some View {
@@ -296,13 +476,25 @@ struct VODDetailView: View {
     }
 
     private func metaRow(label: String, value: String) -> some View {
+        // v1.6.12 (second pass): the previous fix used
+        // `.frame(maxWidth: .infinity, alignment: .leading)` on the
+        // value Text, which was the layout-cascade trigger — that
+        // modifier propagates "ideal width = infinity" up through the
+        // HStack → VStack → infoSection chain, and SwiftUI's eventual
+        // clamp lands at a position that bleeds the leading edge past
+        // the safe area. Solution: drop the maxWidth-infinity hint
+        // entirely and rely on `.fixedSize(horizontal: false, vertical: true)`,
+        // which lets the value Text accept whatever horizontal space
+        // the HStack offers (no cascade) while still allowing it to
+        // grow vertically for multi-line wrapping. Long cast lists
+        // wrap correctly without any width hint upstream.
         HStack(alignment: .top, spacing: 8) {
             Text(label + ":")
                 .font(.labelSmall).foregroundColor(.textTertiary)
                 .frame(width: 60, alignment: .leading)
             Text(value)
                 .font(.labelSmall).foregroundColor(.textSecondary)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -311,13 +503,54 @@ struct VODDetailView: View {
 
         switch item.type {
         case .movie:
+            // Two-phase render: show the slim list-time data
+            // immediately, then upgrade fields when the rich
+            // `/provider-info/` payload returns. Dispatcharr's
+            // provider-info endpoint is server-side throttled to
+            // 24h per movie, but the FIRST call for a movie that
+            // hasn't been visited yet synchronously triggers an
+            // upstream Xtream fetch (`refresh_movie_advanced_data`),
+            // which can take several seconds. By rendering
+            // `item.movie` first we keep the initial frame instant
+            // and let SwiftUI animate the new fields in when they
+            // arrive. Failure (network error, non-Dispatcharr
+            // server) is silent: `fetchMovieDetail` falls back to
+            // returning the existing movie unchanged.
             fullMovie = item.movie
+            if let existing = item.movie {
+                let snap = server.snapshot
+                let enriched = await VODService.fetchMovieDetail(existing: existing, from: snap)
+                // Only update if the fetch actually returned something
+                // richer — equality on the merged model is fine since
+                // the no-op fallback returns the same value object.
+                if enriched != existing {
+                    fullMovie = enriched
+                }
+            }
         case .series:
             guard fullSeries == nil else { return }
-            isLoadingDetail = true
-            defer { isLoadingDetail = false }
+            // v1.6.12: render the slim list-time series instantly so
+            // the user sees the basics (poster, title, year, plot,
+            // genre) without waiting for the network. The detail
+            // fetch then enriches with cast/director/backdrop/
+            // trailer/TMDB-id, mirroring the movie two-phase render.
+            // This also avoids the loading spinner flashing for
+            // series that already have plenty of metadata at list
+            // time — the spinner only takes the screen if we have
+            // nothing to show yet (no `item.series`).
+            if let preview = item.series {
+                fullSeries = preview
+            } else {
+                isLoadingDetail = true
+            }
             let snap = server.snapshot
-            fullSeries = try? await VODService.fetchSeriesDetail(seriesID: item.id, from: snap)
+            let enriched = try? await VODService.fetchSeriesDetail(seriesID: item.id,
+                                                                    from: snap,
+                                                                    existing: item.series)
+            if let enriched {
+                fullSeries = enriched
+            }
+            isLoadingDetail = false
             if let idx = fullSeries?.seasons.indices.first {
                 selectedSeason = idx
             }

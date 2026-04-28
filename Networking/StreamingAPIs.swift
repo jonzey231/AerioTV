@@ -59,7 +59,7 @@ enum APIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidURL:           return "Invalid server URL"
-        case .unauthorized:         return "Invalid credentials — your API key was not found on the server. Go to Settings → your server → API Key and verify it matches a key in Dispatcharr's user settings."
+        case .unauthorized:         return "Invalid credentials — your API key was not found on the server. Go to Settings → your server → Admin API Key and verify it matches an Admin user's API Key in Dispatcharr → System → Users → Edit User → API & XC."
         case .serverError(let c):
             switch c {
             case 404: return "Endpoint not found (404) — verify your server URL"
@@ -644,6 +644,7 @@ struct DispatcharrAPI {
         self.userAgent = userAgent
     }
 
+
     // Shared session — reused across all calls (avoid creating a new URLSession per request).
     // 20s per-request idle timeout mirrors XtreamCodesAPI's session: lets
     // error states (dead container, firewalled host, etc.) surface well
@@ -794,22 +795,46 @@ struct DispatcharrAPI {
         //     the server response" message with the last body snippet
         //     as the final diagnostic breadcrumb.
         let urlString = lastURL?.absoluteString ?? "<unknown url>"
-        let allHTML = !attemptOutcomes.isEmpty
-            && attemptOutcomes.allSatisfy { if case .html = $0 { return true } else { return false } }
-        let all401or403 = !attemptOutcomes.isEmpty
-            && attemptOutcomes.allSatisfy {
-                if case .httpError(let s) = $0, s == 401 || s == 403 { return true }
-                return false
-            }
+        // Relaxed from `all*` to `any*` because real-world
+        // deployments routinely produce mixed outcomes — the
+        // Dispatcharr SPA fallback returns 200 + HTML for unmatched
+        // routes (e.g., `/api/version` on builds where that path
+        // doesn't exist), so a wrong-API-key user sees 401 on the
+        // five channel endpoints AND 200 HTML on `/api/version`.
+        // The previous `all-or-nothing` test fell through to the
+        // generic "couldn't recognise" message in that case, hiding
+        // the much more useful "your API key is wrong" diagnosis.
+        // 401/403 is the strongest signal we have so it wins over
+        // an HTML fallback.
+        let firstAuthErrorCode: Int? = attemptOutcomes.compactMap {
+            if case .httpError(let s) = $0, s == 401 || s == 403 { return s }
+            return nil
+        }.first
+        let anyHTML = attemptOutcomes.contains {
+            if case .html = $0 { return true }
+            return false
+        }
 
         let message: String
-        if allHTML {
+        if let authCode = firstAuthErrorCode {
             message = """
-                Dispatcharr returned the web UI instead of the API for every \
-                endpoint we tried. This usually means one of:
-                  • Your API key is missing or incorrect. Generate a new API \
-                key in Dispatcharr → Settings → API Keys and paste it into \
-                the API Key field above.
+                Dispatcharr rejected this request (HTTP \(authCode)). \
+                Either the Admin API Key is empty/incorrect, or — more \
+                often — the key belongs to a non-Admin user. Aerio needs \
+                an Admin-level API key to list channels and groups, which \
+                a user-scoped key can't do. In Dispatcharr, go to \
+                System → Users → Edit User → API & XC, confirm the user \
+                has Admin permissions, and copy that user's API Key into \
+                the Admin API Key field above.
+                """
+        } else if anyHTML {
+            message = """
+                Dispatcharr returned the web UI instead of the API. This \
+                usually means one of:
+                  • Your Admin API Key is missing or incorrect. In \
+                Dispatcharr, go to System → Users → Edit User → API & XC, \
+                copy the API Key for an Admin user, and paste it into the \
+                Admin API Key field above.
                   • The Server URL points at the web app but not at the API \
                 (for example, a reverse proxy that strips or rewrites /api). \
                 Verify the URL works by opening \(urlString) in a browser \
@@ -818,16 +843,10 @@ struct DispatcharrAPI {
                   • The URL is correct but the port is wrong. Confirm the \
                 port matches the Dispatcharr API port on your server.
                 """
-        } else if all401or403 {
-            message = """
-                Dispatcharr rejected the API key on every probe (HTTP \
-                \(attemptOutcomes.compactMap { if case .httpError(let s) = $0 { return String(s) } else { return nil } }.first ?? "?")). \
-                Double-check the API Key field — you can generate a new key \
-                in Dispatcharr → Settings → API Keys.
-                """
         } else {
-            // Mixed failures or "other" — surface enough detail to diagnose
-            // without pasting the entire HTML body.
+            // Genuine "other" outcome — non-HTML, non-auth-error,
+            // non-JSON. Surface enough detail to diagnose without
+            // pasting the entire HTML body.
             let ctString = lastContentType ?? "<unknown content-type>"
             let statusString = lastStatus.map(String.init) ?? "<unknown status>"
             let snippet = lastBodySnippet.isEmpty
@@ -856,6 +875,7 @@ struct DispatcharrAPI {
             headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
             let (data, response) = try await loggedData(for: request)
             try validate(response: response, data: data)
+
             if let list = try? JSONDecoder().decode([T].self, from: data) {
                 allItems += list
                 break
@@ -1092,6 +1112,96 @@ struct DispatcharrAPI {
         try await fetchAllPages(DispatcharrVODMovie.self, firstPath: "/api/vod/movies/?page_size=25")
     }
 
+    /// v1.6.12: cheap library-size probe used by the AddServer
+    /// "Setting Up" stage. Hits `/api/vod/movies/?page_size=1` and
+    /// reads the DRF wrapper's `count` field (total library size)
+    /// instead of paginating the whole thing. The previous Setting
+    /// Up flow called `getVODMovies()` which paginates 25/page —
+    /// for a 17 000-movie Dispatcharr library that's ~700
+    /// sequential HTTP calls and 2–5 minutes of staring at "Loading
+    /// VOD". XC's equivalent (`get_vod_streams`) returns the full
+    /// list in one call, which is why XC users never saw this hang.
+    /// Returns 0 if the count field is missing — a non-zero return
+    /// value here is only used cosmetically to render the stage's
+    /// "Loaded N movies" detail line.
+    func getVODMovieCount() async throws -> Int {
+        let url = try buildURL(path: "/api/vod/movies/?page_size=1")
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        // DRF paginated wrapper carries `count` even when results is
+        // [...one item...]. Tolerate flat-array responses too — some
+        // older Dispatcharr builds return an unwrapped list, in which
+        // case we fall back to `.count` of whatever we can decode
+        // (defensive only — the modern API always wraps).
+        if let wrapped = try? JSONDecoder().decode(DispatcharrResultsWrapper<DispatcharrVODMovie>.self, from: data) {
+            return wrapped.count ?? wrapped.results.count
+        }
+        if let list = try? JSONDecoder().decode([DispatcharrVODMovie].self, from: data) {
+            return list.count
+        }
+        return 0
+    }
+
+    /// Series counterpart to `getVODMovieCount`. Same rationale, same
+    /// wrapper fallback.
+    func getVODSeriesCount() async throws -> Int {
+        let url = try buildURL(path: "/api/vod/series/?page_size=1")
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        if let wrapped = try? JSONDecoder().decode(DispatcharrResultsWrapper<DispatcharrVODSeries>.self, from: data) {
+            return wrapped.count ?? wrapped.results.count
+        }
+        if let list = try? JSONDecoder().decode([DispatcharrVODSeries].self, from: data) {
+            return list.count
+        }
+        return 0
+    }
+
+    /// v1.6.12: per-movie rich-metadata fetch.
+    /// Hits Dispatcharr's `/api/vod/movies/<id>/provider-info/` action,
+    /// which is the only endpoint that returns cast/director/backdrop/
+    /// runtime/full release-date for a movie. The list endpoint is
+    /// deliberately slim (just typed columns) so a 1000-movie library
+    /// doesn't ship a megabyte of TMDB blobs per page.
+    ///
+    /// **Latency note:** this endpoint is server-side throttled to 24h
+    /// per movie. The first call for a movie that's never been
+    /// visited synchronously triggers `refresh_movie_advanced_data`
+    /// upstream — that contacts the Xtream provider for the metadata
+    /// dictionary, which can take several seconds. Subsequent calls
+    /// within 24h read the cached refresh and return immediately.
+    /// Callers should treat this as best-effort enrichment: render
+    /// whatever's available immediately, then upgrade fields when
+    /// this returns.
+    func getMovieProviderInfo(movieID: Int) async throws -> DispatcharrVODMovieProviderInfo {
+        let url = try buildURL(path: "/api/vod/movies/\(movieID)/provider-info/")
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try decode(DispatcharrVODMovieProviderInfo.self, from: data)
+    }
+
+    /// v1.6.12: same lazy-refresh contract as `getMovieProviderInfo`,
+    /// but for series. Hits `/api/vod/series/<id>/provider-info/`,
+    /// which Dispatcharr names internally as `series_info()`. Same
+    /// 24h server-side throttle, same first-call latency caveat —
+    /// the FIRST call for a series that's never been visited
+    /// triggers an upstream Xtream fetch via
+    /// `refresh_series_advanced_data` and can take several seconds.
+    func getSeriesProviderInfo(seriesID: Int) async throws -> DispatcharrVODSeriesProviderInfo {
+        let url = try buildURL(path: "/api/vod/series/\(seriesID)/provider-info/")
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try decode(DispatcharrVODSeriesProviderInfo.self, from: data)
+    }
+
     func getVODSeries() async throws -> [DispatcharrVODSeries] {
         try await fetchAllPages(DispatcharrVODSeries.self, firstPath: "/api/vod/series/?page_size=25")
     }
@@ -1196,6 +1306,7 @@ struct DispatcharrAPI {
                         default:
                             continuation.finish(throwing: APIError.serverError(http.statusCode)); return
                         }
+
                         // Flat array (non-paginated response)
                         if let list = try? JSONDecoder().decode([T].self, from: data) {
                             if !list.isEmpty { continuation.yield(list) }
@@ -1904,6 +2015,99 @@ struct DispatcharrVODLogo: Decodable {
     }
 }
 
+/// v1.6.12: lean view onto Dispatcharr's `custom_properties` JSON
+/// blob. Dispatcharr stores TMDB-derived metadata (cast, director,
+/// trailers, backdrops, dates, etc.) under arbitrary keys inside this
+/// field on Movie / Series / Episode rows — see Dispatcharr's
+/// `apps/vod/tasks.py` (`refresh_movie_advanced_data`,
+/// `process_series_batch`). Only the keys we surface in the UI are
+/// decoded here; the giant `detailed_info` / `movie_data` sub-dicts
+/// are deliberately ignored to keep the per-item decode cheap when
+/// the list endpoints return 25+ items at a time.
+///
+/// Fields are all `Optional` and decoded with `try?` so a malformed
+/// or missing key never poisons the parent decode. Two fields
+/// (`backdropPath`, `episodeRunTime`) accept either an array or a
+/// scalar because Xtream-shaped payloads use both shapes
+/// interchangeably depending on the upstream provider.
+struct DispatcharrVODCustomProperties: Decodable {
+    let youtubeTrailer: String?
+    let trailer: String?
+    let backdropPath: [String]?
+    let posterPath: String?
+    /// Comma-separated cast list — sometimes under `cast`, sometimes
+    /// under `actors`. Whichever is non-nil, that's the one we keep.
+    let cast: String?
+    let director: String?
+    /// Episode runtime in **minutes** when present.
+    let episodeRunTime: Int?
+    let firstAirDate: String?
+    let lastAirDate: String?
+    let releaseDate: String?
+    let originalName: String?
+    let country: String?
+    let language: String?
+
+    enum CodingKeys: String, CodingKey {
+        case youtubeTrailer = "youtube_trailer"
+        case trailer
+        case backdropPath = "backdrop_path"
+        case posterPath   = "poster_path"
+        case cast
+        case actors
+        case director
+        case episodeRunTime = "episode_run_time"
+        case firstAirDate   = "first_air_date"
+        case lastAirDate    = "last_air_date"
+        case releaseDate
+        case originalName   = "original_name"
+        case country
+        case language
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        youtubeTrailer = try? c.decode(String.self, forKey: .youtubeTrailer)
+        trailer        = try? c.decode(String.self, forKey: .trailer)
+
+        // backdrop_path: prefer array shape; tolerate scalar.
+        if let arr = try? c.decode([String].self, forKey: .backdropPath) {
+            backdropPath = arr.filter { !$0.isEmpty }
+        } else if let single = try? c.decode(String.self, forKey: .backdropPath),
+                  !single.isEmpty {
+            backdropPath = [single]
+        } else {
+            backdropPath = nil
+        }
+
+        posterPath = try? c.decode(String.self, forKey: .posterPath)
+
+        // Cast can come from either key; whichever is non-nil wins.
+        let castKey   = try? c.decode(String.self, forKey: .cast)
+        let actorsKey = try? c.decode(String.self, forKey: .actors)
+        cast = castKey ?? actorsKey
+
+        director = try? c.decode(String.self, forKey: .director)
+
+        // episode_run_time: int or string — accept both.
+        if let i = try? c.decode(Int.self, forKey: .episodeRunTime) {
+            episodeRunTime = i
+        } else if let s = try? c.decode(String.self, forKey: .episodeRunTime),
+                  let parsed = Int(s) {
+            episodeRunTime = parsed
+        } else {
+            episodeRunTime = nil
+        }
+
+        firstAirDate = try? c.decode(String.self, forKey: .firstAirDate)
+        lastAirDate  = try? c.decode(String.self, forKey: .lastAirDate)
+        releaseDate  = try? c.decode(String.self, forKey: .releaseDate)
+        originalName = try? c.decode(String.self, forKey: .originalName)
+        country      = try? c.decode(String.self, forKey: .country)
+        language     = try? c.decode(String.self, forKey: .language)
+    }
+}
+
 struct DispatcharrVODCategory: Decodable, Identifiable {
     let id: Int
     let name: String
@@ -1968,6 +2172,17 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
     let rating: String?
     let streams: [DispatcharrVODStreamOption]?
 
+    // v1.6.12: TMDB-derived metadata. `tmdbID`/`imdbID` are typed
+    // columns on the Dispatcharr Movie model; `year`/`durationSecs`
+    // mirror columns it populates from the upstream Xtream payload.
+    // `customProperties` is the JSON blob that holds everything else
+    // (cast, director, backdrops, trailer key, dates).
+    let year: Int?
+    let durationSecs: Int?
+    let tmdbID: String?
+    let imdbID: String?
+    let customProperties: DispatcharrVODCustomProperties?
+
     // posterURL is the logo's direct URL (no auth needed — TMDB CDN or similar).
     var posterURL: String? { logo?.url }
 
@@ -1976,6 +2191,11 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
         case logo
         case description, plot, overview
         case genre, rating, streams
+        case year
+        case durationSecs    = "duration_secs"
+        case tmdbID          = "tmdb_id"
+        case imdbID          = "imdb_id"
+        case customProperties = "custom_properties"
     }
 
     init(from decoder: Decoder) throws {
@@ -1997,6 +2217,15 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
         genre  = try? c.decode(String.self, forKey: .genre)
         rating = try? c.decode(String.self, forKey: .rating)
         streams = try? c.decode([DispatcharrVODStreamOption].self, forKey: .streams)
+
+        // v1.6.12 additions — defensive decode so a stale Dispatcharr
+        // build that omits any of these doesn't fail the whole row.
+        year             = try? c.decode(Int.self, forKey: .year)
+        durationSecs     = try? c.decode(Int.self, forKey: .durationSecs)
+        tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
+        imdbID           = try? c.decode(String.self, forKey: .imdbID)
+        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
+                                         forKey: .customProperties)
     }
 }
 
@@ -2009,6 +2238,15 @@ struct DispatcharrVODSeries: Decodable, Identifiable {
     let genre: String?
     let rating: String?
 
+    // v1.6.12: TMDB-derived metadata mirrored from
+    // `apps/vod/models.py.Series`. Series doesn't have
+    // `duration_secs` (per-episode runtime is tracked elsewhere),
+    // but `episodeRunTime` lives in `customProperties`.
+    let year: Int?
+    let tmdbID: String?
+    let imdbID: String?
+    let customProperties: DispatcharrVODCustomProperties?
+
     var posterURL: String? { logo?.url }
 
     enum CodingKeys: String, CodingKey {
@@ -2016,6 +2254,10 @@ struct DispatcharrVODSeries: Decodable, Identifiable {
         case logo
         case description, plot, overview
         case genre, rating
+        case year
+        case tmdbID = "tmdb_id"
+        case imdbID = "imdb_id"
+        case customProperties = "custom_properties"
     }
 
     init(from decoder: Decoder) throws {
@@ -2036,6 +2278,159 @@ struct DispatcharrVODSeries: Decodable, Identifiable {
         plot   = p1 ?? p2 ?? p3
         genre  = try? c.decode(String.self, forKey: .genre)
         rating = try? c.decode(String.self, forKey: .rating)
+
+        year             = try? c.decode(Int.self, forKey: .year)
+        tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
+        imdbID           = try? c.decode(String.self, forKey: .imdbID)
+        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
+                                         forKey: .customProperties)
+    }
+}
+
+/// v1.6.12: response shape for `/api/vod/movies/<id>/provider-info/`.
+/// Unlike the list endpoint (which returns slim typed columns and a
+/// possibly-null `custom_properties`), this action flattens the
+/// per-relation `detailed_info` blob plus the per-movie
+/// `custom_properties` plus the typed columns into a single dict —
+/// see Dispatcharr's `apps/vod/api_views.py` `MovieViewSet.provider_info`.
+///
+/// All fields are `Optional` and decoded with `try?` so an
+/// older/leaner Dispatcharr build that omits any of them doesn't
+/// fail the whole decode. `backdropPath` and `rating` accept either
+/// scalar or array/string-vs-int because the upstream Xtream
+/// providers send both shapes interchangeably.
+struct DispatcharrVODMovieProviderInfo: Decodable {
+    let description: String?
+    let plot: String?
+    let year: Int?
+    let releaseDate: String?
+    let genre: String?
+    let director: String?
+    let actors: String?
+    let country: String?
+    let rating: String?
+    let tmdbID: String?
+    let imdbID: String?
+    let youtubeTrailer: String?
+    let durationSecs: Int?
+    let age: String?
+    let backdropPath: [String]?
+    let cover: String?
+    let coverBig: String?
+    let movieImage: String?
+
+    enum CodingKeys: String, CodingKey {
+        case description, plot, year, genre, director, actors, country, age, cover
+        case releaseDate     = "release_date"
+        case rating
+        case tmdbID          = "tmdb_id"
+        case imdbID          = "imdb_id"
+        case youtubeTrailer  = "youtube_trailer"
+        case durationSecs    = "duration_secs"
+        case backdropPath    = "backdrop_path"
+        case coverBig        = "cover_big"
+        case movieImage      = "movie_image"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        description    = try? c.decode(String.self, forKey: .description)
+        plot           = try? c.decode(String.self, forKey: .plot)
+        year           = try? c.decode(Int.self, forKey: .year)
+        releaseDate    = try? c.decode(String.self, forKey: .releaseDate)
+        genre          = try? c.decode(String.self, forKey: .genre)
+        director       = try? c.decode(String.self, forKey: .director)
+        actors         = try? c.decode(String.self, forKey: .actors)
+        country        = try? c.decode(String.self, forKey: .country)
+
+        // rating: Dispatcharr can send either "7.5" (string) or 7.5
+        // (number). The serializer falls back to `0` when nothing is
+        // set, which we treat as nil here so the UI's
+        // empty-rating skip logic still works.
+        if let s = try? c.decode(String.self, forKey: .rating) {
+            rating = s
+        } else if let d = try? c.decode(Double.self, forKey: .rating), d > 0 {
+            rating = String(d)
+        } else {
+            rating = nil
+        }
+
+        tmdbID         = try? c.decode(String.self, forKey: .tmdbID)
+        imdbID         = try? c.decode(String.self, forKey: .imdbID)
+        youtubeTrailer = try? c.decode(String.self, forKey: .youtubeTrailer)
+        durationSecs   = try? c.decode(Int.self, forKey: .durationSecs)
+        age            = try? c.decode(String.self, forKey: .age)
+
+        // backdrop_path: array shape preferred (Dispatcharr stores
+        // them as lists); tolerate scalar in case an upstream provider
+        // sends a single string.
+        if let arr = try? c.decode([String].self, forKey: .backdropPath) {
+            backdropPath = arr.filter { !$0.isEmpty }
+        } else if let single = try? c.decode(String.self, forKey: .backdropPath),
+                  !single.isEmpty {
+            backdropPath = [single]
+        } else {
+            backdropPath = nil
+        }
+
+        cover     = try? c.decode(String.self, forKey: .cover)
+        coverBig  = try? c.decode(String.self, forKey: .coverBig)
+        movieImage = try? c.decode(String.self, forKey: .movieImage)
+    }
+}
+
+/// v1.6.12: response shape for `/api/vod/series/<id>/provider-info/`.
+/// Mirrors the movie provider-info action but keeps `custom_properties`
+/// nested (Dispatcharr's `series_info()` endpoint doesn't flatten the
+/// dict the way `MovieViewSet.provider_info` does — see
+/// `apps/vod/api_views.py.SeriesViewSet.series_info`). The nested
+/// blob carries the same TMDB-derived keys we already decode for
+/// movies (cast, director, backdrop_path, youtube_trailer, country,
+/// release dates), so we reuse `DispatcharrVODCustomProperties`
+/// here.
+///
+/// Series typically populate `cast` (not `actors`) inside
+/// `custom_properties` per Dispatcharr's `process_series_batch()`
+/// in `tasks.py`. The shared decoder accepts either key, so this
+/// is transparent.
+struct DispatcharrVODSeriesProviderInfo: Decodable {
+    let name: String?
+    let description: String?
+    let year: Int?
+    let genre: String?
+    let rating: String?
+    let tmdbID: String?
+    let imdbID: String?
+    let cover: DispatcharrVODLogo?
+    let customProperties: DispatcharrVODCustomProperties?
+
+    enum CodingKeys: String, CodingKey {
+        case name, description, year, genre, cover
+        case rating
+        case tmdbID = "tmdb_id"
+        case imdbID = "imdb_id"
+        case customProperties = "custom_properties"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name        = try? c.decode(String.self, forKey: .name)
+        description = try? c.decode(String.self, forKey: .description)
+        year        = try? c.decode(Int.self, forKey: .year)
+        genre       = try? c.decode(String.self, forKey: .genre)
+        // rating: same string-or-number tolerance as movie info.
+        if let s = try? c.decode(String.self, forKey: .rating) {
+            rating = s
+        } else if let d = try? c.decode(Double.self, forKey: .rating), d > 0 {
+            rating = String(d)
+        } else {
+            rating = nil
+        }
+        tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
+        imdbID           = try? c.decode(String.self, forKey: .imdbID)
+        cover            = try? c.decode(DispatcharrVODLogo.self, forKey: .cover)
+        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
+                                         forKey: .customProperties)
     }
 }
 
@@ -2048,6 +2443,19 @@ struct DispatcharrVODEpisode: Decodable, Identifiable {
     let plot: String?
     let streams: [DispatcharrVODStreamOption]?
 
+    // v1.6.12: episode-specific TMDB columns + custom_properties.
+    // The episode `customProperties` shape is leaner than movie's
+    // (just `info`, `crew`, `movie_image`, `backdrop_path`,
+    // `season_number`) — we reuse the same struct because all of its
+    // fields are optional and the keys we care about (backdrop) are
+    // a superset.
+    let airDate: String?
+    let rating: String?
+    let durationSecs: Int?
+    let tmdbID: String?
+    let imdbID: String?
+    let customProperties: DispatcharrVODCustomProperties?
+
     enum CodingKeys: String, CodingKey {
         case id
         case uuid
@@ -2058,6 +2466,12 @@ struct DispatcharrVODEpisode: Decodable, Identifiable {
         case plot
         case overview
         case streams
+        case airDate          = "air_date"
+        case rating
+        case durationSecs     = "duration_secs"
+        case tmdbID           = "tmdb_id"
+        case imdbID           = "imdb_id"
+        case customProperties = "custom_properties"
     }
 
     init(from decoder: Decoder) throws {
@@ -2075,6 +2489,14 @@ struct DispatcharrVODEpisode: Decodable, Identifiable {
         episodeNumber = try? c.decode(Int.self, forKey: .episodeNumber)
         plot = (try? c.decode(String.self, forKey: .plot)) ?? (try? c.decode(String.self, forKey: .overview))
         streams = try? c.decode([DispatcharrVODStreamOption].self, forKey: .streams)
+
+        airDate          = try? c.decode(String.self, forKey: .airDate)
+        rating           = try? c.decode(String.self, forKey: .rating)
+        durationSecs     = try? c.decode(Int.self, forKey: .durationSecs)
+        tmdbID           = try? c.decode(String.self, forKey: .tmdbID)
+        imdbID           = try? c.decode(String.self, forKey: .imdbID)
+        customProperties = try? c.decode(DispatcharrVODCustomProperties.self,
+                                         forKey: .customProperties)
     }
 }
 

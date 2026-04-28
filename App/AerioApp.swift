@@ -955,6 +955,14 @@ struct RootView: View {
     /// in a dead state after iCloud sync.
     @State private var showOnboarding = false
 
+    /// v1.6.12: drives the post-update "What's new" sheet. Set to
+    /// `true` from `onAppear` only when `WhatsNewStore.shouldShow()`
+    /// returns true — i.e. user is on a release we have curated
+    /// notes for, hasn't already acknowledged this version, and
+    /// hasn't permanently opted out. Kept on a slight delay so the
+    /// sheet rises after the splash → root transition settles.
+    @State private var showWhatsNew = false
+
     private var hasAnySource: Bool {
         !servers.isEmpty || !playlists.isEmpty
     }
@@ -968,6 +976,7 @@ struct RootView: View {
                 }
                 .preferredColorScheme(.dark)
             }
+            .whatsNewSheet(isPresented: $showWhatsNew)
             .onAppear {
                 debugLog("🟣 RootView.onAppear: hasCompletedOnboarding=\(hasCompletedOnboarding), hasAnySource=\(hasAnySource), servers=\(servers.count)")
 
@@ -998,6 +1007,37 @@ struct RootView: View {
                 if !hasCompletedOnboarding && !hasAnySource {
                     showOnboarding = true
                 }
+
+                // v1.6.12: post-update "What's new" pop-up. Only fire
+                // when the onboarding cover isn't being raised (we
+                // don't want two modals stacking on the very first
+                // launch) and the store says we have a fresh release
+                // entry the user hasn't seen yet.
+                //
+                // `isExistingUser` resolves the v1.6.11 → v1.6.12
+                // upgrade case: the marker UserDefault didn't exist
+                // pre-1.6.12, so on the first launch with this code
+                // an upgrader's `lastSeenVersion` is nil. Without
+                // this signal the store would mistake them for a
+                // fresh install and silently skip. Anyone with
+                // servers configured or onboarding marked complete
+                // is conclusively an existing user.
+                //
+                // The 0.6 s delay lets the splash → MainTabView
+                // opacity transition finish so the sheet animates in
+                // cleanly instead of racing the splash fade.
+                let isExistingUser = hasCompletedOnboarding || hasAnySource
+                if !showOnboarding && WhatsNewStore.shouldShow(isExistingUser: isExistingUser) {
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 600_000_000)
+                        // Re-check after the delay: if the user
+                        // backgrounded the app or onboarding raced in
+                        // during the wait, skip silently.
+                        if !showOnboarding && !showWhatsNew {
+                            showWhatsNew = true
+                        }
+                    }
+                }
                 // One-time cleanup: purge EPGProgram rows belonging to any
                 // server that no longer exists. Fixes historical damage
                 // from an earlier build where server deletion didn't
@@ -1021,6 +1061,12 @@ struct RootView: View {
                 // both write to iCloud Keychain on every save going
                 // forward.
                 migrateCredentialsToICloudKeychainIfNeeded()
+                // v1.6.12: drain any legacy plaintext credentials
+                // still parked in iCloud KVS by overwriting the
+                // cloud payload with a credential-free push. Runs
+                // once per device, idempotent (gated by a separate
+                // UserDefaults flag).
+                purgeKVSPlaintextCredentialsIfNeeded()
                 // Cross-platform LAN probe (formerly tvOS-only). On
                 // iOS this complements the SSID-based detection so
                 // hardwired iPads / Mac Catalyst still get LAN
@@ -1146,13 +1192,17 @@ struct RootView: View {
     ///     (local → iCloud → SwiftData) makes the local copy a
     ///     valid fallback if the user later disables iCloud Sync.
     ///
-    /// Why we keep KVS plaintext through `SyncManager.serialize`:
-    ///   v1.6.7 devices read credentials from the KVS payload's
-    ///   `_password` / `_apiKey` fields. If we stop pushing those
-    ///   now, any device still on v1.6.7 in the user's fleet stops
-    ///   getting credential updates. The KVS plaintext is scheduled
-    ///   for removal in v1.7.x once the v1.6.7 install base has
-    ///   rolled forward.
+    /// v1.6.12 update: KVS plaintext is no longer written by this
+    ///   version. `SyncManager.serialize` stopped emitting
+    ///   `_password` / `_apiKey` keys, and a sibling launch task
+    ///   (`purgeKVSPlaintextCredentialsIfNeeded`, below) actively
+    ///   overwrites the cloud KVS with a credential-free payload on
+    ///   first upgraded launch. Older clients (pre-v1.6.12) will
+    ///   keep pushing plaintext until they roll forward, but we
+    ///   don't read that plaintext on the next round-trip — the
+    ///   already-running migration above means our local Keychain
+    ///   is canonical and we only need KVS for non-secret
+    ///   server-list metadata.
     private func migrateCredentialsToICloudKeychainIfNeeded() {
         let flagKey = "kvsToKeychainMigrationDoneV1"
         if UserDefaults.standard.bool(forKey: flagKey) { return }
@@ -1184,6 +1234,61 @@ struct RootView: View {
                 "Credential migration: copied \(migrated) credential(s) to iCloud Keychain across \(servers.count) server(s)",
                 category: "Sync", level: .info)
         }
+    }
+
+    /// One-shot launch task that scrubs legacy plaintext credentials
+    /// out of iCloud KVS on first upgraded launch.
+    ///
+    /// Pre-v1.6.12 clients pushed `_password` and `_apiKey` strings
+    /// into the per-server dict in the KVS payload — see the
+    /// docstring on `SyncManager.serialize` for the historical
+    /// rationale. v1.6.12 stopped writing those keys, but any
+    /// payload already in the cloud (pushed by an older device or by
+    /// this device before the upgrade) still carries them until a
+    /// fresh push overwrites it. Natural pushes are debounced and
+    /// only fire on server-list changes, so a user who doesn't touch
+    /// their Settings → Servers list could leave plaintext sitting
+    /// in KVS for an arbitrary amount of time.
+    ///
+    /// This task forces an immediate (non-debounced) push from this
+    /// device, which writes a credential-free payload (because
+    /// `serialize` no longer emits the secret keys) and overwrites
+    /// whatever is currently in the cloud. After one successful run
+    /// the `kvsCredentialPurgeDoneV1` UserDefaults flag prevents
+    /// re-runs.
+    ///
+    /// Safe to run when iCloud Sync is disabled — we early-out and
+    /// just set the flag, since with Sync off we never write to KVS
+    /// anyway and any plaintext sitting up there can't reach this
+    /// device. If the user later enables Sync, the next natural push
+    /// (which fires on the toggle) will write the credential-free
+    /// payload.
+    private func purgeKVSPlaintextCredentialsIfNeeded() {
+        let flagKey = "kvsCredentialPurgeDoneV1"
+        if UserDefaults.standard.bool(forKey: flagKey) { return }
+
+        guard SyncManager.shared.isSyncEnabled else {
+            UserDefaults.standard.set(true, forKey: flagKey)
+            return
+        }
+        // No servers means nothing to push — the cloud KVS will be
+        // overwritten with an empty array by the regular push flow
+        // the moment the user adds their first server.
+        guard !servers.isEmpty else {
+            UserDefaults.standard.set(true, forKey: flagKey)
+            return
+        }
+
+        // Force a non-debounced push so the cloud KVS gets a
+        // credential-free payload immediately. `pushServers` calls
+        // `serialize` on each server, which (post-v1.6.12) omits
+        // `_password` / `_apiKey` — the new payload supersedes the
+        // legacy one in KVS.
+        SyncManager.shared.pushServers(servers, immediate: true)
+        UserDefaults.standard.set(true, forKey: flagKey)
+        DebugLogger.shared.log(
+            "KVS credential purge: scheduled immediate credential-free push for \(servers.count) server(s)",
+            category: "Sync", level: .info)
     }
 
     private func pruneOrphanedEPGPrograms() {

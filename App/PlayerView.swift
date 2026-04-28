@@ -364,6 +364,44 @@ private struct PlayerRootView: View {
     @State private var showTVOptions = false
     /// Focus target for tvOS — drives which element receives Siri Remote input.
     @FocusState private var tvFocus: TVPlayerFocus?
+    /// v1.6.12: explicit observer for `NowPlayingManager` so SwiftUI
+    /// re-renders PlayerView when `isMinimized` flips. Previously the
+    /// view referenced `NowPlayingManager.shared.isMinimized` directly
+    /// (line ~462's `.focusable(...)`), which reads the value but
+    /// doesn't subscribe to changes. The result was a focus-stranding
+    /// bug surfaced by GH #11: minimizing the full-screen player to
+    /// the corner then re-expanding via Play/Pause from the guide
+    /// left focus on the guide cell. Without re-rendering, the
+    /// invisible `Color.clear` background-capture layer's
+    /// `.focusable(!isMinimized)` argument stayed at its old value,
+    /// so even if the focus engine tried to migrate back into the
+    /// player it had nowhere focusable to land. Back presses then
+    /// hit the guide cell (no exit handler), bubbled to MainTabView's
+    /// `handleMenuPress`, and either felt unresponsive or fired the
+    /// wrong branch. Observing the manager makes the focusable state
+    /// react properly to state changes; the `.onChange` below grabs
+    /// focus back into the player on the false-edge of `isMinimized`.
+    @ObservedObject private var nowPlayingManager = NowPlayingManager.shared
+
+    /// GH #11 v3 fix: namespace for `.focusScope` + `resetFocus`.
+    /// Earlier attempts (deferred `tvFocus` assignment, clear-then-set
+    /// nudge) shipped but didn't take on hardware — the focus engine
+    /// silently ignores cross-region programmatic focus claims when
+    /// the source region (the guide) and target region (the player)
+    /// are siblings under different focus sections. Apple's official
+    /// API for forcing this kind of migration is `resetFocus(in:)`
+    /// fed by a `@Namespace` + `.focusScope(_:)` pair, with the
+    /// preferred-default child opted in via `.prefersDefaultFocus(_:in:)`.
+    /// `resetFocus` clears the current focus and lets the engine
+    /// re-pick a default within the named scope, which DOES cross
+    /// region boundaries. The `Color.clear` background-capture
+    /// layer below opts in via `.prefersDefaultFocus`.
+    @Namespace private var playerFocusScope
+
+    /// Action handle for `resetFocus(in:)`. Called from the
+    /// `.onChange(of: nowPlayingManager.isMinimized)` handler when
+    /// the player un-minimizes back to full-screen.
+    @Environment(\.resetFocus) private var resetFocus
     #endif
 
     // Timeline / scrubber
@@ -459,8 +497,18 @@ private struct PlayerRootView: View {
                     // Always present (avoids view create/destroy lag) but only focusable
                     // when controls are hidden.
                     Color.clear
-                        .focusable(!showControls && !NowPlayingManager.shared.isMinimized)
+                        .focusable(!showControls && !nowPlayingManager.isMinimized)
                         .focused($tvFocus, equals: .background)
+                        // GH #11 v3: opt this layer into the player's
+                        // focus scope as the preferred-default target.
+                        // When the player un-minimizes and we call
+                        // `resetFocus(in: playerFocusScope)`, tvOS
+                        // looks for a focusable view here that's flagged
+                        // as default — Color.clear matches whenever the
+                        // controls are hidden (its normal, full-screen,
+                        // pre-minimize state). When showControls is true
+                        // the gear icon's own focus binding takes over.
+                        .prefersDefaultFocus(!showControls, in: playerFocusScope)
                         .onMoveCommand { direction in
                             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
                             scheduleControlsHide()
@@ -614,28 +662,127 @@ private struct PlayerRootView: View {
             // When closing, return focus to the Options pill.
             if !showing { tvFocus = .gearIcon }
         }
+        // v1.6.12: GH #11 fix (v3). When the player un-minimizes
+        // (corner → full-screen, typically via Play/Pause from the
+        // guide), force focus back into the player.
+        //
+        // Earlier iterations tried (a) just observing `isMinimized`
+        // so PlayerView re-renders, then (b) deferring `tvFocus`
+        // assignment with `DispatchQueue.main.async` + a
+        // clear-then-set nudge — both shipped but neither held up
+        // on hardware. The user still had to press a D-pad
+        // direction first to kick the focus engine into picking up
+        // the player as a valid target.
+        //
+        // Root cause: tvOS treats the player overlay (`.focusSection()`
+        // on its wrapper in HomeView) and the guide as **sibling
+        // focus regions**. `@FocusState` + `.focused()` only moves
+        // focus WITHIN the current region — it doesn't cross
+        // boundaries when the engine has already settled on a
+        // focused view in a different region. Programmatic
+        // assignment is silently ignored cross-region.
+        //
+        // Apple's official cross-region force-focus API is
+        // `resetFocus(in:)` keyed off a `@Namespace` +
+        // `.focusScope(_:)` pair, with the desired default child
+        // opted in via `.prefersDefaultFocus(_:in:)`. Calling
+        // `resetFocus(in: playerFocusScope)` clears the current
+        // focus and lets tvOS pick the preferred-default child of
+        // the named scope — and unlike the `tvFocus` binding, this
+        // DOES cross region boundaries. The `Color.clear`
+        // background-capture layer is opted in as the default when
+        // controls are hidden (its normal full-screen state).
+        //
+        // Still wrapped in `DispatchQueue.main.async` so the
+        // `.focusable(...)` re-evaluation and the engine's
+        // bookkeeping both settle before we claim focus.
+        .onChange(of: nowPlayingManager.isMinimized) { _, minimized in
+            guard !minimized else { return }
+            DispatchQueue.main.async {
+                resetFocus(in: playerFocusScope)
+            }
+        }
         .onAppear { tvFocus = showControls ? .gearIcon : .background }
         // Handle Menu/Back and Play/Pause at the player level so they
         // work regardless of which element currently has focus.
+        // GH #11: Back from fullscreen should always **reveal** the
+        // chrome (Options pill, Add Stream, Record, etc.) on the
+        // first press, then minimize on the second. Earlier code
+        // had it backwards: chrome-shown → Back → hides chrome,
+        // chrome-hidden → Back → minimize. That meant users pressing
+        // Back from a clean fullscreen state (chrome already
+        // auto-hidden) skipped straight to the mini player without
+        // ever seeing the Stream UI.
+        //
+        // New cycle:
+        //   showTVOptions panel open → Back closes the panel.
+        //   chrome visible           → Back minimizes (or dismisses).
+        //   chrome hidden            → Back reveals chrome.
+        //
+        // The same logic also runs in response to the
+        // `.playerBackPress` notification — fired by
+        // `MainTabView.handleMenuPress` when the user pressed Back
+        // while focus was outside PlayerView (typically the guide
+        // cell after expanding from mini via Play/Pause). Without
+        // that hand-off the outer handler would minimize directly
+        // and skip the chrome-reveal step, exactly the regression
+        // GH #11 reported.
         .onExitCommand {
-            if showTVOptions {
-                withAnimation(.easeInOut(duration: 0.2)) { showTVOptions = false }
-                scheduleControlsHide()
-            } else if showControls {
-                withAnimation(.easeInOut(duration: 0.2)) { showControls = false }
-            } else if let minimize = onMinimize {
-                minimize()
-            } else {
-                onDismiss()
-            }
+            debugLog("🎮 [PV] .onExitCommand FIRED (focus is inside PlayerView)")
+            handleBackPress(source: "onExitCommand")
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playerBackPress)) { _ in
+            debugLog("🎮 [PV] .onReceive(.playerBackPress) FIRED (relay from MainTabView)")
+            handleBackPress(source: "playerBackPress")
         }
         .onPlayPauseCommand {
             progressStore.togglePauseAction?()
             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
             if !progressStore.isPaused { scheduleControlsHide() }
         }
+        // GH #11 v3: PlayerView's outer focus scope. Names the
+        // region that `resetFocus(in:)` operates on (see
+        // `.onChange(of: nowPlayingManager.isMinimized)` above) and
+        // bounds where `.prefersDefaultFocus` hints from descendants
+        // (Color.clear) are honored. Different from the
+        // `.focusSection()` on the player wrapper in HomeView —
+        // sections define D-pad navigation regions, scopes define
+        // the namespace `resetFocus`/`prefersDefaultFocus` operate
+        // within. They coexist.
+        .focusScope(playerFocusScope)
         #endif
     }
+
+    #if os(tvOS)
+    /// GH #11: shared Back-press handler for the player. Called from
+    /// both `.onExitCommand` (focus inside PlayerView) and
+    /// `.onReceive(.playerBackPress)` (focus outside PlayerView,
+    /// `MainTabView.handleMenuPress` defers here). One source of
+    /// truth for the chrome cycle:
+    ///
+    ///   Options panel open → close panel.
+    ///   Chrome visible      → minimize (or dismiss).
+    ///   Chrome hidden       → reveal chrome.
+    private func handleBackPress(source: String) {
+        debugLog("🎮 [PV-BACK] handleBackPress source=\(source) | showTVOptions=\(showTVOptions) showControls=\(showControls) isMinimized=\(nowPlayingManager.isMinimized) tvFocus=\(String(describing: tvFocus))")
+        if showTVOptions {
+            debugLog("🎮 [PV-BACK]   → branch: panel-open → close panel")
+            withAnimation(.easeInOut(duration: 0.2)) { showTVOptions = false }
+            scheduleControlsHide()
+        } else if showControls {
+            debugLog("🎮 [PV-BACK]   → branch: chrome-visible → minimize")
+            if let minimize = onMinimize {
+                minimize()
+            } else {
+                onDismiss()
+            }
+        } else {
+            debugLog("🎮 [PV-BACK]   → branch: chrome-hidden → reveal chrome (set showControls=true)")
+            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+            scheduleControlsHide()
+        }
+    }
+    #endif
 
     // MARK: - Loading
     private var loadingOverlay: some View {
@@ -906,7 +1053,7 @@ private struct PlayerRootView: View {
         VStack(spacing: 10) {
             #if os(tvOS)
             // Options pill + popup — anchored to bottom-right (hidden in mini player)
-            if !NowPlayingManager.shared.isMinimized {
+            if !nowPlayingManager.isMinimized {
             HStack {
                 Spacer()
                 ZStack(alignment: .bottomTrailing) {

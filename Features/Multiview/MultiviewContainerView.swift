@@ -181,6 +181,16 @@ struct MultiviewContainerView: View {
                     // container now pushes that flush layout all the
                     // way to the screen edges too.
                     .ignoresSafeArea()
+                    // v1.6.12 (GH #11 follow-up): disable the tile
+                    // Button(s) while the TVOptions panel is open so
+                    // D-pad-UP from the panel's first row can't
+                    // escape to the tile above. Combined with the
+                    // chrome-disable below this gives the panel a
+                    // hard focus trap on every direction (no other
+                    // focusable view exists outside the panel).
+                    #if os(tvOS)
+                    .disabled(showTVOptions)
+                    #endif
 
                 #if os(tvOS)
                 // tvOS N=1 chrome lives INLINE in this VStack but
@@ -229,6 +239,18 @@ struct MultiviewContainerView: View {
                     .clipped()
                     .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
                     .accessibilityHidden(!chromeState.isVisible)
+                    // v1.6.12 (GH #11 follow-up): hard focus trap
+                    // when the TVOptions panel is open. The pill row
+                    // (Options / Record / Add Stream) is what the
+                    // user could D-pad into past Stream Info — its
+                    // .focusSection() on the panel side is just a
+                    // preference; the focus engine still honored the
+                    // directional move because the pill row was
+                    // focusable. Disabling makes its buttons
+                    // non-focusable and removes the only escape
+                    // target, so D-pad-down at the bottom of the
+                    // panel just stops there.
+                    .disabled(showTVOptions)
                 }
                 #endif
 
@@ -262,6 +284,17 @@ struct MultiviewContainerView: View {
                     .clipped()
                     .allowsHitTesting(chromeState.isVisible)
                     .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
+                    // v1.6.12 (GH #11 follow-up): while the TVOptions
+                    // panel is open, disable focus on the transport
+                    // bar so D-pad-down past the last panel row has
+                    // nowhere to escape — the panel's `.focusSection()`
+                    // is just a preference; the focus engine still
+                    // honors directional moves to other focusable
+                    // views unless those views are .disabled. With
+                    // this guard the panel becomes a true focus trap.
+                    #if os(tvOS)
+                    .disabled(showTVOptions)
+                    #endif
                 }
             }
 
@@ -279,6 +312,10 @@ struct MultiviewContainerView: View {
                     showStreamInfo: $showStreamInfo,
                     showRecordSheet: $showRecordSheet
                 )
+                // (No `.disabled(showTVOptions)` here — on tvOS this
+                // overlay is empty by design; the actual chrome pills
+                // live in `PlaybackBottomChrome_tvOS` rendered above
+                // and that's where the focus-trap disable is wired.)
             }
 
             #if os(tvOS)
@@ -326,6 +363,19 @@ struct MultiviewContainerView: View {
                     // user explicitly asked us to remove.
                     onEnterMultiview: nil
                 )
+                // v1.6.12 (GH #11 follow-up): trap D-pad navigation
+                // inside the panel. Without `.focusSection()` tvOS
+                // lets focus escape down past the last row (Stream
+                // Info) into whatever's behind / below the panel —
+                // typically the chrome's Options pill — which left
+                // the panel still visible but unreachable. The
+                // matching pattern lives on PlayerView's panel
+                // instance; this brings the multiview path to
+                // parity. tvOS strongly prefers to keep focus inside
+                // a `focusSection`, so D-pad-down at the bottom of
+                // the scroll just stops there instead of leaping
+                // out.
+                .focusSection()
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 // Audio tile id in the SwiftUI identity so switching
                 // audio tile (if that ever happens mid-panel) rebuilds
@@ -395,6 +445,18 @@ struct MultiviewContainerView: View {
                 category: "Playback", level: .info
             )
             NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+        }
+        // v1.6.12 (GH #11 follow-up): pin chrome visibility while
+        // the TVOptions panel is open so its 5s auto-fade timer
+        // can't strand the panel on a faded background. On
+        // dismiss we release the pin and report a fresh
+        // interaction so the fade clock starts from "now" rather
+        // than picking up where it left off.
+        .onChange(of: showTVOptions) { _, showing in
+            chromeState.setPinned(showing)
+            if !showing {
+                chromeState.reportInteraction()
+            }
         }
         #endif
         #if os(iOS)
@@ -532,60 +594,18 @@ struct MultiviewContainerView: View {
         // grid scope gives us ownership of d-pad + Menu within that
         // region.
         .onExitCommand {
-            // Menu stack, innermost → outermost:
-            //   0. Already minimized → full teardown. If this
-            //      handler is still hit while the mini is up,
-            //      treat it as "user wants out of playback
-            //      entirely" — HomeView's outer .onExitCommand
-            //      also covers this case, but this branch makes
-            //      the behaviour deterministic regardless of
-            //      whether focus currently sits inside the container
-            //      or on the guide behind it.
-            //   1. Fullscreen-within-grid: collapse back to grid.
-            //   2. Relocate mode: cancel relocate.
-            //   3. Chrome hidden: first Menu press summons the
-            //      bottom UI. Per user request, D-pad moves do NOT
-            //      summon chrome — Menu is the dedicated summon
-            //      gesture. This means a user watching flush streams
-            //      sees no UI until they deliberately press Menu, at
-            //      which point Options / Add-Stream / transport bar
-            //      slide in.
-            //   4a. Chrome visible at N=1 (unified single-stream):
-            //       MINIMIZE to the mini corner player (restored
-            //       1.6.0 behaviour). The user then sees the guide
-            //       with the stream still playing in the top-right
-            //       corner; a further Menu press on the guide stops
-            //       playback (handled in HomeView's .onExitCommand).
-            //   4b. Chrome visible at N≥2 (real multiview): prompt
-            //       for exit confirmation ("Exit Multiview?"). This
-            //       guard catches accidental Menu-spams that would
-            //       otherwise tear down a carefully arranged
-            //       multiview in one press.
-            if nowPlaying.isMinimized {
-                DebugLogger.shared.log(
-                    "[MV-Cmd] tvOS Menu → stop (was mini)",
-                    category: "Playback", level: .info
-                )
-                PlayerSession.shared.stop()
-            } else if store.fullscreenTileID != nil {
-                store.fullscreenTileID = nil
-            } else if store.relocatingTileID != nil {
-                store.relocatingTileID = nil
-            } else if !chromeState.isVisible {
-                chromeState.reportInteraction()
-            } else {
-                let isSoleStreamUnified = PlaybackFeatureFlags.useUnifiedPlayback
-                    && store.tiles.count == 1
-                if isSoleStreamUnified {
-                    DebugLogger.shared.log(
-                        "[MV-Cmd] tvOS Menu → minimize (unified N=1)",
-                        category: "Playback", level: .info
-                    )
-                    NowPlayingManager.shared.minimize()
-                } else {
-                    showExitConfirmation = true
-                }
-            }
+            handleMenuPress(source: "onExitCommand")
+        }
+        // GH #11 fix: also listen for the .playerBackPress relay so
+        // MainTabView's outer `.onExitCommand` (which fires after the
+        // user expands from mini back to fullscreen via Play/Pause —
+        // focus is still on the guide cell, so the container's own
+        // .onExitCommand doesn't fire) routes through the same
+        // chrome-cycle logic. Without this, post-expand Back goes
+        // directly to `nowPlaying.minimize()` and skips the
+        // chrome-reveal step the user expects.
+        .onReceive(NotificationCenter.default.publisher(for: .playerBackPress)) { _ in
+            handleMenuPress(source: "playerBackPress")
         }
         .onPlayPauseCommand {
             // Siri Remote Play/Pause routing:
@@ -795,6 +815,115 @@ struct MultiviewContainerView: View {
             session.exitMultiviewKeepingAudioTile()
         }
     }
+
+    #if os(tvOS)
+    /// Shared Menu/Back handler for the multiview container. Called
+    /// from both the container's own `.onExitCommand` (when focus is
+    /// inside the focusSection) and `.onReceive(.playerBackPress)`
+    /// (when focus is outside — typically the guide cell still
+    /// holding focus after Play/Pause re-expanded the mini player).
+    /// Routing both inputs to the same method means the chrome cycle
+    /// is identical regardless of where focus actually sits.
+    ///
+    /// Menu stack, innermost → outermost:
+    ///   0. Options panel open  → close panel. v1.6.12 (GH #11
+    ///                            follow-up): the panel has its own
+    ///                            `.onExitCommand` that dismisses it,
+    ///                            but if the user scrolls down past
+    ///                            the last focusable row inside the
+    ///                            panel, tvOS lets focus escape to
+    ///                            the chrome below. Back then bubbles
+    ///                            past the panel's handler and lands
+    ///                            here — without this branch the
+    ///                            press would fall through to
+    ///                            "minimize" and the panel would stay
+    ///                            stuck on-screen. Catching it
+    ///                            unconditionally at the top of the
+    ///                            stack means Back always closes the
+    ///                            panel first regardless of where
+    ///                            focus drifted to.
+    ///   1. Already minimized   → full teardown (`PlayerSession.stop`).
+    ///   2. Fullscreen tile     → collapse back to grid.
+    ///   3. Relocate mode       → cancel relocate.
+    ///   4. Chrome hidden       → first Menu press summons the
+    ///                            bottom UI (Options pill, Add
+    ///                            Stream, transport bar). Per user
+    ///                            request, D-pad moves do NOT summon
+    ///                            chrome — Menu is the dedicated
+    ///                            summon gesture.
+    ///   5a. Chrome visible at N=1 (unified single-stream)
+    ///                          → MINIMIZE to the corner mini
+    ///                            player. The user then sees the
+    ///                            guide with the stream still
+    ///                            playing; further Menu on the guide
+    ///                            stops playback.
+    ///   5b. Chrome visible at N≥2 → "Exit Multiview?" confirmation.
+    ///                            Guard against accidental Menu-
+    ///                            spams that would otherwise tear
+    ///                            down a carefully arranged grid.
+    private func handleMenuPress(source: String) {
+        DebugLogger.shared.log(
+            "[MV-Cmd] tvOS Menu source=\(source) | showTVOptions=\(showTVOptions) isMinimized=\(nowPlaying.isMinimized) chromeVisible=\(chromeState.isVisible) tiles=\(store.tiles.count) fullscreenTile=\(store.fullscreenTileID ?? "nil") relocating=\(store.relocatingTileID ?? "nil")",
+            category: "Playback", level: .info
+        )
+        if showTVOptions {
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: TVOptions panel open → close panel",
+                category: "Playback", level: .info
+            )
+            withAnimation(.easeInOut(duration: 0.15)) {
+                showTVOptions = false
+            }
+            // Keep chrome alive so the user lands on the Options pill
+            // they just dismissed from rather than a fading bottom
+            // bar — same UX choice as the panel's own .onExitCommand
+            // for in-panel dismiss.
+            chromeState.reportInteraction()
+            return
+        }
+        if nowPlaying.isMinimized {
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: minimized → stop",
+                category: "Playback", level: .info
+            )
+            PlayerSession.shared.stop()
+        } else if store.fullscreenTileID != nil {
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: fullscreen tile → collapse to grid",
+                category: "Playback", level: .info
+            )
+            store.fullscreenTileID = nil
+        } else if store.relocatingTileID != nil {
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: relocate mode → cancel",
+                category: "Playback", level: .info
+            )
+            store.relocatingTileID = nil
+        } else if !chromeState.isVisible {
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: chrome hidden → summon chrome",
+                category: "Playback", level: .info
+            )
+            chromeState.reportInteraction()
+        } else {
+            let isSoleStreamUnified = PlaybackFeatureFlags.useUnifiedPlayback
+                && store.tiles.count == 1
+            if isSoleStreamUnified {
+                DebugLogger.shared.log(
+                    "[MV-Cmd]   → branch: chrome visible + N=1 → minimize",
+                    category: "Playback", level: .info
+                )
+                NowPlayingManager.shared.minimize()
+            } else {
+                DebugLogger.shared.log(
+                    "[MV-Cmd]   → branch: chrome visible + N>=2 → confirm exit",
+                    category: "Playback", level: .info
+                )
+                showExitConfirmation = true
+            }
+        }
+    }
+    #endif
 
     // MARK: - Grid
 
@@ -1012,6 +1141,17 @@ final class MultiviewChromeState: ObservableObject {
     /// Menu button summons the bottom UI.
     @Published var focusIndicatorVisible: Bool = true
 
+    /// v1.6.12: when `true`, `isVisible` is pinned to `true` and the
+    /// auto-hide task is suppressed regardless of how much time has
+    /// passed since the last interaction. Used by `MultiviewContainerView`
+    /// while the TVOptions panel is open — without it the chrome
+    /// would fade out 5s after the panel was summoned, which left
+    /// the panel hovering on a fully-faded background and the user
+    /// unable to dismiss back to the chrome state. Toggle via
+    /// `setPinned(_:)` so any in-flight hide task is cancelled
+    /// atomically with the flag change.
+    @Published private(set) var isPinned: Bool = false
+
     /// Cancellable auto-hide task for the full chrome.
     private var hideTask: Task<Void, Never>?
 
@@ -1067,11 +1207,42 @@ final class MultiviewChromeState: ObservableObject {
         reportFocusActivity()
         lastRescheduleAt = now
         hideTask?.cancel()
+        // While pinned (e.g. TVOptions panel open), don't even
+        // schedule the hide task — chrome stays up until the pin
+        // is released by the panel-close path.
+        guard !isPinned else { return }
         hideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: Self.fadeDelayNs)
             guard !Task.isCancelled, let self else { return }
+            // Re-check the pin at fire time too — pin may have been
+            // set during the 5s sleep (the panel could open after
+            // chrome was summoned), in which case we skip the hide
+            // and the panel-close path will reschedule a fresh
+            // interaction.
+            guard !self.isPinned else { return }
             withAnimation(.easeInOut(duration: 0.4)) {
                 self.isVisible = false
+            }
+        }
+    }
+
+    /// v1.6.12: pin chrome visibility on or off. While `pinned ==
+    /// true`, `isVisible` is force-set to `true` and any in-flight
+    /// hide task is cancelled — auto-hide is fully suppressed.
+    /// Releasing the pin (`setPinned(false)`) doesn't immediately
+    /// hide the chrome; it just lets the next `reportInteraction()`
+    /// reschedule a fresh fade timer. Callers typically follow
+    /// `setPinned(false)` with `reportInteraction()` to start the
+    /// fade clock from now.
+    func setPinned(_ pinned: Bool) {
+        guard isPinned != pinned else { return }
+        isPinned = pinned
+        if pinned {
+            hideTask?.cancel()
+            if !isVisible {
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    isVisible = true
+                }
             }
         }
     }

@@ -42,6 +42,23 @@ struct AddToMultiviewSheet: View {
     /// (`.rejectedMax`, `.unresolvable`). Short inline toast.
     @State private var toastMessage: String? = nil
 
+    /// v1.6.12: currently-selected group filter. `"All"` is the
+    /// sentinel meaning "no filter". Mirrors the Live TV channel-list
+    /// pattern (see `ChannelListView.selectedGroup`) so users get the
+    /// same single-keystroke "narrow to Sports / News / Movies" flow
+    /// they're used to from the main channel list, without having to
+    /// type into the search field.
+    @State private var selectedGroup: String = "All"
+
+    /// User-hidden groups loaded from the same `UserDefaults` key
+    /// `ChannelListView` uses (`hiddenChannelGroups`). The picker
+    /// honours this list so a user who hid a group in the main
+    /// channel list doesn't see it resurface in the add-tile picker.
+    /// Loaded on appear; not observed for live updates because
+    /// hidden-groups edits happen in a separate sheet that's never
+    /// presented over this one.
+    @State private var hiddenGroups: Set<String> = []
+
     var body: some View {
         #if os(tvOS)
         tvOSBody
@@ -56,16 +73,28 @@ struct AddToMultiviewSheet: View {
     @ViewBuilder
     private var iPadOSBody: some View {
         NavigationStack {
-            List {
-                if !favoriteChannels.isEmpty {
-                    section(title: "Favorites", items: favoriteChannels)
+            VStack(spacing: 0) {
+                // v1.6.12: group filter pill bar — same vocabulary as
+                // Live TV's filter row. Placed above the List (not in
+                // the toolbar) so the chips stay visible while the
+                // search bar is focused; collapsed entirely when there
+                // are 0–1 visible groups so a single-group provider
+                // doesn't get a lonely "All" chip eating vertical room.
+                if groupChips.count > 1 {
+                    iPadGroupFilterBar
                 }
-                if !recentChannels.isEmpty {
-                    section(title: "Recent", items: recentChannels)
+
+                List {
+                    if !favoriteChannels.isEmpty {
+                        section(title: "Favorites", items: favoriteChannels)
+                    }
+                    if !recentChannels.isEmpty {
+                        section(title: "Recent", items: recentChannels)
+                    }
+                    section(title: "All Channels", items: allChannelsFiltered)
                 }
-                section(title: "All Channels", items: allChannelsFiltered)
+                .listStyle(.plain)
             }
-            .listStyle(.plain)
             .searchable(text: $searchText, prompt: "Search channels")
             .navigationTitle("Add to Multiview")
             .navigationBarTitleDisplayMode(.inline)
@@ -74,6 +103,7 @@ struct AddToMultiviewSheet: View {
                     Button("Done") { isPresented = false }
                 }
             }
+            .onAppear { loadHiddenGroups() }
             .modifier(SharedSheetModifiers(
                 pendingWarningItem: $pendingWarningItem,
                 toastMessage: $toastMessage,
@@ -84,6 +114,45 @@ struct AddToMultiviewSheet: View {
                 },
                 onCancelWarning: { pendingWarningItem = nil }
             ))
+        }
+    }
+
+    /// Horizontal scrolling row of group-filter chips for iPad.
+    /// Visual lifted from `ChannelListView`'s inline filter row so
+    /// the picker matches the channel list at a glance: accent fill
+    /// for selected, elevated background for unselected, capsule
+    /// shape, single-tap select. Spring animation softens the
+    /// selection swap.
+    @ViewBuilder
+    private var iPadGroupFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(groupChips, id: \.self) { group in
+                    Button {
+                        withAnimation(.spring(response: 0.25)) {
+                            selectedGroup = group
+                        }
+                    } label: {
+                        Text(group)
+                            .font(.labelMedium)
+                            .foregroundColor(selectedGroup == group
+                                             ? .appBackground
+                                             : .textSecondary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(
+                                selectedGroup == group
+                                    ? AnyView(Capsule().fill(Color.accentPrimary))
+                                    : AnyView(Capsule().fill(Color.elevatedBackground))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Filter: \(group)")
+                    .accessibilityAddTraits(selectedGroup == group ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
         }
     }
     #endif
@@ -113,6 +182,21 @@ struct AddToMultiviewSheet: View {
                     .padding(.horizontal, 80)
                     .padding(.top, 40)
                     .padding(.bottom, 20)
+
+                // v1.6.12: group filter pill bar. Sits between the
+                // header and the channel scroll so the focus engine's
+                // natural top-to-bottom traversal lands on filter
+                // chips before the (much longer) channel list, mirroring
+                // Live TV's tvOS layout. `.focusSection()` keeps focus
+                // grouped here when the user moves up from the channels
+                // — without it, swiping up jumps straight to the Close
+                // button instead of the chips.
+                if groupChips.count > 1 {
+                    tvGroupFilterBar
+                        .padding(.horizontal, 80)
+                        .padding(.bottom, 12)
+                        .focusSection()
+                }
 
                 ScrollView {
                     // Rows are direct children of `LazyVStack` so
@@ -167,6 +251,7 @@ struct AddToMultiviewSheet: View {
             }
         }
         .onExitCommand { isPresented = false }
+        .onAppear { loadHiddenGroups() }
         .modifier(SharedSheetModifiers(
             pendingWarningItem: $pendingWarningItem,
             toastMessage: $toastMessage,
@@ -177,6 +262,35 @@ struct AddToMultiviewSheet: View {
             },
             onCancelWarning: { pendingWarningItem = nil }
         ))
+    }
+
+    /// Horizontal scrolling row of group-filter chips for tvOS.
+    /// Larger type and padding than the iPad bar (couch-readable),
+    /// and uses `PickerGroupPillButtonStyle` (defined at the bottom
+    /// of this file) so focus halo + scale match the rest of the
+    /// tvOS multiview vocabulary.
+    @ViewBuilder
+    private var tvGroupFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(groupChips, id: \.self) { group in
+                    Button {
+                        withAnimation(.spring(response: 0.25)) {
+                            selectedGroup = group
+                        }
+                    } label: {
+                        Text(group)
+                            .font(.system(size: 22, weight: .medium))
+                    }
+                    .buttonStyle(PickerGroupPillButtonStyle(
+                        isSelected: selectedGroup == group
+                    ))
+                    .accessibilityLabel("Filter: \(group)")
+                    .accessibilityAddTraits(selectedGroup == group ? .isSelected : [])
+                }
+            }
+            .padding(.vertical, 4)
+        }
     }
 
     /// Header: title on the left, big Close button on the right.
@@ -234,7 +348,7 @@ struct AddToMultiviewSheet: View {
             isAlreadyAdded: alreadyAdded(item),
             isDisabled: multiviewStore.isAtMax
         ) {
-            tryAdd(item)
+            tap(item)
         }
     }
     #else
@@ -246,38 +360,100 @@ struct AddToMultiviewSheet: View {
                     isAlreadyAdded: alreadyAdded(item),
                     isDisabled: multiviewStore.isAtMax
                 ) {
-                    tryAdd(item)
+                    tap(item)
                 }
             }
         }
     }
     #endif
 
+    /// Tap dispatcher. v1.6.12: a tap on an already-added row now
+    /// removes the corresponding tile from multiview (deselect)
+    /// rather than being a no-op. Pre-v1.6.12 the user had to
+    /// dismiss the picker, find the tile in the grid, and remove it
+    /// from the per-tile menu — confusingly indirect for what is
+    /// just "I changed my mind." Now the picker is a true toggle:
+    /// tap to add, tap again to remove.
+    ///
+    /// No toast on remove — the row's trailing icon flips from green
+    /// check back to the `+` and the live tile count in the header
+    /// drops by one, both immediately visible and far less noisy than
+    /// a transient capsule. Adds still show their own error/warning
+    /// toasts via `commitAdd`.
+    private func tap(_ item: ChannelDisplayItem) {
+        if alreadyAdded(item) {
+            multiviewStore.remove(id: item.id)
+        } else {
+            tryAdd(item)
+        }
+    }
+
     // MARK: - Data
 
     private var favoriteChannels: [ChannelDisplayItem] {
-        applySearch(favoritesStore.favoriteItems)
+        applyFilters(favoritesStore.favoriteItems)
     }
 
     private var recentChannels: [ChannelDisplayItem] {
-        applySearch(recentsStore.resolved)
+        applyFilters(recentsStore.resolved)
     }
 
     private var allChannelsFiltered: [ChannelDisplayItem] {
-        applySearch(channelStore.channels)
+        applyFilters(channelStore.channels)
     }
 
-    /// Apply the current search filter (or pass through when empty).
+    /// Groups eligible to appear in the filter pill bar — the
+    /// store-ordered list with user-hidden groups removed. A group
+    /// only shows if at least one channel in `channelStore.channels`
+    /// belongs to it; `orderedGroups` is already maintained that way
+    /// upstream.
+    private var visibleGroups: [String] {
+        channelStore.orderedGroups.filter { !hiddenGroups.contains($0) }
+    }
+
+    /// Pills shown in the filter bar — leading "All" sentinel plus
+    /// every visible group. Computed (not stored) so the bar updates
+    /// automatically when the channel store finishes its initial
+    /// load while the picker is open (Dispatcharr cold launch can
+    /// take a couple of seconds).
+    private var groupChips: [String] {
+        ["All"] + visibleGroups
+    }
+
+    /// Apply the current group + search filters. Group filter runs
+    /// first because it's the cheaper predicate (`==` vs three
+    /// substring comparisons) and prunes the working set before the
+    /// substring scan. `selectedGroup == "All"` short-circuits past
+    /// the group step.
+    ///
     /// Matches across name / group / channel number, case-insensitive.
     /// `String.contains` is a literal substring match — no regex
     /// injection surface even though `searchText` is user input.
-    private func applySearch(_ items: [ChannelDisplayItem]) -> [ChannelDisplayItem] {
-        guard !searchText.isEmpty else { return items }
-        let q = searchText.lowercased()
-        return items.filter { item in
-            item.name.lowercased().contains(q)
-                || item.group.lowercased().contains(q)
-                || item.number.lowercased().contains(q)
+    private func applyFilters(_ items: [ChannelDisplayItem]) -> [ChannelDisplayItem] {
+        var result = items
+        if selectedGroup != "All" {
+            result = result.filter { $0.group == selectedGroup }
+        }
+        if !searchText.isEmpty {
+            let q = searchText.lowercased()
+            result = result.filter { item in
+                item.name.lowercased().contains(q)
+                    || item.group.lowercased().contains(q)
+                    || item.number.lowercased().contains(q)
+            }
+        }
+        return result
+    }
+
+    /// One-shot loader for the user's hidden-groups set. Called from
+    /// each body's `.onAppear`. If the previously-selected group is
+    /// now hidden (because the user hid it elsewhere between picker
+    /// presentations), snap back to "All" so the filter doesn't get
+    /// stuck pointing at an invisible chip.
+    private func loadHiddenGroups() {
+        hiddenGroups = HiddenGroupsStore.load(forKey: "hiddenChannelGroups")
+        if selectedGroup != "All" && hiddenGroups.contains(selectedGroup) {
+            selectedGroup = "All"
         }
     }
 
@@ -464,6 +640,49 @@ private struct SharedSheetModifiers: ViewModifier {
             .accessibilityLabel(text)
     }
 }
+
+// MARK: - tvOS group filter pill style
+
+#if os(tvOS)
+/// Pill style for the picker's group-filter chips. Mirrors the
+/// `TVGroupPillButtonStyle` used by `ChannelListView`'s tvOS group
+/// row (which is `private` to that file, hence this duplicate) so
+/// the picker reads as a sibling to the main channel list rather
+/// than its own visual dialect.
+///
+/// - Selected: accent fill, dark foreground (high-contrast against
+///   the brand color).
+/// - Focused-not-selected: accent ring + 1.05 scale, label switches
+///   to white so it's legible against the elevated background.
+/// - Resting: elevated background, secondary-text label, slight
+///   opacity dip so the focused chip clearly leads.
+struct PickerGroupPillButtonStyle: ButtonStyle {
+    let isSelected: Bool
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        let focused = isFocused
+        return configuration.label
+            .foregroundColor(isSelected
+                             ? .appBackground
+                             : (focused ? .white : .textSecondary))
+            .padding(.horizontal, 26)
+            .padding(.vertical, 13)
+            .background(
+                Capsule()
+                    .fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(focused && !isSelected ? Color.accentPrimary : Color.clear,
+                            lineWidth: 2)
+            )
+            .scaleEffect(focused ? 1.05 : 1.0)
+            .opacity(focused ? 1.0 : (isSelected ? 1.0 : 0.85))
+            .animation(.easeInOut(duration: 0.15), value: focused)
+    }
+}
+#endif
 
 // MARK: - tvOS close button style
 

@@ -445,9 +445,9 @@ struct MoviesView: View {
 
     private func serverContext(_ prefix: String) -> String {
         if let name = vodStore.lastMoviesServerName {
-            return "\(prefix) \(name). Pull down to retry or tap the refresh button."
+            return "\(prefix) \(name). Tap the retry button to try again."
         }
-        return "The server returned no movies. Pull down to retry or tap the refresh button."
+        return "Tap the retry button to try again."
     }
 }
 

@@ -64,7 +64,7 @@ struct WelcomeView: View {
 
                     // Supported source types
                     VStack(spacing: 10) {
-                        FeaturePill(icon: "key.fill", title: "Dispatcharr API Key")
+                        FeaturePill(icon: "key.fill", title: "Dispatcharr Admin API Key")
                         FeaturePill(icon: "tv.and.hifispeaker.fill", title: "Xtream Codes")
                         FeaturePill(icon: "doc.text.fill", title: "M3U + EPG")
                     }
@@ -129,7 +129,7 @@ struct WelcomeView: View {
 
                     // Supported source types
                     VStack(spacing: 8) {
-                        FeaturePill(icon: "key.fill", title: "Dispatcharr API Key")
+                        FeaturePill(icon: "key.fill", title: "Dispatcharr Admin API Key")
                         FeaturePill(icon: "tv.and.hifispeaker.fill", title: "Xtream Codes")
                         FeaturePill(icon: "doc.text.fill", title: "M3U + EPG")
                     }

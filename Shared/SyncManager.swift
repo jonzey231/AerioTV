@@ -266,6 +266,93 @@ final class SyncManager: ObservableObject {
         }
     }
 
+    /// Wipe all iCloud-side state for this app — payloads in
+    /// iCloud KVS plus the synchronizable copies of credentials in
+    /// iCloud Keychain. **Local data on this device is preserved**:
+    /// SwiftData servers, the local-only Keychain copies of
+    /// passwords/API keys, and UserDefaults all stay intact, so
+    /// the app keeps working on this device. The intent is "wipe
+    /// the cloud and start fresh" — useful when a user wants to
+    /// clear stale or corrupted sync state across their fleet
+    /// without losing access on any individual device.
+    ///
+    /// What this clears:
+    ///   • KVS keys: `syncedServers`, `syncedPreferences`,
+    ///     `syncedWatchProgress`, `syncedReminders`, `lastSyncPing`.
+    ///   • iCloud Keychain entries: `password_<id>` and
+    ///     `apiKey_<id>` (both `synchronizable: true`) for every
+    ///     local server. Local-only Keychain copies are not touched.
+    ///   • Launch-task gating flags
+    ///     (`kvsToKeychainMigrationDoneV1`,
+    ///     `kvsCredentialPurgeDoneV1`). Resetting them lets a
+    ///     subsequent re-enable of Sync trigger a clean migration
+    ///     from local Keychain → iCloud Keychain on this device,
+    ///     replicating what a brand-new install would do.
+    ///
+    /// Pending debounced pushes are cancelled first so an in-flight
+    /// `pushServers` debounce doesn't immediately repopulate the
+    /// cloud from this device.
+    ///
+    /// **Note on sync state:** the iCloud-Sync toggle is left
+    /// alone. After `clearAllICloudData` returns, if Sync is still
+    /// enabled the next natural push (or a manual "Sync Now") will
+    /// repopulate the cloud with this device's local state — which
+    /// is exactly what users typically want from "start fresh."
+    /// To fully detach, the caller should also flip the toggle off
+    /// after invoking this.
+    @MainActor
+    func clearAllICloudData(localServers: [ServerConnection]) {
+        debugLog("🔵 SyncManager.clearAllICloudData: starting (local servers=\(localServers.count))")
+
+        // Cancel pending debounces so they don't race the wipe.
+        pushDebounce?.cancel(); pushDebounce = nil
+        prefPushDebounce?.cancel(); prefPushDebounce = nil
+        watchProgressPushDebounce?.cancel(); watchProgressPushDebounce = nil
+        reminderPushDebounce?.cancel(); reminderPushDebounce = nil
+
+        // KVS removal — must run on the literal main dispatch queue.
+        // We're already on @MainActor but `dispatch_assert_queue(main)`
+        // checks the GCD queue identity, not the actor, so we hop
+        // explicitly. Synchronize after to push the deletes out
+        // immediately rather than waiting for the next idle window.
+        let sKey  = kvsKey
+        let pKey  = prefKVSKey
+        let wpKey = watchProgressKVSKey
+        let rKey  = reminderKVSKey
+        DispatchQueue.main.async {
+            let kvs = NSUbiquitousKeyValueStore.default
+            kvs.removeObject(forKey: sKey)
+            kvs.removeObject(forKey: pKey)
+            kvs.removeObject(forKey: wpKey)
+            kvs.removeObject(forKey: rKey)
+            kvs.removeObject(forKey: "lastSyncPing")
+            kvs.synchronize()
+            debugLog("🔵 SyncManager.clearAllICloudData: KVS payloads cleared")
+        }
+
+        // iCloud Keychain — only the synchronizable copies. Local
+        // copies are intentionally preserved so this device keeps
+        // working without re-auth.
+        var keychainCleared = 0
+        for server in localServers {
+            let id = server.id.uuidString
+            if KeychainHelper.delete("password_\(id)", synchronizable: true) {
+                keychainCleared += 1
+            }
+            if KeychainHelper.delete("apiKey_\(id)", synchronizable: true) {
+                keychainCleared += 1
+            }
+        }
+
+        // Reset launch-task gating so a future Sync re-enable can
+        // run the migration + purge cleanly. No-op when the flags
+        // weren't set; safe regardless.
+        UserDefaults.standard.removeObject(forKey: "kvsToKeychainMigrationDoneV1")
+        UserDefaults.standard.removeObject(forKey: "kvsCredentialPurgeDoneV1")
+
+        debugLog("🔵 SyncManager.clearAllICloudData: cleared \(keychainCleared) iCloud Keychain entries, reset migration flags")
+    }
+
     private func handleImportResult(servers: [[String: Any]]?, prefs: [String: Any]?,
                                      watchProgress: [[String: Any]]? = nil,
                                      reminders: [[String: Any]]? = nil) {
@@ -588,15 +675,25 @@ final class SyncManager: ObservableObject {
         if let lastConnected = server.lastConnected {
             dict["lastConnected"] = lastConnected.timeIntervalSince1970
         }
-        // Include credentials so they arrive with the config — iCloud Keychain
-        // sync is too slow to rely on.  KVS is per-Apple-ID and encrypted.
-        debugLog("🔵 SyncManager.serialize: reading effectivePassword, thread=\(Thread.current)")
-        let pw = server.effectivePassword
-        debugLog("🔵 SyncManager.serialize: reading effectiveApiKey, thread=\(Thread.current)")
-        let ak = server.effectiveApiKey
-        if !pw.isEmpty { dict["_password"] = pw }
-        if !ak.isEmpty { dict["_apiKey"] = ak }
-        debugLog("🔵 SyncManager.serialize: done (hasPw=\(!pw.isEmpty), hasKey=\(!ak.isEmpty))")
+        // v1.6.12: credentials are no longer written to iCloud KVS.
+        //
+        // Pre-v1.6.8 we shipped passwords + API keys as `_password` /
+        // `_apiKey` keys inside the per-server dict because iCloud
+        // Keychain replication was historically slow / unreliable
+        // and KVS round-tripped within a couple of seconds. v1.6.8
+        // (Codex D1) added direct iCloud Keychain replication for
+        // both fields — and Apple has since made Keychain sync
+        // genuinely fast — so the KVS plaintext is now strictly
+        // worse: it duplicates the secret material in a separate
+        // store with weaker access controls than the Keychain we're
+        // already using.
+        //
+        // The deserialize side still reads `_password` / `_apiKey`
+        // (see below) so legacy KVS payloads written by older
+        // clients are adopted into Keychain on this device, and the
+        // one-shot purge task in `AerioApp` schedules an immediate
+        // push after launch to actively overwrite any plaintext
+        // still parked in the cloud.
         return dict
     }
 
@@ -608,6 +705,17 @@ final class SyncManager: ObservableObject {
               let type    = ServerType(rawValue: typeRaw),
               let baseURL = dict["baseURL"] as? String else { return nil }
 
+        // `_password` / `_apiKey` are read here purely for **legacy
+        // adoption**. v1.6.12 stopped writing them to KVS (see
+        // `serialize` for the rationale), but a payload pushed by
+        // an older client — or by a still-pre-v1.6.12 device on the
+        // same Apple ID — will still carry them. When found, the
+        // existing `mergeRemoteServers` path persists them into the
+        // local + iCloud Keychain copies, and the launch-time
+        // purge task in `AerioApp` then overwrites the cloud KVS
+        // with a credential-free payload. So the plaintext flows
+        // through this code one last time on each device's first
+        // upgraded launch and never again.
         return SyncedServer(
             id: id, name: name, type: type, baseURL: baseURL,
             username:      dict["username"]  as? String ?? "",
@@ -992,4 +1100,21 @@ extension Notification.Name {
     /// explicitly claims it. This notification is that explicit
     /// claim. Body has no userInfo.
     static let forceGuideFocus = Notification.Name("forceGuideFocus")
+
+    /// v1.6.12 (GH #11): a Back/Menu press caught by `MainTabView`'s
+    /// outer `.onExitCommand` while a single-stream player is active
+    /// AND not minimized — i.e. the player is full-screen but focus
+    /// is somewhere outside its view hierarchy (typically the guide,
+    /// which still holds focus after Play/Pause re-expanded the mini
+    /// player). Posted by `handleMenuPress` and consumed by
+    /// `PlayerView`'s `.onReceive`, where it runs the same chrome-
+    /// cycle logic as the player's own `.onExitCommand` would have
+    /// run if it had received the press directly.
+    ///
+    /// Without this hand-off the outer handler would call
+    /// `nowPlaying.minimize()` immediately and the user would skip
+    /// the chrome-reveal step, dropping straight to the mini player
+    /// on the first Back press after un-minimizing — exactly the
+    /// regression GH #11 reported. Body has no userInfo.
+    static let playerBackPress = Notification.Name("playerBackPress")
 }
