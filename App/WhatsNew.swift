@@ -57,6 +57,15 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.6.14",
+            title: "What's new in 1.6.14",
+            bullets: [
+                "Record Program pop-up updated for clarity",
+                "Text added to clarify comskip is only available via Dispatcharr API playlist and only when recording to Dispatcharr server",
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.14")
+        ),
+        WhatsNewRelease(
             version: "1.6.13",
             title: "What's new in 1.6.13",
             bullets: [

@@ -74,18 +74,17 @@ struct RecordProgramSheet: View {
         .onAppear {
             preRoll = isLive ? 0 : defaultPreRoll
             postRoll = defaultPostRoll
-            // v1.6.8 (B1 Phase 1 final): future-scheduled recordings
-            // always go to Dispatcharr server — local recording is
-            // foreground-only and can't reliably wake at a future
-            // start time (we deliberately don't use background
-            // tasks for DVR). Force the destination accordingly so
-            // a server-defaulted "local" preference doesn't leak
-            // into a no-op scheduled-local row.
-            if !isLive && isDispatcharr {
-                destination = .dispatcharrServer
-            } else {
-                destination = activeServer?.defaultRecordingDestination ?? .local
-            }
+            // v1.6.13.x: pre-fill from the server's default
+            // destination preference. The user can still switch via
+            // the destination picker — for future Dispatcharr
+            // recordings, picking "This device" leaves the recording
+            // as `.scheduled` in MyRecordings (won't auto-start;
+            // user starts manually when ready). v1.6.8's silent
+            // force-to-server for future programs was removed
+            // because it overrode the user's default preference and
+            // hid the picker, leading to a confusing "Comskip
+            // option appears even though I chose local default" UX.
+            destination = activeServer?.defaultRecordingDestination ?? .local
         }
         .sheet(isPresented: $showCustomPreRoll) {
             customSheet { preRoll = customValue }
@@ -136,32 +135,35 @@ struct RecordProgramSheet: View {
                 )
             }
 
-            // Destination
-            //
-            // v1.6.8 (B1 Phase 1 final): the "This device" (local)
-            // option only appears when the program is live. Future
-            // scheduled local recordings aren't supported — iOS
-            // can't reliably wake an idle app at an exact time, so
-            // a "scheduled local" recording would routinely miss
-            // its start by minutes-to-hours. Server-side recording
-            // (Dispatcharr) is always running and reliable for
-            // future recordings; offer it exclusively in that case.
-            if isDispatcharr && isLive {
-                Section("Destination") {
+            // Destination — always shown for Dispatcharr; default
+            // pre-filled from the server's `defaultRecordingDestination`,
+            // user can switch to the secondary option.
+            if isDispatcharr {
+                Section {
                     Picker("Record to", selection: $destination) {
                         Text("Dispatcharr server").tag(RecordingDestination.dispatcharrServer)
                         Text("This device").tag(RecordingDestination.local)
                     }
                     .pickerStyle(.segmented)
+                } header: {
+                    Text("Destination")
                 }
             }
 
-            // Comskip (Dispatcharr server-side only — local doesn't run it)
-            if isDispatcharr && destination == .dispatcharrServer {
+            // Comskip — always shown for Dispatcharr, but disabled
+            // when destination == .local (Comskip is a server-side
+            // feature; local recordings can't run it). The footer
+            // explains why so users don't wonder if it's broken.
+            if isDispatcharr {
                 Section {
                     Toggle("Remove commercials (Comskip)", isOn: $comskip)
+                        .disabled(destination == .local)
                 } footer: {
-                    Text("Automatically detect and remove commercial breaks after the recording completes. Processed server-side.")
+                    if destination == .local {
+                        Text("Comskip is only available when recording to a Dispatcharr server via a Dispatcharr API playlist.")
+                    } else {
+                        Text("Automatically detect and remove commercial breaks after the recording completes. Processed server-side.")
+                    }
                 }
             }
 
@@ -277,16 +279,14 @@ struct RecordProgramSheet: View {
                         label: { $0 == 0 ? "None" : "\($0) min" }
                     )
 
-                    // Same logic as the iOS form: hide the
-                    // local-vs-server picker for future programs —
-                    // local recording is foreground-only by design,
-                    // so future programs go to Dispatcharr server
-                    // exclusively.
-                    if isDispatcharr && isLive {
+                    // Always show the destination row for Dispatcharr —
+                    // user can switch from default to secondary.
+                    // Comskip row also always shown for Dispatcharr;
+                    // it disables itself (with explainer) when
+                    // destination == .local since Comskip is a
+                    // server-side feature.
+                    if isDispatcharr {
                         destinationRow
-                    }
-
-                    if isDispatcharr && destination == .dispatcharrServer {
                         comskipRow
                     }
 
@@ -405,29 +405,42 @@ struct RecordProgramSheet: View {
         }
     }
 
+
     /// Dispatcharr-only comskip toggle rendered as two pills
     /// (On / Off) so it matches the rest of the tvOS record sheet's
     /// pill-selector UI instead of introducing a stray switch control.
+    /// Disabled (greyed) when destination == .local with an explainer
+    /// footer telling the user to switch destination to enable it.
     private var comskipRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let isDisabled = destination == .local
+        return VStack(alignment: .leading, spacing: 8) {
             Text("Remove Commercials (Comskip)")
                 .font(.system(size: 24, weight: .semibold))
+                .foregroundColor(isDisabled ? .textTertiary : .textPrimary)
                 .padding(.leading, 4)
             HStack(spacing: 12) {
                 RecordOptionPill(
                     label: "Off",
                     isSelected: !comskip,
-                    action: { comskip = false }
+                    action: { if !isDisabled { comskip = false } }
                 )
+                .opacity(isDisabled ? 0.45 : 1.0)
+                .allowsHitTesting(!isDisabled)
                 RecordOptionPill(
                     label: "On",
                     isSelected: comskip,
-                    action: { comskip = true }
+                    action: { if !isDisabled { comskip = true } }
                 )
+                .opacity(isDisabled ? 0.45 : 1.0)
+                .allowsHitTesting(!isDisabled)
                 Spacer(minLength: 0)
             }
             .focusSection()
-            Text("Server-side: detects and removes commercial breaks after the recording completes.")
+            Text(
+                isDisabled
+                    ? "Comskip runs server-side. Switch the destination to Dispatcharr server to enable."
+                    : "Server-side: detects and removes commercial breaks after the recording completes."
+            )
                 .font(.system(size: 18))
                 .foregroundColor(.textSecondary)
                 .padding(.leading, 4)
