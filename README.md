@@ -40,8 +40,6 @@ Sideload using your preferred method using the .ipa from [Releases](https://gith
   hard cap at 9 tiles
 - **Thermal watchdog** — stops new tile additions when the device
   reaches `.critical` thermal state
-- **iPad keyboard shortcuts**: ⌘1..⌘9 take audio of tile N, ⌘N open
-  add sheet, ⌘F toggle fullscreen on the audio tile, ⌘W exit
 
 **Live TV**
 
