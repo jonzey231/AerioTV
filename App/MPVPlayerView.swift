@@ -98,12 +98,23 @@ enum MPVLibraryWarmup {
 
     private static func doWarmUp() {
         let totalStart = Date()
+        // v1.6.15: capture thermal state at warmup entry so we can
+        // tell, from a stutter report, whether the device was
+        // already cooking when the user opened the app vs. whether
+        // playback itself heated it up. Resume Last Channel + warmup
+        // both fire near launch and compete for the same CPU/GPU
+        // budget; on a hot device that's been observed to produce
+        // brief audio/video stutters during the first ~10s of
+        // playback. The MultiviewStore observer covers state
+        // transitions DURING playback; this captures the "starting
+        // point" before that observer is even mounted.
+        let thermalAtStart = thermalStateString(ProcessInfo.processInfo.thermalState)
 
         // ── Phase 1: libmpv ────────────────────────────────────────
         let mpvStart = Date()
         guard let mpv = mpv_create() else {
             #if DEBUG
-            print("[MPV-WARMUP] mpv_create failed — warm-up skipped")
+            print("[MPV-WARMUP] mpv_create failed — warm-up skipped (thermal=\(thermalAtStart))")
             #endif
             return
         }
@@ -163,13 +174,31 @@ enum MPVLibraryWarmup {
 
         #if DEBUG
         let totalMs = Int(Date().timeIntervalSince(totalStart) * 1000)
+        // Sample thermal again at completion. If the state moved
+        // during warmup (entry=fair, exit=serious) that itself is a
+        // signal — the warmup pushed the device hotter, which then
+        // bites the auto-resume that's about to start a stream.
+        let thermalAtEnd = thermalStateString(ProcessInfo.processInfo.thermalState)
         if initResult < 0 {
             let err = String(cString: mpv_error_string(initResult))
-            print("[MPV-WARMUP] done in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms) — initialize returned error: \(err)")
+            print("[MPV-WARMUP] done in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms, thermal=\(thermalAtStart)→\(thermalAtEnd)) — initialize returned error: \(err)")
         } else {
-            print("[MPV-WARMUP] process-wide init complete in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms) — first channel tap will hit the warm path")
+            print("[MPV-WARMUP] process-wide init complete in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms, thermal=\(thermalAtStart)→\(thermalAtEnd)) — first channel tap will hit the warm path")
         }
         #endif
+    }
+
+    /// Same vocabulary as `MultiviewContainerView.thermalStateName`
+    /// so log lines from different subsystems are greppable as one
+    /// dataset.
+    private static func thermalStateString(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal:  return "nominal"
+        case .fair:     return "fair"
+        case .serious:  return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
     }
 }
 

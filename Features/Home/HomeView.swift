@@ -2053,14 +2053,59 @@ final class NowPlayingManager: ObservableObject {
     /// the geometry observer fires.
     @Published var miniPlayerBottomAbs: CGFloat = 0
 
+    /// v1.6.15: stream-start signal — bumped to a fresh UUID inside
+    /// `startPlaying(...)` on EVERY live stream begin (cold auto-
+    /// resume, channel-row tap, Siri Remote up/down flip). Drives
+    /// the `ChannelInfoBanner`'s own 5s auto-hide timer so the
+    /// banner appears (without chrome) when the user channel-flips.
+    /// Nil at startup = nothing to do.
+    @Published var streamStartedToken: UUID? = nil
+
+    /// v1.6.15: chrome-wake signal — bumped only when `wakeChrome ==
+    /// true` is passed to `startPlaying(...)`. Live channel-flips
+    /// from the Siri Remote pass `wakeChrome: false` so up/down
+    /// scrolling doesn't summon the bottom pills (which would put
+    /// the next press on the Record button by accident). Other
+    /// stream starts (cold-launch auto-resume, channel-row tap)
+    /// keep the default `true` so the user sees chrome + banner
+    /// together, matching the original "this is a new stream" feel.
+    @Published var chromeWakeToken: UUID? = nil
+
+    /// v1.6.15: mirror of whichever player surface (multiview chrome,
+    /// legacy PlayerView controls) is currently visible. Driven by
+    /// `.onChange(...)` observers on those surfaces. Read by
+    /// `ChannelInfoBanner` so its visibility is locked in step with
+    /// chrome's auto-fade — banner + chrome appear/disappear together.
+    @Published var chromeIsVisible: Bool = false
+
     var isActive: Bool { playingItem != nil }
 
-    func startPlaying(_ item: ChannelDisplayItem, headers: [String: String], isLive: Bool = true) {
-        debugLog("🎮 NowPlaying.startPlaying: \(item.name) (id=\(item.id)), isLive=\(isLive), wasMinimized=\(isMinimized), wasPlaying=\(playingItem?.name ?? "nil")")
+    /// v1.6.15: pending steps for the debounced channel-flip helper.
+    /// Each Siri Remote up/down press calls `changeChannel(direction:)`
+    /// which adds to this counter; the actual channel-load only fires
+    /// after a 300ms idle window. Stops rapid presses from queueing
+    /// 5 separate stream-loads (which produced the red decode-error
+    /// overlay reported in v1.6.15 internal testing).
+    private var pendingChannelStep: Int = 0
+    private var pendingChannelChangeTask: Task<Void, Never>?
+
+    func startPlaying(_ item: ChannelDisplayItem, headers: [String: String], isLive: Bool = true, wakeChrome: Bool = true) {
+        debugLog("🎮 NowPlaying.startPlaying: \(item.name) (id=\(item.id)), isLive=\(isLive), wakeChrome=\(wakeChrome), wasMinimized=\(isMinimized), wasPlaying=\(playingItem?.name ?? "nil")")
         playingItem = item
         playingHeaders = headers
         self.isLive = isLive
         isMinimized = false
+        // v1.6.15: always bump the stream-start signal for live so
+        // the channel-info banner can run its own 5s timer.
+        // Optionally also bump the chrome-wake signal — Siri Remote
+        // up/down channel-flip passes `wakeChrome: false` because
+        // summoning chrome would put the user's next D-pad press on
+        // the Record pill by surprise; cold-launch / row-tap keeps
+        // the default `true` so chrome + banner come up together.
+        if isLive {
+            streamStartedToken = UUID()
+            if wakeChrome { chromeWakeToken = UUID() }
+        }
         // Track watch count for Top Shelf "most watched" ranking
         if isLive { TopShelfDataManager.incrementWatchCount(for: item) }
         // Push into the recents FIFO so the multiview add-sheet's
@@ -2093,6 +2138,66 @@ final class NowPlayingManager: ObservableObject {
         debugLog("🎮 NowPlaying.stop: \(playingItem?.name ?? "nil")")
         playingItem = nil
         isMinimized = false
+    }
+
+    /// v1.6.15: debounced channel-flip step. Each call accumulates a
+    /// signed step (+1 = next channel, -1 = previous) and resets a
+    /// 300ms idle timer. When the timer fires, the accumulated step
+    /// is applied to the current channel's index in
+    /// `ChannelStore.channels`, clamped to the list bounds, and the
+    /// new channel starts playing (via the same path as a row tap).
+    ///
+    /// Why debounce: rapid Siri Remote up/down would otherwise
+    /// trigger one full mpv loadfile per press. 5 presses in a
+    /// second produced cascading decode failures (red error
+    /// overlay) on real hardware. 300ms is short enough that a
+    /// single press feels responsive, long enough that a rapid
+    /// burst collapses to one final load.
+    @MainActor
+    func changeChannel(direction: Int) {
+        pendingChannelStep += direction
+        pendingChannelChangeTask?.cancel()
+        pendingChannelChangeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            self?.flushPendingChannelChange()
+        }
+    }
+
+    /// Apply the accumulated step from `changeChannel(direction:)`.
+    /// Resolves the target channel by index in
+    /// `ChannelStore.channels`, clamps to the list bounds (so a
+    /// burst at the top/bottom of the guide doesn't wrap or
+    /// crash), and routes through the unified-playback or legacy
+    /// path depending on the `useUnifiedPlayback` flag.
+    @MainActor
+    private func flushPendingChannelChange() {
+        let step = pendingChannelStep
+        pendingChannelStep = 0
+        pendingChannelChangeTask = nil
+        guard step != 0 else { return }
+        guard let current = playingItem else { return }
+        let list = ChannelStore.shared.channels
+        guard let currentIdx = list.firstIndex(where: { $0.id == current.id }) else { return }
+        let newIdx = max(0, min(list.count - 1, currentIdx + step))
+        guard newIdx != currentIdx else { return }
+        let next = list[newIdx]
+        let server = ChannelStore.shared.activeServer
+        let resolvedHeaders = server?.authHeaders ?? ["Accept": "*/*"]
+        if PlaybackFeatureFlags.useUnifiedPlayback {
+            // Unified path: re-enter multiview seeded with the new
+            // channel. Mirrors the row-tap path used elsewhere in
+            // HomeView. The exit() + enterMultiview() pair drops the
+            // current tile and seeds a fresh one — same lifecycle
+            // mpv expects for a clean stream swap.
+            PlayerSession.shared.exit()
+            PlayerSession.shared.enterMultiview(seeding: next, server: server)
+        }
+        // wakeChrome=false → channel scroll surfaces ONLY the
+        // banner (its own 5s timer) and leaves chrome hidden so
+        // a follow-up up/down keeps flipping channels instead of
+        // walking the bottom pills.
+        startPlaying(next, headers: resolvedHeaders, isLive: true, wakeChrome: false)
     }
 }
 
@@ -2503,7 +2608,23 @@ struct MainTabView: View {
             ?? channelStore.activeServer
             ?? allServers.first(where: { $0.isActive })
 
-        debugLog("🎮 Auto-resume: starting \(channel.name) (id=\(channel.id)) in mini player (unified=\(PlaybackFeatureFlags.useUnifiedPlayback))")
+        // v1.6.15: log thermal state at the moment auto-resume kicks
+        // playback. Pairs with the `[MPV-WARMUP] thermal=X→Y` line:
+        // if a stutter report shows warmup ended fair/serious AND
+        // auto-resume started serious, the device was already hot
+        // and we lost that race. If warmup ended nominal but resume
+        // shows serious, something else (background scan, EPG sync)
+        // heated it up between warmup and the first frame.
+        let thermalState: String = {
+            switch ProcessInfo.processInfo.thermalState {
+            case .nominal:  return "nominal"
+            case .fair:     return "fair"
+            case .serious:  return "serious"
+            case .critical: return "critical"
+            @unknown default: return "unknown"
+            }
+        }()
+        debugLog("🎮 Auto-resume: starting \(channel.name) (id=\(channel.id)) in mini player (unified=\(PlaybackFeatureFlags.useUnifiedPlayback), thermal=\(thermalState))")
 
         if PlaybackFeatureFlags.useUnifiedPlayback {
             _ = PlayerSession.shared.begin(item: channel, server: server)
@@ -2966,6 +3087,15 @@ struct MainTabView: View {
 
             // In-app reminder banner — shows when a reminder fires while app is in foreground
             ReminderBannerView()
+
+            // v1.6.15: channel-info HUD that briefly identifies the
+            // current live channel + program when a stream starts
+            // (cold launch auto-resume, channel-list tap, Siri Remote
+            // up/down flip on tvOS); fades together with the player
+            // chrome's auto-fade. Sits above the mini player +
+            // reminder banner so it's never occluded.
+            ChannelInfoBanner()
+                .zIndex(3)
         }
         // safeAreaInset on the outer ZStack pushes the entire TabView (including its tab bar)
         // upward so the tab bar sits above the mini player bar and remains tappable.
@@ -3956,6 +4086,250 @@ private struct BackgroundWorkDetailsView: View {
     #endif
 }
 
+
+// MARK: - Channel Info Banner (v1.6.15)
+
+/// Top-left HUD that briefly identifies the current live channel +
+/// program when a new stream starts, fades together with the player
+/// chrome's auto-fade. Cross-platform; rendered in HomeView's outer
+/// ZStack so it sits above the mini player + reminder banner. Only
+/// renders for single-stream playback (suppressed in multi-tile
+/// multiview because the user is comparing streams and an overlaid
+/// channel-info chip would be noise).
+///
+/// Visibility model: a single shared `NowPlayingManager.chromeIsVisible`
+/// flag, written to by the multiview chrome (`MultiviewContainerView`)
+/// and the legacy player chrome (`PlayerView`'s `showControls`). When
+/// either chrome shows or hides, this banner rides along. Stream
+/// starts also wake the chrome, so the banner appears together with
+/// the chrome on every channel-flip — no separate timer.
+private struct ChannelInfoBanner: View {
+    @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    @ObservedObject private var guideStore = GuideStore.shared
+    @ObservedObject private var multiviewStore = MultiviewStore.shared
+
+    /// Local 5s window that opens on every `streamStartedToken`
+    /// bump. Lets the banner appear on a Siri Remote channel-flip
+    /// without dragging chrome up with it (chrome stays hidden so
+    /// the next up/down keeps flipping channels instead of walking
+    /// the bottom pills).
+    @State private var bannerWindowActive: Bool = false
+    @State private var bannerHideTask: Task<Void, Never>?
+
+    /// Renders when EITHER (a) chrome is up — handles brand-new
+    /// stream starts (cold-launch / row-tap that bump
+    /// `chromeWakeToken`) and Menu/Back chrome summon, OR (b) we're
+    /// inside the 5s post-stream-start window — handles channel-
+    /// scroll where chrome stays hidden. Suppressed in multi-tile
+    /// multiview.
+    private var shouldRender: Bool {
+        let isSingleStream = multiviewStore.tiles.count <= 1
+        return (nowPlaying.chromeIsVisible || bannerWindowActive) && isSingleStream
+    }
+
+    /// Resolve current program for this channel. First the
+    /// lightweight `ChannelDisplayItem.currentProgram*` fields
+    /// (cheap, populated for Xtream + Dispatcharr current-programs
+    /// cache); fall back to `GuideStore.programs[id].first(where:
+    /// \.isLive)` for the bulk-EPG path. Same two-source pattern
+    /// `ChannelListView` uses for row subtitles. Returns nil when
+    /// neither source has data — the banner then shows just channel
+    /// number + name.
+    private func liveProgram(for item: ChannelDisplayItem) -> (title: String, start: Date, end: Date)? {
+        if let title = item.currentProgram, !title.isEmpty,
+           let start = item.currentProgramStart,
+           let end = item.currentProgramEnd {
+            return (title, start, end)
+        }
+        if let p = guideStore.programs[item.id]?.first(where: { $0.isLive }) {
+            return (p.title, p.start, p.end)
+        }
+        return nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if shouldRender, let item = nowPlaying.playingItem, nowPlaying.isLive {
+                bannerContent(for: item)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .allowsHitTesting(false)
+        // Open the 5s banner-window every time a new stream starts
+        // (live only — token only bumps for live in NowPlayingManager).
+        // Independent of chrome so a channel-scroll surfaces just the
+        // banner. If chrome is already up (Menu/Back, brand-new
+        // stream-start that bumped `chromeWakeToken`), the banner is
+        // shown via that path too — both signals together are
+        // idempotent.
+        .onChange(of: nowPlaying.streamStartedToken) { _, newToken in
+            guard newToken != nil else { return }
+            bannerWindowActive = true
+            bannerHideTask?.cancel()
+            bannerHideTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                guard !Task.isCancelled else { return }
+                bannerWindowActive = false
+            }
+        }
+        .animation(.easeInOut(duration: 0.3), value: nowPlaying.chromeIsVisible)
+        .animation(.easeInOut(duration: 0.3), value: bannerWindowActive)
+        .animation(.easeInOut(duration: 0.3), value: multiviewStore.tiles.count)
+    }
+
+    @ViewBuilder
+    private func bannerContent(for item: ChannelDisplayItem) -> some View {
+        HStack(alignment: .top, spacing: 14) {
+            if let url = item.logoURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let img):
+                        img.resizable().aspectRatio(contentMode: .fit)
+                    default:
+                        Color.clear
+                    }
+                }
+                .frame(width: logoSize, height: logoSize)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    if !item.number.isEmpty {
+                        Text(item.number)
+                            .font(channelNumberFont)
+                            .foregroundColor(.white.opacity(0.55))
+                    }
+                    Text(item.name)
+                        .font(channelNameFont)
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                }
+
+                if let prog = liveProgram(for: item) {
+                    Text(prog.title)
+                        .font(programFont)
+                        .foregroundColor(.white.opacity(0.85))
+                        .lineLimit(1)
+
+                    if let timeAndDuration = airingTimeAndDuration(start: prog.start, end: prog.end) {
+                        Text(timeAndDuration)
+                            .font(timeFont)
+                            .foregroundColor(.white.opacity(0.65))
+                            .lineLimit(1)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, verticalPadding)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.black.opacity(0.72))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.45), radius: 14, y: 6)
+        .frame(maxWidth: maxBannerWidth, alignment: .leading)
+        .padding(.top, topPadding)
+        .padding(.leading, sidePadding)
+    }
+
+    /// "10:00 PM – 11:30 PM · 1h 30m" — single line, falls back to
+    /// nil when the airing window is invalid (defensive — guards
+    /// against inverted EPG payloads).
+    private func airingTimeAndDuration(start: Date, end: Date) -> String? {
+        guard end > start else { return nil }
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        let window = "\(f.string(from: start)) – \(f.string(from: end))"
+
+        let totalMinutes = Int(end.timeIntervalSince(start) / 60)
+        let hours = totalMinutes / 60
+        let minutes = totalMinutes % 60
+        let durationStr: String
+        if hours > 0 && minutes > 0 {
+            durationStr = "\(hours)h \(minutes)m"
+        } else if hours > 0 {
+            durationStr = "\(hours)h"
+        } else {
+            durationStr = "\(minutes)m"
+        }
+        return "\(window) · \(durationStr)"
+    }
+
+    // MARK: Per-platform sizing
+
+    private var logoSize: CGFloat {
+        #if os(tvOS)
+        return 56
+        #else
+        return 36
+        #endif
+    }
+    private var channelNumberFont: Font {
+        #if os(tvOS)
+        return .system(size: 26, weight: .medium)
+        #else
+        return .system(size: 15, weight: .medium)
+        #endif
+    }
+    private var channelNameFont: Font {
+        #if os(tvOS)
+        return .system(size: 28, weight: .semibold)
+        #else
+        return .system(size: 16, weight: .semibold)
+        #endif
+    }
+    private var programFont: Font {
+        #if os(tvOS)
+        return .system(size: 22)
+        #else
+        return .system(size: 14)
+        #endif
+    }
+    private var timeFont: Font {
+        #if os(tvOS)
+        return .system(size: 18)
+        #else
+        return .system(size: 12)
+        #endif
+    }
+    private var verticalPadding: CGFloat {
+        #if os(tvOS)
+        return 14
+        #else
+        return 10
+        #endif
+    }
+    private var maxBannerWidth: CGFloat {
+        #if os(tvOS)
+        return 720
+        #else
+        return 460
+        #endif
+    }
+    private var topPadding: CGFloat {
+        #if os(tvOS)
+        return 32
+        #else
+        return 8
+        #endif
+    }
+    private var sidePadding: CGFloat {
+        #if os(tvOS)
+        return 40
+        #else
+        return 8
+        #endif
+    }
+}
 
 #if os(iOS)
 // MARK: - Mini Player Chrome Modifier

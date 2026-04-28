@@ -64,22 +64,11 @@ struct PlaybackChromeOverlay: View {
     /// timer.
     @EnvironmentObject private var chromeState: MultiviewChromeState
 
-    #if !os(tvOS)
-    /// Drives the iPhone-portrait title layout — moves the channel +
-    /// program strip below the button row when we're tall, keeps it
-    /// inline between buttons otherwise. On iPhone, `verticalSizeClass`
-    /// is `.regular` in portrait and `.compact` in landscape.
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
-
-    /// True only on an actual iPhone held in portrait. iPad keeps the
-    /// inline layout regardless of orientation because it has enough
-    /// horizontal room for the title between buttons; iPhone landscape
-    /// keeps inline too (the horizontal bar is short enough that
-    /// vertically stacking would eat valuable vertical space).
-    private var isiPhonePortrait: Bool {
-        UIDevice.current.userInterfaceIdiom == .phone && verticalSizeClass == .regular
-    }
-    #endif
+    // v1.6.15: removed `verticalSizeClass` + `isiPhonePortrait` —
+    // they only existed to switch between the inline title layout
+    // (iPad / iPhone landscape) and the three-line title row
+    // (iPhone portrait), both of which are now gone. Channel info
+    // lives in `ChannelInfoBanner` (HomeView) instead.
 
     var body: some View {
         // This overlay ONLY renders the iOS top bar at N=1. tvOS
@@ -118,8 +107,12 @@ struct PlaybackChromeOverlay: View {
         // nothing rendered here.
     }
 
-    /// Title of the sole tile (or empty). Drawn in the iOS top bar
-    /// and announced by VoiceOver on both platforms.
+    /// Title of the sole tile (or empty). v1.6.15: no longer used by
+    /// the chrome bar (the new `ChannelInfoBanner` in HomeView
+    /// covers that), but still consumed by the Audio-Only
+    /// foreground overlay — Audio-Only is a fullscreen "no video"
+    /// curtain that needs its own readout of which channel is
+    /// muted-to-audio.
     private var soleTileTitle: String {
         store.tiles.first?.item.name ?? ""
     }
@@ -200,13 +193,14 @@ struct PlaybackChromeOverlay: View {
             // truncate inside a ~160pt gap that can't hold them.
             HStack(alignment: .center, spacing: 12) {
                 closeButton_iOS
-                if !isiPhonePortrait {
-                    Spacer(minLength: 8)
-                    titleInlineLabel_iOS
-                    Spacer(minLength: 8)
-                } else {
-                    Spacer(minLength: 0)
-                }
+                // v1.6.15: title removed from the chrome bar — the
+                // new top-left `ChannelInfoBanner` (HomeView) shows
+                // channel logo, number, name, program title, and
+                // airing window in one place across iPhone, iPad,
+                // and Apple TV. The chrome's centered title /
+                // iPhone-portrait three-line title stack was
+                // duplicating that information.
+                Spacer(minLength: 0)
                 if let audio = store.audioProgressStore {
                     iPadOverflowAdapter(
                         progressStore: audio,
@@ -243,16 +237,10 @@ struct PlaybackChromeOverlay: View {
             // probing, no manual bumps per form factor.
             .padding(.top, dynamicTopInset)
 
-            // iPhone-portrait only: dedicated title row below the buttons.
-            // Gets the full horizontal width so the channel name and
-            // currently-airing program name both render in full. Since
-            // we're in portrait the video is letterboxed anyway — this
-            // row overlays black bars, not the stream itself.
-            if isiPhonePortrait {
-                titleStack_iPhonePortrait
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-            }
+            // v1.6.15: removed the iPhone-portrait three-line title
+            // stack (channel name / program / time range). The new
+            // `ChannelInfoBanner` (HomeView) renders this as a
+            // single top-left HUD on every form factor.
 
             Spacer(minLength: 0)
             liveProgressBand
@@ -308,66 +296,11 @@ struct PlaybackChromeOverlay: View {
         .accessibilityHint("Stop playback and return to the guide")
     }
 
-    /// Inline title used in the button-row HStack for iPad and iPhone
-    /// landscape. Single line, truncates if it runs out of room between
-    /// the Close button and the right-hand cluster. iPhone portrait
-    /// swaps this for `titleStack_iPhonePortrait` below, which takes a
-    /// full-width row of its own.
-    private var titleLabel_iOS: some View {
-        Text(soleTileTitle)
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(.white)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .accessibilityAddTraits(.isHeader)
-            .accessibilityHint("Currently playing channel")
-    }
-
-    /// Alias kept so inline call sites stay readable. Same behavior as
-    /// `titleLabel_iOS`.
-    private var titleInlineLabel_iOS: some View { titleLabel_iOS }
-
-    /// iPhone-portrait title block. Gets its own row below the button
-    /// cluster with the full screen width to itself — no more getting
-    /// squeezed between pill buttons. Shows channel name on top, the
-    /// currently-airing program name underneath (when EPG is known),
-    /// and the start-end time range under that. Three short lines beat
-    /// a truncated single line for the user's "what am I watching?"
-    /// test.
-    private var titleStack_iPhonePortrait: some View {
-        let tile = store.tiles.first
-        let program = tile?.item.currentProgram ?? ""
-        let start = tile?.item.currentProgramStart
-        let end = tile?.item.currentProgramEnd
-
-        return VStack(alignment: .leading, spacing: 2) {
-            Text(soleTileTitle)
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .truncationMode(.tail)
-
-            if !program.isEmpty {
-                Text(program)
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(.white.opacity(0.82))
-                    .lineLimit(2)
-                    .truncationMode(.tail)
-            }
-
-            if let start, let end {
-                HStack(spacing: 4) {
-                    Text(start, style: .time)
-                    Text("–")
-                    Text(end, style: .time)
-                }
-                .font(.system(size: 12, weight: .regular))
-                .foregroundStyle(.white.opacity(0.6))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-    }
+    // v1.6.15: title helpers removed (`titleLabel_iOS`,
+    // `titleInlineLabel_iOS`, `titleStack_iPhonePortrait`,
+    // `soleTileTitle`). The new top-left `ChannelInfoBanner`
+    // (HomeView) is the single source of truth for "what am I
+    // watching" across iPhone, iPad, and Apple TV.
 
     private var addButton_iOS: some View {
         Button {

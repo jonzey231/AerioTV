@@ -407,6 +407,29 @@ struct MultiviewContainerView: View {
         // made the first Menu press feel like a no-op because the
         // chrome was technically "visible" but not perceived yet, so
         // the press fell through to the minimize branch.
+        //
+        // v1.6.15: mirror this container's local chrome visibility
+        // up to `NowPlayingManager.chromeIsVisible` so the
+        // `ChannelInfoBanner` overlay (which lives in HomeView's
+        // outer ZStack, not in this container's environment) can
+        // lock its visibility to the same auto-fade timer. Cross-
+        // platform — both iPhone/iPad (PlaybackChromeOverlay) and
+        // tvOS (inline pills) read the same `chromeState`.
+        .onChange(of: chromeState.isVisible) { _, visible in
+            nowPlaying.chromeIsVisible = visible
+        }
+        // v1.6.15: wake chrome only on stream starts that explicitly
+        // requested it (cold-launch auto-resume, channel-row tap).
+        // Siri Remote up/down flips bump `streamStartedToken` but
+        // NOT `chromeWakeToken`, so the channel-scroll path leaves
+        // chrome hidden — that way a follow-up up/down keeps flipping
+        // channels instead of landing on the chrome's Record pill.
+        // The banner still appears on every flip via its own 5s
+        // timer driven by `streamStartedToken`.
+        .onChange(of: nowPlaying.chromeWakeToken) { _, newToken in
+            guard newToken != nil else { return }
+            chromeState.reportInteraction()
+        }
         #if os(tvOS)
         // Force focus onto the audio tile on mount.
         // `prefersDefaultFocus` is only a HINT — tvOS often ignores
@@ -436,15 +459,49 @@ struct MultiviewContainerView: View {
         // own `@FocusState`. This is the only reliable way to move
         // focus off the container on tvOS.
         .onChange(of: nowPlaying.isMinimized) { _, minimized in
-            guard minimized else { return }
-            // Clear local @FocusState so the binding no longer pulls
-            // focus to the tile, then post the guide-focus claim.
-            focusedTileID = nil
-            DebugLogger.shared.log(
-                "[MV-Cmd] minimized → forceGuideFocus",
-                category: "Playback", level: .info
-            )
-            NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+            if minimized {
+                // Clear local @FocusState so the binding no longer
+                // pulls focus to the tile, then post the guide-focus
+                // claim.
+                focusedTileID = nil
+                DebugLogger.shared.log(
+                    "[MV-Cmd] minimized → forceGuideFocus",
+                    category: "Playback", level: .info
+                )
+                NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+            } else {
+                // v1.6.15: when the player un-minimizes, re-assert
+                // focus on the front tile so the container's
+                // `.onMoveCommand` (and its up/down channel-flip)
+                // receives D-pad events immediately. Without this
+                // focus stayed on the tab bar above (UITabBarButton),
+                // and the user had to D-pad once just to "wake"
+                // focus before any subsequent press did anything —
+                // the "must press down first" symptom from internal
+                // testing. The tiny `Task.yield()` lets tvOS's own
+                // post-expand focus pass complete first so our
+                // write lands last.
+                if let firstID = store.tiles.first?.id {
+                    Task { @MainActor in
+                        await Task.yield()
+                        focusedTileID = firstID
+                    }
+                }
+            }
+        }
+        // v1.6.15: re-assert focus on the new front tile whenever
+        // the tile id changes — covers the channel-flip path
+        // (`changeChannel` → `PlayerSession.exit() + enterMultiview()`)
+        // which clears tiles to a fresh id. Without this,
+        // `focusedTileID` still pointed at the OLD id (now absent
+        // from the focusable set), so the container sat in
+        // "ambiguous focus" and dropped the next D-pad press.
+        .onChange(of: store.tiles.first?.id) { _, newID in
+            guard let newID, !nowPlaying.isMinimized else { return }
+            Task { @MainActor in
+                await Task.yield()
+                focusedTileID = newID
+            }
         }
         // v1.6.12 (GH #11 follow-up): pin chrome visibility while
         // the TVOptions panel is open so its 5s auto-fade timer
@@ -525,6 +582,30 @@ struct MultiviewContainerView: View {
                     focusedTileID = relocatingID
                 }
                 return
+            }
+            // v1.6.15: Apple TV up/down channel-change. Gated on:
+            //   1. Single-stream playback (N=1, full-screen). At N>=2
+            //      up/down is grid navigation, not a channel-flip.
+            //   2. Player NOT minimized — when shrunk to corner the
+            //      remote belongs to the guide behind, not the player.
+            //   3. Chrome is HIDDEN. When the user has summoned chrome
+            //      via Menu/Back, up/down should navigate to the
+            //      Options / Record / Add Stream pills below the tile,
+            //      not flip channels behind their back. Pressing
+            //      Menu/Back again hides chrome and re-enables flip.
+            //   Up = next channel (higher number), Down = previous —
+            //   matches the IPTV remote idiom (inverse of guide-list
+            //   scroll direction).
+            if store.tiles.count == 1,
+               !nowPlaying.isMinimized,
+               !chromeState.isVisible {
+                if direction == .up {
+                    nowPlaying.changeChannel(direction: +1)
+                    return
+                } else if direction == .down {
+                    nowPlaying.changeChannel(direction: -1)
+                    return
+                }
             }
             // Normal navigation: just wake the focus indicator.
             chromeState.reportFocusActivity()

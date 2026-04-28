@@ -1,5 +1,60 @@
 # Changelog
 
+## v1.6.15 — 2026-04-28
+
+### Added
+
+- **Apple TV: Siri Remote up/down changes channels.** While
+  watching a single live stream full-screen, pressing Up on the
+  Siri Remote tunes to the next channel (higher number) and Down
+  tunes to the previous channel — the IPTV remote idiom users
+  expect, inverse of the guide list's scroll direction.
+  Multi-tile multiview is unaffected (up/down stays as tile-to-
+  tile navigation there). Rapid presses are debounced over a
+  300ms idle window so a burst of 5 presses collapses to one
+  final stream load instead of cascading through five —
+  prevents the red decode-error overlay that appeared when
+  successive `loadfile` calls overlapped.
+- **Channel info banner.** Brief HUD that appears in the top-
+  left whenever a new live stream starts (cold-launch auto-
+  resume, channel-row tap, Siri Remote up/down flip). Shows
+  channel logo, channel number, channel name, current program
+  title, and the airing window/duration when EPG data is
+  available. Cross-platform — iPhone, iPad, and Apple TV all
+  surface it. Suppressed during multi-tile multiview because
+  the user is comparing streams and an overlaid banner would be
+  noise.
+- **Apple TV chrome lock.** When the player chrome is hidden,
+  Up/Down channel-flips the stream. When chrome is summoned
+  (Menu/Back), Up/Down switches to walking the chrome controls
+  (Options, Record, Add Stream pills) — pressing Menu/Back
+  again hides chrome and re-enables channel-flipping. The
+  banner appears every stream start regardless; chrome only
+  wakes on "fresh" starts (cold launch, row tap), not on
+  channel-scroll, so a follow-up press keeps flipping channels
+  instead of landing on the Record pill by surprise.
+
+### Improved
+
+- **"Must press down first" focus regression on Apple TV
+  fixed.** After the unified-player refactor (1.6.1), expanding
+  from the corner mini-player back to fullscreen left focus on
+  the tab bar above the player — the first D-pad press just
+  woke focus instead of registering as input. Container now
+  re-asserts `focusedTileID` on every un-minimize and on every
+  tile-id change (covers the channel-flip path that swaps tile
+  identity), with a `Task.yield()` so the write lands after
+  tvOS's own focus pass instead of being clobbered by it.
+- **Thermal stutter instrumentation.** DEBUG-only logs at the
+  two cold-launch hot spots — `[MPV-WARMUP]` lines now include
+  `thermal=X→Y` (state at warmup entry / exit), and the
+  `🎮 Auto-resume: starting…` log includes `thermal=X` at the
+  moment playback kicks. Combined with the existing
+  `[MV-Thermal]` transitions during multiview, a single grep
+  across `nominal|fair|serious|critical` correlates the whole
+  launch path. Lets a future stutter report be diagnosed from
+  the Xcode console alone.
+
 ## v1.6.12 — 2026-04-27
 
 ### Added

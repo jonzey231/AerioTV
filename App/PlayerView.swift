@@ -510,6 +510,22 @@ private struct PlayerRootView: View {
                         // the gear icon's own focus binding takes over.
                         .prefersDefaultFocus(!showControls, in: playerFocusScope)
                         .onMoveCommand { direction in
+                            // v1.6.15: Apple TV up/down channel-flip
+                            // for live single-stream playback. Gated
+                            // on chrome being hidden AND live — when
+                            // the user has summoned chrome via
+                            // Menu/Back, up/down should walk the
+                            // chrome controls (Options pill, Stream
+                            // info row), NOT flip channels behind
+                            // their back. Pressing Menu/Back again
+                            // hides chrome and re-enables flip.
+                            if isLive, !showControls,
+                               direction == .up || direction == .down {
+                                NowPlayingManager.shared.changeChannel(
+                                    direction: direction == .up ? +1 : -1
+                                )
+                                return
+                            }
                             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
                             scheduleControlsHide()
                             if !isLive {
@@ -650,6 +666,28 @@ private struct PlayerRootView: View {
             // only runs while the overlay is visible — avoids mpv
             // lock contention that causes frame-delivery jitter.
             progressStore.isStreamInfoVisible = visible
+        }
+        // v1.6.15: mirror this player's chrome visibility into the
+        // shared `NowPlayingManager.chromeIsVisible` flag so the
+        // `ChannelInfoBanner` overlay (in HomeView's outer ZStack)
+        // can lock step with chrome's auto-fade. Cross-platform —
+        // both legacy iOS PlayerView and tvOS need this; the
+        // unified iOS path goes through `MultiviewContainerView`'s
+        // own mirror and lands in the same shared flag.
+        .onChange(of: showControls) { _, visible in
+            NowPlayingManager.shared.chromeIsVisible = visible
+        }
+        // v1.6.15: wake the chrome only on stream starts that asked
+        // for it (cold-launch auto-resume, channel-row tap). Siri
+        // Remote up/down flips intentionally do not bump
+        // `chromeWakeToken` — a flip should keep chrome hidden so
+        // the next up/down keeps flipping channels. The banner
+        // (HomeView's `ChannelInfoBanner`) still surfaces on every
+        // flip via its own 5s timer.
+        .onChange(of: NowPlayingManager.shared.chromeWakeToken) { _, newToken in
+            guard newToken != nil, isLive else { return }
+            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+            scheduleControlsHide()
         }
         #if os(tvOS)
         .onChange(of: showControls) { _, visible in

@@ -57,6 +57,16 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.6.15",
+            title: "What's new in 1.6.15",
+            bullets: [
+                "Apple TV: Up/Down on Siri Remote changes channels",
+                "New channel info banner shows logo, number, name, program, and airing time on every stream start",
+                "On Apple TV, press Menu/Back to lock the channel and reach Options, Record, and Add Stream"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.15")
+        ),
+        WhatsNewRelease(
             version: "1.6.14",
             title: "What's new in 1.6.14",
             bullets: [
