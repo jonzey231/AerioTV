@@ -642,6 +642,20 @@ final class ChannelStore: ObservableObject {
             currentChannelServerID = nil
             return
         }
+        // v1.6.13.x: idempotent guard. AppEntryView fires `refresh` from
+        // its `.onAppear` (during the splash) so the channel network
+        // fetch overlaps the 2.8s splash animation. Then MainTabView's
+        // `.task(channelServerKey)` fires `refresh` AGAIN once the
+        // splash dismisses. Without this guard the second call would
+        // cancel the in-flight network request and re-issue it from
+        // scratch — wiping out the head start. With it, the second
+        // call is a no-op when a load is already in progress (or
+        // complete) for the same server.
+        if let task = loadTask, !task.isCancelled,
+           currentChannelServerID == server.id,
+           (isLoading || !channels.isEmpty) {
+            return
+        }
         // Clear stale channels immediately when the active server changes so old
         // EPG data doesn't linger while the new server's channels are loading.
         if server.id != currentChannelServerID {
@@ -1911,6 +1925,93 @@ enum TopShelfKeychain {
     }
 }
 
+// MARK: - Last Played Tracker (v1.6.13, GH #8)
+//
+// Persists the last channel started via `NowPlayingManager.startPlaying`
+// so the Auto-Resume Last Channel feature in Settings → Appearance →
+// App Behaviors can pick up where the user left off on next launch.
+//
+// Three pieces of state — channel id, server id, isLive — are written
+// synchronously to UserDefaults so even a force-quit during playback
+// leaves a usable marker. The launch hydration path resolves the
+// channel via `ChannelStore.channels.first(where: { $0.id == channelID })`,
+// silently giving up if the channel was removed upstream or the
+// server was deleted between launches. UserDefaults (not Keychain or
+// SwiftData) because the marker is per-device, not credential-class
+// data, and we want zero friction on the read path during launch.
+//
+// Storage is intentionally simple — three keys instead of a single
+// JSON-encoded struct — so a malformed value on one key still leaves
+// the others readable and makes the data easy to inspect by hand
+// (e.g. via `defaults read` for diagnostics).
+enum LastPlayedTracker {
+    private static let channelIDKey = "lastPlayed.channelID"
+    private static let serverIDKey  = "lastPlayed.serverID"
+    private static let isLiveKey    = "lastPlayed.isLive"
+
+    struct Marker {
+        let channelID: String
+        let serverID: UUID
+        let isLive: Bool
+    }
+
+    /// Snapshot of the most recently started channel + server pair.
+    /// `nil` when the user has never started a channel on this
+    /// device, or when one of the persisted keys is malformed.
+    static var lastPlayed: Marker? {
+        let d = UserDefaults.standard
+        guard let channelID = d.string(forKey: channelIDKey), !channelID.isEmpty,
+              let serverIDStr = d.string(forKey: serverIDKey),
+              let serverID = UUID(uuidString: serverIDStr) else {
+            return nil
+        }
+        let isLive = d.object(forKey: isLiveKey) as? Bool ?? true
+        return Marker(channelID: channelID, serverID: serverID, isLive: isLive)
+    }
+
+    static func record(channelID: String, serverID: UUID, isLive: Bool) {
+        let d = UserDefaults.standard
+        d.set(channelID, forKey: channelIDKey)
+        d.set(serverID.uuidString, forKey: serverIDKey)
+        d.set(isLive, forKey: isLiveKey)
+    }
+
+    static func clear() {
+        let d = UserDefaults.standard
+        d.removeObject(forKey: channelIDKey)
+        d.removeObject(forKey: serverIDKey)
+        d.removeObject(forKey: isLiveKey)
+    }
+}
+
+// MARK: - Auto-Resume Wiring (v1.6.13)
+//
+// Consolidates the three auto-resume triggers (cold-launch
+// `.onAppear`, channel-list-arrives `.onChange`, warm-resume
+// `.onChange(of: scenePhase)`) into a single ViewModifier so
+// MainTabView's body stays under Swift's type-checker budget.
+// Without this consolidation each `.onChange/.onAppear` is one
+// more modifier on body's already-long chain — tvOS x86_64
+// hits the heuristic limit and emits "compiler is unable to
+// type-check this expression in reasonable time".
+private struct AutoResumeWiring: ViewModifier {
+    let channelsAreEmpty: Bool
+    let scenePhase: ScenePhase
+    let onResumeAttempt: () -> Void
+    let onScenePhaseChange: (ScenePhase, ScenePhase) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: channelsAreEmpty) { _, isEmpty in
+                if !isEmpty { onResumeAttempt() }
+            }
+            .onAppear { onResumeAttempt() }
+            .onChange(of: scenePhase) { oldPhase, newPhase in
+                onScenePhaseChange(oldPhase, newPhase)
+            }
+    }
+}
+
 // MARK: - Now Playing Manager
 @MainActor
 final class NowPlayingManager: ObservableObject {
@@ -1938,6 +2039,20 @@ final class NowPlayingManager: ObservableObject {
     /// from anywhere without having to also import `PlayerSession`.
     @Published var configuredAsMultiviewAdapter: Bool = false
 
+    /// v1.6.13.x: Absolute (`.global`-coordinate) Y-position of the
+    /// corner-mini-player's BOTTOM edge, captured dynamically by an
+    /// `.onGeometryChange` on the mini view in `iOSMultiviewWrapper`
+    /// / `iOSLegacyPlayerWrapper`. Read by `ChannelListView` to
+    /// position the channel-group chip row immediately below the
+    /// mini regardless of device chrome (iOS 18 iPad TabView top
+    /// tabs add a variable amount of vertical chrome that
+    /// `.ignoresSafeArea()` may or may not penetrate, so the mini's
+    /// effective bottom isn't reliably `topPadding + height`).
+    /// Default 0 means "no measurement yet" — the consumer treats
+    /// that as "no push" so layout stays at natural position until
+    /// the geometry observer fires.
+    @Published var miniPlayerBottomAbs: CGFloat = 0
+
     var isActive: Bool { playingItem != nil }
 
     func startPlaying(_ item: ChannelDisplayItem, headers: [String: String], isLive: Bool = true) {
@@ -1952,6 +2067,16 @@ final class NowPlayingManager: ObservableObject {
         // "Recent" section reflects actual watching behavior — not
         // just channels the user added to multiview.
         if isLive { RecentChannelsStore.shared.push(item) }
+        // v1.6.13 (GH #8): persist a "last played" marker for the
+        // Auto-Resume Last Channel feature in App Behaviors. Synchronous
+        // UserDefaults write inside startPlaying so even a force-quit
+        // mid-session leaves the marker pointing at the channel the
+        // user was just on. The launch hydration in MainTabView reads
+        // this back and silently drops it if the channel / server
+        // can't be resolved at next launch.
+        if let serverID = ChannelStore.shared.activeServer?.id {
+            LastPlayedTracker.record(channelID: item.id, serverID: serverID, isLive: isLive)
+        }
     }
 
     func minimize() {
@@ -2084,6 +2209,26 @@ struct MainTabView: View {
     /// dismiss when a Dispatcharr server is configured — other server
     /// types skip this wait entirely.
     @State private var didInitialDVRReconcile = false
+
+    /// v1.6.13 (GH #8): once-per-app-session gate for the
+    /// Auto-Resume Last Channel feature. Set to `true` the first
+    /// time we attempt resume hydration so the observer doesn't
+    /// re-fire when the channel list re-populates from network
+    /// after the cache load (or when the user switches active
+    /// servers later in the session).
+    @State private var didAttemptAutoResume = false
+
+    /// v1.6.13.x: Scene-phase observer for the warm-resume auto-
+    /// resume path. tvOS commonly suspends + restores the app
+    /// instead of cold-launching when the user goes Home → reopen
+    /// from the dock; in that case `MainTabView` is never recreated,
+    /// so `didAttemptAutoResume` retains `true` from the original
+    /// launch and `attemptAutoResume()` short-circuits. We listen
+    /// for the `.background → .active` transition, reset the flag,
+    /// and re-fire — but only when no player is currently active
+    /// (which protects users who pressed Home mid-watch and want
+    /// to come back to the same stream still running).
+    @Environment(\.scenePhase) private var scenePhase
 
     init() {
         debugLog("🔶🔶 MainTabView.init() — NEW INSTANCE CREATED, thread=\(Thread.current)")
@@ -2260,13 +2405,142 @@ struct MainTabView: View {
     /// - No servers are configured (we can't sync anything).
     /// - Channels are already populated (a normal warm reopen where
     ///   the ChannelStore is already hydrated; nothing new to show).
+    /// - v1.6.13 (GH #8): the user has opted into Skip Loading Screen
+    ///   in Settings → Appearance → App Behaviors. They've explicitly
+    ///   asked to land on Live TV instantly and accept the brief UI
+    ///   stutter while data hydrates in the background.
     private func tryShowInitialLoading() {
         guard !showInitialEPGLoading else { return }
         guard !allServers.isEmpty else { return }
         guard channelStore.channels.isEmpty else { return }
+        if UserDefaults.standard.bool(forKey: "appBehaviorsSkipLoadingScreen") {
+            debugLog("🔶 Initial sync — skip flag set in App Behaviors, skipping loading cover")
+            return
+        }
         showInitialEPGLoading = true
         initialLoadingStartedAt = CFAbsoluteTimeGetCurrent()
         debugLog("🔶 Initial sync starting — showing loading screen (servers=\(allServers.count))")
+    }
+
+    /// v1.6.13 (GH #8): Auto-Resume Last Channel hydration. Fires
+    /// once per app session as soon as the channel list is
+    /// resolvable AND the user has opted in via Settings →
+    /// Appearance → App Behaviors. Starts the last-played channel
+    /// directly in the corner mini-player; the user lands on the
+    /// Guide with their last channel already warming up. Press
+    /// Play/Pause to expand to fullscreen.
+    ///
+    /// Platform gate: iPad and Apple TV only. Per the v1.6.13 spec
+    /// the corner mini doesn't fit on iPhone (the iPhone keeps its
+    /// bottom-anchored `MiniPlayerBar` paradigm), so the toggle is
+    /// hidden in Settings on iPhone and this method short-circuits
+    /// there even if the UserDefault is somehow true (e.g. an
+    /// iCloud-synced preference from an iPad).
+    ///
+    /// Skipped when:
+    /// - Already attempted this session (`didAttemptAutoResume`).
+    /// - Toggle is off.
+    /// - On iPhone (idiom != .pad).
+    /// - No marker recorded (first-ever launch / cleared state).
+    /// - Channel list doesn't currently contain a row matching the
+    ///   marker's `channelID` (channel was deleted upstream, or the
+    ///   active server changed since last play).
+    private func attemptAutoResume() {
+        guard !didAttemptAutoResume else { return }
+
+        // Settings gate. Reading via UserDefaults rather than
+        // @AppStorage so the property doesn't need to live on
+        // MainTabView and trigger re-renders on every change.
+        guard UserDefaults.standard.bool(forKey: "appBehaviorsAutoResumeLastChannel") else {
+            didAttemptAutoResume = true
+            return
+        }
+
+        // Platform gate. iPhone is excluded from auto-resume because
+        // the bottom MiniPlayerBar UX is too jarring for an unsolicited
+        // appear; iPad + tvOS get the corner mini-player which feels
+        // ambient.
+        #if os(iOS)
+        guard UIDevice.current.userInterfaceIdiom == .pad else {
+            didAttemptAutoResume = true
+            return
+        }
+        #endif
+
+        // If a channel is already playing (warm-resume case where
+        // tvOS suspended us with the player intact and then woke us
+        // back up), we have nothing to resume — the player IS the
+        // resume. Mark attempted so we don't fight whatever the
+        // user does next.
+        if nowPlaying.isActive {
+            didAttemptAutoResume = true
+            return
+        }
+
+        // Channels must be resolvable. We DON'T set
+        // `didAttemptAutoResume = true` here so the `.onChange`
+        // observer can call us again once channels arrive.
+        guard !channelStore.channels.isEmpty else { return }
+
+        // From here on, mark the attempt regardless of whether we
+        // actually find a match — failure modes (deleted channel,
+        // missing marker) shouldn't keep firing on every channel
+        // list change throughout the session.
+        didAttemptAutoResume = true
+
+        guard let marker = LastPlayedTracker.lastPlayed else {
+            debugLog("🎮 Auto-resume: no LastPlayedTracker marker, skipping")
+            return
+        }
+
+        guard let channel = channelStore.channels.first(where: { $0.id == marker.channelID }) else {
+            debugLog("🎮 Auto-resume: channel id=\(marker.channelID) not in current list (likely deleted upstream or different active server), skipping")
+            return
+        }
+
+        // Server lookup mirrors `playerHeaders()` in ChannelListView.
+        let server = allServers.first(where: { $0.id == marker.serverID })
+            ?? channelStore.activeServer
+            ?? allServers.first(where: { $0.isActive })
+
+        debugLog("🎮 Auto-resume: starting \(channel.name) (id=\(channel.id)) in mini player (unified=\(PlaybackFeatureFlags.useUnifiedPlayback))")
+
+        if PlaybackFeatureFlags.useUnifiedPlayback {
+            _ = PlayerSession.shared.begin(item: channel, server: server)
+        } else {
+            let headers = server?.authHeaders ?? ["Accept": "*/*"]
+            nowPlaying.startPlaying(channel, headers: headers, isLive: marker.isLive)
+        }
+
+        // Drop straight into the corner mini. SwiftUI batches the
+        // back-to-back state writes (`isMinimized = false` inside
+        // startPlaying / begin, then `true` here) into the same
+        // render pass, so the player view mounts already minimized
+        // — no fullscreen-then-shrink flicker.
+        nowPlaying.minimize()
+    }
+
+    /// v1.6.13.x: warm-resume handler. tvOS commonly suspends +
+    /// restores the app instead of cold-launching when the user
+    /// goes Home → reopen from the dock; in that case `MainTabView`
+    /// is never recreated, `didAttemptAutoResume` retains `true`
+    /// from the original launch, and `attemptAutoResume()` short-
+    /// circuits at its first guard. We listen for the
+    /// `.background → .active` (or `.inactive → .active`)
+    /// transition, reset the gate, and re-fire — but the
+    /// `nowPlaying.isActive` early-return inside `attemptAutoResume`
+    /// itself keeps us from restarting a stream that survived the
+    /// suspension intact.
+    ///
+    /// Extracted from the inline `.onChange(of: scenePhase)` closure
+    /// so MainTabView's body modifier chain stays under Swift's
+    /// type-checker budget on tvOS x86_64.
+    private func handleAutoResumeScenePhase(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
+        guard oldPhase != .active, newPhase == .active else { return }
+        guard !nowPlaying.isActive else { return }
+        debugLog("🎮 Auto-resume: scenePhase \(oldPhase) → active with no active player — re-trying")
+        didAttemptAutoResume = false
+        attemptAutoResume()
     }
 
     /// Called whenever `initialSyncKey` changes. Dismisses the
@@ -2585,6 +2859,18 @@ struct MainTabView: View {
                             .allowsHitTesting(!minimized)
                             .padding(.trailing, minimized ? 40 : 0)
                             .padding(.top, minimized ? 40 : 0)
+                            // v1.6.13.x: capture mini's actual
+                            // bottom for ChannelListView's chip-row
+                            // push-down (tvOS branch).
+                            .onGeometryChange(for: CGFloat.self) { proxy in
+                                proxy.frame(in: .global).maxY
+                            } action: { newValue in
+                                if minimized {
+                                    nowPlaying.miniPlayerBottomAbs = newValue
+                                } else if nowPlaying.miniPlayerBottomAbs != 0 {
+                                    nowPlaying.miniPlayerBottomAbs = 0
+                                }
+                            }
                     }
                     .frame(
                         width: geo.size.width,
@@ -2606,38 +2892,18 @@ struct MainTabView: View {
                 // corner player even with hit-testing off, which is
                 // exactly the bug the mini UX needs to avoid.
                 #else
-                MultiviewContainerView()
-                    .ignoresSafeArea()
-                    .zIndex(2)
+                // iOS: see `iOSMultiviewWrapper` — extracted out of
+                // body to keep Swift's type-checker under budget.
+                iOSMultiviewWrapper
                 #endif
             } else if nowPlaying.isActive, let item = nowPlaying.playingItem {
                 // Single PlayerView kept in hierarchy for uninterrupted playback.
                 // Transitions between full-screen and mini use size/position
                 // modifiers — the player instance is never destroyed.
                 #if os(iOS)
-                GeometryReader { geo in
-                    let containerH = geo.size.height
-                    PlayerView(
-                        urls: item.streamURLs,
-                        title: item.name,
-                        headers: nowPlaying.playingHeaders,
-                        isLive: nowPlaying.isLive,
-                        subtitle: item.currentProgram,
-                        subtitleStart: item.currentProgramStart,
-                        subtitleEnd: item.currentProgramEnd,
-                        artworkURL: item.logoURL,
-                        onMinimize: { nowPlaying.minimize() },
-                        onClose: { nowPlaying.stop() }
-                    )
-                    .id(item.id) // Force recreate when channel changes
-                    .ignoresSafeArea()
-                    // When minimized: push off-screen below; drag up pulls it into view.
-                    // When expanded: sit at y=0 (full screen).
-                    .offset(y: nowPlaying.isMinimized ? max(0, containerH + miniPlayerDragOffset) : 0)
-                    .opacity(nowPlaying.isMinimized ? min(1, -miniPlayerDragOffset / 300) : 1)
-                    .allowsHitTesting(!nowPlaying.isMinimized)
-                }
-                .ignoresSafeArea()
+                // iOS: see `iOSLegacyPlayerWrapper` — extracted out of
+                // body to keep Swift's type-checker under budget.
+                iOSLegacyPlayerWrapper(item: item)
                 #elseif os(tvOS)
                 // Single PlayerView instance — survives minimize/expand without
                 // recreating the player (avoids 1s+ hang and stream restart).
@@ -2669,6 +2935,18 @@ struct MainTabView: View {
                         .allowsHitTesting(!minimized) // Full-screen: interactive; mini: not
                         .padding(.trailing, minimized ? 40 : 0)
                         .padding(.top, minimized ? 40 : 0)
+                        // v1.6.13.x: capture mini's actual bottom
+                        // for ChannelListView's chip-row push-down
+                        // (tvOS legacy-path branch).
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.frame(in: .global).maxY
+                        } action: { newValue in
+                            if minimized {
+                                nowPlaying.miniPlayerBottomAbs = newValue
+                            } else if nowPlaying.miniPlayerBottomAbs != 0 {
+                                nowPlaying.miniPlayerBottomAbs = 0
+                            }
+                        }
 
                         // Stop button — only visible when minimized
                         // Mini player: no stop button — press Menu/Back to stop
@@ -2693,7 +2971,15 @@ struct MainTabView: View {
         // upward so the tab bar sits above the mini player bar and remains tappable.
         #if os(iOS)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if nowPlaying.isMinimized, let item = nowPlaying.playingItem {
+            // v1.6.13: only iPhone uses the bottom MiniPlayerBar.
+            // iPad uses a top-right corner mini (handled inside the
+            // body's main ZStack — see the iPad GeometryReader
+            // branches above), so the bottom bar would double-render
+            // an off-screen mini and steal vertical space from the
+            // guide.
+            if UIDevice.current.userInterfaceIdiom == .phone,
+               nowPlaying.isMinimized,
+               let item = nowPlaying.playingItem {
                 MiniPlayerBar(item: item, nowPlaying: nowPlaying, dragOffset: $miniPlayerDragOffset)
             }
         }
@@ -2903,6 +3189,27 @@ struct MainTabView: View {
         // on-screen state honest. The key is a Hashable digest of
         // every signal; onChange fires each time any of them flip.
         .onChange(of: initialSyncKey) { _, _ in tryDismissInitialLoading() }
+        // v1.6.13 (GH #8): auto-resume the last-played channel into
+        // the corner mini-player as soon as the channel list is
+        // resolvable. Fires on the first non-empty `channels`
+        // transition; the `didAttemptAutoResume` gate makes it
+        // strictly once-per-session.
+        // v1.6.13: auto-resume hooks consolidated into a single
+        // ViewModifier so the body's modifier chain stays under
+        // Swift's type-checker budget on tvOS x86_64. The modifier
+        // wires three triggers — `.onAppear` (cold launch),
+        // `.onChange(of: channels.isEmpty)` (channels arrive after
+        // appear), and `.onChange(of: scenePhase)` (warm resume from
+        // suspension) — and forwards each to the corresponding
+        // method on this struct.
+        .modifier(AutoResumeWiring(
+            channelsAreEmpty: channelStore.channels.isEmpty,
+            scenePhase: scenePhase,
+            onResumeAttempt: { attemptAutoResume() },
+            onScenePhaseChange: { old, new in
+                handleAutoResumeScenePhase(from: old, to: new)
+            }
+        ))
         // Background-work heartbeat logger. When `isAnyBackgroundWork`
         // transitions false → true we start a 15s-tick Task that
         // prints the currently-active task labels. The user-visible
@@ -2981,130 +3288,10 @@ struct MainTabView: View {
         // This runs immediately on first appear so the Live TV tab is ready
         // before the user taps it.
         .task(id: channelServerKey) {
-            debugLog("🔶 MainTabView.task(channelServerKey): firing, servers=\(allServers.count)")
-            channelStore.refresh(servers: allServers)
-            debugLog("🔶 MainTabView.task(channelServerKey): refresh called")
-            // Flip `isEPGLoading` to true RIGHT NOW — before the
-            // wait-for-channels loop. Without this there's a race
-            // window: `channelStore.isLoading` flips false the
-            // instant channels finish hydrating (from
-            // SwiftData / the JSON API), but `isEPGLoading` doesn't
-            // flip true until the next line starts executing
-            // `loadAllEPG`. In that single-run-loop-tick gap,
-            // `initialSyncKey` reads `channelsDone=true` AND
-            // `epgDone=true` AND dismisses the ServerSyncView
-            // cover — before a single XMLTV byte has downloaded.
-            // The user sees Live TV with uncolored schedule rows
-            // because `seedEPGCache` hasn't run yet. Setting the
-            // flag pre-emptively closes the race; `loadAllEPG`'s
-            // `defer` still resets it when done.
-            if !allServers.isEmpty {
-                channelStore.isEPGLoading = true
-            }
-
-            // Kick off the SwiftData EPG-cache load IN PARALLEL with
-            // the channel network fetch. `loadFromCache` doesn't read
-            // the `channels` parameter — it only needs `serverID` +
-            // modelContext — so there's no dependency that requires
-            // serializing it behind the `while channelStore.isLoading`
-            // poll. Channel fetch is network-bound and EPG cache
-            // load is disk-bound (SwiftData on a background
-            // ModelContext), so they don't compete for the same
-            // resource on the client, and the server has no
-            // visibility into the local SwiftData work. On the
-            // torture playlist this overlap saves ~2-3s off the
-            // "Initial sync complete" dismiss. The
-            // `inFlightLoadTask` coalescer inside `loadFromCache`
-            // keeps EPGGuideView.task's later call from re-doing
-            // the work.
-            let activeServer = allServers.first(where: { $0.isActive }) ?? allServers.first
-            let activeServerID = activeServer?.id.uuidString ?? "unknown"
-            // Use a regular `Task` (inherits MainActor from this
-            // SwiftUI `.task` scope) rather than `async let` because
-            // `ModelContext` is non-Sendable and `async let` wants
-            // to hand it across an implicit concurrency boundary.
-            // The captured `modelContext` stays on MainActor through
-            // the entire chain — `loadFromCache` is @MainActor-
-            // isolated and dispatches its own off-main work via
-            // `Task.detached` using only the Sendable container.
-            let cacheLoadHandle = Task { () -> Bool in
-                await guideStore.loadFromCache(
-                    modelContext: modelContext,
-                    channels: [],  // unused inside loadFromCache (kept for API shape)
-                    serverID: activeServerID
-                )
-            }
-
-            // Wait for channels to finish loading.
-            while channelStore.isLoading {
-                try? await Task.sleep(for: .milliseconds(200))
-            }
-
-            // Collect the parallel cache-load verdict. If the
-            // channel fetch took longer than the SwiftData load
-            // (the typical case — network RTT vs. local disk) this
-            // await resolves immediately.
-            let cacheIsFresh = await cacheLoadHandle.value
-
-            if !channelStore.channels.isEmpty {
-                // Try to short-circuit the expensive `loadAllEPG`
-                // path by checking the SwiftData EPG cache first. On
-                // warm relaunches within the 24-hour freshness
-                // window, the cache already has everything the guide
-                // needs. Re-running `loadAllEPG` would fire
-                // `getEPGGrid` (68k+ programs, multi-MB JSON) AND an
-                // awaited `primeXMLTVFromURL` (98k+ programs, full
-                // XMLTV download + parse) — on a large Dispatcharr
-                // instance this easily adds 3-4 minutes to the cover
-                // dismissal despite the data already being on disk.
-                //
-                // Previously this check lived inside
-                // `EPGGuideView.task(id: channels.count)` and only
-                // gated `guideStore.fetchUpcoming`, which runs in
-                // parallel with `loadAllEPG` — so the cache hit was
-                // visible in the log ("skipping network fetch") but
-                // the cover still waited for `loadAllEPG` to
-                // complete. Running the check here instead gates the
-                // real offender.
-                //
-                // iPhone also benefits: it never mounts EPGGuideView,
-                // so its EPGCache could previously only be populated
-                // by `loadAllEPG`. We now explicitly populate it via
-                // `seedEPGCache` on the cache-hit path so List view
-                // card expansions don't trigger per-card network
-                // fetches.
-                //
-                // Nested short-circuiting contains — see the matching
-                // comment in EPGGuideView.swift. The previous
-                // `.values.flatMap { $0 }.contains` form allocated a
-                // full flattened Array of all cached programs on the
-                // main thread (97k+ entries on the torture playlist),
-                // costing a 2-3s hang. Double short-circuit eliminates
-                // both the allocation and the scan on a fresh cache.
-                let futureCutoff = Date().addingTimeInterval(1800)
-                let hasFuturePrograms = guideStore.programs.contains { _, progs in
-                    progs.contains { $0.end > futureCutoff }
-                }
-                if cacheIsFresh && hasFuturePrograms {
-                    debugLog("🔶 MainTabView.task(channelServerKey): EPG cache is fresh + has future programs — skipping loadAllEPG")
-                    // Seed EPGCache from GuideStore.programs so the
-                    // List view has per-channel EPG data. Awaited so
-                    // the cover doesn't dismiss before EPGCache has
-                    // the entries it needs.
-                    await guideStore.seedEPGCache(channels: channelStore.channels, server: activeServer)
-                    channelStore.isEPGLoading = false
-                } else {
-                    debugLog("🔶 MainTabView.task(channelServerKey): EPG cache stale or empty (fresh=\(cacheIsFresh), hasFuture=\(hasFuturePrograms)) — running loadAllEPG")
-                    await channelStore.loadAllEPG()
-                }
-            } else {
-                // Channel load failed (auth, server down). Reset
-                // the flag we pre-set above so the cover can
-                // dismiss via the error path — otherwise the user
-                // would be stuck staring at "Setting Up …" with
-                // no way out.
-                channelStore.isEPGLoading = false
-            }
+            // v1.6.13: closure body extracted to method to keep the
+            // body's modifier chain under Swift's type-checker budget
+            // on tvOS x86_64. Behavior unchanged.
+            await runChannelServerTaskBody()
         }
         // DVR reconcile at tab-bar level so the DVR tab lights up as
         // soon as a Dispatcharr server reports a recording — even if
@@ -3182,6 +3369,388 @@ struct MainTabView: View {
         }
         #endif
     }
+
+    /// v1.6.13: Channel/EPG load orchestrator. Pulled out of the
+    /// `.task(id: channelServerKey)` closure attached to body so the
+    /// body's expression complexity stays under Swift's type-checker
+    /// budget on tvOS x86_64. Behavior unchanged from the inline
+    /// closure that lived here in v1.6.12.
+    @MainActor
+    private func runChannelServerTaskBody() async {
+        debugLog("🔶 MainTabView.task(channelServerKey): firing, servers=\(allServers.count)")
+        channelStore.refresh(servers: allServers)
+        debugLog("🔶 MainTabView.task(channelServerKey): refresh called")
+        // Flip `isEPGLoading` to true RIGHT NOW — before the
+        // wait-for-channels loop. Without this there's a race
+        // window: `channelStore.isLoading` flips false the
+        // instant channels finish hydrating (from
+        // SwiftData / the JSON API), but `isEPGLoading` doesn't
+        // flip true until the next line starts executing
+        // `loadAllEPG`. In that single-run-loop-tick gap,
+        // `initialSyncKey` reads `channelsDone=true` AND
+        // `epgDone=true` AND dismisses the ServerSyncView
+        // cover — before a single XMLTV byte has downloaded.
+        // The user sees Live TV with uncolored schedule rows
+        // because `seedEPGCache` hasn't run yet. Setting the
+        // flag pre-emptively closes the race; `loadAllEPG`'s
+        // `defer` still resets it when done.
+        if !allServers.isEmpty {
+            channelStore.isEPGLoading = true
+        }
+
+        // Kick off the SwiftData EPG-cache load IN PARALLEL with
+        // the channel network fetch. `loadFromCache` doesn't read
+        // the `channels` parameter — it only needs `serverID` +
+        // modelContext — so there's no dependency that requires
+        // serializing it behind the `while channelStore.isLoading`
+        // poll. Channel fetch is network-bound and EPG cache
+        // load is disk-bound (SwiftData on a background
+        // ModelContext), so they don't compete for the same
+        // resource on the client, and the server has no
+        // visibility into the local SwiftData work. On the
+        // torture playlist this overlap saves ~2-3s off the
+        // "Initial sync complete" dismiss. The
+        // `inFlightLoadTask` coalescer inside `loadFromCache`
+        // keeps EPGGuideView.task's later call from re-doing
+        // the work.
+        let activeServer = allServers.first(where: { $0.isActive }) ?? allServers.first
+        let activeServerID = activeServer?.id.uuidString ?? "unknown"
+        // Use a regular `Task` (inherits MainActor from this
+        // SwiftUI `.task` scope) rather than `async let` because
+        // `ModelContext` is non-Sendable and `async let` wants
+        // to hand it across an implicit concurrency boundary.
+        // The captured `modelContext` stays on MainActor through
+        // the entire chain — `loadFromCache` is @MainActor-
+        // isolated and dispatches its own off-main work via
+        // `Task.detached` using only the Sendable container.
+        let cacheLoadHandle = Task { () -> Bool in
+            await guideStore.loadFromCache(
+                modelContext: modelContext,
+                channels: [],  // unused inside loadFromCache (kept for API shape)
+                serverID: activeServerID
+            )
+        }
+
+        // Wait for channels to finish loading.
+        while channelStore.isLoading {
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+
+        // Collect the parallel cache-load verdict. If the
+        // channel fetch took longer than the SwiftData load
+        // (the typical case — network RTT vs. local disk) this
+        // await resolves immediately.
+        let cacheIsFresh = await cacheLoadHandle.value
+
+        if !channelStore.channels.isEmpty {
+            // Try to short-circuit the expensive `loadAllEPG`
+            // path by checking the SwiftData EPG cache first. On
+            // warm relaunches within the 24-hour freshness
+            // window, the cache already has everything the guide
+            // needs. Re-running `loadAllEPG` would fire
+            // `getEPGGrid` (68k+ programs, multi-MB JSON) AND an
+            // awaited `primeXMLTVFromURL` (98k+ programs, full
+            // XMLTV download + parse) — on a large Dispatcharr
+            // instance this easily adds 3-4 minutes to the cover
+            // dismissal despite the data already being on disk.
+            //
+            // Previously this check lived inside
+            // `EPGGuideView.task(id: channels.count)` and only
+            // gated `guideStore.fetchUpcoming`, which runs in
+            // parallel with `loadAllEPG` — so the cache hit was
+            // visible in the log ("skipping network fetch") but
+            // the cover still waited for `loadAllEPG` to
+            // complete. Running the check here instead gates the
+            // real offender.
+            //
+            // iPhone also benefits: it never mounts EPGGuideView,
+            // so its EPGCache could previously only be populated
+            // by `loadAllEPG`. We now explicitly populate it via
+            // `seedEPGCache` on the cache-hit path so List view
+            // card expansions don't trigger per-card network
+            // fetches.
+            //
+            // Nested short-circuiting contains — see the matching
+            // comment in EPGGuideView.swift. The previous
+            // `.values.flatMap { $0 }.contains` form allocated a
+            // full flattened Array of all cached programs on the
+            // main thread (97k+ entries on the torture playlist),
+            // costing a 2-3s hang. Double short-circuit eliminates
+            // both the allocation and the scan on a fresh cache.
+            let futureCutoff = Date().addingTimeInterval(1800)
+            let hasFuturePrograms = guideStore.programs.contains { _, progs in
+                progs.contains { $0.end > futureCutoff }
+            }
+            if cacheIsFresh && hasFuturePrograms {
+                debugLog("🔶 MainTabView.task(channelServerKey): EPG cache is fresh + has future programs — skipping loadAllEPG")
+                // Seed EPGCache from GuideStore.programs so the
+                // List view has per-channel EPG data. Awaited so
+                // the cover doesn't dismiss before EPGCache has
+                // the entries it needs.
+                await guideStore.seedEPGCache(channels: channelStore.channels, server: activeServer)
+                channelStore.isEPGLoading = false
+            } else {
+                debugLog("🔶 MainTabView.task(channelServerKey): EPG cache stale or empty (fresh=\(cacheIsFresh), hasFuture=\(hasFuturePrograms)) — running loadAllEPG")
+                await channelStore.loadAllEPG()
+            }
+        } else {
+            // Channel load failed (auth, server down). Reset
+            // the flag we pre-set above so the cover can
+            // dismiss via the error path — otherwise the user
+            // would be stuck staring at "Setting Up …" with
+            // no way out.
+            channelStore.isEPGLoading = false
+        }
+    }
+
+    #if os(iOS)
+    // MARK: - iOS Player Wrappers (v1.6.13)
+    //
+    // Pulled out of `body` for the same reason as `handleMenuPress`
+    // below: the body's modifier chain + the new iPad corner-mini
+    // branches together exceed Swift's type-checker budget on tvOS
+    // x86_64 ("unable to type-check this expression in reasonable
+    // time"). Each helper has its own scope so the budget resets.
+    //
+    // Both helpers are iOS-only — `MagnificationGesture` and
+    // `UIDevice` aren't available on tvOS, and the tvOS branches in
+    // the body are expressed inline with their own corner-mini
+    // geometry.
+
+    /// Unified-playback multiview wrapper. iPad shrinks to a top-
+    /// right corner mini at N=1 mirroring tvOS UX; iPhone keeps the
+    /// full-screen MultiviewContainer (the bottom MiniPlayerBar
+    /// continues to handle minimize/expand on phone form factor).
+    @ViewBuilder
+    private var iOSMultiviewWrapper: some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let isSoleStream = multiviewStore.tiles.count == 1
+            let minimized = isSoleStream && nowPlaying.isMinimized
+            GeometryReader { geo in
+                let miniW: CGFloat = 400
+                let miniH: CGFloat = 225
+                ZStack(alignment: .topTrailing) {
+                    MultiviewContainerView()
+                        .frame(
+                            width: minimized ? miniW : geo.size.width,
+                            height: minimized ? miniH : geo.size.height
+                        )
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: minimized ? 12 : 0,
+                            style: .continuous
+                        ))
+                        .shadow(
+                            color: minimized ? .black.opacity(0.25) : .clear,
+                            radius: 8, y: 3
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(Color.accentPrimary.opacity(0.5), lineWidth: 1)
+                                .opacity(minimized ? 1 : 0)
+                                .frame(
+                                    width: minimized ? miniW : 0,
+                                    height: minimized ? miniH : 0
+                                )
+                                .allowsHitTesting(false)
+                        )
+                        .disabled(minimized)
+                        .allowsHitTesting(!minimized)
+                        .padding(.trailing, minimized ? 24 : 0)
+                        .padding(.top, minimized ? 24 : 0)
+                        // v1.6.13.x: Capture the mini's ACTUAL
+                        // bottom edge in global screen coords and
+                        // publish it to NowPlayingManager so
+                        // ChannelListView can position the chip row
+                        // immediately below the real on-screen
+                        // bottom — not below the assumed
+                        // `topPadding + height` value, which is
+                        // wrong on iPad iOS 18 because
+                        // `.ignoresSafeArea()` doesn't penetrate
+                        // the TabView's top tab-bar chrome,
+                        // shifting the mini's effective frame down
+                        // by an unknown amount.
+                        .onGeometryChange(for: CGFloat.self) { proxy in
+                            proxy.frame(in: .global).maxY
+                        } action: { newValue in
+                            if minimized {
+                                nowPlaying.miniPlayerBottomAbs = newValue
+                            } else if nowPlaying.miniPlayerBottomAbs != 0 {
+                                // Mini went away (expanded back to full-screen
+                                // or stopped) — clear the published value so
+                                // chip row returns to its natural top.
+                                nowPlaying.miniPlayerBottomAbs = 0
+                            }
+                        }
+                        .simultaneousGesture(
+                            MagnificationGesture()
+                                .onEnded { scale in
+                                    guard isSoleStream,
+                                          !nowPlaying.isMinimized,
+                                          scale < 0.85 else { return }
+                                    withAnimation(.spring(response: 0.35)) {
+                                        nowPlaying.minimize()
+                                    }
+                                }
+                        )
+
+                    // v1.6.13.x: tap-to-expand overlay. When the
+                    // mini is in minimized state, MultiviewContainer
+                    // is `.disabled(minimized)` to keep tvOS's focus
+                    // engine off it — but that also blocks iPad
+                    // tap-to-expand. This sibling overlay sits at
+                    // exactly the mini's frame and catches taps,
+                    // calling `nowPlaying.expand()` to bring back
+                    // full-screen playback. Only present when
+                    // minimized so it doesn't intercept full-screen
+                    // taps. Sibling-in-ZStack so the
+                    // `.disabled(minimized)` on MultiviewContainer
+                    // can't reach this view.
+                    if minimized {
+                        Color.clear
+                            .frame(width: miniW, height: miniH)
+                            .padding(.trailing, 24)
+                            .padding(.top, 24)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                withAnimation(.spring(response: 0.35)) {
+                                    nowPlaying.expand()
+                                }
+                            }
+                    }
+                }
+                .frame(
+                    width: geo.size.width,
+                    height: geo.size.height,
+                    alignment: minimized ? .topTrailing : .center
+                )
+                .animation(.spring(response: 0.35), value: minimized)
+            }
+            .ignoresSafeArea()
+            .zIndex(2)
+        } else {
+            MultiviewContainerView()
+                .ignoresSafeArea()
+                .zIndex(2)
+        }
+    }
+
+    /// Legacy single-stream player wrapper. iPad uses the corner-
+    /// mini geometry (no swipe-down — replaced by pinch-to-zoom-out
+    /// per v1.6.13 spec); iPhone keeps today's offset-driven swipe-
+    /// down minimize behavior unchanged.
+    @ViewBuilder
+    private func iOSLegacyPlayerWrapper(item: ChannelDisplayItem) -> some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let minimized = nowPlaying.isMinimized
+            GeometryReader { geo in
+                let miniW: CGFloat = 400
+                let miniH: CGFloat = 225
+                ZStack(alignment: .topTrailing) {
+                    PlayerView(
+                        urls: item.streamURLs,
+                        title: item.name,
+                        headers: nowPlaying.playingHeaders,
+                        isLive: nowPlaying.isLive,
+                        subtitle: item.currentProgram,
+                        subtitleStart: item.currentProgramStart,
+                        subtitleEnd: item.currentProgramEnd,
+                        artworkURL: item.logoURL,
+                        onMinimize: { withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() } },
+                        onClose: { nowPlaying.stop() }
+                    )
+                    .id(item.id)
+                    .frame(
+                        width: minimized ? miniW : geo.size.width,
+                        height: minimized ? miniH : geo.size.height
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: minimized ? 12 : 0, style: .continuous))
+                    .shadow(color: minimized ? .black.opacity(0.25) : .clear, radius: 8, y: 3)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(Color.accentPrimary.opacity(0.5), lineWidth: 1)
+                            .opacity(minimized ? 1 : 0)
+                            .frame(
+                                width: minimized ? miniW : 0,
+                                height: minimized ? miniH : 0
+                            )
+                            .allowsHitTesting(false)
+                    )
+                    .allowsHitTesting(!minimized)
+                    .padding(.trailing, minimized ? 24 : 0)
+                    .padding(.top, minimized ? 24 : 0)
+                    // v1.6.13.x: same dynamic mini-bottom capture
+                    // as the unified-path wrapper above. See that
+                    // comment for rationale.
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.frame(in: .global).maxY
+                    } action: { newValue in
+                        if minimized {
+                            nowPlaying.miniPlayerBottomAbs = newValue
+                        } else if nowPlaying.miniPlayerBottomAbs != 0 {
+                            nowPlaying.miniPlayerBottomAbs = 0
+                        }
+                    }
+                    .simultaneousGesture(
+                        MagnificationGesture()
+                            .onEnded { scale in
+                                guard !nowPlaying.isMinimized,
+                                      scale < 0.85 else { return }
+                                withAnimation(.spring(response: 0.35)) {
+                                    nowPlaying.minimize()
+                                }
+                            }
+                    )
+
+                    // v1.6.13.x: tap-to-expand overlay (legacy
+                    // path). Same rationale as the unified-path
+                    // wrapper above.
+                    if minimized {
+                        Color.clear
+                            .frame(width: miniW, height: miniH)
+                            .padding(.trailing, 24)
+                            .padding(.top, 24)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                withAnimation(.spring(response: 0.35)) {
+                                    nowPlaying.expand()
+                                }
+                            }
+                    }
+                }
+                .frame(
+                    width: geo.size.width,
+                    height: geo.size.height,
+                    alignment: minimized ? .topTrailing : .center
+                )
+                .animation(.spring(response: 0.35), value: minimized)
+            }
+            .ignoresSafeArea()
+            .zIndex(2)
+        } else {
+            GeometryReader { geo in
+                let containerH = geo.size.height
+                PlayerView(
+                    urls: item.streamURLs,
+                    title: item.name,
+                    headers: nowPlaying.playingHeaders,
+                    isLive: nowPlaying.isLive,
+                    subtitle: item.currentProgram,
+                    subtitleStart: item.currentProgramStart,
+                    subtitleEnd: item.currentProgramEnd,
+                    artworkURL: item.logoURL,
+                    onMinimize: { nowPlaying.minimize() },
+                    onClose: { nowPlaying.stop() }
+                )
+                .id(item.id)
+                .ignoresSafeArea()
+                .offset(y: nowPlaying.isMinimized ? max(0, containerH + miniPlayerDragOffset) : 0)
+                .opacity(nowPlaying.isMinimized ? min(1, -miniPlayerDragOffset / 300) : 1)
+                .allowsHitTesting(!nowPlaying.isMinimized)
+            }
+            .ignoresSafeArea()
+        }
+    }
+    #endif
 
     #if os(tvOS)
     /// Apple TV Menu-button handler. Pulled out of `.onExitCommand`

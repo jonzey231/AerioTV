@@ -62,12 +62,42 @@ struct ChannelListView: View {
     /// Collapse the always-visible nav-bar search drawer into an
     /// on-demand pull-down. Only honored when compact chrome is ON.
     @AppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
+    /// v1.6.13.x: Drives whether the iPad nav-bar search drawer is
+    /// shown. Default `false` (hidden) — a magnifier toolbar button
+    /// reveals it on demand. iPhone keeps the always-visible classic
+    /// drawer and ignores this flag (its `.searchable` modifier
+    /// doesn't bind to it). Reclaims ~50pt of vertical space, which
+    /// matters now that the corner mini-player on iPad pushes the
+    /// channel-group filter row down.
+    @State private var iPadSearchPresented: Bool = false
     /// True only on actual iPhones AND when the Developer flag is on.
     /// iPad / Mac Catalyst always get the classic layout.
     private var isCompactChrome: Bool {
         compactChromeiPhone && UIDevice.current.userInterfaceIdiom == .phone
     }
     #endif
+
+    /// v1.6.13.x: Captured absolute (`.global`-coordinate-space) top
+    /// edge of the chip-row container, used by
+    /// `miniPlayerTopInset(naturalTopAbsolute:)` to position the
+    /// chip row dynamically below the corner mini regardless of
+    /// device chrome (iPad Mini vs iPad Pro vs Mac Catalyst all
+    /// expose different status-bar / nav-bar / TabView heights).
+    ///
+    /// We use `proxy.frame(in: .global).minY` rather than
+    /// `safeAreaInsets.top` because a view inside a NavigationStack
+    /// content area sees `safeAreaInsets.top == 0` (the chrome was
+    /// already consumed by the nav bar / tab bar above it) — that
+    /// returns the wrong value and the padding push overshoots by
+    /// the chrome height. The frame's absolute Y is the true
+    /// position we need to compare against the mini-player's
+    /// absolute bottom edge.
+    ///
+    /// Populated via a `GeometryReader`-backed `.background` +
+    /// `PreferenceKey` so the read doesn't disturb layout. Lives
+    /// OUTSIDE the iOS-only `#if` because the tvOS Guide branch
+    /// also references it for the same dynamic-push behavior.
+    @State private var capturedNaturalTop: CGFloat = 0
 
     /// Cross-platform accessor used by the shared body content. Always
     /// returns `false` on tvOS (compact chrome is iPhone-only) so the
@@ -78,6 +108,52 @@ struct ChannelListView: View {
         #else
         return false
         #endif
+    }
+
+    /// v1.6.13: When the corner mini-player is active, the channel-
+    /// group filter row otherwise sits behind the mini's top-right
+    /// corner and gets visually clipped. Push the filter row (and
+    /// everything below it in the VStack) down so the pills are
+    /// fully reachable.
+    ///
+    /// **Dynamic geometry (v1.6.13.x):** The mini player is
+    /// positioned inside HomeView's outer GeometryReader which
+    /// `.ignoresSafeArea()`, so its bottom edge in absolute (screen)
+    /// coords is a fixed `(top-padding + height)` regardless of any
+    /// chrome above (status bar, top-tab bar, nav bar). The chip
+    /// row's natural top in screen coords, however, IS that chrome
+    /// height — and varies by device (iPad Mini, iPad Pro, Mac
+    /// Catalyst, etc). We read the chip row's natural top via a
+    /// `GeometryReader` reading `proxy.frame(in: .global).minY` and
+    /// compute push as `(mini_bottom_abs + gap) - natural_top_abs`,
+    /// so the chip row always lands ~12pt below the mini regardless
+    /// of device size.
+    ///
+    /// Returns 0 on iPhone (uses bottom MiniPlayerBar instead) or
+    /// when no measurement has been published yet — both of those
+    /// cases mean "no push, leave chip row at its natural top".
+    ///
+    /// v1.6.13.x: now driven by the ACTUAL mini-player bottom edge
+    /// captured in HomeView's `iOSMultiviewWrapper` /
+    /// `iOSLegacyPlayerWrapper` and republished via
+    /// `NowPlayingManager.miniPlayerBottomAbs`. Earlier attempts
+    /// computed mini bottom from constants (`24 + 225`) and the
+    /// math was off on iPad iOS 18 — the TabView's top tab bar
+    /// shifts the mini's effective frame down by an unknown
+    /// amount that `.ignoresSafeArea()` doesn't penetrate. Using
+    /// the geometry-observer reading guarantees the chip row
+    /// lands exactly `gap` points below whatever the rendered
+    /// mini's bottom edge actually is, on any device + size class.
+    private func miniPlayerTopInset(naturalTopAbsolute: CGFloat) -> CGFloat {
+        guard nowPlaying.isActive, nowPlaying.isMinimized else { return 0 }
+        guard naturalTopAbsolute > 0 else { return 0 }
+        #if os(iOS)
+        guard UIDevice.current.userInterfaceIdiom == .pad else { return 0 }
+        #endif
+        let miniBottomAbs = nowPlaying.miniPlayerBottomAbs
+        guard miniBottomAbs > 0 else { return 0 }  // not measured yet
+        let gap: CGFloat = 12
+        return max(0, miniBottomAbs + gap - naturalTopAbsolute)
     }
     #if os(tvOS)
     @State private var showSearchField = false
@@ -149,6 +225,8 @@ struct ChannelListView: View {
                     }
                     #if os(iOS)
                     // Guide view toggle — iPad only (iPhone always uses list)
+                    // (iPad search button moved into the chip row, see
+                    // groupFilterBar's iPad branch.)
                     if UIDevice.current.userInterfaceIdiom == .pad {
                         ToolbarItem(placement: .navigationBarTrailing) {
                             Button {
@@ -189,16 +267,23 @@ struct ChannelListView: View {
                     #endif
                 }
                 #if os(iOS)
-                // When compact chrome + "Hide Search" is on, drop to
-                // `.automatic` so the search drawer only appears when the
-                // user pulls down — reclaims the ~50 pt the always-visible
-                // drawer otherwise eats on iPhone landscape. Classic layout
-                // keeps `.always` so today's users see no change.
-                .searchable(text: $searchText,
-                            placement: .navigationBarDrawer(
-                                displayMode: (isCompactChrome && hideSearchBarCompact) ? .automatic : .always
-                            ),
-                            prompt: "Search channels")
+                // v1.6.13.x: iPhone keeps the classic always-visible
+                // nav-bar drawer search field (collapsing under
+                // compact chrome). iPad now omits `.searchable`
+                // entirely — the search UX moved to a button +
+                // inline TextField inside the chip row (see
+                // `groupFilterBar`'s iPad branch). The earlier
+                // attempt to use `.searchable(isPresented:)` to
+                // hide the drawer didn't actually hide it on iOS 18
+                // (placement-driven visibility wins over the binding
+                // for `.navigationBarDrawer`), so we drop the modifier
+                // on iPad rather than fight the system.
+                .modifier(
+                    PerIdiomSearchableModifier(
+                        text: $searchText,
+                        iPhoneDisplayMode: (isCompactChrome && hideSearchBarCompact) ? .automatic : .always
+                    )
+                )
                 #endif
                 .onChange(of: searchText)       { _, _ in filterChannels() }
                 .onChange(of: selectedGroup)    { _, _ in filterChannels() }
@@ -397,28 +482,53 @@ struct ChannelListView: View {
                 actionTitle: "Refresh"
             )
         } else if showGuideView {
+            // v1.6.13.x: Outer VStack with a 0-height GHOST CAPTURE
+            // POINT as its first child, then the actual padded VStack
+            // as its second child. The ghost's position equals
+            // bodyContent's natural top (= chip row's natural top
+            // before any push). Padding the inner VStack stretches
+            // the outer VStack DOWNWARD but doesn't move the ghost,
+            // so the captured value is rock-stable. This is what
+            // every prior attempt was trying to achieve via various
+            // marker placements; this position is the one SwiftUI
+            // actually honors.
             VStack(spacing: 0) {
-                // Compact-chrome honors the user's hide-filter preference even
-                // in the iPad Guide layout (iPad itself is gated by the flag,
-                // so this only activates on actual iPhones in landscape).
-                if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
-                    && !compactChromeHidesFilterBar {
-                    groupFilterBar
-                        .padding(.vertical, 10)
-                        #if os(tvOS)
-                        .focusSection()
-                        #endif
-                }
-                EPGGuideView(
-                    channels: filteredChannels,
-                    servers: Array(servers),
-                    onSelectChannel: { item in
-                        startPlayback(item)
+                Color.clear
+                    .frame(height: 0)
+                    .allowsHitTesting(false)
+                    .onGeometryChange(for: CGFloat.self) { proxy in
+                        proxy.frame(in: .global).minY
+                    } action: { newValue in
+                        capturedNaturalTop = newValue
                     }
-                )
-                #if os(tvOS)
-                .focusSection()
-                #endif
+
+                VStack(spacing: 0) {
+                    // Compact-chrome honors the user's hide-filter preference even
+                    // in the iPad Guide layout (iPad itself is gated by the flag,
+                    // so this only activates on actual iPhones in landscape).
+                    if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
+                        && !compactChromeHidesFilterBar {
+                        groupFilterBar
+                            .padding(.vertical, 10)
+                            #if os(tvOS)
+                            .focusSection()
+                            #endif
+                    }
+                    EPGGuideView(
+                        channels: filteredChannels,
+                        servers: Array(servers),
+                        onSelectChannel: { item in
+                            startPlayback(item)
+                        }
+                    )
+                    #if os(tvOS)
+                    .focusSection()
+                    #endif
+                }
+                .padding(.top, miniPlayerTopInset(naturalTopAbsolute: capturedNaturalTop))
+                .animation(.spring(response: 0.35), value: capturedNaturalTop)
+                .animation(.spring(response: 0.35), value: nowPlaying.isMinimized)
+                .animation(.spring(response: 0.35), value: nowPlaying.miniPlayerBottomAbs)
             }
         } else {
             channelListContent
@@ -576,6 +686,15 @@ struct ChannelListView: View {
             }
             #endif
         }
+        // v1.6.13: same mini push-down as the Guide branch above.
+        // iOS-only in practice (tvOS uses Guide). Natural top is
+        // captured by the sibling marker in `mainContent`.
+        #if os(iOS)
+        .padding(.top, miniPlayerTopInset(naturalTopAbsolute: capturedNaturalTop))
+        .animation(.spring(response: 0.35), value: capturedNaturalTop)
+        .animation(.spring(response: 0.35), value: nowPlaying.isMinimized)
+        .animation(.spring(response: 0.35), value: nowPlaying.miniPlayerBottomAbs)
+        #endif
     }
 
     // MARK: - Group Filter Bar
@@ -634,6 +753,50 @@ struct ChannelListView: View {
                         action: { showManageGroups = true },
                         hiddenCount: hiddenGroups.count
                     )
+                }
+                // v1.6.13.x: iPad search button + inline TextField,
+                // placed immediately to the right of Manage Groups
+                // per user spec. Replaces the previous nav-bar
+                // search drawer that wouldn't actually hide. The
+                // TextField only renders when the toggle is on, so
+                // the chip row keeps its original height by default.
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    Button {
+                        withAnimation(.spring(response: 0.25)) {
+                            iPadSearchPresented.toggle()
+                            if !iPadSearchPresented { searchText = "" }
+                        }
+                    } label: {
+                        Image(systemName: iPadSearchPresented ? "magnifyingglass.circle.fill" : "magnifyingglass")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(iPadSearchPresented ? .appBackground : .textSecondary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(
+                                Capsule()
+                                    .fill(iPadSearchPresented ? Color.accentPrimary : Color.elevatedBackground)
+                            )
+                    }
+                    .accessibilityLabel(iPadSearchPresented ? "Hide Search" : "Search Channels")
+
+                    if iPadSearchPresented {
+                        TextField("Search channels", text: $searchText)
+                            .textFieldStyle(.plain)
+                            .font(.labelMedium)
+                            .foregroundColor(.textPrimary)
+                            .frame(width: 240)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(
+                                Capsule()
+                                    .fill(Color.elevatedBackground)
+                                    .overlay(
+                                        Capsule()
+                                            .stroke(Color.accentPrimary.opacity(0.3), lineWidth: 1)
+                                    )
+                            )
+                            .submitLabel(.search)
+                    }
                 }
                 #else
                 ManageGroupsButton(
@@ -2520,3 +2683,59 @@ private struct CachedLogoImage: View {
         }
     }
 }
+
+/// v1.6.13.x: Captures the absolute Y of a view's frame top
+/// (`proxy.frame(in: .global).minY`) from a `GeometryReader`
+/// placed in a `.background` so the chip-row's mini-player
+/// push-down inset can be computed dynamically (no per-device
+/// hard-coded padding). The reduce keeps the latest value rather
+/// than summing siblings — only one reader is in play at a time
+/// within any given branch of the body.
+///
+/// We capture the absolute frame Y rather than `safeAreaInsets.top`
+/// because the chip-row VStack lives inside a NavigationStack
+/// content area — `safeAreaInsets.top` returns 0 in that context
+/// (the chrome is consumed by the NavigationStack itself), but
+/// the absolute frame Y correctly reports the screen-space
+/// position to compare against the mini's `.ignoresSafeArea()`-
+/// rooted bottom edge.
+private struct NaturalTopPreference: PreferenceKey {
+    // `static let` (not `var`) so Swift 6 strict-concurrency
+    // doesn't flag the protocol-required `defaultValue` requirement
+    // as nonisolated mutable shared state. The protocol asks for a
+    // gettable property; an immutable `let` satisfies it.
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+#if os(iOS)
+/// v1.6.13.x: Per-idiom `.searchable` modifier so iPad gets the
+/// new button-revealed drawer (`isPresented:` binding) while iPhone
+/// keeps the classic always-visible drawer (no binding) — the
+/// system needs the binding form to programmatically hide the
+/// drawer, but iPhone's pull-down-to-reveal idiom doesn't apply
+/// when a binding is present, so the two surfaces use distinct
+/// modifier overloads.
+private struct PerIdiomSearchableModifier: ViewModifier {
+    @Binding var text: String
+    let iPhoneDisplayMode: SearchFieldPlacement.NavigationBarDrawerDisplayMode
+
+    func body(content: Content) -> some View {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            // No-op on iPad — search is handled inline in the chip
+            // row via a magnifier button + TextField, which gives
+            // us a clean show/hide that the system's `.searchable`
+            // placement wouldn't honor.
+            content
+        } else {
+            content.searchable(
+                text: $text,
+                placement: .navigationBarDrawer(displayMode: iPhoneDisplayMode),
+                prompt: "Search channels"
+            )
+        }
+    }
+}
+#endif

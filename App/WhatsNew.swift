@@ -57,16 +57,17 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
-            version: "1.6.12",
-            title: "What's new in 1.6.12",
+            version: "1.6.13",
+            title: "What's new in 1.6.13",
             bullets: [
-                "VOD details now show cast, director, backdrop & runtime (Dispatcharr API only)",
-                "Trailer + View on TMDB links on movies and series (Dispatcharr API only)",
-                "Multiview picker: filter by group, tap to deselect",
-                "New \"Clear iCloud Data\" + per-playlist VOD toggle",
-                "Apple TV: Back/Menu button works as expected now"
+                "Added 'Skip Loading Screen' toggle in Settings > Appearance > App Behaviors",
+                "Added 'Resume Last Channel' toggle in Settings > Appearance > App Behaviors",
+                "Persistent search field has been changed to a button on iPad in Guide view to reduce wasted space",
+                "Pinch-to-zoom-out has been added to iPad. This shrinks the currently playing channel to a miniplayer",
+                "When present, the miniplayer no longer covers channel group names",
+                "Significantly reduced app launch time by better utilizing existing persistent cache"
             ],
-            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.12")
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.13")
         )
     ]
 

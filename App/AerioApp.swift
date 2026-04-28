@@ -921,6 +921,7 @@ final class TVLANProbe: ObservableObject {
 // its true value, and the splash is not replayed. No persistence needed.
 struct AppEntryView: View {
     @State private var splashFinished = false
+    @Environment(\.modelContext) private var modelContext
 
     var body: some View {
         ZStack {
@@ -934,6 +935,46 @@ struct AppEntryView: View {
         }
         .animation(.easeIn(duration: 0.3), value: splashFinished)
         .preferredColorScheme(.dark)
+        .onAppear {
+            kickoffSplashTimePreload()
+        }
+    }
+
+    /// v1.6.13.x: Pre-warm the channel + EPG cache load DURING the
+    /// splash animation, instead of waiting until MainTabView's
+    /// `.task(channelServerKey)` fires (which doesn't run until the
+    /// 2.8s splash dismisses + RootView mounts + MainTabView lays
+    /// out). With "Skip Loading Screen" enabled, the user sees an
+    /// empty Live TV tab for that whole window unless we overlap
+    /// the network fetch with the splash.
+    ///
+    /// `ChannelStore.refresh` is now idempotent (see HomeView.swift
+    /// — the guard short-circuits when a load is already in flight
+    /// for the same server), so MainTabView's later call is a no-op
+    /// and the channel fetch we kicked off here gets to keep running
+    /// without being cancelled + re-issued.
+    @MainActor
+    private func kickoffSplashTimePreload() {
+        let descriptor = FetchDescriptor<ServerConnection>()
+        guard let servers = try? modelContext.fetch(descriptor),
+              !servers.isEmpty else { return }
+        ChannelStore.shared.refresh(servers: servers)
+
+        // Also kick off the SwiftData EPG cache load so the guide
+        // can render immediately on first paint with cached programs.
+        // `loadFromCache` is `inFlightLoadTask`-coalesced inside
+        // GuideStore so MainTabView's later call won't duplicate.
+        // GuideStore.loadFromCache logs its own completion line.
+        let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+        let activeServerID = activeServer?.id.uuidString ?? "unknown"
+        let context = modelContext
+        Task {
+            _ = await GuideStore.shared.loadFromCache(
+                modelContext: context,
+                channels: [],
+                serverID: activeServerID
+            )
+        }
     }
 }
 
