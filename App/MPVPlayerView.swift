@@ -1236,12 +1236,40 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //       few frames of background rendering — acceptable
             //       edge case; auto-PiP is the happy path on every
             //       PiP-capable iPhone.
-            if pipAutoEligible {
+            //
+            //       v1.6.17: gate on multiview tile count. If the user
+            //       is in multi-tile multiview (count > 1), iOS gets
+            //       confused by the multiple AVSampleBufferDisplayLayers
+            //       in the hierarchy and doesn't reliably engage PiP
+            //       for any of them — and the per-tile vid-stays-alive
+            //       path leaks GPU + audio for the audio tile while
+            //       the other 8 tiles disable cleanly, leaving a
+            //       lopsided "audio plays but tiles black on return"
+            //       repro that's difficult to recover from. With the
+            //       gate, multi-tile multiview falls through to the
+            //       default pause-on-background branch — every tile
+            //       suspends symmetrically, audio stops cleanly, and
+            //       foregrounding restores everything via the
+            //       symmetric vid=auto + unpause path.
+            //       Multiview auto-PiP remains a known gap; the v1.6.15
+            //       plan acknowledged this would require a multi-tile-
+            //       aware PiP setup that's still future work.
+            // MultiviewStore is @MainActor; this @objc handler is nonisolated
+            // but UIApplication.didEnterBackgroundNotification posts on main,
+            // so assumeIsolated is safe.
+            let multiviewTileCount = MainActor.assumeIsolated { MultiviewStore.shared.tiles.count }
+            let multiviewActive = multiviewTileCount > 1
+            if pipAutoEligible, !multiviewActive {
                 #if DEBUG
                 print("[MPV-BG] Background: auto-PiP eligible, keeping vid live")
                 #endif
                 return
             }
+            #if DEBUG
+            if pipAutoEligible, multiviewActive {
+                print("[MPV-BG] Background: pipAutoEligible=true but multiview tiles=\(multiviewTileCount) — falling through to default pause-on-background path")
+            }
+            #endif
 
             // (2) Audio-Only mode. Kill video, keep audio + Dynamic Island /
             //     lockscreen via NowPlayingBridge.
@@ -1293,6 +1321,43 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // logic below uses `autoPausedOnBackground` (separate
             // flag) to decide whether mpv needs to be unpaused.
             isInBackground = false
+
+            #if os(iOS)
+            // v1.6.17: recover the AVSampleBufferDisplayLayer FIRST,
+            // before flipping vid=auto and unpausing mpv. iOS suspends
+            // the sample-buffer pipeline on background entry; the
+            // renderer can land in `.failed` with "Operation
+            // Interrupted" and never self-recover. Frames enqueued
+            // onto a failed renderer are silently dropped, leaving
+            // the view black even though mpv is producing frames.
+            //
+            // Pre-1.6.17 the recovery was scheduled on a `Task
+            // @MainActor` (async) and the unpause was queued on
+            // `mpvQueue` (separate serial queue, also async). On
+            // multi-tile multiview foregrounding, those two async
+            // hops raced — mpv's first post-unpause frame could
+            // arrive at the renderer BEFORE flush() ran, get
+            // dropped, and the tile would stay black for the whole
+            // session.
+            //
+            // willEnterForeground notifications post on main, so
+            // we're already on the main thread here. Wrap the layer
+            // touch in `MainActor.assumeIsolated` to satisfy strict
+            // concurrency without an async hop, and flush
+            // synchronously so the renderer is healthy by the time
+            // the unpause queue's first frame lands.
+            MainActor.assumeIsolated {
+                if let layer = self.viewController?.sampleBufferLayer,
+                   layer.sampleBufferRenderer.status == .failed {
+                    #if DEBUG
+                    let err = layer.sampleBufferRenderer.error?.localizedDescription ?? "?"
+                    print("[MPV-BG] Foreground: sampleBufferRenderer FAILED (\(err)) — flushing to recover")
+                    #endif
+                    layer.sampleBufferRenderer.flush()
+                }
+            }
+            #endif
+
             // Re-enable video if the background handler disabled it.
             let vid = mpv_get_property_string(mpv, "vid")
             let vidStr = vid.flatMap { String(cString: $0) }
@@ -1305,32 +1370,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 mpv_set_property_string(mpv, "vid", "auto")
             }
             mpv_free(vid)
-
-            #if os(iOS)
-            // Recover the AVSampleBufferDisplayLayer's sampleBufferRenderer
-            // if iOS put it into a `.failed` state during background. When
-            // the user backgrounds the app in Audio-Only mode without PiP
-            // engaged, iOS interrupts the sample-buffer pipeline
-            // ("Operation Interrupted" in the renderer's `.error`) and the
-            // layer NEVER self-recovers — even though `vid=auto` re-enables
-            // mpv's video output, frames enqueued onto a failed renderer
-            // are silently dropped and the view stays black. `flush()` on
-            // the renderer resets the decoder state and restores
-            // `isReadyForMoreMediaData`, letting the next enqueued frame
-            // paint. Only run on main (layer is a CA object); run on every
-            // foreground transition because the bookkeeping cost is a
-            // single status read + no-op when the layer is already OK.
-            Task { @MainActor [weak self] in
-                guard let self, let layer = self.viewController?.sampleBufferLayer else { return }
-                if layer.sampleBufferRenderer.status == .failed {
-                    #if DEBUG
-                    let err = layer.sampleBufferRenderer.error?.localizedDescription ?? "?"
-                    print("[MPV-BG] Foreground: sampleBufferRenderer FAILED (\(err)) — flushing to recover")
-                    #endif
-                    layer.sampleBufferRenderer.flush()
-                }
-            }
-            #endif
 
             // Undo the defensive pause applied in branch (4), but only if
             // we applied it — never clobber a user-initiated pause. Goes

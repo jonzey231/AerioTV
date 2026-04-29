@@ -2198,6 +2198,16 @@ struct DispatcharrVODCustomProperties: Decodable {
     /// per-episode-specific value.
     let crew: String?
 
+    /// v1.6.17 — per-item category id (string in JSON, integer-shaped
+    /// in practice, e.g. "1136"). The Series model has no top-level
+    /// `category` field in Dispatcharr's schema; the only place a
+    /// VOD item's category appears in the list response is here, in
+    /// `custom_properties.category_id`. We use it to group items
+    /// client-side after a single unfiltered fetch — see the rationale
+    /// in `VODStore.loadMovies` / `loadSeries` for why we abandoned
+    /// the documented `?category=` query parameter.
+    let categoryID: String?
+
     enum CodingKeys: String, CodingKey {
         case youtubeTrailer = "youtube_trailer"
         case trailer
@@ -2215,6 +2225,7 @@ struct DispatcharrVODCustomProperties: Decodable {
         case language
         case movieImage     = "movie_image"
         case crew
+        case categoryID     = "category_id"
     }
 
     init(from decoder: Decoder) throws {
@@ -2259,6 +2270,15 @@ struct DispatcharrVODCustomProperties: Decodable {
         language     = try? c.decode(String.self, forKey: .language)
         movieImage   = try? c.decode(String.self, forKey: .movieImage)
         crew         = try? c.decode(String.self, forKey: .crew)
+        // category_id can come through as String ("1136") or Int (1136)
+        // depending on the Dispatcharr version; normalise to String.
+        if let s = try? c.decode(String.self, forKey: .categoryID) {
+            categoryID = s
+        } else if let i = try? c.decode(Int.self, forKey: .categoryID) {
+            categoryID = String(i)
+        } else {
+            categoryID = nil
+        }
     }
 }
 

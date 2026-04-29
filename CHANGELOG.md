@@ -1,5 +1,102 @@
 # Changelog
 
+## v1.6.17 — 2026-04-29
+
+### Fixed
+
+- **Multiview no longer leaves all tiles black after backgrounding
+  with 9 streams active.** Repro: open a single channel, add 8 more
+  for a 3×3 grid, switch to another app, switch back. Pre-1.6.17 the
+  audio kept playing but every video tile rendered black until the
+  user manually re-tapped each one. Two compounding causes:
+  (1) `didEnterBackground` was returning early at the
+  `pipAutoEligible` check on the audio tile — but iOS won't actually
+  engage Picture-in-Picture for any of the multi-tile
+  `AVSampleBufferDisplayLayer` instances because there are too many
+  to disambiguate. So vid stayed alive on one tile and was disabled
+  on the others, leaving them in an asymmetric state on return.
+  (2) `AVSampleBufferDisplayLayer.sampleBufferRenderer` came back
+  from background in `.failed` status; without an explicit `flush()`,
+  mpv's frame writes were silently dropped. Fix: the
+  `pipAutoEligible` early-return now gates on
+  `MultiviewStore.tiles.count > 1`, so multi-tile multiview falls
+  through to the symmetric pause-on-background path; and
+  `willEnterForeground` calls `sampleBufferRenderer.flush()`
+  synchronously before re-enabling video so the renderer is healthy
+  by the time mpv starts pumping frames. Single-stream auto-PiP path
+  is unchanged. Multiview-aware auto-PiP itself is still a known
+  gap — out of scope here.
+
+- **VOD On Demand tab now appears for users on stricter Dispatcharr
+  builds.** Two compounding bugs that produced "VOD detected in logs
+  but never shows up in the app":
+
+  1. The `.task(id: vodServerKey)` in `MainTabView` only re-fires
+     when `vodServerKey` changes, and `vodServerKey` hashed only
+     `id|baseURL|isActive` — it did NOT include `vodEnabled` or
+     `supportsVOD`. A user toggling Fetch VOD from this Playlist on
+     would update SwiftData, but the task wouldn't refire and the
+     VOD store stayed empty until app relaunch. Fixed by including
+     both flags in `vodServerKey`.
+
+  2. Pre-1.6.17 `loadMovies`/`loadSeries` iterated each enabled
+     category and called `/api/vod/{movies,series}/?category=<name>`
+     in a loop, deduping by uuid. That worked on lenient Dispatcharr
+     instances where `?category=` was effectively ignored — every
+     request returned the FULL library and the dedup made it look
+     like per-category isolation. On stricter Dispatcharr builds
+     (verified against
+     `dispatcharr-freynas.frey-home.synology.me` on 2026-04-29 with
+     a four-test curl matrix), the same query returns `count: 0`
+     because the filter expects something the categories endpoint
+     never tells us about. The Series and Movie OpenAPI schemas
+     have NO top-level `category` field — the only place a VOD
+     item's category appears in the list response is
+     `custom_properties.category_id`, and even that's only populated
+     for series. v1.6.17 switches to a single unfiltered paginated
+     fetch and groups items client-side: series tag from
+     `custom_properties.category_id`; movies (where Dispatcharr
+     doesn't surface category attribution on the list endpoint)
+     fall back to the first enabled category, matching the v1.6.16
+     UX exactly while no longer returning empty on strict builds.
+
+### Added
+
+- **Granular iCloud Sync Categories.** Settings → iCloud Sync now
+  exposes a new "Sync Categories" sub-page where you can opt out of
+  syncing individual data types (Playlists & Servers, VOD Watch
+  Progress, Reminders, App Preferences, Credentials) instead of the
+  prior all-or-nothing master toggle. Each row also has a "Delete
+  from iCloud" button that scrubs that category's KVS payload (or
+  iCloud Keychain entries, for Credentials) without touching the
+  rest. Local data on the device is preserved — only the cloud copy
+  is removed. The toggle states themselves still ride iCloud sync,
+  so flipping a category off on iPhone propagates to iPad. Master
+  iCloud Sync toggle still gates everything; per-category toggles
+  default ON so existing users see no change on upgrade.
+
+- **Reorder Playlists in Settings.** The Playlists section now
+  supports user-defined ordering. iOS / iPadOS: tap "Edit" in the
+  navigation bar (appears when 2+ playlists exist) for drag-to-
+  reorder handles. tvOS: long-press a playlist for the context menu
+  → Move Up / Move Down. The order writes into the existing
+  `sortOrder` model field, persists in SwiftData, and rides iCloud
+  sync — reorder once on iPhone and your iPad / Apple TV pick up the
+  same arrangement. Tiebreaker on `createdAt` keeps the legacy
+  insertion-order behaviour stable for users who never reorder.
+
+### Changed
+
+- **Multiview on iPhone respects the notch and Dynamic Island.**
+  Pre-1.6.17, multiview tiles extended edge-to-edge regardless of
+  device, which slid video frames behind the notch / Dynamic Island
+  / landscape speaker cutout — eating tile content the user couldn't
+  recover. Now iPhone multiview renders the tile grid INSIDE the
+  safe area, with the black background filling the corners around
+  the cutouts. iPad keeps the legacy edge-to-edge look (its
+  safe-area insets are zero in normal full-screen mode). tvOS is
+  unchanged.
+
 ## v1.6.16 — 2026-04-28
 
 ### Fixed

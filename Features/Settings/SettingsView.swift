@@ -25,7 +25,19 @@ struct SettingsView: View {
     /// the observer fixes the cascade by forcing re-render on every
     /// theme mutation.
     @ObservedObject private var theme = ThemeManager.shared
-    @Query private var servers: [ServerConnection]
+    // v1.6.17: explicit sort order for the Playlists list. `sortOrder`
+    // existed since the original model and rides iCloud sync (see
+    // SyncManager line 795), but until now the @Query returned
+    // SwiftData's insertion order — leaving the user with no way to
+    // reorder. With the sort applied here, drag-to-reorder on iOS/iPad
+    // and up/down arrows on tvOS write into `sortOrder` and the list
+    // re-renders immediately. Tiebreaker on `createdAt` keeps legacy
+    // servers (all `sortOrder == 0`) deterministic by add date.
+    @Query(sort: [
+        SortDescriptor(\ServerConnection.sortOrder, order: .forward),
+        SortDescriptor(\ServerConnection.createdAt, order: .forward)
+    ])
+    private var servers: [ServerConnection]
     @Environment(\.modelContext) private var modelContext
     @State private var showAddServer = false
     @State private var serverToDelete: ServerConnection? = nil
@@ -182,6 +194,13 @@ struct SettingsView: View {
                                     }
                                 }
                             }
+                            #if os(iOS)
+                            // v1.6.17 — drag-to-reorder for iOS/iPadOS.
+                            // Wired into `moveServers` which renumbers
+                            // every visible server's `sortOrder` so the
+                            // result rides iCloud sync as a single push.
+                            .onMove(perform: moveServers)
+                            #endif
                         }
 
                         Button {
@@ -223,6 +242,17 @@ struct SettingsView: View {
                                     .font(.labelSmall)
                                     .foregroundColor(.textTertiary)
                                     #endif
+                                if servers.count > 1 {
+                                    #if os(iOS)
+                                    Label("Tap Edit to reorder", systemImage: "arrow.up.arrow.down")
+                                        .font(.labelSmall)
+                                        .foregroundColor(.textTertiary)
+                                    #else
+                                    Label("Use ▲ ▼ to reorder", systemImage: "arrow.up.arrow.down")
+                                        .font(.system(size: 20, weight: .regular))
+                                        .foregroundColor(.textSecondary)
+                                    #endif
+                                }
                             }
                             .padding(.top, 4)
                         }
@@ -280,6 +310,11 @@ struct SettingsView: View {
                                    let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
                                     SyncManager.shared.pushWatchProgress(all, immediate: true)
                                 }
+                                // v1.6.17 — also push reminders so toggling
+                                // a category back on can be followed by a
+                                // one-tap "push everything" rather than
+                                // waiting for the next reminder edit.
+                                SyncManager.shared.pushReminders(immediate: true)
                             } label: {
                                 SettingsRow(icon: "arrow.triangle.2.circlepath.icloud",
                                             iconColor: .accentPrimary,
@@ -294,6 +329,19 @@ struct SettingsView: View {
                             .buttonStyle(.plain)
                             #endif
                         }
+
+                        // v1.6.17 — granular per-category sync controls.
+                        // Stays accessible even when iCloudSyncEnabled is off
+                        // so the Delete actions work for stale-state cleanup.
+                        NavigationLink(destination: SyncCategoriesSettingsView()) {
+                            SettingsRow(icon: "slider.horizontal.3",
+                                        iconColor: .accentPrimary,
+                                        title: "Sync Categories",
+                                        subtitle: "Choose what syncs across your devices")
+                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
 
                         // v1.6.12: destructive action — wipe everything
                         // this app has parked in iCloud. Always offered
@@ -459,6 +507,20 @@ struct SettingsView: View {
             #if os(iOS)
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.large)
+            // v1.6.17 — drag-to-reorder for the Playlists list. The
+            // EditButton toggles List editMode; while active the user
+            // gets reorder handles on every server row. NavigationLinks
+            // are intentionally disabled by SwiftUI in edit mode (the
+            // user taps "Done" first to navigate). Only surfaces with
+            // 2+ servers since reordering one item is meaningless.
+            .toolbar {
+                if servers.count > 1 {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        EditButton()
+                            .tint(theme.accent)
+                    }
+                }
+            }
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
             #if os(tvOS)
@@ -468,6 +530,7 @@ struct SettingsView: View {
                 case "multiview":       MultiviewSettingsView()
                 case "network":         NetworkSettingsView()
                 case "dvr-settings": DVRSettingsView()
+                case "sync-categories": SyncCategoriesSettingsView()
                 case "developer":  DeveloperSettingsView()
                 case "edit-server":
                     if let server = serverToEdit {
@@ -629,6 +692,43 @@ struct SettingsView: View {
         SyncManager.shared.pushServers(servers)
     }
 
+    // MARK: - Reorder helpers (v1.6.17)
+
+    /// iOS/iPadOS drag-to-reorder hook. Renumbers every server's
+    /// `sortOrder` to match the new visual order and pushes the
+    /// updated list to iCloud as a single batch.
+    private func moveServers(from source: IndexSet, to destination: Int) {
+        var working = Array(servers)
+        working.move(fromOffsets: source, toOffset: destination)
+        renumberAndPersist(working)
+    }
+
+    /// tvOS up/down button hook. Moves the server at `index` by
+    /// `delta` positions (-1 = up, +1 = down) and persists.
+    private func moveServer(from index: Int, by delta: Int) {
+        let target = index + delta
+        guard target >= 0, target < servers.count, target != index else { return }
+        var working = Array(servers)
+        let item = working.remove(at: index)
+        working.insert(item, at: target)
+        renumberAndPersist(working)
+    }
+
+    /// Walks the new visual order and writes monotonic `sortOrder`
+    /// values (10, 20, 30, …) so future inserts have room to slot
+    /// in between without renumbering everyone. Saves SwiftData and
+    /// pushes the updated list to iCloud.
+    private func renumberAndPersist(_ ordered: [ServerConnection]) {
+        for (i, server) in ordered.enumerated() {
+            let newOrder = (i + 1) * 10
+            if server.sortOrder != newOrder {
+                server.sortOrder = newOrder
+            }
+        }
+        try? modelContext.save()
+        SyncManager.shared.pushServers(ordered)
+    }
+
     // MARK: - tvOS Settings Layout
 
     #if os(tvOS)
@@ -695,6 +795,28 @@ struct SettingsView: View {
                                         }
                                     }
                                     .disabled(server.isActive)
+
+                                    // v1.6.17 — Move Up / Move Down in
+                                    // the tvOS context menu. The Siri
+                                    // Remote can't drag rows, and the
+                                    // existing context-menu pattern is
+                                    // where users already go for Edit /
+                                    // Delete, so reorder lives there too.
+                                    let idx = servers.firstIndex(where: { $0.id == server.id }) ?? 0
+                                    if idx > 0 {
+                                        Button {
+                                            moveServer(from: idx, by: -1)
+                                        } label: {
+                                            Label("Move Up", systemImage: "arrow.up")
+                                        }
+                                    }
+                                    if idx < servers.count - 1 {
+                                        Button {
+                                            moveServer(from: idx, by: 1)
+                                        } label: {
+                                            Label("Move Down", systemImage: "arrow.down")
+                                        }
+                                    }
                                 }
                                 Button { serverToEdit = server } label: {
                                     Label("Edit", systemImage: "pencil")
@@ -773,7 +895,21 @@ struct SettingsView: View {
                                let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
                                 SyncManager.shared.pushWatchProgress(all, immediate: true)
                             }
+                            // v1.6.17 — also push reminders so toggling
+                            // a category back on can be followed by a
+                            // one-tap "push everything."
+                            SyncManager.shared.pushReminders(immediate: true)
                         }
+                    }
+                    // v1.6.17 — granular per-category sync controls.
+                    // Stays accessible even when iCloudSyncEnabled is off
+                    // so the per-category Delete actions work for stale-
+                    // state cleanup before re-enabling sync.
+                    TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild()) {
+                        SettingsRow(icon: "slider.horizontal.3",
+                                    iconColor: .accentPrimary,
+                                    title: "Sync Categories",
+                                    subtitle: "Choose what syncs across your devices")
                     }
                     // v1.6.12: destructive — wipe iCloud-side state.
                     // Always offered (even when Sync is currently off)

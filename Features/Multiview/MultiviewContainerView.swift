@@ -180,7 +180,24 @@ struct MultiviewContainerView: View {
                     // tiles already sit flush against each other; the
                     // container now pushes that flush layout all the
                     // way to the screen edges too.
-                    .ignoresSafeArea()
+                    //
+                    // v1.6.17 — iPhone-only safe-area carve-out.
+                    // Without this, the tiles slide under the notch /
+                    // Dynamic Island in portrait and under the speaker
+                    // cutout on the leading edge in landscape, eating
+                    // into video content the user can't recover. iPad
+                    // keeps the edge-to-edge behavior because its
+                    // safe-area insets are zero in normal-window
+                    // mode anyway. tvOS doesn't have a notch.
+                    //
+                    // The black background behind the grid still
+                    // covers edge-to-edge (see ZStack outer
+                    // `Color.black.ignoresSafeArea()`), so what the
+                    // user sees during multiview on a notched iPhone
+                    // is "tiles render inside the safe boundary,
+                    // black fills the corners around them" — same
+                    // behaviour as iOS PiP or MapKit.
+                    .modifier(MultiviewSafeAreaModifier())
                     // v1.6.12 (GH #11 follow-up): disable the tile
                     // Button(s) while the TVOptions panel is open so
                     // D-pad-UP from the panel's first row can't
@@ -1524,6 +1541,33 @@ final class MultiviewChromeState: ObservableObject {
                 self.focusIndicatorVisible = false
             }
         }
+    }
+}
+
+// MARK: - Multiview Safe Area Modifier (v1.6.17)
+//
+// Carves out the iPhone notch / Dynamic Island / landscape speaker
+// cutout so multiview tiles render INSIDE the safe area instead of
+// sliding behind the hardware. iPad and tvOS get the legacy
+// edge-to-edge behaviour: iPad's safe-area insets are zero in
+// normal full-screen mode, and tvOS doesn't have a notch to dodge.
+private struct MultiviewSafeAreaModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        if UIDevice.current.userInterfaceIdiom == .phone {
+            // Phone — respect the safe area on every edge so the
+            // notch / Dynamic Island / home indicator / landscape
+            // speaker carve-out never overlaps a tile's video frame.
+            content
+        } else {
+            // iPad — preserve the legacy "tiles bleed to the
+            // hardware edge" multiview look.
+            content.ignoresSafeArea()
+        }
+        #else
+        // tvOS — no notch, edge-to-edge is the right thing.
+        content.ignoresSafeArea()
+        #endif
     }
 }
 

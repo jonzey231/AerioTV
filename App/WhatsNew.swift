@@ -57,6 +57,18 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.6.17",
+            title: "What's new in 1.6.17",
+            bullets: [
+                "Multiview no longer leaves video tiles black after switching apps with 9 streams active — every tile now resumes cleanly when you return",
+                "On Demand tab now reliably shows your movies and TV shows on a wider range of Dispatcharr server configurations — fixed both the per-playlist VOD-toggle relaunch bug AND a stricter-Dispatcharr-build category-filter bug that was leaving the tab empty (Dispatcharr API playlists only)",
+                "New Sync Categories sub-page in Settings → iCloud Sync lets you opt out of syncing specific data types — Playlists, Watch Progress, Reminders, App Preferences, or Credentials — with a per-category Delete option that scrubs only that data from iCloud",
+                "Reorder your Playlists in Settings: drag-to-reorder on iPhone/iPad (tap Edit), Move Up/Move Down via long-press on Apple TV. Order syncs across all your devices via iCloud",
+                "Multiview on iPhone now respects the notch and Dynamic Island — video tiles stay inside the safe area instead of sliding behind the cutout"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.17")
+        ),
+        WhatsNewRelease(
             version: "1.6.16",
             title: "What's new in 1.6.16",
             bullets: [

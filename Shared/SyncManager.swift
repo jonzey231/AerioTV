@@ -353,6 +353,69 @@ final class SyncManager: ObservableObject {
         debugLog("🔵 SyncManager.clearAllICloudData: cleared \(keychainCleared) iCloud Keychain entries, reset migration flags")
     }
 
+    // MARK: - Scoped Delete (v1.6.17)
+
+    /// Wipes a single category's iCloud payload without touching the rest.
+    /// Used by the per-row "Delete from iCloud" buttons in the granular
+    /// Sync Categories Settings sub-section. Local data on this device is
+    /// preserved — only the cloud copy is removed.
+    @MainActor
+    func clearCloudCategory(_ category: SyncCategory, localServers: [ServerConnection]) {
+        debugLog("🔵 SyncManager.clearCloudCategory: starting category=\(category.rawValue)")
+
+        switch category {
+        case .servers:
+            pushDebounce?.cancel(); pushDebounce = nil
+            let key = kvsKey
+            DispatchQueue.main.async {
+                NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
+                NSUbiquitousKeyValueStore.default.synchronize()
+                debugLog("🔵 SyncManager.clearCloudCategory: cleared servers KVS")
+            }
+        case .watchProgress:
+            watchProgressPushDebounce?.cancel(); watchProgressPushDebounce = nil
+            let key = watchProgressKVSKey
+            DispatchQueue.main.async {
+                NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
+                NSUbiquitousKeyValueStore.default.synchronize()
+                debugLog("🔵 SyncManager.clearCloudCategory: cleared watch progress KVS")
+            }
+        case .reminders:
+            reminderPushDebounce?.cancel(); reminderPushDebounce = nil
+            let key = reminderKVSKey
+            DispatchQueue.main.async {
+                NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
+                NSUbiquitousKeyValueStore.default.synchronize()
+                debugLog("🔵 SyncManager.clearCloudCategory: cleared reminders KVS")
+            }
+        case .preferences:
+            prefPushDebounce?.cancel(); prefPushDebounce = nil
+            let key = prefKVSKey
+            DispatchQueue.main.async {
+                NSUbiquitousKeyValueStore.default.removeObject(forKey: key)
+                NSUbiquitousKeyValueStore.default.synchronize()
+                debugLog("🔵 SyncManager.clearCloudCategory: cleared preferences KVS")
+            }
+        case .credentials:
+            // Mirrors the credentials-only portion of clearAllICloudData.
+            var keychainCleared = 0
+            for server in localServers {
+                let id = server.id.uuidString
+                if KeychainHelper.delete("password_\(id)", synchronizable: true) {
+                    keychainCleared += 1
+                }
+                if KeychainHelper.delete("apiKey_\(id)", synchronizable: true) {
+                    keychainCleared += 1
+                }
+            }
+            // Reset migration flags so re-enabling credential sync later
+            // can re-migrate cleanly (matches clearAllICloudData).
+            UserDefaults.standard.removeObject(forKey: "kvsToKeychainMigrationDoneV1")
+            UserDefaults.standard.removeObject(forKey: "kvsCredentialPurgeDoneV1")
+            debugLog("🔵 SyncManager.clearCloudCategory: cleared \(keychainCleared) iCloud Keychain entries")
+        }
+    }
+
     private func handleImportResult(servers: [[String: Any]]?, prefs: [String: Any]?,
                                      watchProgress: [[String: Any]]? = nil,
                                      reminders: [[String: Any]]? = nil) {
@@ -402,6 +465,11 @@ final class SyncManager: ObservableObject {
     func pushServers(_ servers: [ServerConnection], immediate: Bool = false) {
         guard isSyncEnabled, !isMerging else {
             debugLog("🔵 SyncManager.pushServers: skipped (enabled=\(isSyncEnabled), merging=\(isMerging))")
+            return
+        }
+        // v1.6.17 — granular per-category gate.
+        guard SyncCategory.servers.isEnabled else {
+            debugLog("🔵 SyncManager.pushServers: category disabled by user")
             return
         }
 
@@ -478,6 +546,23 @@ final class SyncManager: ObservableObject {
     private func buildPreferencesDict() -> [String: Any] {
         var dict: [String: Any] = [:]
         let ud = UserDefaults.standard
+
+        // v1.6.17 — the per-category sync toggles ALWAYS round-trip through
+        // the prefs lane so a fresh device picks them up on its first import,
+        // and so a flip on iPhone reaches iPad even if "App Preferences" sync
+        // is otherwise off. The remaining prefs are gated by the user's
+        // "App Preferences" category toggle below.
+        for k in SyncCategory.allDefaultsKeys {
+            if ud.object(forKey: k) != nil { dict[k] = ud.bool(forKey: k) }
+        }
+
+        // Granular gate: when "App Preferences" sync is off, push only the
+        // toggle subset above and bail. The other devices' caches stay
+        // whatever the user set them to locally.
+        guard SyncCategory.preferences.isEnabled else {
+            return dict
+        }
+
         for k in syncStringKeys      { if let v = ud.string(forKey: k)      { dict[k] = v } }
         for k in syncBoolKeys        { if ud.object(forKey: k) != nil       { dict[k] = ud.bool(forKey: k) } }
         for k in syncDoubleKeys      { if ud.object(forKey: k) != nil       { dict[k] = ud.double(forKey: k) } }
@@ -564,6 +649,13 @@ final class SyncManager: ObservableObject {
             debugLog("🔵 SyncManager.doMerge: no server data")
             return
         }
+        // v1.6.17 — granular per-category gate. When the user opts out of
+        // server sync on this device, ignore remote server payloads (their
+        // local server list stays authoritative for this device).
+        guard SyncCategory.servers.isEnabled else {
+            debugLog("🔵 SyncManager.doMerge: category disabled by user, ignoring remote payload")
+            return
+        }
 
         isMerging = true
         defer { isMerging = false }
@@ -588,6 +680,23 @@ final class SyncManager: ObservableObject {
         defer { isMerging = false }
 
         let ud = UserDefaults.standard
+
+        // v1.6.17 — the per-category sync toggle states ALWAYS apply, even
+        // when the user has "App Preferences" sync turned off. Otherwise a
+        // user who disabled "App Preferences" sync on iPhone could never
+        // re-enable it from iPad (the iPhone would never receive the flip).
+        for k in SyncCategory.allDefaultsKeys {
+            if let v = dict[k] as? Bool { ud.set(v, forKey: k) }
+        }
+
+        // Granular gate: when "App Preferences" sync is off on this device,
+        // bail before applying the rest of the prefs payload. Local prefs
+        // stay authoritative; the toggle flips above still propagated.
+        guard SyncCategory.preferences.isEnabled else {
+            debugLog("🔵 SyncManager.doApplyPreferences: category disabled by user, applied toggle subset only")
+            return
+        }
+
         for k in syncStringKeys      { if let v = dict[k] as? String   { ud.set(v, forKey: k) } }
         for k in syncBoolKeys        { if let v = dict[k] as? Bool     { ud.set(v, forKey: k) } }
         for k in syncDoubleKeys      { if let v = dict[k] as? Double   { ud.set(v, forKey: k) } }
@@ -627,6 +736,16 @@ final class SyncManager: ObservableObject {
 
     func syncCredentials(for server: ServerConnection) {
         guard isSyncEnabled else { return }
+        // v1.6.17 — when the user opts out of credential sync, leave any
+        // existing keychain entries on this device alone (don't migrate
+        // them to synchronizable). Note: existing already-synchronizable
+        // entries from prior versions can still appear on other devices
+        // until "Delete Credentials from iCloud" is invoked from
+        // Settings — this only affects what we migrate going forward.
+        guard SyncCategory.credentials.isEnabled else {
+            debugLog("🔵 SyncManager.syncCredentials: category disabled by user")
+            return
+        }
         let id = server.id.uuidString
         KeychainHelper.migrateToSynchronizable(key: "password_\(id)")
         KeychainHelper.migrateToSynchronizable(key: "apiKey_\(id)")
@@ -634,6 +753,14 @@ final class SyncManager: ObservableObject {
 
     func saveCredentialsSynced(for server: ServerConnection) {
         guard isSyncEnabled else {
+            server.saveCredentialsToKeychain()
+            return
+        }
+        // v1.6.17 — granular per-category gate. Fall back to local-only
+        // keychain saves so a credential change doesn't leak across
+        // devices when the user opted out.
+        guard SyncCategory.credentials.isEnabled else {
+            debugLog("🔵 SyncManager.saveCredentialsSynced: category disabled by user, saving locally")
             server.saveCredentialsToKeychain()
             return
         }
@@ -797,6 +924,11 @@ final class SyncManager: ObservableObject {
     /// Push all local watch progress entries to KVS (debounced).
     func pushWatchProgress(_ entries: [WatchProgress], immediate: Bool = false) {
         guard isSyncEnabled, !isMerging else { return }
+        // v1.6.17 — granular per-category gate.
+        guard SyncCategory.watchProgress.isEnabled else {
+            debugLog("🔵 SyncManager.pushWatchProgress: category disabled by user")
+            return
+        }
 
         let payload = entries.map { serializeWatchProgress($0) }
         nonisolated(unsafe) let capturedPayload = payload
@@ -840,6 +972,12 @@ final class SyncManager: ObservableObject {
     private func mergeRemoteWatchProgress(_ remoteEntries: [[String: Any]]?) {
         guard let remoteEntries, !remoteEntries.isEmpty else { return }
         guard let context = WatchProgressManager.modelContext else { return }
+        // v1.6.17 — granular per-category gate. Local watch progress
+        // stays authoritative on this device when the user opts out.
+        guard SyncCategory.watchProgress.isEnabled else {
+            debugLog("🔵 SyncManager.mergeRemoteWatchProgress: category disabled by user, ignoring \(remoteEntries.count) remote entries")
+            return
+        }
 
         isMerging = true
         defer { isMerging = false }
@@ -919,6 +1057,11 @@ final class SyncManager: ObservableObject {
     /// Push local reminders to iCloud KVS (debounced).
     func pushReminders(immediate: Bool = false) {
         guard isSyncEnabled, !isMerging else { return }
+        // v1.6.17 — granular per-category gate.
+        guard SyncCategory.reminders.isEnabled else {
+            debugLog("🔵 SyncManager.pushReminders: category disabled by user")
+            return
+        }
 
         let reminders = ReminderManager.shared.syncableReminders
         var payload: [[String: Any]] = []
@@ -953,6 +1096,11 @@ final class SyncManager: ObservableObject {
     /// Merge remote reminders from iCloud into local ReminderManager.
     private func mergeRemoteReminders(_ remoteEntries: [[String: Any]]?) {
         guard let remoteEntries else { return }
+        // v1.6.17 — granular per-category gate.
+        guard SyncCategory.reminders.isEnabled else {
+            debugLog("🔵 SyncManager.mergeRemoteReminders: category disabled by user, ignoring \(remoteEntries.count) remote entries")
+            return
+        }
 
         isMerging = true
         defer { isMerging = false }
