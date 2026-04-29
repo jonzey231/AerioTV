@@ -1,5 +1,109 @@
 # Changelog
 
+## v1.6.16 — 2026-04-28
+
+### Fixed
+
+- **VOD series episodes now load reliably on the first open.** A
+  series detail's `.task` was being cancelled mid-fetch by ancestor
+  re-renders (iCloud sync churn rebuilding the server list,
+  back-out-and-reopen, VODStore refilling categories) — the
+  cancellation propagated into the URLSession data task and aborted
+  the episode-list request as `NSURLErrorCancelled (-999)`. The
+  workaround pre-1.6.16 was to back out and re-open the series.
+  Fix: spawn the fetch via `Task.detached` so it survives view
+  cancellation, and cache successful results in a static dict
+  (`SeriesDetailCache`) so subsequent opens hit the cache instantly.
+  Bonus: the cache also de-dupes concurrent same-id fetches via an
+  `inFlightTasks` map, so a double-tap can't kick two parallel
+  requests.
+
+- **Provider-info now runs before episodes.** Pre-1.6.16 ran
+  `/api/vod/series/{id}/provider-info/` and
+  `/api/vod/series/{id}/episodes/` concurrently via `async let`.
+  The OpenAPI schema documents provider-info as
+  *"Get detailed series information, refreshing from provider if
+  needed"* — i.e. it's the lazy-scrape trigger. Concurrent
+  execution raced the scrape, so for series Dispatcharr hadn't
+  yet pulled episode metadata for, the episodes endpoint returned
+  `[]` while provider-info was still populating the table. Now
+  provider-info is awaited first; episodes runs second against the
+  populated data.
+
+- **Episode plot now displays correctly.** Decoder was looking for
+  `plot` / `overview` keys, but the actual Dispatcharr response
+  uses `description`. Pre-1.6.16 every episode row showed an
+  empty plot. `description` is now the primary preference;
+  `plot` / `overview` remain as fallbacks for forked builds.
+
+- **Drop redundant `Authorization: ApiKey` header on Dispatcharr
+  API calls.** Pre-1.6.16 sent both `X-API-Key` and `Authorization`
+  "for compatibility." In practice the dual headers switched
+  Dispatcharr from unrestricted API-key auth to a user-scoped
+  session whose visibility was filtered to a subset of m3u_accounts.
+  Some series had providers in accounts the session couldn't see,
+  so the episodes endpoint returned `count=0` for them. Curl with
+  X-API-Key alone returned the full list. Fixed by sending only
+  `X-API-Key`. Verified no regression on `/api/vod/series/`,
+  `/api/vod/movies/`, `/api/vod/series/{id}/episodes/`, or
+  `/api/channels/channels/`.
+
+- **Episode-list page fetch is now parallel.** `getVODSeriesEpisodes`
+  walks pages by reading `count` from the first page and fanning
+  out pages 2..N concurrently via `withThrowingTaskGroup`. For a
+  1000+ episode series like One Piece on a typical LAN this drops
+  from sequential ~2 minutes (10+ round-trips) to ~5–10 seconds.
+  Sequential `next`-walk fallback retained for forks that strip
+  `count`.
+
+### Added
+
+- **Episode rows now show rich metadata.** A new strip between the
+  title and the plot summary displays *Duration · Air Date · ★
+  Rating*. Each piece is independently optional — empty fields are
+  skipped without leaving dangling separators. Mirrors what
+  Dispatcharr's web UI shows in its episode row Duration / Date
+  columns plus the per-episode TMDB rating.
+
+- **Episode artwork.** `VODEpisode.posterURL` now reads from
+  `custom_properties.movie_image` (the per-episode TMDB still
+  URL Dispatcharr stores). Falls back to the parent series's poster
+  when an episode has no per-episode metadata, so series with
+  sparse Dispatcharr scrape data (Kroll Show, etc.) render the
+  series poster across every row instead of blank rectangles.
+
+- **Episode rich fields plumbed through.** `VODEpisode` gained
+  `airDate`, `rating`, `tmdbID`, `imdbID`, and `crew` (per-episode
+  director from `custom_properties.crew`). Computed `displayRating`
+  and `displayAirDate` helpers match the existing VODMovie /
+  VODSeries vocabulary. Static `DateFormatter` caching avoids
+  per-row allocation on long episode lists.
+
+- **`MovieDetailCache` parity with `SeriesDetailCache`.** Movie
+  detail (provider-info enrichment) now uses the same
+  `Task.detached` + cache + de-dupe pattern as series. Movies
+  open instantly on second visit. Empty-result detection uses the
+  no-op-fallback equality check (`result != existing`) so a
+  transient enrichment failure doesn't poison the cache.
+
+- **Empty-result safety.** Neither cache stores a result with no
+  meaningful data — `SeriesDetailCache` requires non-empty seasons,
+  `MovieDetailCache` requires the result to differ from the slim
+  preview. A bad fetch never locks the user out of getting real
+  data on the next open.
+
+### Improved
+
+- **Diagnostic logs for VOD load path.** New
+  `[VOD-Series] fetchStart / fetchOK / fetchNIL / fetchFAIL`,
+  `[VOD-Series-Cache] HIT / JOIN in-flight / MISS / STORED /
+  NOT storing`, `[VOD-Episodes] start / page=N OK|FAIL /
+  parallel fan-out / DONE`, and `[VOD-Movie-Cache]` lines trace
+  every step of the fetch. DEBUG-only — compiled out of release
+  builds. Combined with the existing `[REMOTE]`/`[MV-*]` log
+  vocabulary, the next time anything misbehaves we can pinpoint
+  the failure mode from the Xcode console alone.
+
 ## v1.6.15 — 2026-04-28
 
 ### Added

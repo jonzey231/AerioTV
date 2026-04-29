@@ -1,6 +1,189 @@
 import SwiftUI
 import SwiftData
 
+// MARK: - Series Detail Cache (v1.6.16.x)
+//
+// In-memory cache for VODSeries detail (seasons + episodes). Lives
+// here because VODDetailView is the sole consumer; promoting it to a
+// shared store wasn't worth the indirection.
+//
+// Why this exists: VODDetailView's `.task { await loadDetail() }` is
+// auto-cancelled when the view leaves the hierarchy — fine in
+// principle. In practice, three things cancel the task before the
+// fetch completes:
+//   1. iCloud sync arriving mid-fetch and bumping `servers.count`,
+//      which re-renders RootView and rebuilds the navigation stack.
+//   2. The user backing out and re-opening (impatience: the parallel
+//      page fan-out for a 1000-episode series is still seconds of
+//      work even on LAN).
+//   3. The parent VOD list refilling per-category, mutating the
+//      VODDisplayItem upstream.
+// Any of those propagates a structured-concurrency cancellation into
+// the URLSession data task, which surfaces as
+// `NSURLErrorCancelled (-999)` and tanks the entire fetch. Pre-cache
+// the user lived through this as "first open never loads, second
+// open works in 5s" — the second-attempt working was Dispatcharr's
+// server-side cache being warm from the cancelled-but-partially-
+// completed first attempt.
+//
+// Solution: spawn the fetch via `Task.detached` so it survives view
+// cancellation, then store the result in this static cache. The
+// next time any VODDetailView mounts for the same seriesID, the
+// cache hit returns instantly. `inFlightTasks` de-dupes concurrent
+// requests for the same id (e.g., user double-taps the series row).
+@MainActor
+private enum SeriesDetailCache {
+    /// Successfully-fetched series details, keyed by series id.
+    /// Lives for the app's lifetime — fine because the data is
+    /// small (a series of N episodes is ~N small structs) and
+    /// there's no scenario where stale episode data is meaningfully
+    /// wrong (the user can pull-to-refresh or restart the app).
+    static var entries: [String: VODSeries] = [:]
+
+    /// In-flight detached fetches, keyed by series id. A second
+    /// caller for the same id awaits the first's result instead of
+    /// kicking off a parallel duplicate fetch.
+    static var inFlightTasks: [String: Task<VODSeries?, Never>] = [:]
+
+    /// Returns cached series detail if present; otherwise spawns a
+    /// detached fetch (or joins one already in flight), waits for
+    /// it, caches + returns the result. The detached fetch is NOT
+    /// cancelled when the view that called this method goes away —
+    /// it runs to completion in the background and populates the
+    /// cache regardless. The view's await on the result MAY return
+    /// early if the view's own `.task` is cancelled, but the cache
+    /// will be populated by the time the next view mount checks.
+    static func loadIfNeeded(seriesID: String,
+                              server: ServerSnapshot,
+                              existing: VODSeries?) async -> VODSeries? {
+        if let cached = entries[seriesID] {
+            #if DEBUG
+            debugLog("[VOD-Series-Cache] HIT id=\(seriesID) seasons=\(cached.seasons.count) episodes=\(cached.seasons.reduce(0) { $0 + $1.episodes.count })")
+            #endif
+            return cached
+        }
+        if let existingTask = inFlightTasks[seriesID] {
+            debugLog("[VOD-Series-Cache] JOIN in-flight id=\(seriesID)")
+            return await existingTask.value
+        }
+        debugLog("[VOD-Series-Cache] MISS — spawning detached fetch id=\(seriesID)")
+        // v1.6.16.x: register-before-detach. Pre-fix the assignment
+        // `inFlightTasks[id] = task` happened AFTER `Task.detached`,
+        // which on a warm cache could complete in <1ms — fast
+        // enough that the closure's `inFlightTasks.removeValue`
+        // ran before the assignment, leaving a stale completed
+        // task permanently in the dict. Net result: small memory
+        // leak per series visit. Fixed by capturing the task
+        // reference in a holder, registering the holder
+        // synchronously, then attaching the detached work.
+        // Cleanup compares against the captured holder so a fresh
+        // re-entrant fetch (rare but possible if the detached
+        // task hasn't finished yet) doesn't accidentally clear
+        // the new in-flight registration.
+        let task = Task<VODSeries?, Never>.detached {
+            do {
+                let result = try await VODService.fetchSeriesDetail(seriesID: seriesID,
+                                                                     from: server,
+                                                                     existing: existing)
+                await MainActor.run {
+                    // Only clear OUR own in-flight registration.
+                    if SeriesDetailCache.inFlightTasks[seriesID] != nil {
+                        SeriesDetailCache.inFlightTasks.removeValue(forKey: seriesID)
+                    }
+                    if let result, !result.seasons.isEmpty {
+                        // v1.6.16.x: only cache results that actually
+                        // have episode data. Pre-fix this branch
+                        // accepted empty results (seasons=0), which
+                        // permanently locked the user out of ever
+                        // loading episodes for a series whose first
+                        // fetch returned empty (Dispatcharr
+                        // intermittent state, account-filter mismatch,
+                        // etc.) — the next mount would short-circuit
+                        // on the cache hit and never re-query. Empty
+                        // responses now bypass the cache entirely so
+                        // every fresh open re-tries the network.
+                        SeriesDetailCache.entries[seriesID] = result
+                        #if DEBUG
+                        debugLog("[VOD-Series-Cache] STORED id=\(seriesID) seasons=\(result.seasons.count) episodes=\(result.seasons.reduce(0) { $0 + $1.episodes.count })")
+                        #endif
+                    } else if result != nil {
+                        debugLog("[VOD-Series-Cache] NOT storing empty result id=\(seriesID) seasons=0 — next open will re-fetch")
+                    } else {
+                        debugLog("[VOD-Series-Cache] detached fetch returned nil id=\(seriesID)")
+                    }
+                }
+                return result
+            } catch {
+                await MainActor.run {
+                    SeriesDetailCache.inFlightTasks.removeValue(forKey: seriesID)
+                    debugLog("[VOD-Series-Cache] detached fetch FAILED id=\(seriesID) error=\(error)")
+                }
+                return nil
+            }
+        }
+        inFlightTasks[seriesID] = task
+        return await task.value
+    }
+}
+
+// MARK: - Movie Detail Cache (v1.6.16.x)
+//
+// Same shape as `SeriesDetailCache` above, ported because the
+// movie path has the same view-cancellation exposure: iCloud sync
+// churn, ancestor re-renders, and back-out + reopen all cancel
+// the view's `.task`, which propagates structured-concurrency
+// cancellation into the URLSession data task and aborts the
+// `provider-info` fetch. Failure mode for movies was milder than
+// series (the slim list-time preview kept rendering, just without
+// rich plot/cast/director/backdrop) but the user still paid the
+// scrape cost on every re-open. With this cache, every successful
+// fetch makes subsequent opens instant for the rest of the app
+// session.
+@MainActor
+private enum MovieDetailCache {
+    static var entries: [String: VODMovie] = [:]
+    static var inFlightTasks: [String: Task<VODMovie?, Never>] = [:]
+
+    static func loadIfNeeded(existing: VODMovie,
+                              server: ServerSnapshot) async -> VODMovie? {
+        let movieID = existing.id
+        if let cached = entries[movieID] {
+            debugLog("[VOD-Movie-Cache] HIT id=\(movieID)")
+            return cached
+        }
+        if let existingTask = inFlightTasks[movieID] {
+            debugLog("[VOD-Movie-Cache] JOIN in-flight id=\(movieID)")
+            return await existingTask.value
+        }
+        debugLog("[VOD-Movie-Cache] MISS — spawning detached fetch id=\(movieID)")
+        // See `SeriesDetailCache.loadIfNeeded` for the
+        // register-before-cleanup ordering rationale. Same shape
+        // here for symmetry.
+        let task = Task<VODMovie?, Never>.detached {
+            let result = await VODService.fetchMovieDetail(existing: existing, from: server)
+            await MainActor.run {
+                if MovieDetailCache.inFlightTasks[movieID] != nil {
+                    MovieDetailCache.inFlightTasks.removeValue(forKey: movieID)
+                }
+                // `fetchMovieDetail` returns the existing movie
+                // unchanged on failure; cache only when we got a
+                // genuinely-richer object back so a transient
+                // failure doesn't lock the user out of getting
+                // enriched data on the next open.
+                if result != existing {
+                    MovieDetailCache.entries[movieID] = result
+                    debugLog("[VOD-Movie-Cache] STORED id=\(movieID)")
+                } else {
+                    debugLog("[VOD-Movie-Cache] NOT storing — fetch returned existing unchanged id=\(movieID)")
+                }
+            }
+            return result
+        }
+        inFlightTasks[movieID] = task
+        return await task.value
+    }
+}
+
 // MARK: - VOD Detail View (Movie or Series)
 struct VODDetailView: View {
     let item: VODDisplayItem
@@ -513,17 +696,24 @@ struct VODDetailView: View {
             // which can take several seconds. By rendering
             // `item.movie` first we keep the initial frame instant
             // and let SwiftUI animate the new fields in when they
-            // arrive. Failure (network error, non-Dispatcharr
-            // server) is silent: `fetchMovieDetail` falls back to
-            // returning the existing movie unchanged.
+            // arrive.
+            //
+            // v1.6.16.x: route through `MovieDetailCache` so the
+            // detached fetch survives view cancellation (iCloud
+            // sync, back-out + reopen, ancestor re-render) and
+            // subsequent opens hit the cache instantly. Same
+            // pattern as `SeriesDetailCache`, ported for parity.
             fullMovie = item.movie
             if let existing = item.movie {
+                // Cache fast-path
+                if let cached = MovieDetailCache.entries[existing.id] {
+                    fullMovie = cached
+                    debugLog("[VOD-Movie] view path used cache id=\(existing.id)")
+                    return
+                }
                 let snap = server.snapshot
-                let enriched = await VODService.fetchMovieDetail(existing: existing, from: snap)
-                // Only update if the fetch actually returned something
-                // richer — equality on the merged model is fine since
-                // the no-op fallback returns the same value object.
-                if enriched != existing {
+                if let enriched = await MovieDetailCache.loadIfNeeded(existing: existing, server: snap),
+                   enriched != existing {
                     fullMovie = enriched
                 }
             }
@@ -534,21 +724,63 @@ struct VODDetailView: View {
             // genre) without waiting for the network. The detail
             // fetch then enriches with cast/director/backdrop/
             // trailer/TMDB-id, mirroring the movie two-phase render.
-            // This also avoids the loading spinner flashing for
-            // series that already have plenty of metadata at list
-            // time — the spinner only takes the screen if we have
-            // nothing to show yet (no `item.series`).
-            if let preview = item.series {
+            //
+            // v1.6.16: ALWAYS flip `isLoadingDetail` to true while
+            // the series-detail fetch is in flight, even if the
+            // list-time preview is present. The preview only carries
+            // metadata (poster, title, plot) — NO seasons / episodes.
+            // Pre-1.6.16 the episode section silently rendered empty
+            // while the fetch was running, which on Dispatcharr +
+            // large series (One Piece, etc.) left the user staring
+            // at an empty list for minutes with no spinner. The
+            // workaround was "open the series, back out, open it
+            // again" because the second open used Dispatcharr's
+            // warm server-side cache. Now the section shows a
+            // ProgressView until seasons populate, regardless of
+            // preview state, so the user has clear feedback that
+            // episodes are loading.
+            // v1.6.16.x: route through `SeriesDetailCache` so the
+            // network fetch survives this view's lifecycle. The
+            // detached task spawned inside `loadIfNeeded` continues
+            // running even when SwiftUI cancels our `.task` on the
+            // user backing out, an iCloud-sync server-list refresh,
+            // or any other ancestor re-render. On a re-mount the
+            // cache hit returns the result instantly.
+            //
+            // Render the slim preview first so the hero / metadata
+            // are visible while the episode fetch is in flight.
+            if let preview = item.series, fullSeries == nil {
                 fullSeries = preview
-            } else {
-                isLoadingDetail = true
             }
+            // Cache fast-path: if we've already fetched this series
+            // in a previous mount of this view (or a sibling),
+            // skip the spinner and go straight to seasons.
+            if let cached = SeriesDetailCache.entries[item.id] {
+                fullSeries = cached
+                if let idx = cached.seasons.indices.first {
+                    selectedSeason = idx
+                }
+                debugLog("[VOD-Series] view path used cache id=\(item.id) seasons=\(cached.seasons.count)")
+                return
+            }
+            isLoadingDetail = true
             let snap = server.snapshot
-            let enriched = try? await VODService.fetchSeriesDetail(seriesID: item.id,
-                                                                    from: snap,
-                                                                    existing: item.series)
+            let fetchStart = Date()
+            debugLog("[VOD-Series] fetchStart id=\(item.id) name=\(item.name) hasPreview=\(item.series != nil)")
+            let enriched = await SeriesDetailCache.loadIfNeeded(seriesID: item.id,
+                                                                 server: snap,
+                                                                 existing: item.series)
+            // The view's `.task` may have been cancelled while we
+            // were awaiting the detached fetch. If so, the writes
+            // below are no-ops (the @State storage is destroyed),
+            // and the cache will be populated by the detached task
+            // anyway — the next view mount picks up the fast path.
+            let elapsedMs = Int(Date().timeIntervalSince(fetchStart) * 1000)
             if let enriched {
                 fullSeries = enriched
+                debugLog("[VOD-Series] fetchOK id=\(item.id) elapsed=\(elapsedMs)ms seasons=\(enriched.seasons.count) episodes=\(enriched.seasons.reduce(0) { $0 + $1.episodes.count })")
+            } else {
+                debugLog("[VOD-Series] fetchNIL id=\(item.id) elapsed=\(elapsedMs)ms — fullSeries stays at preview (seasons=\(fullSeries?.seasons.count ?? 0))")
             }
             isLoadingDetail = false
             if let idx = fullSeries?.seasons.indices.first {
@@ -590,6 +822,28 @@ private struct TVEpisodeRowButton: View {
                     Text("E\(ep.episodeNumber) · \(ep.title)")
                         .font(.bodyMedium).foregroundColor(.textPrimary)
                         .lineLimit(1)
+                    // v1.6.16.x: metadata strip — duration · air date ·
+                    // rating. Mirrors what Dispatcharr's web UI shows
+                    // in its episode rows (Duration / Date columns)
+                    // plus the per-episode TMDB rating which is
+                    // valuable on tvOS where users browse with the
+                    // Siri Remote and can't easily scrub plots.
+                    // Each piece is independently optional — empty
+                    // ones are skipped, separators only render
+                    // between non-empty pieces, so a sparse row
+                    // (e.g. only duration set) doesn't show a
+                    // dangling " · " divider.
+                    let pieces: [String] = [
+                        ep.duration,
+                        ep.displayAirDate,
+                        ep.displayRating.isEmpty ? "" : "★ \(ep.displayRating)"
+                    ].filter { !$0.isEmpty }
+                    if !pieces.isEmpty {
+                        Text(pieces.joined(separator: " · "))
+                            .font(.labelSmall)
+                            .foregroundColor(.textSecondary.opacity(0.85))
+                            .lineLimit(1)
+                    }
                     if !ep.plot.isEmpty {
                         Text(ep.plot)
                             .font(.labelSmall).foregroundColor(.textSecondary)

@@ -452,10 +452,7 @@ struct MultiviewTileView: View {
             )
             .id(tile.id)
             .onAppear {
-                DebugLogger.shared.log(
-                    "[MV-Tile] mount id=\(tile.id) name=\(tile.item.name)",
-                    category: "Playback", level: .info
-                )
+                debugLog("[MV-Tile] onAppear id=\(tile.id) name=\(tile.item.name)")
                 // Register our per-tile progress store so the unified
                 // chrome overlay (PlaybackChromeOverlay + Options
                 // panel) can bind scrubber / track pickers / speed to
@@ -464,11 +461,24 @@ struct MultiviewTileView: View {
                 store.registerProgressStore(progressStore, for: tile.id)
             }
             .onDisappear {
-                DebugLogger.shared.log(
-                    "[MV-Tile] unmount id=\(tile.id)",
-                    category: "Playback", level: .info
-                )
+                debugLog("[MV-Tile] onDisappear id=\(tile.id)")
                 store.unregisterProgressStore(for: tile.id)
+            }
+            // v1.6.15.x: defensive belt + suspenders. The user
+            // reported a UI freeze if they channel-flip then open
+            // Options — root cause traced to `audioProgressStore`
+            // being nil because the new tile's `.onAppear` doesn't
+            // reliably fire after a `PlayerSession.exit() +
+            // enterMultiview()` cycle (SwiftUI's diff sometimes
+            // collapses the .idle → .multiview round-trip and
+            // skips the remount, even though tile.id changed).
+            // `.task(id: tile.id)` fires on initial appear AND
+            // whenever the id changes, regardless of whether
+            // onAppear ran — guarantees the registration even
+            // when the diff swallows onAppear.
+            .task(id: tile.id) {
+                debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
+                store.registerProgressStore(progressStore, for: tile.id)
             }
 
             // Per-tile corner chrome is suppressed at N=1. The
@@ -632,10 +642,7 @@ struct MultiviewTileView: View {
             // identity with the single-mode view.
             .id(tile.id)
             .onAppear {
-                DebugLogger.shared.log(
-                    "[MV-Tile] mount id=\(tile.id) name=\(tile.item.name)",
-                    category: "Playback", level: .info
-                )
+                debugLog("[MV-Tile] onAppear id=\(tile.id) name=\(tile.item.name)")
                 // Register our per-tile progress store so the unified
                 // chrome overlay (PlaybackChromeOverlay + Options
                 // panel) can bind scrubber / track pickers / speed to
@@ -644,11 +651,15 @@ struct MultiviewTileView: View {
                 store.registerProgressStore(progressStore, for: tile.id)
             }
             .onDisappear {
-                DebugLogger.shared.log(
-                    "[MV-Tile] unmount id=\(tile.id)",
-                    category: "Playback", level: .info
-                )
+                debugLog("[MV-Tile] onDisappear id=\(tile.id)")
                 store.unregisterProgressStore(for: tile.id)
+            }
+            // v1.6.15.x: same belt + suspenders as the tvOS body —
+            // see the matching `.task(id: tile.id)` block in
+            // `tvOSBody` for the freeze-after-channel-flip rationale.
+            .task(id: tile.id) {
+                debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
+                store.registerProgressStore(progressStore, for: tile.id)
             }
 
             // Per-tile corner chrome suppressed at N=1 (container

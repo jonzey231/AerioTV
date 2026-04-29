@@ -2157,6 +2157,7 @@ final class NowPlayingManager: ObservableObject {
     func changeChannel(direction: Int) {
         pendingChannelStep += direction
         pendingChannelChangeTask?.cancel()
+        debugLog("[MV-ChannelFlip] press direction=\(direction > 0 ? "+1" : "-1") accumulatedStep=\(pendingChannelStep) currentItem=\(playingItem?.name ?? "nil")")
         pendingChannelChangeTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled else { return }
@@ -2184,12 +2185,14 @@ final class NowPlayingManager: ObservableObject {
         let next = list[newIdx]
         let server = ChannelStore.shared.activeServer
         let resolvedHeaders = server?.authHeaders ?? ["Accept": "*/*"]
+        debugLog("[MV-ChannelFlip] flush step=\(step) from=\(current.name)(id=\(current.id)) to=\(next.name)(id=\(next.id)) unified=\(PlaybackFeatureFlags.useUnifiedPlayback)")
         if PlaybackFeatureFlags.useUnifiedPlayback {
             // Unified path: re-enter multiview seeded with the new
             // channel. Mirrors the row-tap path used elsewhere in
             // HomeView. The exit() + enterMultiview() pair drops the
             // current tile and seeds a fresh one — same lifecycle
             // mpv expects for a clean stream swap.
+            debugLog("[MV-ChannelFlip] calling PlayerSession.exit() then enterMultiview(...)")
             PlayerSession.shared.exit()
             PlayerSession.shared.enterMultiview(seeding: next, server: server)
         }
@@ -4121,10 +4124,17 @@ private struct ChannelInfoBanner: View {
     /// `chromeWakeToken`) and Menu/Back chrome summon, OR (b) we're
     /// inside the 5s post-stream-start window — handles channel-
     /// scroll where chrome stays hidden. Suppressed in multi-tile
-    /// multiview.
+    /// multiview AND when the player isn't actively visible
+    /// (minimized to the corner mini, or stopped entirely) — the
+    /// banner is a "what just started playing in the player" cue,
+    /// so it shouldn't drift over to the TV Guide tab when the
+    /// user has dropped the player to the corner or closed it.
     private var shouldRender: Bool {
         let isSingleStream = multiviewStore.tiles.count <= 1
-        return (nowPlaying.chromeIsVisible || bannerWindowActive) && isSingleStream
+        let isFullscreenActive = nowPlaying.isActive && !nowPlaying.isMinimized
+        return (nowPlaying.chromeIsVisible || bannerWindowActive)
+            && isSingleStream
+            && isFullscreenActive
     }
 
     /// Resolve current program for this channel. First the
@@ -4319,16 +4329,67 @@ private struct ChannelInfoBanner: View {
         #if os(tvOS)
         return 32
         #else
-        return 8
+        // iPhone: below the chrome's close button row. iPad / Mac:
+        // align with the close button's vertical center (banner sits
+        // to its right).
+        if isiPhoneIdiom {
+            return iOSDynamicTopInset + 60  // close-button height (52) + 8pt spacing
+        } else {
+            return iOSDynamicTopInset
+        }
         #endif
     }
     private var sidePadding: CGFloat {
         #if os(tvOS)
         return 40
         #else
-        return 8
+        // iPhone: left edge (banner sits below the close button so
+        // there's no horizontal conflict). iPad / Mac: clear the
+        // close button — `chrome.padding(.horizontal, 16)` + 52pt
+        // close-button width + 12pt breathing room = 80pt.
+        if isiPhoneIdiom {
+            return 8
+        } else {
+            return 80
+        }
         #endif
     }
+
+    #if !os(tvOS)
+    /// Replicates `PlaybackChromeOverlay.dynamicTopInset` so the
+    /// banner stays vertically aligned with the chrome's close /
+    /// overflow / add buttons across every iPhone, iPad, and Mac
+    /// Catalyst form factor without hard-coding device tables. See
+    /// PlaybackChromeOverlay.swift for the full reasoning.
+    private var iOSDynamicTopInset: CGFloat {
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first(where: { $0.activationState == .foregroundActive })
+            ?? scenes.first
+
+        let windowInset: CGFloat = {
+            guard let scene else { return 0 }
+            if let key = scene.windows.first(where: { $0.isKeyWindow }) {
+                return key.safeAreaInsets.top
+            }
+            return scene.windows.first?.safeAreaInsets.top ?? 0
+        }()
+        let statusBarHeight = scene?.statusBarManager?.statusBarFrame.height ?? 0
+
+        let isLandscapePhone: Bool = {
+            guard isiPhoneIdiom else { return false }
+            return scene?.interfaceOrientation.isLandscape ?? false
+        }()
+        let floor: CGFloat = isLandscapePhone ? 20 : 48
+        return max(max(windowInset, statusBarHeight) + 12, floor)
+    }
+
+    /// True only on physical iPhone (UIDevice idiom `.phone`).
+    /// iPad / Mac Catalyst / Apple TV all return false.
+    private var isiPhoneIdiom: Bool {
+        UIDevice.current.userInterfaceIdiom == .phone
+    }
+    #endif
 }
 
 #if os(iOS)

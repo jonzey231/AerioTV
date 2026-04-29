@@ -429,6 +429,59 @@ struct VODEpisode: Identifiable, Hashable {
     let streamURL: URL?
     let containerExtension: String
     let serverID: UUID
+
+    // v1.6.16.x: rich per-episode metadata. All default empty so
+    // existing initializers don't need updating; populated by
+    // `dispatcharrSeriesDetail(...)` from the Dispatcharr Episode
+    // schema fields (`air_date`, `rating`, `tmdb_id`, `imdb_id`)
+    // plus `custom_properties.crew` (the per-episode director).
+    var airDate: String = ""
+    var rating: String = ""
+    var tmdbID: String = ""
+    var imdbID: String = ""
+    var crew: String = ""
+
+    /// "8.0" / "" for nil-or-zero. Same convention as VODMovie /
+    /// VODSeries — the UI's empty-rating skip logic stays portable
+    /// across all three.
+    var displayRating: String {
+        guard !rating.isEmpty, let r = Double(rating), r > 0 else { return "" }
+        return String(format: "%.1f", r)
+    }
+
+    /// Episode air date as locale-short for the row UI. Falls
+    /// back to the raw `airDate` string when the input doesn't
+    /// parse as `yyyy-MM-dd`. Returns empty when the field is
+    /// missing — callers should skip rendering rather than show
+    /// a placeholder. v1.6.16.x: formatters are static so a
+    /// 1000-episode series doesn't allocate two new
+    /// `DateFormatter` instances per row on every SwiftUI body
+    /// re-evaluation.
+    var displayAirDate: String {
+        guard !airDate.isEmpty else { return "" }
+        guard let date = Self.airDateParser.date(from: airDate) else { return airDate }
+        return Self.airDateDisplay.string(from: date)
+    }
+
+    /// Parser for the wire format Dispatcharr emits
+    /// (ISO 8601 date, `yyyy-MM-dd`). Pinned to POSIX + UTC so
+    /// the parse is deterministic regardless of device locale.
+    private static let airDateParser: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        return f
+    }()
+
+    /// User-facing display formatter. Locale-aware (`.short`
+    /// style respects `Locale.current` so US users see
+    /// `M/d/yyyy`, UK users see `dd/MM/yyyy`, etc.).
+    private static let airDateDisplay: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .short
+        return f
+    }()
 }
 
 // MARK: - VOD Category

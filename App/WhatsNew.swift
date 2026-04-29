@@ -57,6 +57,19 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.6.16",
+            title: "What's new in 1.6.16",
+            bullets: [
+                "Apple TV: opening Options right after channel-flipping no longer freezes the UI",
+                "Stream Info overlay redesigned: bottom-left on Apple TV, clears the Dynamic Island on iPhone, with a close button on iPad/iPhone",
+                "Channel info banner now correctly clears the player's close button on iPad and iPhone, and stays hidden when the player is minimized",
+                "VOD series episodes now load reliably on the first open — no more back-out-and-reopen workaround (Dispatcharr API playlists only)",
+                "Episode rows now show artwork, duration, air date, and TMDB rating (Dispatcharr API playlists only)",
+                "Movies and series open instantly on second visit"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.16")
+        ),
+        WhatsNewRelease(
             version: "1.6.15",
             title: "What's new in 1.6.15",
             bullets: [

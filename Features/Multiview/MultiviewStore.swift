@@ -231,6 +231,7 @@ final class MultiviewStore: ObservableObject {
         if wasAudio && prior !== store {
             audioProgressStoreRevision &+= 1
         }
+        debugLog("[MV-ProgressStore] register tileID=\(tileID) wasAudio=\(wasAudio) audioTileID=\(audioTileID ?? "nil") dictCount=\(progressStoresByTileID.count)")
     }
 
     /// Called by `MultiviewTileView.onDisappear` (and by `remove(id:)`
@@ -243,6 +244,7 @@ final class MultiviewStore: ObservableObject {
         if wasAudio && had {
             audioProgressStoreRevision &+= 1
         }
+        debugLog("[MV-ProgressStore] unregister tileID=\(tileID) wasAudio=\(wasAudio) audioTileID=\(audioTileID ?? "nil") had=\(had) dictCount=\(progressStoresByTileID.count)")
     }
 
     /// Seconds during which the perf-warning stays "recently shown"

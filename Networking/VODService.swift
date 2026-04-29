@@ -528,19 +528,36 @@ final class VODService {
         guard let sid = Int(seriesID) else { return nil }
         let base = server.baseURL
 
-        // Fetch episodes + provider-info concurrently. Episodes are
-        // required (UI shows the episode list); provider-info is
-        // best-effort enrichment — a network failure there falls
-        // back to `existing` for the metadata fields, so the user
-        // still gets the season/episode tree.
-        async let episodesTask = api.getVODSeriesEpisodes(seriesID: sid)
-        async let infoTask: DispatcharrVODSeriesProviderInfo? = {
-            do { return try await api.getSeriesProviderInfo(seriesID: sid) }
-            catch { return nil }
-        }()
-
-        let episodes = try await episodesTask
-        let info = await infoTask
+        // v1.6.16.x: provider-info FIRST, episodes SECOND.
+        //
+        // Pre-1.6.16.x ran these concurrently with `async let` —
+        // worked fine for series whose episodes were already
+        // cached server-side, but for series Dispatcharr hadn't
+        // scraped yet (Spiral, Theodosia, Adults), the episodes
+        // call returned `[]` because it raced the scrape.
+        //
+        // The OpenAPI schema is explicit about why: `/api/vod/
+        // series/{id}/provider-info/` is described as "Get
+        // detailed series information, refreshing from provider
+        // if needed" — that's the lazy-scrape trigger. Without
+        // calling it first, the episodes endpoint returns an
+        // empty array because Dispatcharr's per-series episode
+        // table hasn't been populated from the upstream Xtream
+        // provider yet.
+        //
+        // Sequential cost: ~one extra network round-trip per
+        // first-open of an unscraped series. Acceptable. Already-
+        // scraped series still complete in the same total time
+        // because both endpoints hit the warm cache fast.
+        // Subsequent opens use `SeriesDetailCache` so the cost is
+        // paid once.
+        let info: DispatcharrVODSeriesProviderInfo?
+        do {
+            info = try await api.getSeriesProviderInfo(seriesID: sid)
+        } catch {
+            info = nil
+        }
+        let episodes = try await api.getVODSeriesEpisodes(seriesID: sid)
 
         // Build season map from episodes. v1.6.12 also surfaces
         // episode runtime via `duration_secs` (was always blank
@@ -548,17 +565,63 @@ final class VODService {
         var seasonMap: [Int: [VODEpisode]] = [:]
         for ep in episodes {
             let season = ep.seasonNumber ?? 1
-            let vodEp = VODEpisode(
+            // v1.6.16.x: surface per-episode artwork from
+            // `custom_properties.movie_image`. Dispatcharr stores
+            // the TMDB still URL there for each episode (typically
+            // a w185 path on `image.tmdb.org`). Pre-1.6.16.x we
+            // hardcoded `posterURL: nil` because the field was
+            // unreliable — but that was an artifact of the
+            // concurrent-fetch race causing `episodes` to return
+            // empty arrays. Now that provider-info runs first and
+            // primes the per-episode cache, `movie_image` is
+            // populated and we can render real episode thumbnails
+            // in the row instead of a blank placeholder.
+            // v1.6.16.x: episode poster with series-poster fallback.
+            // Some series (e.g. Kroll Show on the test server)
+            // have `custom_properties: null` on every episode —
+            // Dispatcharr's TMDB scraper hasn't fetched per-episode
+            // stills for that title, even though the series-level
+            // metadata is fully populated. Pre-fallback the episode
+            // rows rendered as a stack of identical empty
+            // rectangles, which read as "AerioTV is broken." Now
+            // the rows fall back to the series poster (already on
+            // hand from `existing`), so a sparse-metadata series
+            // shows a uniform poster across every episode row
+            // instead of blanks. Empty-string `movieImage` is
+            // treated as missing (`URL(string: "")` returns nil
+            // anyway, but the explicit non-empty check is more
+            // defensive).
+            let episodePoster: URL? = {
+                if let img = ep.customProperties?.movieImage,
+                   !img.isEmpty,
+                   let url = URL(string: img) {
+                    return url
+                }
+                return existing?.posterURL
+            }()
+            // v1.6.16.x: per-episode rich metadata. Now that the
+            // provider-info-first ordering populates the per-episode
+            // table, the schema fields (`air_date`, `rating`,
+            // `tmdb_id`, `imdb_id`) and `custom_properties.crew`
+            // are reliably set, so we plumb them through to the
+            // display model. Fields default to "" when absent so
+            // the row UI's existing empty-skip logic just works.
+            var vodEp = VODEpisode(
                 id: String(ep.id), seriesID: seriesID,
                 title: ep.title,
                 seasonNumber: season, episodeNumber: ep.episodeNumber ?? 0,
                 plot: ep.plot ?? "",
                 duration: formatDuration(seconds: ep.durationSecs),
-                posterURL: nil,
+                posterURL: episodePoster,
                 streamURL: api.proxyEpisodeURL(uuid: ep.uuid,
                                                   preferredStreamID: ep.streams?.first?.streamID),
                 containerExtension: "mp4", serverID: server.id
             )
+            vodEp.airDate = ep.airDate ?? ""
+            vodEp.rating  = ep.rating ?? ""
+            vodEp.tmdbID  = ep.tmdbID ?? ""
+            vodEp.imdbID  = ep.imdbID ?? ""
+            vodEp.crew    = ep.customProperties?.crew ?? ""
             seasonMap[season, default: []].append(vodEp)
         }
         let seasons: [VODSeason] = seasonMap.map { (num, eps) in

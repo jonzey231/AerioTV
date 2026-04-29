@@ -335,6 +335,25 @@ struct MultiviewContainerView: View {
             // the panel), or wait for the 5s chrome fade (we do
             // NOT hide it on fade — a panel open mid-fade would
             // blink; the Options panel has its own lifecycle).
+            // v1.6.15.x diagnostic: the user reported a UI freeze if
+            // they channel-flip via Siri Remote up/down then open
+            // Options. The hypothesis is that
+            // `PlayerSession.exit() + enterMultiview()` from
+            // `flushPendingChannelChange` unmounts/remounts the
+            // container fast enough that the new tile's
+            // `registerProgressStore` (called from `.onAppear`)
+            // hasn't fired by the time the user opens Options →
+            // `audioProgressStore` is nil → panel doesn't mount →
+            // chrome is pinned with no focusable target = "frozen".
+            // Keep the diagnostic log so a future hardware test can
+            // confirm or rule out the hypothesis.
+            #if os(tvOS)
+            let _ = {
+                if showTVOptions, store.audioProgressStore == nil {
+                    debugLog("[MV-Cmd] OPTIONS PANEL gate failed: showTVOptions=true but audioProgressStore=nil (audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) firstTileID=\(store.tiles.first?.id ?? "nil"))")
+                }
+            }()
+            #endif
             if isSoleTile,
                showTVOptions,
                let audioStore = store.audioProgressStore,
@@ -389,6 +408,32 @@ struct MultiviewContainerView: View {
             }
             #endif
 
+            // v1.6.15.x: Stream Info overlay. Mounted when the user
+            // toggles "Stream Info" inside the Options panel (tvOS)
+            // or the iOS overflow menu. Reads from the audio tile's
+            // `PlayerProgressStore` so the values reflect the
+            // currently-audible stream regardless of which tile in a
+            // multi-tile grid is active.
+            //
+            // Per-platform positioning matches the new
+            // ChannelInfoBanner's dynamic-margin strategy:
+            //   - tvOS: bottom-left, 40pt leading / 32pt bottom.
+            //     Banner sits top-left so they're diagonally
+            //     opposite, never overlapping. Back button dismisses
+            //     (handled in `handleMenuPress`).
+            //   - iPhone: top-leading, top inset reads the same
+            //     dynamic safe-area calc the chrome bar uses, so the
+            //     card slides in beneath the Dynamic Island /
+            //     status bar instead of being clipped by it.
+            //   - iPad / Mac: same dynamic top inset, but room to
+            //     spare so we leave the card centered horizontally.
+            // iOS gets a small close button on the card so the user
+            // doesn't have to reopen the Options menu just to dismiss.
+            if showStreamInfo, let audioStore = store.audioProgressStore {
+                streamInfoOverlay(audioStore: audioStore)
+                    .transition(.opacity)
+            }
+
             if store.relocatingTileID != nil {
                 relocateBanner
             }
@@ -429,6 +474,20 @@ struct MultiviewContainerView: View {
         .onChange(of: nowPlaying.chromeWakeToken) { _, newToken in
             guard newToken != nil else { return }
             chromeState.reportInteraction()
+        }
+        // v1.6.15.x: bridge `showStreamInfo` → audio tile's
+        // `isStreamInfoVisible`. The audio tile's coordinator only
+        // runs the volatile stats timer (codec, bitrate, sync,
+        // drops) while this flag is true — keeping it off avoids
+        // mpv lock contention when nothing is reading the values.
+        // Without this bridge the StreamInfoCardView would render
+        // with all-zeroes even after the user toggled it on, because
+        // the toggle just flipped MultiviewContainerView's @State
+        // and never reached the per-tile coordinator that owns the
+        // timer. Same pattern PlayerView's legacy single-stream
+        // path uses (PlayerView.swift onChange of showStreamInfo).
+        .onChange(of: showStreamInfo) { _, visible in
+            store.audioProgressStore?.isStreamInfoVisible = visible
         }
         #if os(tvOS)
         // Force focus onto the audio tile on mount.
@@ -944,9 +1003,26 @@ struct MultiviewContainerView: View {
     ///                            down a carefully arranged grid.
     private func handleMenuPress(source: String) {
         DebugLogger.shared.log(
-            "[MV-Cmd] tvOS Menu source=\(source) | showTVOptions=\(showTVOptions) isMinimized=\(nowPlaying.isMinimized) chromeVisible=\(chromeState.isVisible) tiles=\(store.tiles.count) fullscreenTile=\(store.fullscreenTileID ?? "nil") relocating=\(store.relocatingTileID ?? "nil")",
+            "[MV-Cmd] tvOS Menu source=\(source) | showTVOptions=\(showTVOptions) showStreamInfo=\(showStreamInfo) isMinimized=\(nowPlaying.isMinimized) chromeVisible=\(chromeState.isVisible) tiles=\(store.tiles.count) fullscreenTile=\(store.fullscreenTileID ?? "nil") relocating=\(store.relocatingTileID ?? "nil")",
             category: "Playback", level: .info
         )
+        // v1.6.15.x: Stream Info overlay catches Back BEFORE the
+        // Options-panel branch. Stream Info is opened FROM the
+        // Options panel and persists after the panel dismisses, so
+        // a Back press while Stream Info is up should close the
+        // info card first; if the user wants to leave the chrome
+        // entirely, a second Back gets them there.
+        if showStreamInfo {
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: Stream Info open → close it",
+                category: "Playback", level: .info
+            )
+            withAnimation(.easeInOut(duration: 0.15)) {
+                showStreamInfo = false
+            }
+            chromeState.reportInteraction()
+            return
+        }
         if showTVOptions {
             DebugLogger.shared.log(
                 "[MV-Cmd]   → branch: TVOptions panel open → close panel",
@@ -1091,6 +1167,102 @@ struct MultiviewContainerView: View {
         @unknown default: return "unknown"
         }
     }
+
+    // MARK: - Stream Info overlay (v1.6.15.x)
+
+    /// Platform-specific Stream Info card placement. tvOS sits at
+    /// bottom-left so it doesn't overlap the top-left
+    /// `ChannelInfoBanner`. iPhone hugs the top-left below the
+    /// Dynamic Island / status bar via the same `iOSDynamicTopInset`
+    /// calc the banner uses. iPad lands center-top because there's
+    /// room. iOS gets a close (×) button so the user doesn't have
+    /// to re-open Options just to dismiss the card.
+    @ViewBuilder
+    private func streamInfoOverlay(audioStore: PlayerProgressStore) -> some View {
+        #if os(tvOS)
+        VStack {
+            Spacer()
+            HStack {
+                StreamInfoCardView(info: audioStore.streamInfo)
+                    .padding(.leading, 40)
+                    .padding(.bottom, 32)
+                Spacer()
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .allowsHitTesting(false)
+        #else
+        VStack {
+            HStack {
+                streamInfoCardWithCloseButton(audioStore: audioStore)
+                    .padding(.leading, 8)
+                    .padding(.top, iOSStreamInfoTopInset)
+                Spacer()
+            }
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        #endif
+    }
+
+    #if !os(tvOS)
+    /// iOS / iPadOS Stream Info card with an inline close (×)
+    /// button. The card itself reads taps; the surrounding overlay
+    /// stays hit-test-disabled so the user can still tap through
+    /// to the underlying chrome / video.
+    @ViewBuilder
+    private func streamInfoCardWithCloseButton(audioStore: PlayerProgressStore) -> some View {
+        ZStack(alignment: .topTrailing) {
+            StreamInfoCardView(info: audioStore.streamInfo)
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    showStreamInfo = false
+                }
+            } label: {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close stream info")
+            .offset(x: 10, y: -10)
+        }
+    }
+
+    /// iPhone / iPad top inset for the Stream Info card. Mirrors
+    /// `PlaybackChromeOverlay.dynamicTopInset` so the card always
+    /// clears the Dynamic Island, notch, or compact status bar
+    /// without device-specific branching.
+    private var iOSStreamInfoTopInset: CGFloat {
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first(where: { $0.activationState == .foregroundActive })
+            ?? scenes.first
+        let windowInset: CGFloat = {
+            guard let scene else { return 0 }
+            if let key = scene.windows.first(where: { $0.isKeyWindow }) {
+                return key.safeAreaInsets.top
+            }
+            return scene.windows.first?.safeAreaInsets.top ?? 0
+        }()
+        let statusBarHeight = scene?.statusBarManager?.statusBarFrame.height ?? 0
+        let idiomIsPhone = UIDevice.current.userInterfaceIdiom == .phone
+        let isLandscapePhone: Bool = {
+            guard idiomIsPhone else { return false }
+            return scene?.interfaceOrientation.isLandscape ?? false
+        }()
+        let floor: CGFloat = isLandscapePhone ? 20 : 48
+        // +12pt breathing room past whichever inset is reported,
+        // so the close button doesn't kiss the Dynamic Island.
+        return max(max(windowInset, statusBarHeight) + 12, floor)
+    }
+    #endif
 
     // MARK: - Thermal banner
 

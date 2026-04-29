@@ -683,6 +683,7 @@ struct PlaybackBottomChrome_tvOS: View {
     private var optionsButton: some View {
         Button {
             chromeState.reportInteraction()
+            debugLog("[MV-Cmd] Options pill pressed → showTVOptions=true | audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) audioStore=\(store.audioProgressStore == nil ? "nil" : "ok")")
             showTVOptions = true
         } label: {
             HStack(spacing: 10) {

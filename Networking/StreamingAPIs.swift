@@ -669,8 +669,27 @@ struct DispatcharrAPI {
         case .bearer(let token):
             h["Authorization"] = "Bearer \(token)"
         case .apiKey(let key):
-            // Dispatcharr supports either header style; sending both improves compatibility.
-            h["Authorization"] = "ApiKey \(key)"
+            // v1.6.16.x: send X-API-Key alone for API-key auth.
+            //
+            // Pre-1.6.16.x sent BOTH `Authorization: ApiKey <key>`
+            // AND `X-API-Key: <key>` "for compatibility". In
+            // practice Dispatcharr's per-series episodes endpoint
+            // returned `count=0` for some series with that
+            // dual-header request even though X-API-Key alone (via
+            // curl) returned the full episode list. Best guess:
+            // adding the Authorization header switches Dispatcharr
+            // from unrestricted API-key auth to a user-scoped
+            // session whose visibility is filtered to a subset of
+            // m3u_accounts; series whose providers fall outside
+            // that subset come back empty. Series whose providers
+            // happen to match the session's accounts work fine,
+            // which is why this surfaced as an "intermittent"
+            // 0-episodes bug — Spiral's providers included accounts
+            // (#11, #22) the session couldn't see, while Lucky
+            // Hank / Friends / Parks and Recreation were on
+            // accounts the session could see. Dropping
+            // Authorization here makes every endpoint route through
+            // the same X-API-Key path.
             h["X-API-Key"] = key
         }
         return h
@@ -1331,7 +1350,125 @@ struct DispatcharrAPI {
     }
 
     func getVODSeriesEpisodes(seriesID: Int) async throws -> [DispatcharrVODEpisode] {
-        try await fetchAllPages(DispatcharrVODEpisode.self, firstPath: "/api/vod/series/\(seriesID)/episodes/?page_size=100")
+        // v1.6.16: parallel page fetch. Pre-1.6.16 this used the
+        // sequential `fetchAllPages` helper which walks `next` URLs
+        // one at a time — fine for a 75-episode series (1 page) but
+        // a disaster for One Piece (1000+ episodes, 10+ pages, 2+
+        // minutes of round-trips). Dispatcharr's wrapper exposes
+        // `count` on every page, so after the first page we know
+        // exactly how many more pages exist and can fetch them
+        // concurrently via TaskGroup.
+        //
+        // Falls back to sequential `next`-walking when `count` is
+        // missing (older Dispatcharr versions or cursor pagination).
+        let started = Date()
+        let pageSize = 100
+        debugLog("[VOD-Episodes] start seriesID=\(seriesID) pageSize=\(pageSize)")
+        let firstPage: DispatcharrResultsWrapper<DispatcharrVODEpisode>
+        do {
+            firstPage = try await fetchEpisodesPage(seriesID: seriesID,
+                                                     page: 1,
+                                                     pageSize: pageSize)
+        } catch {
+            debugLog("[VOD-Episodes] page=1 FAIL seriesID=\(seriesID) error=\(error)")
+            throw error
+        }
+        var allItems = firstPage.results
+        debugLog("[VOD-Episodes] page=1 OK seriesID=\(seriesID) results=\(firstPage.results.count) reportedCount=\(firstPage.count.map(String.init) ?? "nil") next=\(firstPage.next != nil)")
+
+        // Dispatcharr's pagination wrapper includes `count` (total
+        // items) — preferred path: compute the page count and fan
+        // out concurrent requests for pages 2..N.
+        if let total = firstPage.count, total > allItems.count {
+            let totalPages = Int(ceil(Double(total) / Double(pageSize)))
+            if totalPages > 1 {
+                debugLog("[VOD-Episodes] parallel fan-out seriesID=\(seriesID) total=\(total) totalPages=\(totalPages)")
+                let extras: [(Int, [DispatcharrVODEpisode])]
+                do {
+                    extras = try await withThrowingTaskGroup(of: (Int, [DispatcharrVODEpisode]).self) { group -> [(Int, [DispatcharrVODEpisode])] in
+                        for page in 2...totalPages {
+                            group.addTask {
+                                do {
+                                    let p = try await self.fetchEpisodesPage(seriesID: seriesID,
+                                                                               page: page,
+                                                                               pageSize: pageSize)
+                                    debugLog("[VOD-Episodes] page=\(page) OK seriesID=\(seriesID) results=\(p.results.count)")
+                                    return (page, p.results)
+                                } catch {
+                                    debugLog("[VOD-Episodes] page=\(page) FAIL seriesID=\(seriesID) error=\(error)")
+                                    throw error
+                                }
+                            }
+                        }
+                        var collected: [(Int, [DispatcharrVODEpisode])] = []
+                        for try await pair in group { collected.append(pair) }
+                        // Re-sort by page index so caller-side seasonNumber
+                        // / episodeNumber sorts stay deterministic.
+                        return collected.sorted { $0.0 < $1.0 }
+                    }
+                } catch {
+                    let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+                    debugLog("[VOD-Episodes] FAN-OUT FAIL seriesID=\(seriesID) elapsed=\(elapsed)ms error=\(error)")
+                    throw error
+                }
+                for (_, results) in extras {
+                    allItems.append(contentsOf: results)
+                }
+            }
+            let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+            debugLog("[VOD-Episodes] DONE (parallel) seriesID=\(seriesID) episodes=\(allItems.count) elapsed=\(elapsed)ms")
+            return allItems
+        }
+
+        // Compatibility path: no `count` field — walk `next` URLs
+        // sequentially. This is the original `fetchAllPages` flow
+        // preserved for older Dispatcharr versions that may strip
+        // `count` from the response wrapper.
+        debugLog("[VOD-Episodes] no count — falling back to sequential next-walk seriesID=\(seriesID)")
+        var nextURLString = firstPage.next
+        var pageIdx = 2
+        while let nextStr = nextURLString, let nextURL = URL(string: nextStr) {
+            do {
+                var request = URLRequest(url: nextURL)
+                headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+                let (data, response) = try await loggedData(for: request)
+                try validate(response: response, data: data)
+                let wrapped = try decode(DispatcharrResultsWrapper<DispatcharrVODEpisode>.self, from: data)
+                debugLog("[VOD-Episodes] page=\(pageIdx) OK (sequential) seriesID=\(seriesID) results=\(wrapped.results.count)")
+                allItems.append(contentsOf: wrapped.results)
+                nextURLString = wrapped.next
+                pageIdx += 1
+            } catch {
+                debugLog("[VOD-Episodes] page=\(pageIdx) FAIL (sequential) seriesID=\(seriesID) error=\(error)")
+                throw error
+            }
+        }
+        let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+        debugLog("[VOD-Episodes] DONE (sequential) seriesID=\(seriesID) episodes=\(allItems.count) elapsed=\(elapsed)ms")
+        return allItems
+    }
+
+    /// Helper for `getVODSeriesEpisodes` — fetch a specific
+    /// numbered page and return the raw wrapper. Kept private here
+    /// because the parallel-fan-out logic is specific to the
+    /// episodes endpoint; other paginated endpoints still use the
+    /// sequential `fetchAllPages` helper.
+    private func fetchEpisodesPage(seriesID: Int,
+                                    page: Int,
+                                    pageSize: Int) async throws -> DispatcharrResultsWrapper<DispatcharrVODEpisode> {
+        let path = "/api/vod/series/\(seriesID)/episodes/?page=\(page)&page_size=\(pageSize)"
+        let url = try buildURL(path: path)
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        // Some endpoints return a flat array when there's only one
+        // page worth of items. Normalise to the wrapper shape so
+        // the caller can branch on `count` uniformly.
+        if let flat = try? JSONDecoder().decode([DispatcharrVODEpisode].self, from: data) {
+            return DispatcharrResultsWrapper(results: flat, next: nil, count: flat.count)
+        }
+        return try decode(DispatcharrResultsWrapper<DispatcharrVODEpisode>.self, from: data)
     }
 
     // MARK: - Proxy stream URLs
@@ -2047,6 +2184,19 @@ struct DispatcharrVODCustomProperties: Decodable {
     let originalName: String?
     let country: String?
     let language: String?
+    /// v1.6.16.x: per-episode TMDB still URL. Dispatcharr stores
+    /// it under `custom_properties.movie_image` for episodes (a
+    /// w185-sized still on `image.tmdb.org`). The same key is also
+    /// surfaced by movie-provider-info; we add it here so the
+    /// shared custom-properties decoder can populate it for both
+    /// movie and episode contexts.
+    let movieImage: String?
+    /// v1.6.16.x: per-episode crew/director string. Dispatcharr
+    /// stores the episode's director under `custom_properties.crew`
+    /// (e.g. `"Philippe Triboit"`). Series-level `director` lives
+    /// in the parent series's custom_properties, so this is the
+    /// per-episode-specific value.
+    let crew: String?
 
     enum CodingKeys: String, CodingKey {
         case youtubeTrailer = "youtube_trailer"
@@ -2063,6 +2213,8 @@ struct DispatcharrVODCustomProperties: Decodable {
         case originalName   = "original_name"
         case country
         case language
+        case movieImage     = "movie_image"
+        case crew
     }
 
     init(from decoder: Decoder) throws {
@@ -2105,6 +2257,8 @@ struct DispatcharrVODCustomProperties: Decodable {
         originalName = try? c.decode(String.self, forKey: .originalName)
         country      = try? c.decode(String.self, forKey: .country)
         language     = try? c.decode(String.self, forKey: .language)
+        movieImage   = try? c.decode(String.self, forKey: .movieImage)
+        crew         = try? c.decode(String.self, forKey: .crew)
     }
 }
 
@@ -2465,6 +2619,7 @@ struct DispatcharrVODEpisode: Decodable, Identifiable {
         case episodeNumber = "episode_number"
         case plot
         case overview
+        case description
         case streams
         case airDate          = "air_date"
         case rating
@@ -2487,7 +2642,30 @@ struct DispatcharrVODEpisode: Decodable, Identifiable {
         title = (try? c.decode(String.self, forKey: .title)) ?? (try? c.decode(String.self, forKey: .name)) ?? ""
         seasonNumber = try? c.decode(Int.self, forKey: .seasonNumber)
         episodeNumber = try? c.decode(Int.self, forKey: .episodeNumber)
-        plot = (try? c.decode(String.self, forKey: .plot)) ?? (try? c.decode(String.self, forKey: .overview))
+        // v1.6.16.x: real-API verification (Dispatcharr 0.7.x via
+        // /api/vod/series/{id}/episodes/) showed the plot field is
+        // sent as `description`, not `plot`/`overview`. The
+        // existing fallback chain pre-1.6.16.x silently dropped
+        // every episode plot. Adding `description` as the first
+        // preference reflects the actual response shape; `plot`
+        // and `overview` are kept as fallbacks for older or
+        // forked Dispatcharr builds that may still emit them.
+        plot = (try? c.decode(String.self, forKey: .description))
+            ?? (try? c.decode(String.self, forKey: .plot))
+            ?? (try? c.decode(String.self, forKey: .overview))
+        // v1.6.16.x: Dispatcharr's actual response uses a `providers`
+        // array, not `streams` — the field names match
+        // `DispatcharrVODStreamOption` won't apply directly because
+        // the wire shape nests differently (each provider object
+        // has `id`, `episode`, `m3u_account`, no top-level
+        // `stream_id`). API verification confirms the legacy
+        // `streams` key never appears in current Dispatcharr
+        // builds. We accept the nil here — `proxyEpisodeURL`
+        // happily generates a working stream URL without
+        // `preferredStreamID` (Dispatcharr picks the default
+        // provider server-side). If a forked Dispatcharr build
+        // still emits the legacy `streams` array this `try?`
+        // path picks it up.
         streams = try? c.decode([DispatcharrVODStreamOption].self, forKey: .streams)
 
         airDate          = try? c.decode(String.self, forKey: .airDate)

@@ -76,6 +76,74 @@ struct StreamInfo: Equatable {
     var avsync: Double = 0
 }
 
+/// Standalone Stream Info card used by both `PlayerView` (legacy
+/// single-stream path) and `MultiviewContainerView` (unified path).
+/// v1.6.15.x: extracted from PlayerView's private `streamInfoOverlay`
+/// because the unified path's `MultiviewContainerView` had its
+/// `showStreamInfo` toggle wired but no actual overlay mount —
+/// toggling the row in Options did nothing visible. Sharing one card
+/// view keeps the visual treatment identical across both paths.
+struct StreamInfoCardView: View {
+    let info: StreamInfo
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            row(label: "VIDEO", value: "\(info.videoCodec)  \(info.width)×\(info.height)")
+            row(label: "", value: "\(String(format: "%.2f", info.fps))fps  \(info.pixelFormat)")
+            row(label: "", value: "hwdec: \(info.hwdec)")
+            row(label: "AUDIO", value: "\(info.audioCodec)  \(info.sampleRate)Hz  \(info.channels)ch")
+            row(label: "CACHE", value: "\(String(format: "%.1f", info.cacheDuration))s  \(StreamInfoCardView.formatBitrate(info.bitrate))")
+            row(label: "SYNC", value: "\(String(format: "%.3f", info.avsync))s  drops: \(info.droppedFrames)")
+        }
+        #if os(tvOS)
+        .padding(20)
+        #else
+        .padding(12)
+        #endif
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+    }
+
+    @ViewBuilder
+    private func row(label: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            if !label.isEmpty {
+                Text(label)
+                    #if os(tvOS)
+                    .font(.system(size: 14, weight: .bold, design: .monospaced))
+                    #else
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    #endif
+                    .foregroundColor(Color.accentPrimary)
+                    .frame(width: 46, alignment: .trailing)
+            } else {
+                Color.clear.frame(width: 46, height: 1)
+            }
+            Text(value)
+                #if os(tvOS)
+                .font(.system(size: 14, weight: .medium, design: .monospaced))
+                #else
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                #endif
+                .foregroundColor(.white.opacity(0.9))
+        }
+    }
+
+    static func formatBitrate(_ bytesPerSec: Double) -> String {
+        let mbps = bytesPerSec * 8.0 / 1_000_000.0
+        if mbps >= 1.0 {
+            return String(format: "%.1f Mbps", mbps)
+        } else {
+            return String(format: "%.0f kbps", mbps * 1000)
+        }
+    }
+}
+
 // MARK: - Player Progress Store
 // @unchecked Sendable: all @Published mutations dispatched to main queue manually.
 final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
@@ -1691,66 +1759,13 @@ private struct PlayerRootView: View {
 
     // MARK: - Stream Info Overlay
 
+    /// v1.6.15.x: thin wrapper that delegates to the standalone
+    /// `StreamInfoCardView` (defined alongside `StreamInfo` near the
+    /// top of this file). The card itself is reusable across both
+    /// the legacy single-stream path (this view) and the unified
+    /// multiview path (`MultiviewContainerView`).
     private var streamInfoOverlay: some View {
-        let info = progressStore.streamInfo
-        return VStack(alignment: .leading, spacing: 6) {
-            streamInfoRow(label: "VIDEO", value: "\(info.videoCodec)  \(info.width)×\(info.height)")
-            streamInfoRow(label: "", value: "\(String(format: "%.2f", info.fps))fps  \(info.pixelFormat)")
-            streamInfoRow(label: "", value: "hwdec: \(info.hwdec)")
-            streamInfoRow(label: "AUDIO", value: "\(info.audioCodec)  \(info.sampleRate)Hz  \(info.channels)ch")
-            streamInfoRow(label: "CACHE", value: "\(String(format: "%.1f", info.cacheDuration))s  \(formatBitrate(info.bitrate))")
-            streamInfoRow(label: "SYNC", value: "\(String(format: "%.3f", info.avsync))s  drops: \(info.droppedFrames)")
-        }
-        #if os(tvOS)
-        .padding(20)
-        #else
-        .padding(12)
-        #endif
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
-        .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
-    }
-
-    private func streamInfoRow(label: String, value: String) -> some View {
-        HStack(spacing: 8) {
-            if !label.isEmpty {
-                Text(label)
-                    #if os(tvOS)
-                    .font(.system(size: 14, weight: .bold, design: .monospaced))
-                    #else
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    #endif
-                    .foregroundColor(Color.accentPrimary)
-                    .frame(width: 46, alignment: .trailing)
-            } else {
-                Color.clear
-                    #if os(tvOS)
-                    .frame(width: 46, height: 1)
-                    #else
-                    .frame(width: 46, height: 1)
-                    #endif
-            }
-            Text(value)
-                #if os(tvOS)
-                .font(.system(size: 14, weight: .medium, design: .monospaced))
-                #else
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                #endif
-                .foregroundColor(.white.opacity(0.9))
-        }
-    }
-
-    private func formatBitrate(_ bytesPerSec: Double) -> String {
-        let mbps = bytesPerSec * 8.0 / 1_000_000.0
-        if mbps >= 1.0 {
-            return String(format: "%.1f Mbps", mbps)
-        } else {
-            return String(format: "%.0f kbps", mbps * 1000)
-        }
+        StreamInfoCardView(info: progressStore.streamInfo)
     }
 
     private func liquidButton(
