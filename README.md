@@ -160,8 +160,8 @@ Sideload using your preferred method using the .ipa from [Releases](https://gith
 
 ## Supported Server Types
 
-1. **[Dispatcharr](https://github.com/Dispatcharr/Dispatcharr)** — Native API with API key authentication. See the [Dispatcharr GitHub repository](https://github.com/Dispatcharr/Dispatcharr) for more information.
-2. **Xtream Codes** — Provider URL + username & password authentication.
+1. **Dispatcharr API** (Recommended) — Native API with API key authentication. See the [Dispatcharr GitHub repository](https://github.com/Dispatcharr/Dispatcharr) for more information.
+2. **Xtream Codes** — IPTV Source URL + username & password authentication.
 3. **M3U Playlist** — Direct URL + optional XMLTV EPG.
 
 ## Requirements for Development
