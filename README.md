@@ -170,9 +170,8 @@ Click each type for the full breakdown:
 <summary><strong>Dispatcharr API</strong> <em>(Recommended)</em> — Native API with API key authentication. <em>Most full-featured option.</em></summary>
 
 [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) is a
-self-hosted IPTV middleware that proxies upstream IPTV feeds
-and adds DVR, EPG, VOD, and much more to the management experience.
-AerioTV's deepest integration.
+self-hosted IPTV middleware that gives users control over their IPTV services.
+See the linked GitHub.
 
 **Benefits**
 
