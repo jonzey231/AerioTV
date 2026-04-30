@@ -637,11 +637,24 @@ struct DispatcharrAPI {
     /// legacy callsites that don't have a server reference fall back to
     /// the app-wide default.
     let userAgent: String
+    /// v1.6.20: per-server auth header shape, persisted on the
+    /// `ServerConnection` after Test Connection auto-detects what the
+    /// server accepts. Default `.xapikey` matches v1.6.16+ behavior
+    /// (preferred — full VOD episode visibility); `verifyConnection`
+    /// auto-falls-back to `.both` then `.bearer` on HTTP 401 so users
+    /// on Dispatcharr builds that reject X-API-Key alone get connected
+    /// without intervention. Bearer auth (`auth == .bearer`) ignores
+    /// this field — that path is unambiguous.
+    let authMode: DispatcharrAuthHeaderMode
 
-    init(baseURL: String, auth: Auth, userAgent: String = DeviceInfo.defaultUserAgent) {
+    init(baseURL: String,
+         auth: Auth,
+         userAgent: String = DeviceInfo.defaultUserAgent,
+         authMode: DispatcharrAuthHeaderMode = .xapikey) {
         self.baseURL = baseURL
         self.auth = auth
         self.userAgent = userAgent
+        self.authMode = authMode
     }
 
 
@@ -651,15 +664,39 @@ struct DispatcharrAPI {
     // inside the 20s mark instead of the 60s Apple default that makes the
     // app feel "perpetually loading" to a user whose server is actually
     // down. Resource-wide 300s still covers large EPG/VOD payloads.
+    //
+    // v1.6.20: a `RedirectPreservingDelegate` is wired here so URLSession
+    // re-applies our auth headers across HTTP 301/302/307/308 redirects.
+    // Apple's URLSession default-strips custom headers (including
+    // `X-API-Key` and `Authorization`) when a redirect crosses origin —
+    // a real-world hit for Dispatcharr deployments behind a reverse
+    // proxy that 301s `/api` → `/api/`. Without re-applying, the
+    // follow-up request lands at the auth wall stripped of credentials
+    // and 401s; the user blames the API key. The delegate copies our
+    // X-API-Key, Authorization, Accept, and User-Agent fields onto the
+    // redirected request before letting URLSession proceed.
+    private static let redirectDelegate = RedirectPreservingDelegate()
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 20
         config.timeoutIntervalForResource = 300
-        return URLSession(configuration: config)
+        return URLSession(configuration: config,
+                          delegate: redirectDelegate,
+                          delegateQueue: nil)
     }()
     private var session: URLSession { Self.session }
 
-    private var headers: [String: String] {
+    /// Headers for the current `authMode`. All other DispatcharrAPI
+    /// methods read this — only `verifyConnection` overrides it during
+    /// auth-shape discovery (see `headers(for:)`).
+    private var headers: [String: String] { headers(for: authMode) }
+
+    /// Builds the request header dictionary for an explicit auth mode.
+    /// Used by `verifyConnection` to iterate header shapes against a
+    /// Dispatcharr instance whose auth requirements aren't yet known
+    /// (different builds reject different shapes — see the
+    /// `DispatcharrAuthHeaderMode` doc comment for the rationale).
+    private func headers(for mode: DispatcharrAuthHeaderMode) -> [String: String] {
         var h: [String: String] = [
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -667,30 +704,38 @@ struct DispatcharrAPI {
         ]
         switch auth {
         case .bearer(let token):
+            // Bearer-token auth ignores `mode` — the header shape is
+            // unambiguous regardless of which Dispatcharr build we're
+            // talking to.
             h["Authorization"] = "Bearer \(token)"
         case .apiKey(let key):
-            // v1.6.16.x: send X-API-Key alone for API-key auth.
-            //
-            // Pre-1.6.16.x sent BOTH `Authorization: ApiKey <key>`
-            // AND `X-API-Key: <key>` "for compatibility". In
-            // practice Dispatcharr's per-series episodes endpoint
-            // returned `count=0` for some series with that
-            // dual-header request even though X-API-Key alone (via
-            // curl) returned the full episode list. Best guess:
-            // adding the Authorization header switches Dispatcharr
-            // from unrestricted API-key auth to a user-scoped
-            // session whose visibility is filtered to a subset of
-            // m3u_accounts; series whose providers fall outside
-            // that subset come back empty. Series whose providers
-            // happen to match the session's accounts work fine,
-            // which is why this surfaced as an "intermittent"
-            // 0-episodes bug — Spiral's providers included accounts
-            // (#11, #22) the session couldn't see, while Lucky
-            // Hank / Friends / Parks and Recreation were on
-            // accounts the session could see. Dropping
-            // Authorization here makes every endpoint route through
-            // the same X-API-Key path.
-            h["X-API-Key"] = key
+            switch mode {
+            case .xapikey:
+                // v1.6.16+ default. Preferred when the server accepts
+                // it — Dispatcharr's per-series episodes endpoint
+                // returns the full episode list under X-API-Key alone,
+                // whereas adding `Authorization` can route the request
+                // through user-scoped session auth that filters
+                // visibility to a subset of m3u_accounts.
+                h["X-API-Key"] = key
+            case .both:
+                // Pre-1.6.16 shape. Some Dispatcharr builds REQUIRE
+                // the `Authorization` header and reject X-API-Key
+                // alone with HTTP 401 — that's the bug three users
+                // hit in v1.6.19, regardless of API key validity.
+                // This shape gets those deployments connected. Cost:
+                // the same VOD-episode filtering that v1.6.16 was
+                // chasing may resurface for series whose upstream
+                // providers fall outside the session's m3u_accounts
+                // view. Acceptable trade — partial VOD beats no
+                // connection at all.
+                h["Authorization"] = "ApiKey \(key)"
+                h["X-API-Key"] = key
+            case .bearer:
+                // Rare — reserved for token-based deployments that
+                // don't speak ApiKey at all.
+                h["Authorization"] = "Bearer \(key)"
+            }
         }
         return h
     }
@@ -710,6 +755,32 @@ struct DispatcharrAPI {
             "/api/version"
         ]
 
+        // v1.6.20: iterate over auth header shapes when the configured
+        // `authMode` is rejected. Some Dispatcharr builds reject
+        // `X-API-Key`-alone (v1.6.16+ default) with HTTP 401 even with
+        // a perfectly valid Admin API key — they require the legacy
+        // `Authorization: ApiKey <key>` header that pre-1.6.16 sent
+        // alongside it. Three users on private deployments hit this
+        // in v1.6.19. The fix: try the configured mode first, then
+        // fall back to other shapes when 401/403 surfaces, and report
+        // the working shape back to the caller so it can be persisted
+        // on `ServerConnection.dispatcharrAuthMode` for subsequent
+        // requests.
+        let candidateModes: [DispatcharrAuthHeaderMode] = {
+            switch auth {
+            case .bearer:
+                // Bearer token auth doesn't have a header-shape choice.
+                return [.bearer]
+            case .apiKey:
+                // Try the configured mode first, then the others, deduplicated.
+                var modes: [DispatcharrAuthHeaderMode] = [authMode]
+                for m in [DispatcharrAuthHeaderMode.xapikey, .both, .bearer] {
+                    if !modes.contains(m) { modes.append(m) }
+                }
+                return modes
+            }
+        }()
+
         /// Per-attempt outcome used to diagnose a failed verify. Tracking
         /// this lets us give the user an actionable error ("API key is
         /// wrong", "server unreachable", "server is running but didn't
@@ -725,76 +796,119 @@ struct DispatcharrAPI {
         var lastStatus: Int?
         var lastContentType: String?
         var lastURL: URL?
+        // Tracks whether we ever saw the URL produce non-API content
+        // (HTML, redirects, etc.) — distinguishes "wrong URL" from
+        // "wrong header shape" in the diagnostic message.
+        var sawNonAPIResponse = false
 
-        for path in candidatePaths {
-            let url = try buildURL(path: path)
-            lastURL = url
-            var request = URLRequest(url: url)
-            request.setValue("application/json", forHTTPHeaderField: "Accept")
-            headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        modeLoop: for mode in candidateModes {
+            // Per-mode tally — we only escalate to the next header
+            // shape when this mode emitted at least one auth-style
+            // failure (401/403). If the mode produced 200 HTML for
+            // every probe, the URL points at the SPA, not the API,
+            // and re-trying with different headers won't help.
+            var modeAuthRejected = false
+            var modeNonAuthFailures = 0
 
-            let (data, response) = try await loggedData(for: request)
+            for path in candidatePaths {
+                let url = try buildURL(path: path)
+                lastURL = url
+                var request = URLRequest(url: url)
+                headers(for: mode).forEach { request.setValue($1, forHTTPHeaderField: $0) }
 
-            if let http = response as? HTTPURLResponse {
-                lastStatus = http.statusCode
-                lastContentType = http.value(forHTTPHeaderField: "Content-Type")
-            }
+                let (data, response) = try await loggedData(for: request)
 
-            // If it's not a 2xx, capture body snippet and try next.
-            if (lastStatus ?? 0) < 200 || (lastStatus ?? 0) >= 300 {
-                let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
-                lastBodySnippet = String(body.prefix(800))
-                attemptOutcomes.append(.httpError(lastStatus ?? 0))
-                continue
-            }
-
-            // If it's HTML, it's almost certainly the web UI shell, not the API.
-            if let ct = lastContentType?.lowercased(), ct.contains("text/html") {
-                let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
-                lastBodySnippet = String(body.prefix(800))
-                attemptOutcomes.append(.html)
-                continue
-            }
-
-            // Try decoding depending on endpoint.
-            do {
-                if path.contains("version") {
-                    return try decodeDispatcharrServerInfo(from: data)
-                } else if path.contains("channels/summary") {
-                    _ = try decode([DispatcharrChannelSummary].self, from: data)
-                    return DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
-                } else if path.contains("channels/channels") {
-                    // Try paginated wrapper first (page_size=1), then flat array
-                    if let _ = try? decode(DispatcharrResultsWrapper<DispatcharrChannel>.self, from: data) {
-                        return DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
-                    }
-                    _ = try decode([DispatcharrChannel].self, from: data)
-                    return DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
-                } else if path.contains("channels/groups") {
-                    // Try paginated wrapper first (page_size=1), then flat array
-                    if let _ = try? decode(DispatcharrResultsWrapper<DispatcharrChannelGroup>.self, from: data) {
-                        return DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
-                    }
-                    _ = try decode([DispatcharrChannelGroup].self, from: data)
-                    return DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
-                } else {
-                    // /api/channels/ is an index document (links). Treat a JSON object with a "channels" key as valid.
-                    let obj = try JSONSerialization.jsonObject(with: data)
-                    if let dict = obj as? [String: Any], dict["channels"] != nil {
-                        return DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
-                    }
-                    throw APIError.decodingError(NSError(
-                        domain: "DispatcharrAPI",
-                        code: -3,
-                        userInfo: [NSLocalizedDescriptionKey: "Expected channels index JSON object with a 'channels' key."]
-                    ))
+                if let http = response as? HTTPURLResponse {
+                    lastStatus = http.statusCode
+                    lastContentType = http.value(forHTTPHeaderField: "Content-Type")
                 }
-            } catch {
-                let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
-                lastBodySnippet = String(body.prefix(800))
-                attemptOutcomes.append(.jsonDecodeFailed)
-                continue
+
+                // If it's not a 2xx, capture body snippet and try next.
+                if (lastStatus ?? 0) < 200 || (lastStatus ?? 0) >= 300 {
+                    let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
+                    lastBodySnippet = String(body.prefix(800))
+                    let s = lastStatus ?? 0
+                    attemptOutcomes.append(.httpError(s))
+                    if s == 401 || s == 403 {
+                        modeAuthRejected = true
+                    } else {
+                        modeNonAuthFailures += 1
+                    }
+                    continue
+                }
+
+                // If it's HTML, it's almost certainly the web UI shell, not the API.
+                if let ct = lastContentType?.lowercased(), ct.contains("text/html") {
+                    let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
+                    lastBodySnippet = String(body.prefix(800))
+                    attemptOutcomes.append(.html)
+                    sawNonAPIResponse = true
+                    continue
+                }
+
+                // Try decoding depending on endpoint.
+                do {
+                    let info: DispatcharrServerInfo
+                    if path.contains("version") {
+                        info = try decodeDispatcharrServerInfo(from: data)
+                    } else if path.contains("channels/summary") {
+                        _ = try decode([DispatcharrChannelSummary].self, from: data)
+                        info = DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
+                    } else if path.contains("channels/channels") {
+                        // Try paginated wrapper first (page_size=1), then flat array
+                        if let _ = try? decode(DispatcharrResultsWrapper<DispatcharrChannel>.self, from: data) {
+                            info = DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
+                        } else {
+                            _ = try decode([DispatcharrChannel].self, from: data)
+                            info = DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
+                        }
+                    } else if path.contains("channels/groups") {
+                        // Try paginated wrapper first (page_size=1), then flat array
+                        if let _ = try? decode(DispatcharrResultsWrapper<DispatcharrChannelGroup>.self, from: data) {
+                            info = DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
+                        } else {
+                            _ = try decode([DispatcharrChannelGroup].self, from: data)
+                            info = DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
+                        }
+                    } else {
+                        // /api/channels/ is an index document (links). Treat a JSON object with a "channels" key as valid.
+                        let obj = try JSONSerialization.jsonObject(with: data)
+                        if let dict = obj as? [String: Any], dict["channels"] != nil {
+                            info = DispatcharrServerInfo(version: nil, serverName: "Dispatcharr")
+                        } else {
+                            throw APIError.decodingError(NSError(
+                                domain: "DispatcharrAPI",
+                                code: -3,
+                                userInfo: [NSLocalizedDescriptionKey: "Expected channels index JSON object with a 'channels' key."]
+                            ))
+                        }
+                    }
+                    // Success — embed the working header shape so the
+                    // caller can persist it on the server.
+                    var enriched = info
+                    enriched.discoveredAuthMode = mode
+                    debugLog("DispatcharrAPI verify: success with auth mode .\(mode.rawValue) on \(path)")
+                    return enriched
+                } catch {
+                    let body = String(data: data, encoding: .utf8) ?? "<non-utf8 body>"
+                    lastBodySnippet = String(body.prefix(800))
+                    attemptOutcomes.append(.jsonDecodeFailed)
+                    modeNonAuthFailures += 1
+                    continue
+                }
             }
+
+            // Decide whether to try the next mode. Only iterate when
+            // this mode's failure mode was auth-shaped — otherwise
+            // (URL pointing at SPA, 5xx, decoding mismatch, network
+            // issue) the next mode is just going to repeat the same
+            // outcome and waste round-trips against the user's server.
+            if !modeAuthRejected {
+                debugLog("DispatcharrAPI verify: mode .\(mode.rawValue) failed without auth-error signal — stopping mode iteration")
+                break modeLoop
+            }
+            debugLog("DispatcharrAPI verify: mode .\(mode.rawValue) was auth-rejected — trying next shape")
+            _ = modeNonAuthFailures  // silence unused-variable warning when we did break
         }
 
         // Summarise the attempts into a user-actionable message. The
@@ -808,43 +922,70 @@ struct DispatcharrAPI {
         //     SPA) OR the URL points at the web port but not through
         //     the `/api` prefix (e.g., a reverse proxy that strips
         //     `/api`).
-        //   • 401/403 on every probe → authentication rejected.
+        //   • 401/403 on every probe → authentication rejected (and
+        //     we already auto-tried every supported header shape, so
+        //     the API key itself is the most likely cause).
         //   • Everything 4xx/5xx → server error.
         //   • Mixed/other → fall back to a generic "couldn't recognise
         //     the server response" message with the last body snippet
         //     as the final diagnostic breadcrumb.
         let urlString = lastURL?.absoluteString ?? "<unknown url>"
-        // Relaxed from `all*` to `any*` because real-world
-        // deployments routinely produce mixed outcomes — the
-        // Dispatcharr SPA fallback returns 200 + HTML for unmatched
-        // routes (e.g., `/api/version` on builds where that path
-        // doesn't exist), so a wrong-API-key user sees 401 on the
-        // five channel endpoints AND 200 HTML on `/api/version`.
-        // The previous `all-or-nothing` test fell through to the
-        // generic "couldn't recognise" message in that case, hiding
-        // the much more useful "your API key is wrong" diagnosis.
-        // 401/403 is the strongest signal we have so it wins over
-        // an HTML fallback.
         let firstAuthErrorCode: Int? = attemptOutcomes.compactMap {
             if case .httpError(let s) = $0, s == 401 || s == 403 { return s }
             return nil
         }.first
-        let anyHTML = attemptOutcomes.contains {
+        let anyHTML = sawNonAPIResponse || attemptOutcomes.contains {
             if case .html = $0 { return true }
             return false
         }
+        // Detect "every single probe was 401/403" — strongest possible
+        // wrong-API-key signal. v1.6.20 split this from the looser
+        // "any auth error" path so we can distinguish "every shape we
+        // tried got rejected" (almost certainly an invalid/non-admin
+        // key) from "one shape worked partially and others didn't"
+        // (more likely a header-shape edge case worth surfacing
+        // separately, though our auto-fallback should have caught
+        // those).
+        let allAuth: Bool = {
+            guard !attemptOutcomes.isEmpty else { return false }
+            return attemptOutcomes.allSatisfy {
+                if case .httpError(let s) = $0, s == 401 || s == 403 { return true }
+                return false
+            }
+        }()
 
         let message: String
-        if let authCode = firstAuthErrorCode {
+        if allAuth, let authCode = firstAuthErrorCode {
             message = """
-                Dispatcharr rejected this request (HTTP \(authCode)). \
-                Either the Admin API Key is empty/incorrect, or — more \
-                often — the key belongs to a non-Admin user. Aerio needs \
-                an Admin-level API key to list channels and groups, which \
-                a user-scoped key can't do. In Dispatcharr, go to \
-                System → Users → Edit User → API & XC, confirm the user \
-                has Admin permissions, and copy that user's API Key into \
-                the Admin API Key field above.
+                Dispatcharr rejected every authentication shape Aerio tried \
+                (HTTP \(authCode)). The server is reachable, but it won't \
+                accept this Admin API Key. Most common causes:
+                  • The key belongs to a non-Admin user. Aerio needs an \
+                Admin-level key to list channels and groups. In \
+                Dispatcharr, go to System → Users → Edit User → API & XC, \
+                confirm the user has Admin permissions, and copy that \
+                user's API Key into the Admin API Key field above.
+                  • The key was rotated or deleted on the server. Generate \
+                a fresh Admin API Key in Dispatcharr and paste it in.
+                  • The Server URL is reaching a different Dispatcharr \
+                instance than the one whose API Key you copied. Verify \
+                \(urlString) points at the correct deployment.
+                """
+        } else if let authCode = firstAuthErrorCode {
+            // Mixed outcome — some auth errors, some not. Could be a
+            // misconfigured reverse proxy answering some routes and
+            // not others, or a deployment quirk our auto-fallback
+            // didn't anticipate. Surface what we saw.
+            message = """
+                Dispatcharr returned HTTP \(authCode) on the API probe \
+                (\(urlString)). Aerio auto-tried every supported \
+                authentication header shape (X-API-Key, Authorization: \
+                ApiKey, Authorization: Bearer); every shape was rejected. \
+                Either the Admin API Key is incorrect, or this server \
+                requires a header shape Aerio doesn't yet know about. \
+                Confirm the key is from System → Users → Edit User → \
+                API & XC for an Admin user and that the Server URL \
+                reaches the same Dispatcharr deployment.
                 """
         } else if anyHTML {
             message = """
@@ -860,7 +1001,8 @@ struct DispatcharrAPI {
                 while logged out — you should see a JSON error, not the \
                 Dispatcharr login page.
                   • The URL is correct but the port is wrong. Confirm the \
-                port matches the Dispatcharr API port on your server.
+                port matches the Dispatcharr API port on your server (the \
+                default is the same port as the web UI).
                 """
         } else {
             // Genuine "other" outcome — non-HTML, non-auth-error,
@@ -1828,8 +1970,57 @@ struct DispatcharrAPI {
     }
 
     // MARK: - Helpers
+    /// Builds the full request URL from the server's baseURL and a path
+    /// like `/api/channels/groups/?page_size=1`. Uses URLComponents so
+    /// non-default ports, IPv6 host literals, and pre-existing baseURL
+    /// path components survive the join (the previous string-concat
+    /// approach was correct for the common case but fragile around
+    /// trailing slashes and userinfo). Treats anything after the first
+    /// `?` in `path` as the query so the caller can keep the
+    /// pre-encoded `?key=value&...` shape it ships with today.
+    ///
+    /// v1.6.20: pulled in alongside the auth-mode auto-detect work
+    /// because one of the affected users runs Dispatcharr at
+    /// `http://dispatchar.domain.com:9191` — port preservation is the
+    /// kind of thing URLComponents handles correctly by definition,
+    /// whereas `URL(string: a + b)` only happens to do so today.
     private func buildURL(path: String) throws -> URL {
-        guard let url = URL(string: baseURL + path) else { throw APIError.invalidURL }
+        // Split path from any query string. We assume Dispatcharr
+        // paths never carry a fragment (`#`) so we don't bother
+        // splitting on that.
+        let pathOnly: String
+        let queryOnly: String?
+        if let qIdx = path.firstIndex(of: "?") {
+            pathOnly = String(path[..<qIdx])
+            queryOnly = String(path[path.index(after: qIdx)...])
+        } else {
+            pathOnly = path
+            queryOnly = nil
+        }
+
+        // Parse the baseURL into its parts (scheme, host, port, any
+        // pre-existing path). Fall back to the legacy string-concat
+        // path if URLComponents can't make sense of the input — keeps
+        // us no worse than v1.6.19 for genuinely malformed URLs.
+        guard var components = URLComponents(string: baseURL) else {
+            guard let url = URL(string: baseURL + path) else { throw APIError.invalidURL }
+            return url
+        }
+
+        // Strip a trailing `/` from baseURL's path so the join
+        // doesn't produce `//api/...`. The empty case is fine
+        // (`""` + `"/api/..."` = `"/api/..."`).
+        var basePath = components.path
+        if basePath.hasSuffix("/") { basePath = String(basePath.dropLast()) }
+        let joined = basePath + (pathOnly.hasPrefix("/") ? pathOnly : "/" + pathOnly)
+        components.path = joined
+        // The path strings sprinkled through DispatcharrAPI carry
+        // already-encoded queries (`?page_size=1`, `?ids=1,2`, etc.).
+        // Round-tripping through `query` would re-percent-encode the
+        // commas, so we set the percent-encoded form directly.
+        components.percentEncodedQuery = queryOnly
+
+        guard let url = components.url else { throw APIError.invalidURL }
         return url
     }
 
@@ -1916,11 +2107,85 @@ struct DispatcharrAPI {
     }
 }
 
+// MARK: - URLSession Redirect Delegate
+/// Re-applies our auth + identity headers to redirected requests so
+/// they survive `301`/`302`/`307`/`308` hops.
+///
+/// **Why this exists.** URLSession's default redirect handler strips
+/// the `Authorization` header on cross-origin redirects (intentional —
+/// otherwise a malicious server could `301` to attacker-controlled
+/// hosts and exfiltrate the credential). It also occasionally drops
+/// non-standard headers like `X-API-Key` depending on the redirect
+/// type. For Dispatcharr deployments behind a reverse proxy that
+/// rewrites paths (e.g., `/api` → `/api/`, or HTTP → HTTPS upgrade
+/// via `301`), this manifests as: the first request includes the API
+/// key, gets `301`'d, the redirected request lands at the auth wall
+/// without credentials, server returns `401`, and the user sees
+/// "Dispatcharr rejected this request" even though the key is valid.
+///
+/// This delegate is wired onto the shared `DispatcharrAPI.session`
+/// so every API call inherits the behavior. The redirect target
+/// inherits the auth-relevant headers from `task.originalRequest`;
+/// non-auth headers (e.g., `Cookie`, `Referer`) are left to URLSession's
+/// default handling.
+///
+/// v1.6.20 (Aerio): added as part of the auth-fallback work after
+/// three users on private Dispatcharr deployments hit HTTP 401 on
+/// Test Connection. We can't be certain redirects were the trigger
+/// for those specific reports — header-shape was the smoking gun —
+/// but a stripped-on-redirect API key would produce indistinguishable
+/// symptoms, so this is belt-and-suspenders against the same class
+/// of failure.
+final class RedirectPreservingDelegate: NSObject, URLSessionTaskDelegate {
+
+    /// Header names we ALWAYS re-apply to redirected requests. Order
+    /// is irrelevant — they're applied unconditionally.
+    private static let preservedHeaders: [String] = [
+        "X-API-Key",
+        "Authorization",
+        "Accept",
+        "Content-Type",
+        "User-Agent"
+    ]
+
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping (URLRequest?) -> Void) {
+        var modified = request
+        if let original = task.originalRequest {
+            for name in Self.preservedHeaders {
+                if let value = original.value(forHTTPHeaderField: name) {
+                    modified.setValue(value, forHTTPHeaderField: name)
+                }
+            }
+            #if DEBUG
+            // One-line audit so a misbehaving reverse-proxy redirect
+            // shows up in the debug log without needing a packet
+            // capture.
+            let from = original.url?.absoluteString ?? "<unknown>"
+            let to   = request.url?.absoluteString ?? "<unknown>"
+            debugLog("DispatcharrAPI redirect: \(response.statusCode) \(from) → \(to) (re-applied \(Self.preservedHeaders.count) headers)")
+            #endif
+        }
+        completionHandler(modified)
+    }
+}
+
 // MARK: - Dispatcharr Response Models
 struct DispatcharrServerInfo: Decodable {
     let version: String?
     /// Optional human-friendly server name (key varies by backend/version).
     let serverName: String?
+    /// v1.6.20: the auth header shape that successfully reached the API
+    /// during `verifyConnection`. Persisted on the `ServerConnection`
+    /// model so subsequent API calls and stream playback use the same
+    /// shape without re-detecting on every cold start. `nil` means the
+    /// caller didn't run discovery (e.g., decoding from a JSON body
+    /// directly), in which case the caller should keep whatever was
+    /// previously persisted.
+    var discoveredAuthMode: DispatcharrAuthHeaderMode?
 
     enum CodingKeys: String, CodingKey {
         case version
@@ -1928,9 +2193,11 @@ struct DispatcharrServerInfo: Decodable {
         case name
     }
 
-    init(version: String? = nil, serverName: String? = nil) {
+    init(version: String? = nil, serverName: String? = nil,
+         discoveredAuthMode: DispatcharrAuthHeaderMode? = nil) {
         self.version = version
         self.serverName = serverName
+        self.discoveredAuthMode = discoveredAuthMode
     }
 
     init(from decoder: Decoder) throws {
@@ -1938,6 +2205,7 @@ struct DispatcharrServerInfo: Decodable {
         version = try? c.decode(String.self, forKey: .version)
         // Prefer explicit server_name, fall back to name.
         serverName = (try? c.decode(String.self, forKey: .serverName)) ?? (try? c.decode(String.self, forKey: .name))
+        discoveredAuthMode = nil
     }
 }
 

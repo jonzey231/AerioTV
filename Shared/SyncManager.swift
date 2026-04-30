@@ -802,6 +802,16 @@ final class SyncManager: ObservableObject {
         if let lastConnected = server.lastConnected {
             dict["lastConnected"] = lastConnected.timeIntervalSince1970
         }
+        // v1.6.20: cross-device persistence of the auto-detected
+        // Dispatcharr auth header shape. Empty (= "not yet detected")
+        // skipped intentionally so we don't overwrite a remote
+        // device's already-discovered shape with our pre-discovery
+        // default. Older clients that don't know about this key
+        // simply ignore it during deserialize and keep their own
+        // local default.
+        if !server.dispatcharrAuthMode.isEmpty {
+            dict["dispatcharrAuthMode"] = server.dispatcharrAuthMode
+        }
         // v1.6.12: credentials are no longer written to iCloud KVS.
         //
         // Pre-v1.6.8 we shipped passwords + API keys as `_password` /
@@ -856,7 +866,8 @@ final class SyncManager: ObservableObject {
             localEPGURL:   dict["localEPGURL"] as? String ?? "",
             homeSSID:      dict["homeSSID"]    as? String ?? "",
             password:      dict["_password"]   as? String ?? "",
-            apiKey:        dict["_apiKey"]     as? String ?? ""
+            apiKey:        dict["_apiKey"]     as? String ?? "",
+            dispatcharrAuthMode: dict["dispatcharrAuthMode"] as? String ?? ""
         )
     }
 
@@ -1205,6 +1216,14 @@ struct SyncedServer: Sendable {
     let homeSSID: String
     let password: String
     let apiKey: String
+    /// v1.6.20: per-server Dispatcharr auth header shape, raw string
+    /// (`""`, `"xapikey"`, `"both"`, or `"bearer"`). Unused by other
+    /// server types. Synced so that once one device discovers the
+    /// working shape during Test Connection, every other device on
+    /// the same iCloud account inherits it without re-running
+    /// discovery. Empty string = inherit the back-compat default
+    /// (`.both`) on the receiving device.
+    let dispatcharrAuthMode: String
 }
 
 // MARK: - Notification Names

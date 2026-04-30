@@ -1847,8 +1847,26 @@ struct ServerDetailView: View {
                 let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL, username: server.username, password: server.effectivePassword)
                 _ = try await api.verifyConnection()
             case .dispatcharrAPI:
-                let api = DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(server.effectiveApiKey))
-                _ = try await api.verifyConnection()
+                // Re-verify with the persisted auth mode as the
+                // starting hint — verifyConnection auto-falls-back if
+                // the server now wants a different shape (e.g. user
+                // upgraded Dispatcharr to a build with stricter auth).
+                let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                         auth: .apiKey(server.effectiveApiKey),
+                                         userAgent: server.effectiveUserAgent,
+                                         authMode: server.dispatcharrHeaderMode)
+                let info = try await api.verifyConnection()
+                // v1.6.20: persist the discovered auth shape so
+                // subsequent API calls and stream playback use it.
+                if let mode = info.discoveredAuthMode,
+                   mode.rawValue != server.dispatcharrAuthMode {
+                    server.dispatcharrAuthMode = mode.rawValue
+                    debugLog("SettingsView Test Connection: persisting auth mode .\(mode.rawValue) for \(server.name)")
+                    // Immediate cross-device push so other devices on
+                    // the same iCloud account inherit the working
+                    // shape without waiting for the next debounce.
+                    SyncManager.shared.pushServers(servers, immediate: true)
+                }
             case .m3uPlaylist:
                 guard let url = URL(string: server.baseURL) else { throw APIError.invalidURL }
                 let (_, response) = try await URLSession.shared.data(from: url)

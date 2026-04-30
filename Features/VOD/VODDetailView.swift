@@ -644,7 +644,10 @@ struct VODDetailView: View {
         var resolvedURL = url
         if let server, server.type == .dispatcharrAPI {
             isResolvingURL = true
-            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL, auth: .apiKey(server.effectiveApiKey))
+            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                     auth: .apiKey(server.effectiveApiKey),
+                                     userAgent: server.effectiveUserAgent,
+                                     authMode: server.dispatcharrHeaderMode)
             resolvedURL = (try? await api.resolveFinalURLForPlayback(url)) ?? url
             isResolvingURL = false
         }

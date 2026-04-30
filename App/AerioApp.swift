@@ -1394,6 +1394,13 @@ struct RootView: View {
                     local.localEPGURL = remote.localEPGURL
                     local.homeSSID = remote.homeSSID
                     local.lastConnected = remote.lastConnected
+                    // v1.6.20: adopt remote's auto-detected Dispatcharr
+                    // auth shape if it discovered one. Empty remote
+                    // value (no detection yet on the source device)
+                    // doesn't overwrite a working local discovery.
+                    if !remote.dispatcharrAuthMode.isEmpty {
+                        local.dispatcharrAuthMode = remote.dispatcharrAuthMode
+                    }
                     // Queue credential writes for after the merge
                     if !remote.password.isEmpty {
                         pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))
@@ -1426,6 +1433,13 @@ struct RootView: View {
                 newServer.createdAt = remote.createdAt
                 newServer.lastConnected = remote.lastConnected
                 newServer.isVerified = remote.isVerified
+                // v1.6.20: inherit the auto-detected Dispatcharr auth
+                // shape from the source device so the new install
+                // doesn't have to re-run discovery on first cold
+                // start. Empty remote value falls through to the
+                // model default of `""` which `dispatcharrHeaderMode`
+                // resolves to `.both` for back-compat.
+                newServer.dispatcharrAuthMode = remote.dispatcharrAuthMode
                 // Queue credential writes for after the merge
                 if !remote.password.isEmpty {
                     pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))

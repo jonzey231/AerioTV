@@ -115,9 +115,13 @@ final class VODStore: ObservableObject {
         let baseURL = server.effectiveBaseURL
         let apiKey  = server.effectiveApiKey
         let sID     = server.id
+        // v1.6.20: capture per-server auth shape for the off-main API client.
+        let authMode = server.dispatcharrHeaderMode
+        let userAgent = server.effectiveUserAgent
         isSearchingMovies = true
         movieSearchTask = Task {
-            let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+            let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
+                                     userAgent: userAgent, authMode: authMode)
             var results: [VODDisplayItem] = []
             var lastPublishTime = Date.distantPast
             let publishInterval: TimeInterval = 0.5
@@ -166,9 +170,13 @@ final class VODStore: ObservableObject {
         let baseURL = server.effectiveBaseURL
         let apiKey  = server.effectiveApiKey
         let sID     = server.id
+        // v1.6.20: capture per-server auth shape for the off-main API client.
+        let authMode = server.dispatcharrHeaderMode
+        let userAgent = server.effectiveUserAgent
         isSearchingSeries = true
         seriesSearchTask = Task {
-            let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+            let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
+                                     userAgent: userAgent, authMode: authMode)
             var results: [VODDisplayItem] = []
             var lastPublishTime = Date.distantPast
             let publishInterval: TimeInterval = 0.5
@@ -262,8 +270,12 @@ final class VODStore: ObservableObject {
             let baseURL = server.effectiveBaseURL
             let apiKey  = server.effectiveApiKey
             let sID     = server.id
+            // v1.6.20: per-server auth shape capture.
+            let authMode = server.dispatcharrHeaderMode
+            let userAgent = server.effectiveUserAgent
             debugLog("🎬 VODStore.loadMovies: dispatcharr baseURL=\(baseURL), hasKey=\(!apiKey.isEmpty)")
-            let api     = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+            let api     = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
+                                         userAgent: userAgent, authMode: authMode)
 
             // Fetch categories from the dedicated endpoint and filter to
             // the ones the user has actually enabled on at least one
@@ -492,7 +504,11 @@ final class VODStore: ObservableObject {
             let baseURL = server.effectiveBaseURL
             let apiKey  = server.effectiveApiKey
             let sID     = server.id
-            let api     = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+            // v1.6.20: per-server auth shape capture.
+            let authMode = server.dispatcharrHeaderMode
+            let userAgent = server.effectiveUserAgent
+            let api     = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
+                                         userAgent: userAgent, authMode: authMode)
 
             // Mirrors `loadMovies` above — see that function for the
             // full rationale on why per-enabled-category fetching +
@@ -856,6 +872,11 @@ final class ChannelStore: ObservableObject {
         let apiKey   = server.effectiveApiKey
         let serverID = server.id
         let epgURL   = server.effectiveEPGURL
+        // v1.6.20: capture the auto-detected Dispatcharr auth header
+        // mode + UA so the off-main-thread DispatcharrAPI clients use
+        // the per-server shape that Test Connection discovered.
+        let authMode = server.dispatcharrHeaderMode
+        let userAgent = server.effectiveUserAgent
         debugLog("🔷 ChannelStore.load: snapshot done (type=\(type), baseURL=\(baseURL), hasPw=\(!password.isEmpty), hasKey=\(!apiKey.isEmpty))")
 
         // Fast reachability probe (only on a cold load). A dead Docker
@@ -896,7 +917,8 @@ final class ChannelStore: ObservableObject {
                     type: type, baseURL: baseURL,
                     username: username, password: password,
                     apiKey: apiKey, serverID: serverID,
-                    epgURL: epgURL
+                    epgURL: epgURL,
+                    authMode: authMode, userAgent: userAgent
                 )
                 debugLog("🔷 ChannelStore.load: fetchChannels returned \(items.count) items")
                 guard !Task.isCancelled else { isLoading = false; return }
@@ -1083,6 +1105,11 @@ final class ChannelStore: ObservableObject {
         // a SwiftData model; reading a property after an `await`
         // suspension risks a thread-context violation.
         let dispatcharrXMLTVOverride = server.dispatcharrXMLTVURL
+        // v1.6.20: snapshot the auto-detected auth header mode + UA
+        // so the off-main-thread API constructor uses the per-server
+        // shape instead of the default `.xapikey`.
+        let authMode = server.dispatcharrHeaderMode
+        let userAgent = server.effectiveUserAgent
 
         isEPGLoading = true
         defer { isEPGLoading = false }
@@ -1091,7 +1118,10 @@ final class ChannelStore: ObservableObject {
         case .dispatcharrAPI:
             // Dispatcharr: one bulk call via /api/epg/grid/ — all channels, -1h to +24h
             do {
-                let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+                let dAPI = DispatcharrAPI(baseURL: baseURL,
+                                          auth: .apiKey(apiKey),
+                                          userAgent: userAgent,
+                                          authMode: authMode)
                 let programs = try await dAPI.getEPGGrid()
 
                 // Everything below (dictionary build, ~7k-item sort,
@@ -1307,7 +1337,9 @@ final class ChannelStore: ObservableObject {
         type: ServerType, baseURL: String,
         username: String, password: String,
         apiKey: String, serverID: UUID,
-        epgURL: String = ""
+        epgURL: String = "",
+        authMode: DispatcharrAuthHeaderMode = .xapikey,
+        userAgent: String = DeviceInfo.defaultUserAgent
     ) async throws -> ([ChannelDisplayItem], [String]) {
         switch type {
         case .m3uPlaylist:
@@ -1315,7 +1347,8 @@ final class ChannelStore: ObservableObject {
         case .xtreamCodes:
             return try await fetchXtream(baseURL: baseURL, username: username, password: password)
         case .dispatcharrAPI:
-            return try await fetchDispatcharr(baseURL: baseURL, apiKey: apiKey)
+            return try await fetchDispatcharr(baseURL: baseURL, apiKey: apiKey,
+                                              authMode: authMode, userAgent: userAgent)
         }
     }
 
@@ -1427,9 +1460,12 @@ final class ChannelStore: ObservableObject {
 
     // MARK: - Dispatcharr API
 
-    private func fetchDispatcharr(baseURL: String, apiKey: String) async throws -> ([ChannelDisplayItem], [String]) {
+    private func fetchDispatcharr(baseURL: String, apiKey: String,
+                                  authMode: DispatcharrAuthHeaderMode = .xapikey,
+                                  userAgent: String = DeviceInfo.defaultUserAgent) async throws -> ([ChannelDisplayItem], [String]) {
         debugLog("🔷 ChannelStore.fetchDispatcharr: starting")
-        let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+        let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
+                                  userAgent: userAgent, authMode: authMode)
         let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
 
         // Fire channels + groups concurrently. Current-programs was
@@ -2413,7 +2449,8 @@ struct MainTabView: View {
         for server in dispatcharrServers {
             let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                      auth: .apiKey(server.effectiveApiKey),
-                                     userAgent: server.effectiveUserAgent)
+                                     userAgent: server.effectiveUserAgent,
+                                     authMode: server.dispatcharrHeaderMode)
             await RecordingCoordinator.shared.reconcileDispatcharrRecordings(
                 api: api,
                 serverID: server.id.uuidString,

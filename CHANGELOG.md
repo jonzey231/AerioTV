@@ -1,5 +1,104 @@
 # Changelog
 
+## v1.6.20 — 2026-04-29
+
+### Fixed
+
+- **Dispatcharr Test Connection no longer 401s on deployments
+  that require dual auth headers.** Three users on private
+  Dispatcharr instances (one of them at
+  `http://dispatchar.domain.com:9191`) reported HTTP 401 on
+  Test Connection in v1.6.19 with valid Admin API keys. Root
+  cause: v1.6.16's "X-API-Key alone" change (which fixed a VOD
+  episodes filtering bug on the user's main server) is rejected
+  by some Dispatcharr builds — they require the legacy
+  `Authorization: ApiKey <key>` header that pre-1.6.16 sent
+  alongside it. v1.6.20 auto-detects the working header shape:
+  on Test Connection, Aerio tries X-API-Key alone first
+  (preferred — preserves full VOD episode visibility), falls
+  back to dual headers (`Authorization: ApiKey` + `X-API-Key`)
+  on HTTP 401, then to bearer-token auth as a final fallback.
+  The discovered shape is persisted on the per-server
+  `dispatcharrAuthMode` field (synced via iCloud) so subsequent
+  API calls and stream playback skip re-discovery and
+  immediately speak the right shape.
+
+### Added
+
+- **Per-server `dispatcharrAuthMode` SwiftData field** —
+  `""` / `"xapikey"` / `"both"` / `"bearer"`. Auto-populated
+  during Test Connection. Synced across devices via
+  `SyncManager` so once one device discovers the working shape,
+  every other device on the same iCloud account inherits it.
+  Empty string (no detection yet) falls through to `.both` for
+  back-compat with stream-playback header construction —
+  matches what shipped pre-v1.6.16 so existing installs don't
+  regress on upgrade.
+- **`DispatcharrAuthHeaderMode` enum** in `Models/Models.swift`
+  exposing the three shapes as a type-safe value with raw-string
+  bridging for SwiftData stability.
+- **`RedirectPreservingDelegate` on `DispatcharrAPI.session`** —
+  re-applies `X-API-Key`, `Authorization`, `Accept`,
+  `Content-Type`, and `User-Agent` to redirected requests so
+  HTTP 301/302/307/308 hops behind a reverse proxy don't strip
+  the credentials and produce a misleading 401. Belt-and-
+  suspenders against the same class of failure as the auth-
+  shape mismatch — different root cause, same symptom.
+- **`discoveredAuthMode: DispatcharrAuthHeaderMode?` on
+  `DispatcharrServerInfo`** — the working shape returned from
+  `verifyConnection` so the caller can persist it on the
+  `ServerConnection` model.
+- **`discoveredDispatcharrAuthMode` on `ServerConnectionViewModel`**
+  + persistence into `buildServerConnection` so adding a server
+  through Settings → Add Server captures and saves the working
+  shape on save.
+
+### Changed
+
+- **`ServerConnection.authHeaders`** now consults the per-server
+  `dispatcharrHeaderMode` instead of always emitting dual
+  headers. Stream playback (which uses these headers via mpv's
+  `--http-header-fields` plumbing) inherits the auto-detected
+  shape so stream URLs that need a specific shape work after
+  Test Connection runs. Empty/unknown mode falls back to
+  `.both` (the historical pre-v1.6.16 shape) so users who
+  haven't re-tested their connection on v1.6.20 keep working.
+- **`DispatcharrAPI` initializer** gained an `authMode:` parameter
+  (default `.xapikey` to preserve the v1.6.16+ VOD-episode
+  behavior). `headers` factored into `headers(for:)` so
+  `verifyConnection` can iterate header shapes locally without
+  mutating the struct.
+- **`DispatcharrAPI.buildURL`** migrated from naive string
+  concatenation to URLComponents, preserving non-default
+  ports, IPv6 host literals, and pre-existing baseURL path
+  components correctly. Pulled in alongside the auth work
+  because one of the affected users runs at
+  `http://dispatchar.domain.com:9191` — port preservation is
+  the kind of thing URLComponents handles by definition.
+- **Dispatcharr Test Connection error messages** rewritten to
+  distinguish "every shape rejected (likely wrong key or non-
+  Admin user)" from "mixed auth/non-auth failure (URL or
+  reverse-proxy quirk)" from "got the SPA shell instead of
+  the API" from "couldn't recognise the response at all". The
+  v1.6.19 single message dumped the raw HTML body for everything
+  and didn't tell users what to try.
+- **Construction sites updated** — every `DispatcharrAPI(...)`
+  callsite that has a `ServerConnection` reference (or
+  `ServerSnapshot`) now passes the per-server `authMode` and
+  `userAgent` so off-main-thread API calls use the right shape:
+  `VODService` (4 sites), `MyRecordingsView` (2),
+  `SettingsView` Test Connection, `HomeView` (7),
+  `EPGGuideView` (2), `ChannelListView`, `VODDetailView`,
+  `RecordProgramSheet`, `ServerSyncView` (4),
+  `ServerConnectionViewModel` verify path. The verify call
+  intentionally keeps the default `.xapikey` so discovery
+  always starts from the preferred shape.
+- **`ServerSnapshot`** gained `dispatcharrAuthMode` and
+  `userAgent` fields so background-thread VOD / channel /
+  EPG fetches construct DispatcharrAPI clients with the
+  per-server shape instead of falling back to the hard-coded
+  default.
+
 ## v1.6.19 — 2026-04-29
 
 ### Reverted

@@ -230,7 +230,8 @@ struct MyRecordingsView: View {
               active.type == .dispatcharrAPI else { return }
         let api = DispatcharrAPI(baseURL: active.effectiveBaseURL,
                                  auth: .apiKey(active.effectiveApiKey),
-                                 userAgent: active.effectiveUserAgent)
+                                 userAgent: active.effectiveUserAgent,
+                                 authMode: active.dispatcharrHeaderMode)
         await coordinator.reconcileDispatcharrRecordings(
             api: api,
             serverID: active.id.uuidString,
@@ -399,7 +400,8 @@ struct MyRecordingsView: View {
               server.type == .dispatcharrAPI else { return nil }
         return DispatcharrAPI(baseURL: server.effectiveBaseURL,
                               auth: .apiKey(server.effectiveApiKey),
-                              userAgent: server.effectiveUserAgent)
+                              userAgent: server.effectiveUserAgent,
+                              authMode: server.dispatcharrHeaderMode)
     }
 
     /// tvOS-only: tapping a completed row plays it without requiring the

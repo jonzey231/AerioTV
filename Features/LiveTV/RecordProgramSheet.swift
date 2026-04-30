@@ -584,7 +584,8 @@ struct RecordProgramSheet: View {
                 }
                 let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                          auth: .apiKey(server.effectiveApiKey),
-                                         userAgent: server.effectiveUserAgent)
+                                         userAgent: server.effectiveUserAgent,
+                                         authMode: server.dispatcharrHeaderMode)
                 // If user has custom buffers, don't let server double-apply offsets.
                 let applyServerOffsets = (preRoll == 0 && postRoll == 0)
                 try? await coordinator.scheduleDispatcharrRecording(

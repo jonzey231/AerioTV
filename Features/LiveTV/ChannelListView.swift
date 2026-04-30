@@ -1081,10 +1081,14 @@ struct ChannelListView: View {
             guard !tvgID.isEmpty || channelID != nil else { return nil }
             let baseURL  = server.effectiveBaseURL
             let apiKey   = server.effectiveApiKey
+            // v1.6.20: per-server auth shape capture.
+            let authMode = server.dispatcharrHeaderMode
+            let userAgent = server.effectiveUserAgent
             let cacheKey = "d_\(baseURL)_\(tvgID.isEmpty ? item.id : tvgID)"
             return {
                 if let cached = await EPGCache.shared.get(cacheKey) { return cached }
-                let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+                let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
+                                          userAgent: userAgent, authMode: authMode)
                 do {
                     let identifier = tvgID.isEmpty ? "channelID=\(channelID ?? 0)" : "tvgID=\(tvgID)"
                     debugLog("📺 EPG fetch: \(identifier)")

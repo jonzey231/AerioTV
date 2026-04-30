@@ -1,6 +1,32 @@
 import SwiftData
 import SwiftUI
 
+// MARK: - Dispatcharr Auth Header Mode
+/// Per-server Dispatcharr auth header shape.
+///
+/// Auto-detected on Test Connection (v1.6.20+) so different Dispatcharr
+/// builds with different header requirements all work without user
+/// intervention. Persisted as the raw string in
+/// `ServerConnection.dispatcharrAuthMode` for SwiftData stability.
+///
+///  - `.xapikey`: send `X-API-Key: <key>` only. Preferred when it works
+///    — preserves full VOD episode visibility (some Dispatcharr builds
+///    filter the per-series episode list when `Authorization` is also
+///    present, by routing the request through user-scoped session auth
+///    that limits visible m3u_accounts).
+///  - `.both`: send both `Authorization: ApiKey <key>` AND
+///    `X-API-Key: <key>`. The historical shape Aerio shipped pre-v1.6.20
+///    for stream playback. Some Dispatcharr builds reject X-API-Key
+///    alone with HTTP 401; this is the fallback that gets those
+///    deployments connected.
+///  - `.bearer`: send `Authorization: Bearer <key>` only. Rare —
+///    reserved for token-based deployments.
+enum DispatcharrAuthHeaderMode: String, Codable {
+    case xapikey
+    case both
+    case bearer
+}
+
 // MARK: - Server Type Enum
 enum ServerType: String, Codable, CaseIterable {
     case dispatcharrAPI = "dispatcharr_api"
@@ -107,6 +133,28 @@ final class ServerConnection {
     /// playlists today).
     var vodEnabled: Bool = true
 
+    /// v1.6.20: per-server Dispatcharr auth header shape, auto-detected
+    /// during Test Connection and persisted so subsequent API calls and
+    /// stream playback use the same shape. Empty string means
+    /// "not yet detected" — `authHeaders` and `DispatcharrAPI` fall back
+    /// to the historical dual header shape (`Authorization: ApiKey` +
+    /// `X-API-Key`) which is what shipped before v1.6.20.
+    ///
+    /// Background: three users on private Dispatcharr instances reported
+    /// HTTP 401 on Test Connection in v1.6.19 even with valid Admin API
+    /// keys. v1.6.16's "X-API-Key alone" change (which fixed a VOD
+    /// episodes filtering bug on the user's main server) is rejected by
+    /// some Dispatcharr builds — they require the `Authorization` header
+    /// or refuse the request. Auto-detection tries X-API-Key first
+    /// (preferred — full VOD episode visibility) and falls back to dual
+    /// or bearer on 401 so the user gets connected without needing to
+    /// know which header shape their server speaks.
+    ///
+    /// Stored as raw string (not the enum directly) for SwiftData
+    /// stability; `dispatcharrHeaderMode` returns the typed enum.
+    /// Possible values: `""`, `"xapikey"`, `"both"`, `"bearer"`.
+    var dispatcharrAuthMode: String = ""
+
     init(
         name: String,
         type: ServerType,
@@ -200,15 +248,41 @@ final class ServerConnection {
         KeychainHelper.delete("apiKey_\(id.uuidString)", synchronizable: true)
     }
 
-    /// Auth headers for API requests. Dispatcharr servers include ApiKey + X-API-Key
-    /// plus the User-Agent so it shows up in the admin Stats panel; all other types
-    /// just include Accept. Centralised here to avoid duplication.
+    /// Effective Dispatcharr auth header mode. Honors the persisted
+    /// `dispatcharrAuthMode` (auto-detected on Test Connection in
+    /// v1.6.20+); falls back to `.both` for servers that haven't been
+    /// re-verified since upgrading, since `Authorization: ApiKey` +
+    /// `X-API-Key` together is the historical shape that worked on
+    /// every Dispatcharr build prior to v1.6.20.
+    var dispatcharrHeaderMode: DispatcharrAuthHeaderMode {
+        DispatcharrAuthHeaderMode(rawValue: dispatcharrAuthMode) ?? .both
+    }
+
+    /// Auth headers for API requests. Dispatcharr servers honor the
+    /// per-server `dispatcharrHeaderMode` (X-API-Key only, dual, or
+    /// bearer — auto-detected during Test Connection so different
+    /// Dispatcharr builds with different header requirements all
+    /// work). User-Agent is always included so the device shows up
+    /// in the admin Stats panel. All other types just include Accept.
+    /// Centralised here to avoid duplication.
     var authHeaders: [String: String] {
         switch type {
         case .dispatcharrAPI:
             let key = effectiveApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            return ["Authorization": "ApiKey \(key)", "X-API-Key": key, "Accept": "*/*",
-                    "User-Agent": effectiveUserAgent]
+            var h: [String: String] = [
+                "Accept": "*/*",
+                "User-Agent": effectiveUserAgent
+            ]
+            switch dispatcharrHeaderMode {
+            case .xapikey:
+                h["X-API-Key"] = key
+            case .both:
+                h["Authorization"] = "ApiKey \(key)"
+                h["X-API-Key"] = key
+            case .bearer:
+                h["Authorization"] = "Bearer \(key)"
+            }
+            return h
         default:
             return ["Accept": "*/*"]
         }

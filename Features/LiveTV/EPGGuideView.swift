@@ -582,7 +582,9 @@ final class GuideStore: ObservableObject {
         beginBatch()
         defer { endBatch() }
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                  auth: .apiKey(server.effectiveApiKey))
+                                  auth: .apiKey(server.effectiveApiKey),
+                                  userAgent: server.effectiveUserAgent,
+                                  authMode: server.dispatcharrHeaderMode)
 
         // Build tvgID ↔ channelID mapping (case-insensitive keys for matching)
         let tvgIDToChannelID: [String: String] = Dictionary(
@@ -1139,6 +1141,9 @@ final class GuideStore: ObservableObject {
         let serverType = server.type
         let baseURL = server.effectiveBaseURL
         let apiKey = server.effectiveApiKey
+        // v1.6.20: per-server auth shape capture for the off-main API client.
+        let authMode = server.dispatcharrHeaderMode
+        let userAgent = server.effectiveUserAgent
         let username = server.username
         let password = server.effectivePassword
         let channelID = channel.id
@@ -1190,7 +1195,8 @@ final class GuideStore: ObservableObject {
                 group.addTask {
                     switch serverType {
                     case .dispatcharrAPI:
-                        let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+                        let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
+                                                 userAgent: userAgent, authMode: authMode)
                         let hasTvgID = tvgID != nil && !tvgID!.isEmpty
                         let chID = Int(channelID)
                         guard hasTvgID || chID != nil else { return ([], false) }

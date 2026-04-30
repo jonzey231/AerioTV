@@ -19,6 +19,16 @@ final class ServerConnectionViewModel {
     var verificationSuccess: Bool = false
     var verificationError: String? = nil
     var verifiedServerName: String? = nil
+    /// v1.6.20: auto-detected Dispatcharr auth header shape (X-API-Key
+    /// only, dual, or bearer) discovered during `verifyConnection`.
+    /// The Add/Edit Server view persists this onto the new
+    /// `ServerConnection.dispatcharrAuthMode` field so subsequent API
+    /// calls and stream playback use the same shape — Aerio doesn't
+    /// have to re-detect on every cold start, and Dispatcharr
+    /// deployments that reject `X-API-Key`-alone with HTTP 401
+    /// (the bug three users hit on private deployments in v1.6.19)
+    /// stay connected after the initial discovery.
+    var discoveredDispatcharrAuthMode: DispatcharrAuthHeaderMode? = nil
 
     var isFormValid: Bool {
         guard !name.isEmpty, !baseURL.isEmpty else { return false }
@@ -38,6 +48,7 @@ final class ServerConnectionViewModel {
         verificationError = nil
         verificationSuccess = false
         verifiedServerName = nil
+        discoveredDispatcharrAuthMode = nil
 
         // Silent one-shot retry. Some reverse-proxy / LB setups (Cloudflare
         // Tunnel, Traefik with cold upstreams, nginx with slow_start) return
@@ -120,6 +131,11 @@ final class ServerConnectionViewModel {
 
         case .dispatcharrAPI:
             try await withATSSchemeUpgrade(originalURL: normalizedURL) { url in
+                // Default authMode `.xapikey` — v1.6.16+ behavior.
+                // verifyConnection auto-falls-back to `.both` and
+                // `.bearer` on HTTP 401, returning the working shape
+                // in `info.discoveredAuthMode` so the caller can
+                // persist it on the SwiftData model.
                 let api = DispatcharrAPI(baseURL: url, auth: .apiKey(self.apiKey))
                 let info = try await api.verifyConnection()
                 // Prefer a friendly name if provided; otherwise show version.
@@ -128,6 +144,7 @@ final class ServerConnectionViewModel {
                 } else {
                     self.verifiedServerName = "v\(info.version ?? "unknown")"
                 }
+                self.discoveredDispatcharrAuthMode = info.discoveredAuthMode
                 self.verificationSuccess = true
             }
         }
@@ -245,6 +262,16 @@ final class ServerConnectionViewModel {
             localEPGURL: localEPGURL
         )
         server.dispatcharrXMLTVURL = dispatcharrXMLTVURL
+        // v1.6.20: persist the auth header shape that worked during
+        // verifyConnection so subsequent API calls and stream playback
+        // skip re-discovery and immediately speak the right shape.
+        // Empty string (the model default) means "haven't verified
+        // yet"; ServerConnection.dispatcharrHeaderMode falls back to
+        // `.both` in that case for back-compat with stream-playback
+        // header construction.
+        if let mode = discoveredDispatcharrAuthMode {
+            server.dispatcharrAuthMode = mode.rawValue
+        }
         return server
     }
 
@@ -262,6 +289,7 @@ final class ServerConnectionViewModel {
         verificationSuccess = false
         verificationError = nil
         verifiedServerName = nil
+        discoveredDispatcharrAuthMode = nil
     }
 
     private var normalizedURL: String {

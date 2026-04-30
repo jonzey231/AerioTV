@@ -420,7 +420,7 @@ struct ServerSyncView: View {
     private func loadGroups(snap: ServerSnapshot) async -> Int {
         switch snap.type {
         case .dispatcharrAPI:
-            let api = DispatcharrAPI(baseURL: snap.baseURL, auth: .apiKey(snap.apiKey))
+            let api = DispatcharrAPI(baseURL: snap.baseURL, auth: .apiKey(snap.apiKey), userAgent: snap.userAgent, authMode: snap.dispatcharrAuthMode)
             if let groups = try? await api.getChannelGroups() {
                 return groups.count
             }
@@ -439,7 +439,7 @@ struct ServerSyncView: View {
     private func loadChannels(snap: ServerSnapshot) async -> Int {
         switch snap.type {
         case .dispatcharrAPI:
-            let api = DispatcharrAPI(baseURL: snap.baseURL, auth: .apiKey(snap.apiKey))
+            let api = DispatcharrAPI(baseURL: snap.baseURL, auth: .apiKey(snap.apiKey), userAgent: snap.userAgent, authMode: snap.dispatcharrAuthMode)
             if let channels = try? await api.getChannels() {
                 return channels.count
             }
@@ -507,7 +507,7 @@ struct ServerSyncView: View {
             // returned number is only used cosmetically for the
             // stage's done-detail label, so paginating the full
             // library here was always wasted work.
-            let api = DispatcharrAPI(baseURL: snap.baseURL, auth: .apiKey(snap.apiKey))
+            let api = DispatcharrAPI(baseURL: snap.baseURL, auth: .apiKey(snap.apiKey), userAgent: snap.userAgent, authMode: snap.dispatcharrAuthMode)
             var count = 0
             if let movies = try? await api.getVODMovieCount() { count += movies }
             if let series = try? await api.getVODSeriesCount() { count += series }
@@ -532,7 +532,8 @@ struct ServerSyncView: View {
         }
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                  auth: .apiKey(server.effectiveApiKey),
-                                 userAgent: server.effectiveUserAgent)
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode)
         if let remote = try? await api.listRecordings() {
             return remote.isEmpty ? "No recordings scheduled" : "\(remote.count) recordings"
         }

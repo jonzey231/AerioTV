@@ -13,6 +13,17 @@ struct ServerSnapshot: Sendable {
     let username: String
     let password: String
     let apiKey: String
+    /// v1.6.20: per-server Dispatcharr auth header shape, captured from
+    /// `ServerConnection.dispatcharrHeaderMode`. Lets background-thread
+    /// network code construct DispatcharrAPI clients with the auto-
+    /// detected header shape instead of falling back to the default
+    /// (which would 401 on Dispatcharr builds that require dual headers).
+    let dispatcharrAuthMode: DispatcharrAuthHeaderMode
+    /// v1.6.20: effective per-server User-Agent. Captured here so the
+    /// snapshot-based DispatcharrAPI constructions surface the right
+    /// device label in the admin Stats panel without round-tripping
+    /// back to the model on a background thread.
+    let userAgent: String
 }
 
 extension ServerConnection {
@@ -24,7 +35,9 @@ extension ServerConnection {
             baseURL: effectiveBaseURL,
             username: username,
             password: effectivePassword,
-            apiKey: effectiveApiKey
+            apiKey: effectiveApiKey,
+            dispatcharrAuthMode: dispatcharrHeaderMode,
+            userAgent: effectiveUserAgent
         )
     }
 }
@@ -281,7 +294,7 @@ final class VODService {
     // MARK: - Dispatcharr — Movies
 
     private static func dispatcharrMovies(server: ServerSnapshot) async throws -> ([VODMovie], [VODCategory]) {
-        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey))
+        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey), userAgent: server.userAgent, authMode: server.dispatcharrAuthMode)
         let raw = try await api.getVODMovies()
         let base = server.baseURL
 
@@ -336,7 +349,7 @@ final class VODService {
     // MARK: - Dispatcharr — Series
 
     private static func dispatcharrSeries(server: ServerSnapshot) async throws -> ([VODSeries], [VODCategory]) {
-        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey))
+        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey), userAgent: server.userAgent, authMode: server.dispatcharrAuthMode)
         let raw = try await api.getVODSeries()
         let base = server.baseURL
 
@@ -396,7 +409,7 @@ final class VODService {
     private static func dispatcharrMovieDetail(existing: VODMovie,
                                                 server: ServerSnapshot) async throws -> VODMovie {
         guard let movieID = Int(existing.id) else { return existing }
-        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey))
+        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey), userAgent: server.userAgent, authMode: server.dispatcharrAuthMode)
         let info = try await api.getMovieProviderInfo(movieID: movieID)
         let base = server.baseURL
 
@@ -524,7 +537,7 @@ final class VODService {
     private static func dispatcharrSeriesDetail(seriesID: String,
                                                 server: ServerSnapshot,
                                                 existing: VODSeries?) async throws -> VODSeries? {
-        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey))
+        let api = DispatcharrAPI(baseURL: server.baseURL, auth: .apiKey(server.apiKey), userAgent: server.userAgent, authMode: server.dispatcharrAuthMode)
         guard let sid = Int(seriesID) else { return nil }
         let base = server.baseURL
 

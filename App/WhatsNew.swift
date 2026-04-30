@@ -57,6 +57,18 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.6.20",
+            title: "What's new in 1.6.20",
+            bullets: [
+                "Test Connection no longer fails with HTTP 401 on Dispatcharr deployments that need the legacy auth header — Aerio now auto-detects which header shape your Dispatcharr instance accepts (X-API-Key alone, dual headers, or bearer token) and remembers the working shape for next time. Fixes the \"Dispatcharr rejected this request\" error that hit users on private LAN deployments even with valid Admin API keys",
+                "The discovered auth shape syncs across your devices via iCloud — once one device figures out what your server wants, every other device on the same Apple ID inherits it without having to re-test",
+                "Auth headers now survive HTTP redirects (301/302/307/308) so reverse-proxy setups that rewrite paths or upgrade HTTP→HTTPS no longer strip the API key mid-request",
+                "Dispatcharr URL handling is more robust around non-default ports and IPv6 hosts — moved from naive string concatenation to URLComponents internally",
+                "Test Connection error messages rewritten to actually tell you what to try when something goes wrong — \"every shape rejected\" vs \"got the SPA login page\" vs \"couldn't reach the server at all\""
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.20")
+        ),
+        WhatsNewRelease(
             version: "1.6.19",
             title: "What's new in 1.6.19",
             bullets: [
