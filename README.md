@@ -173,46 +173,58 @@ Click each type for the full breakdown:
 self-hosted IPTV middleware that gives users control over their IPTV services.
 See the linked GitHub.
 
-**Benefits**
+**Benefits Dispatcharr is uniquely good at**
 
-- **Server-side DVR.** Schedule recordings that continue running
-  even when AerioTV is closed or the device is asleep. Local
-  recording (to the device) is also available.
-- **Comskip (commercial-skip)** — toggle when scheduling a server
-  recording or run it post-recording from the DVR tab.
-- **Server-side recording playback** — stream completed
-  recordings directly from the server with HTTP Range support.
-- **Pre-roll / post-roll buffers** — start a recording early and
-  end late so live sports running long don't get cut off.
-- **TMDB-rich VOD metadata** — backdrop, plot, cast, director,
-  year, rating, runtime for movies and series, plus per-episode
-  air date, TMDB rating, IMDB ID, and per-episode artwork.
-- **Channel UUID with server-side stream failover.** When a
-  primary stream dies mid-playback, Dispatcharr can swap to a backup
-  provider transparently — the player doesn't even hiccup.
+- **Server-side DVR** — schedule recordings that continue running
+  even when AerioTV is closed or the device is asleep. (Local
+  recording to the device works on every server type, but Dispatcharr
+  is the only one where the server itself can run the recording.)
+- **Comskip (commercial-skip)** — toggle when scheduling a server-side
+  recording or run it post-recording from the DVR tab. Comskip runs
+  on the Dispatcharr server, so it's only available for server-side
+  recordings.
+- **Server-side recording playback** — stream completed server
+  recordings directly with HTTP Range support, no auth headers
+  needed.
+- **Server-side stream failover via channel UUID** — when a primary
+  stream dies mid-playback, Dispatcharr swaps to a backup provider
+  transparently. The player doesn't even hiccup. (Xtream Codes has
+  client-side URL fallback — Aerio tries `.m3u8` then `.ts` — but
+  the server can't swap to a different provider on its own.)
+- **TMDB-enriched VOD metadata** — backdrops, plots, cast, director,
+  year, rating, runtime, plus per-episode air dates, TMDB ratings,
+  IMDB IDs, and per-episode artwork. Pulled in by Dispatcharr's
+  TMDB scraper. (Xtream Codes also has VOD, but its metadata is
+  whatever the provider supplies — usually poster + title +
+  one-line plot, not TMDB-grade.)
 - **Bulk EPG fetch** — one network call returns -1h to +24h for
-  every channel. Faster than per-channel XMLTV walks.
-- **Live server-side Stream Info** *(v1.6.18+)* — resolution,
-  FPS, video / audio codec, output bitrate, and current viewer
-  count, pulled from Dispatcharr every 5s while the overlay is
-  visible. More authoritative than mpv-derived numbers because
-  Dispatcharr analyzes the source feed directly.
-- **Per-server custom User-Agent** — set in Settings → Edit
-  Playlist; sent on every request and on mpv playback so the value
-  shows up in Dispatcharr's admin Stats panel.
-- **External XMLTV URL override** *(advanced)* — point EPG at a
-  third-party XMLTV source while keeping channels from Dispatcharr.
-- **Per-playlist VOD toggle** — disable VOD on a sandbox /
-  secondary Dispatcharr server while keeping its Live TV channels.
-- **Auto-discovery of recordings** scheduled from the Dispatcharr
-  web UI or another device — they appear in AerioTV's DVR tab
-  within ~2 minutes.
+  every channel via `/api/epg/grid/`. Xtream Codes uses per-stream
+  EPG calls; M3U pulls XMLTV from a separate URL.
+- **Live server-side Stream Info overlay** *(v1.6.18+)* —
+  resolution, FPS, video / audio codec, output bitrate, and
+  current viewer count, pulled from Dispatcharr every 5s while
+  the overlay is visible. More authoritative than mpv-derived
+  numbers because Dispatcharr analyzes the source feed directly.
+  XC and M3U fall back to the same 5 fields rendered from mpv.
+- **Per-server custom User-Agent override** — set in Settings →
+  Edit Playlist. Sent on every Dispatcharr API request and to mpv
+  on playback so the value shows up in Dispatcharr's admin Stats
+  panel. Not currently exposed for XC or M3U.
+- **External XMLTV URL override** *(advanced)* — point the EPG at
+  a third-party XMLTV source while keeping channels from
+  Dispatcharr's API. (M3U has its own EPG URL field — it's the
+  primary EPG source there, not an override.)
+- **Auto-discovery of recordings scheduled outside the app** —
+  recordings you scheduled from the Dispatcharr web UI appear in
+  AerioTV's DVR tab within ~2 minutes. XC / M3U don't have a
+  server-side scheduler to discover from.
 
 **Drawbacks**
 
 - **Requires self-hosting.** You need to run Dispatcharr (Docker,
-  NAS, home server) — there's no SaaS offering. If you just want to
-  paste a provider URL and watch, M3U or Xtream Codes is faster.
+  NAS, home server) — there's no SaaS offering. If you just want
+  to paste a provider URL and watch, M3U or Xtream Codes is faster
+  to get going.
 - **Initial scrape time.** Adding a Dispatcharr server with a
   large upstream provider can take a few minutes to populate the
   channel list, EPG, and VOD library on the first launch.
@@ -232,26 +244,40 @@ AerioTV pulls live TV, movies, and series.
 
 - **No self-hosting.** Most IPTV providers expose an Xtream Codes
   endpoint by default — paste the URL, type your credentials, done.
-- **Live TV + VOD.** Movies and series come from the same login
-  as live channels, no separate EPG / VOD URLs to manage.
-- **EPG via TVG ID matching** — most provider EPGs are keyed to
-  match Xtream's `tvg_id` field automatically.
-- **Familiar auth model** — a single username and password.
+- **Live TV + VOD library.** Movies and series come from the same
+  login as live channels — no separate EPG / VOD URLs to manage.
+- **Per-playlist VOD toggle.** Settings → Edit Playlist exposes
+  the same "Fetch VOD from this playlist" switch Dispatcharr does,
+  so you can keep a sandbox / secondary playlist's Live TV
+  without loading its VOD library every launch.
+- **Local DVR with pre-roll / post-roll.** Recordings on this
+  device, with the same buffer pickers (None / 5 / 10 / 15 / 30 /
+  60 min or custom) Dispatcharr server-side recordings get.
+  Recordings continue while the app stays running.
+- **EPG via TVG ID matching** — most provider EPGs key to
+  Xtream's `tvg_id` field automatically.
+- **Client-side stream URL fallback** — Aerio tries `.m3u8` first,
+  then `.ts`, so a transient HLS hiccup doesn't kill playback
+  outright.
+- **Familiar auth model** — single username and password.
 
 **Drawbacks**
 
-- **VOD metadata is sparse** — no TMDB enrichment, no
-  per-episode air dates, no per-episode artwork. You get the
-  poster, title, and (sometimes) a one-line plot from the
-  provider's data.
+- **VOD metadata is provider-supplied, not TMDB-enriched.** You
+  typically get the poster, title, and one-line plot. Per-episode
+  air dates, TMDB ratings, and per-episode artwork are not
+  available.
 - **No server-side DVR.** Recordings are local-only — must keep
-  AerioTV running for the duration. No comskip.
-- **No channel UUID failover.** When a stream dies it just dies;
-  the provider has to fix it on their end.
-- **Stream Info shows mpv-derived stats only** — what your
+  AerioTV running for the recording duration. No comskip
+  (Dispatcharr-only).
+- **No server-side stream failover.** When a stream dies your
+  client-side `.m3u8` → `.ts` fallback is the only failover layer
+  — the provider has to fix anything beyond that.
+- **Stream Info shows mpv-derived stats only.** What your
   device's decoder reports, not what the source feed actually is.
 - **EPG depth varies by provider** — some give you a few days,
   some give you a few hours.
+- **No custom User-Agent or external XMLTV URL override.**
 
 </details>
 
@@ -260,7 +286,7 @@ AerioTV pulls live TV, movies, and series.
 
 A plain M3U playlist is just a list of stream URLs in a text file.
 Works with literally any IPTV provider that gives you a playlist
-URL — including providers that don't support Xtream Codes API.
+URL — including providers that don't support the Xtream Codes API.
 
 **Benefits**
 
@@ -269,6 +295,10 @@ URL — including providers that don't support Xtream Codes API.
 - **Fastest setup.** Paste the URL → done. No credentials, no
   server, no scrape time.
 - **No self-hosting.**
+- **Local DVR with pre-roll / post-roll.** Recordings on this
+  device, with the same buffer pickers Xtream and Dispatcharr
+  recordings get. Recordings continue while the app stays
+  running.
 - **Optional separate XMLTV URL** for EPG. Bring your own EPG
   source if your provider doesn't include one.
 - **Compressed `.xml.gz` EPG** — *coming in a future release*.
@@ -276,17 +306,20 @@ URL — including providers that don't support Xtream Codes API.
 **Drawbacks**
 
 - **No VOD library.** M3U is live TV only — no movies or series.
-  If your provider has VOD, you'll need their Xtream Codes endpoint
-  (or a Dispatcharr instance pointed at them) to access it.
+  If your provider has VOD, you'll need their Xtream Codes
+  endpoint (or a Dispatcharr instance pointed at them) to access
+  it.
 - **No server-side DVR.** Recordings are local-only — AerioTV
-  has to be running for the recording to capture. No comskip.
+  has to be running for the recording to capture. No comskip
+  (Dispatcharr-only).
 - **EPG depends on a separate XMLTV source.** You set the URL
   yourself, and EPG quality is whatever that source provides.
-- **No stream failover.** When a stream URL stops working, the
-  provider has to fix the playlist; AerioTV can't transparently
-  swap to a backup.
-- **No live stream stats from any server.** Stream Info shows
-  mpv-derived numbers only.
+- **No stream failover at all.** When a stream URL stops working,
+  the provider has to fix the playlist — there's no `.m3u8`/`.ts`
+  client fallback like XC has, and no server-side swap like
+  Dispatcharr has.
+- **Stream Info shows mpv-derived stats only.** No server to query.
+- **No custom User-Agent override.**
 - **Large M3U files can be slow to parse** on first launch — a
   20,000-channel playlist takes a noticeable beat to ingest.
 
