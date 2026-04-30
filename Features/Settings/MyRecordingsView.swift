@@ -32,11 +32,15 @@ struct MyRecordingsView: View {
 
     /// Identifiable wrapper used by `.fullScreenCover(item:)`. Holds
     /// just enough metadata for `PlayerView` to render a recording
-    /// (title is shown in the chrome; URL drives MPV).
+    /// (title is shown in the chrome; URL drives MPV; headers are
+    /// passed through to mpv's `http-header-fields` for server
+    /// recordings whose endpoint requires the same auth as the
+    /// rest of the Dispatcharr API. Local recordings pass `[:]`.
     struct PlayingRecording: Identifiable {
         let id: UUID
         let url: URL
         let title: String
+        let headers: [String: String]
     }
 
     /// v1.6.10: Recordings are scoped to the currently-active playlist
@@ -131,6 +135,22 @@ struct MyRecordingsView: View {
                     ForEach(activeList, id: \.id) { rec in
                         RecordingRow(recording: rec)
                             .listRowBackground(Color.cardBackground)
+                            // v1.6.20: tap-to-play on completed rows.
+                            // Long-press still surfaces the context
+                            // menu (Play, Stop / Cancel, Delete,
+                            // Download; whatever applies to the
+                            // row's status). `.contextMenu` keeps
+                            // working alongside the tap gesture.
+                            // In-progress and scheduled rows do
+                            // nothing on tap because `playIfCompleted`
+                            // gates on `isCompleted || stopped`.
+                            // `contentShape(.rectangle)` makes the
+                            // whole row the tap target so users
+                            // don't have to land on the title text.
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                playIfCompleted(rec)
+                            }
                             .contextMenu {
                                 contextMenuItems(for: rec)
                             }
@@ -196,7 +216,7 @@ struct MyRecordingsView: View {
             PlayerView(
                 urls: [item.url],
                 title: item.title,
-                headers: [:],
+                headers: item.headers,
                 isLive: false
             )
         }
@@ -450,30 +470,40 @@ struct MyRecordingsView: View {
         // the destroy fires, so audible overlap is sub-second.
         NowPlayingManager.shared.stop()
         playingRecording = PlayingRecording(
-            id: rec.id, url: url, title: rec.programTitle
+            id: rec.id, url: url, title: rec.programTitle, headers: [:]
         )
     }
 
     /// v1.6.8 (B2-partial): plays a completed Dispatcharr server
-    /// recording. The `/api/channels/recordings/<id>/file/`
-    /// endpoint is `AllowAny` (per `DispatcharrAPI.recordingPlaybackURL`
-    /// docstring) and supports HTTP Range, so we hand the URL
-    /// directly to `PlayerView` without auth headers.
+    /// recording. The `/api/channels/recordings/<id>/file/` endpoint
+    /// was originally documented as `AllowAny` (no auth needed), but
+    /// v1.6.20 saw HTTP 503 from a user's deployment on this exact
+    /// path. Some Dispatcharr builds tightened the route to require
+    /// the same auth shape as the rest of the API. Now we pass the
+    /// per-server `authHeaders` (which honour the auto-detected
+    /// `dispatcharrHeaderMode`, whether X-API-Key alone, dual, or bearer)
+    /// to mpv via `http-header-fields`. Harmless on builds that are
+    /// still AllowAny (the extra headers are simply ignored), and
+    /// fixes 503 on builds that aren't.
     private func playServerRecording(_ rec: Recording) {
-        guard let api = apiForRecording(rec),
+        guard let server = servers.first(where: { $0.id.uuidString == rec.serverID }),
+              server.type == .dispatcharrAPI,
+              let api = apiForRecording(rec),
               let remoteID = rec.remoteRecordingID,
               let url = api.recordingPlaybackURL(id: remoteID) else {
-            debugLog("⚠️ Cannot play server recording — missing api / remoteID / URL for \(rec.programTitle)")
+            debugLog("⚠️ Cannot play server recording. Missing server / api / remoteID / URL for \(rec.programTitle)")
             return
         }
-        debugLog("▶️ Play server recording: id=\(remoteID) url=\(url.absoluteString)")
+        let headers = server.authHeaders
+        let headerKeys = headers.keys.sorted().joined(separator: ",")
+        debugLog("▶️ Play server recording: id=\(remoteID) url=\(url.absoluteString) headers=\(headerKeys)")
         // v1.6.18 — see `playRecording` above for the rationale.
         // Same fix shape: stop the live stream before mounting the
         // recording's fullScreenCover so two mpv instances aren't
         // both producing audio.
         NowPlayingManager.shared.stop()
         playingRecording = PlayingRecording(
-            id: rec.id, url: url, title: rec.programTitle
+            id: rec.id, url: url, title: rec.programTitle, headers: headers
         )
     }
 

@@ -4,6 +4,31 @@
 
 ### Fixed
 
+- **Dispatcharr server recording playback no longer fails with
+  HTTP 503.** The `/api/channels/recordings/<id>/file/` endpoint
+  was originally documented as `AllowAny` (no auth required), but
+  newer Dispatcharr builds tightened the route to require the
+  same auth headers as the rest of the API. AerioTV was passing
+  `headers: [:]` when handing the URL to mpv, so the request
+  arrived with no credentials and the server rejected it.
+  `MyRecordingsView.playServerRecording` now plumbs
+  `server.authHeaders` (honouring the auto-detected
+  `dispatcharrHeaderMode`) through `PlayingRecording` to
+  `PlayerView`'s `headers` parameter, which feeds
+  `mpv_set_option_string("http-header-fields", …)`. Harmless on
+  builds still serving `/file/` as AllowAny (the extra headers
+  are ignored), required on builds that have tightened the route.
+- **Tap a completed recording row to play it on iPhone / iPad.**
+  Previously, iOS list rows in My Recordings only responded to
+  long-press → context menu → Play. Now the standard interaction
+  pattern applies: tap to play (gated to `completed` /
+  `stopped` rows so scheduled / in-progress rows still ignore
+  taps), long-press for the full context menu (Play, Stop /
+  Cancel, Delete, Download, Apply Comskip; whatever applies to
+  the row's status), swipe left for swipe actions. `contentShape`
+  makes the whole row the tap target so users don't have to
+  land precisely on the title text. tvOS already had tap-to-play
+  via `TVRecordingRow.onSelect`.
 - **Dispatcharr Test Connection no longer 401s on deployments
   that require dual auth headers.** Three users on private
   Dispatcharr instances (one of them at
@@ -14,7 +39,7 @@
   by some Dispatcharr builds — they require the legacy
   `Authorization: ApiKey <key>` header that pre-1.6.16 sent
   alongside it. v1.6.20 auto-detects the working header shape:
-  on Test Connection, Aerio tries X-API-Key alone first
+  on Test Connection, AerioTV tries X-API-Key alone first
   (preferred — preserves full VOD episode visibility), falls
   back to dual headers (`Authorization: ApiKey` + `X-API-Key`)
   on HTTP 401, then to bearer-token auth as a final fallback.
@@ -25,6 +50,22 @@
 
 ### Added
 
+- **Silent auto-discovery on app launch.** Closes the upgrade
+  window where a user who installed v1.6.20 but didn't manually
+  re-tap Test Connection was left with the back-compat default
+  (`.both` / dual headers), which could briefly resurface the
+  v1.6.16 VOD-episodes-empty bug for some series. The launch-time
+  hook in `AerioApp` (`discoverDispatcharrAuthModeIfNeeded`)
+  scans every Dispatcharr server with `isVerified == true` and an
+  empty `dispatcharrAuthMode`, fires a detached background
+  `verifyConnection` against each, persists the discovered shape
+  through a fresh main-actor `ModelContext`, and triggers an
+  immediate iCloud push so every device on the user's Apple ID
+  inherits without each having to re-discover. Re-runs after
+  iCloud sync delivers fresh remote servers (catches the case
+  where a server was added on a pre-v1.6.20 device that never
+  knew to discover). No-op once every server has a persisted
+  shape; silent on failure (next launch retries).
 - **Per-server `dispatcharrAuthMode` SwiftData field** —
   `""` / `"xapikey"` / `"both"` / `"bearer"`. Auto-populated
   during Test Connection. Synced across devices via

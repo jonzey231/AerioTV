@@ -60,11 +60,14 @@ enum WhatsNewStore {
             version: "1.6.20",
             title: "What's new in 1.6.20",
             bullets: [
-                "Test Connection no longer fails with HTTP 401 on Dispatcharr deployments that need the legacy auth header — Aerio now auto-detects which header shape your Dispatcharr instance accepts (X-API-Key alone, dual headers, or bearer token) and remembers the working shape for next time. Fixes the \"Dispatcharr rejected this request\" error that hit users on private LAN deployments even with valid Admin API keys",
-                "The discovered auth shape syncs across your devices via iCloud — once one device figures out what your server wants, every other device on the same Apple ID inherits it without having to re-test",
+                "Test Connection no longer fails with HTTP 401 on Dispatcharr deployments that need the legacy auth header. AerioTV now auto-detects which header shape your Dispatcharr instance accepts (X-API-Key alone, dual headers, or bearer token) and remembers the working shape for next time. Fixes the \"Dispatcharr rejected this request\" error that hit users on private LAN deployments even with valid Admin API keys",
+                "Auto-detection runs silently in the background on first launch after upgrade, so existing users don't have to re-tap Test Connection. AerioTV figures out the right header shape on its own and persists it",
+                "The discovered auth shape syncs across your devices via iCloud. Once one device figures out what your server wants, every other device on the same Apple ID inherits it without having to re-test",
+                "Dispatcharr server recordings now play back reliably. Auth headers are passed to the server's recording-playback endpoint so it stops returning HTTP 503 on builds that tightened the route from \"AllowAny\" to authenticated",
+                "Tap a completed recording on iPhone / iPad to play it. Long-press still brings up the full context menu (Play, Stop / Cancel, Delete, Download). Standard interaction now matches everywhere else in the app",
                 "Auth headers now survive HTTP redirects (301/302/307/308) so reverse-proxy setups that rewrite paths or upgrade HTTP→HTTPS no longer strip the API key mid-request",
-                "Dispatcharr URL handling is more robust around non-default ports and IPv6 hosts — moved from naive string concatenation to URLComponents internally",
-                "Test Connection error messages rewritten to actually tell you what to try when something goes wrong — \"every shape rejected\" vs \"got the SPA login page\" vs \"couldn't reach the server at all\""
+                "Dispatcharr URL handling is more robust around non-default ports and IPv6 hosts. Moved from naive string concatenation to URLComponents internally",
+                "Test Connection error messages rewritten to actually tell you what to try when something goes wrong. Distinguishes \"every shape rejected\" from \"got the SPA login page\" from \"couldn't reach the server at all\""
             ],
             releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.20")
         ),
@@ -176,7 +179,7 @@ enum WhatsNewStore {
     /// 2. We have a release-notes entry for the current version.
     /// 3. The user hasn't already seen this version's prompt.
     /// 4. **Either** there's a recorded `lastSeenVersion` (so we know
-    ///    this device has been running Aerio before), **or** the
+    ///    this device has been running AerioTV before), **or** the
     ///    caller has passed `isExistingUser: true` — meaning the
     ///    user has servers / completed onboarding from a prior
     ///    version, even though this is the first launch since we
@@ -191,7 +194,7 @@ enum WhatsNewStore {
     /// v1.6.11, but the user has servers → show the notes).
     ///
     /// `isExistingUser` should be `true` when the device has any
-    /// pre-existing app state that proves Aerio ran here before
+    /// pre-existing app state that proves AerioTV ran here before
     /// — the simplest signal is "any servers configured **or**
     /// onboarding flag is set."
     static func shouldShow(isExistingUser: Bool) -> Bool {
@@ -322,7 +325,7 @@ struct WhatsNewSheet: View {
             Text(release.title)
                 .font(titleFont)
                 .multilineTextAlignment(.center)
-            Text("Aerio \(release.version)")
+            Text("AerioTV \(release.version)")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }

@@ -1108,6 +1108,16 @@ struct RootView: View {
                 // once per device, idempotent (gated by a separate
                 // UserDefaults flag).
                 purgeKVSPlaintextCredentialsIfNeeded()
+                // v1.6.20: silently auto-detect the Dispatcharr
+                // auth header shape for any verified server still
+                // missing one. Closes the v1.6.19→v1.6.20 upgrade
+                // window where the back-compat `.both` fallback
+                // could briefly resurface the v1.6.16 VOD-episodes-
+                // empty bug until the user manually re-ran Test
+                // Connection. No-op once every server has a
+                // persisted shape (either from this discovery or
+                // from iCloud sync).
+                discoverDispatcharrAuthModeIfNeeded()
                 // Cross-platform LAN probe (formerly tvOS-only). On
                 // iOS this complements the SSID-based detection so
                 // hardwired iPads / Mac Catalyst still get LAN
@@ -1172,6 +1182,13 @@ struct RootView: View {
                 DispatchQueue.main.async {
                     debugLog("🟢 RootView: releasing isMergingRemote")
                     isMergingRemote = false
+                    // v1.6.20: a sync delivery may have brought in
+                    // a verified server from another device that
+                    // never ran auth-mode discovery (e.g., that
+                    // device was on v1.6.19 when the server was
+                    // added). Run discovery again now that we
+                    // have the merged set in the local store.
+                    discoverDispatcharrAuthModeIfNeeded()
                 }
             }
             // SyncManager asks the app to push current servers (first-device scenario)
@@ -1330,6 +1347,126 @@ struct RootView: View {
         DebugLogger.shared.log(
             "KVS credential purge: scheduled immediate credential-free push for \(servers.count) server(s)",
             category: "Sync", level: .info)
+    }
+
+    /// v1.6.20: Silent auto-discovery of the Dispatcharr auth header
+    /// shape for any verified server whose `dispatcharrAuthMode` is
+    /// still empty. Closes the v1.6.19→v1.6.20 upgrade window where
+    /// users who installed v1.6.20 but didn't manually re-tap Test
+    /// Connection were left with the back-compat default (`.both`),
+    /// which could briefly resurface the v1.6.16 VOD-episodes-empty
+    /// bug for some series before the user happened to test
+    /// connection again.
+    ///
+    /// Behavior:
+    ///  - Runs on every cold launch, but is a no-op for any server
+    ///    whose `dispatcharrAuthMode` is already populated (either
+    ///    from a manual Test Connection on this device or via
+    ///    iCloud sync from another device that already discovered).
+    ///  - Only runs against servers with `isVerified == true` so
+    ///    we don't burn HTTP requests against a server the user
+    ///    never successfully connected to in the first place.
+    ///  - Detached background Task per server, with the result
+    ///    written back on the main actor through a fresh fetch (no
+    ///    main-thread blocking, no holding the ModelContext across
+    ///    suspension points).
+    ///  - Silent on failure: a transient network blip or a
+    ///    temporarily-unreachable server leaves the field empty,
+    ///    and the next launch retries.
+    ///
+    /// This is intentionally launch-only (not foreground/network-
+    /// reachability triggered). Once the flag is populated, it
+    /// sticks across launches and across iCloud sync, so a single
+    /// successful discovery on any device on the user's Apple ID
+    /// permanently fixes the upgrade window for every device.
+    private func discoverDispatcharrAuthModeIfNeeded() {
+        let candidates = servers.filter {
+            $0.type == .dispatcharrAPI
+                && $0.isVerified
+                && $0.dispatcharrAuthMode.isEmpty
+        }
+        guard !candidates.isEmpty else { return }
+
+        DebugLogger.shared.log(
+            "Auth-mode auto-discovery: \(candidates.count) Dispatcharr server(s) need a header-shape probe",
+            category: "Sync", level: .info)
+
+        // Snapshot per-server inputs on the main actor so the
+        // detached Task never touches the SwiftData model.
+        struct Probe: Sendable {
+            let id: UUID
+            let baseURL: String
+            let apiKey: String
+            let userAgent: String
+        }
+        let probes: [Probe] = candidates.map {
+            Probe(id: $0.id,
+                  baseURL: $0.effectiveBaseURL,
+                  apiKey: $0.effectiveApiKey,
+                  userAgent: $0.effectiveUserAgent)
+        }
+        let container = modelContext.container
+
+        Task.detached(priority: .utility) {
+            for probe in probes {
+                // Default `.xapikey` start point. verifyConnection
+                // auto-falls-back to `.both` and `.bearer` on HTTP
+                // 401 and returns whichever shape worked.
+                let api = DispatcharrAPI(baseURL: probe.baseURL,
+                                         auth: .apiKey(probe.apiKey),
+                                         userAgent: probe.userAgent,
+                                         authMode: .xapikey)
+                do {
+                    let info = try await api.verifyConnection()
+                    guard let mode = info.discoveredAuthMode else {
+                        debugLog("Auth-mode auto-discovery: \(probe.baseURL) verified but no mode reported (legacy code path)")
+                        continue
+                    }
+                    // Persist on the main actor through a fresh
+                    // ModelContext fetch. Capturing the SwiftData
+                    // model into the detached Task is unsafe.
+                    await MainActor.run {
+                        // Fresh main-actor context off the same
+                        // shared container. Lets us safely fetch
+                        // and write without holding a model
+                        // reference across the await suspension.
+                        let context = ModelContext(container)
+                        let id = probe.id
+                        let descriptor = FetchDescriptor<ServerConnection>(
+                            predicate: #Predicate<ServerConnection> { $0.id == id }
+                        )
+                        guard let server = try? context.fetch(descriptor).first else {
+                            debugLog("Auth-mode auto-discovery: server \(probe.id) not found at write time (deleted?)")
+                            return
+                        }
+                        // Re-check the empty guard. If the user
+                        // tapped Test Connection manually while
+                        // we were probing, or another device's
+                        // sync landed first, don't overwrite.
+                        guard server.dispatcharrAuthMode.isEmpty else {
+                            debugLog("Auth-mode auto-discovery: server \(probe.id) already has mode \"\(server.dispatcharrAuthMode)\", skipping write")
+                            return
+                        }
+                        server.dispatcharrAuthMode = mode.rawValue
+                        try? context.save()
+                        DebugLogger.shared.log(
+                            "Auth-mode auto-discovery: \(probe.baseURL) → .\(mode.rawValue) (persisted)",
+                            category: "Sync", level: .info)
+                        // Push so other devices on the same iCloud
+                        // account inherit immediately. Re-fetch the
+                        // full set so the push payload includes
+                        // every server, not just the one we just
+                        // mutated.
+                        let allServers = (try? context.fetch(FetchDescriptor<ServerConnection>())) ?? []
+                        SyncManager.shared.pushServers(allServers, immediate: true)
+                    }
+                } catch {
+                    DebugLogger.shared.log(
+                        "Auth-mode auto-discovery: \(probe.baseURL) failed (\(error.localizedDescription)), will retry next launch",
+                        category: "Sync", level: .warning)
+                }
+            }
+        }
     }
 
     private func pruneOrphanedEPGPrograms() {
