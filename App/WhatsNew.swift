@@ -57,6 +57,15 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.6.19",
+            title: "What's new in 1.6.19",
+            bullets: [
+                "Stream Info now shows the same client-side stats on every server type — what your device is actually decoding. The Dispatcharr server-side fetch added in v1.6.18 is gone; mpv-derived numbers are more useful for confirming your local playback is healthy",
+                "Stream Info card is back to the larger 6-row layout — VIDEO codec + size, FPS + pixel format, hwdec mode, AUDIO codec + sample rate + channel count, CACHE + bitrate, SYNC + dropped-frame count"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.19")
+        ),
+        WhatsNewRelease(
             version: "1.6.18",
             title: "What's new in 1.6.18",
             bullets: [

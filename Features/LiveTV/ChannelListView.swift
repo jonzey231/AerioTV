@@ -1203,16 +1203,6 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// (M3U) or any future format change. `nil` for non-Dispatcharr
     /// providers; record-to-server is gated on this being non-nil.
     var dispatcharrChannelID: Int? = nil
-    /// v1.6.18: Dispatcharr-only — the channel's primary stream IDs
-    /// from `DispatcharrChannel.streams`. The Stream Info overlay
-    /// fetches `/api/channels/streams/{id}/` to surface server-side
-    /// stats (resolution, FPS, codec, bitrate, viewer count) on top
-    /// of the mpv-derived client-side stats. The first ID is the
-    /// active stream Dispatcharr is currently routing for the
-    /// channel; subsequent entries are failover candidates. `nil`
-    /// for non-Dispatcharr providers (XC, M3U) — those use
-    /// mpv-derived stats only.
-    var dispatcharrStreamIDs: [Int]? = nil
     var currentProgram: String? = nil
     var currentProgramDescription: String? = nil
     var currentProgramStart: Date? = nil

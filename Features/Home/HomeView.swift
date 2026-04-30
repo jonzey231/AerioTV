@@ -1519,10 +1519,6 @@ final class ChannelStore: ObservableObject {
             // string-parse `item.id` to build a Dispatcharr
             // recording request.
             item.dispatcharrChannelID = ch.id
-            // v1.6.18: stream IDs for the Stream Info overlay's
-            // server-side stats fetch. `ch.streams` is `[Int]?` —
-            // typically a single primary plus optional failovers.
-            item.dispatcharrStreamIDs = ch.streams
             return item
         }
         items = sortChannels(items, groupOrder: groupOrder)

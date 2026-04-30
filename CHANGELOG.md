@@ -1,5 +1,58 @@
 # Changelog
 
+## v1.6.19 — 2026-04-29
+
+### Reverted
+
+- **Stream Info no longer pulls Dispatcharr server-side stats.**
+  v1.6.18 added a 5-second polling Task that hit
+  `/api/channels/streams/{id}/` and rendered Dispatcharr's
+  `stream_stats` blob (resolution, FPS, codec, ffmpeg output
+  bitrate, viewer count) when the active server was Dispatcharr
+  API. v1.6.19 reverts that path entirely. Reasoning: those
+  numbers describe what the SERVER is doing, not what the
+  device is actually decoding — users open Stream Info to see
+  whether their playback is healthy on this device, so
+  mpv-derived stats are the more useful and more honest
+  source. Same numbers everywhere also means consistent UX
+  across server types and one less moving part to maintain.
+
+### Changed
+
+- **Stream Info overlay layout restored to the original 6-row
+  format.** The v1.6.18 5-field redesign (RES / FPS / VIDEO /
+  AUDIO / RATE) read too small and dropped fields users
+  actually wanted (pixel format, hwdec mode, A/V sync,
+  dropped-frame counter, cache duration). v1.6.19 brings back
+  VIDEO / "" / "" / AUDIO / CACHE / SYNC — codec + dimensions,
+  fps + pixel format, hwdec, audio codec + sample rate +
+  channel count, cache duration + bitrate, A/V sync + drops.
+  Identical card on iPhone, iPad, and Apple TV; identical card
+  on every server type.
+
+### Removed
+
+- `DispatcharrStreamStats`, `DispatcharrStreamDetail`, and
+  `DispatcharrAPI.getStreamDetail(streamID:)` in
+  `Networking/StreamingAPIs.swift` — no longer needed once the
+  Stream Info overlay stopped fetching server-side stats.
+- `dispatcharrStreamIDs: [Int]?` on `ChannelDisplayItem` and the
+  matching assignment in HomeView's `fetchDispatcharr` — the
+  field existed only to feed the polling Task.
+- `serverSideStats` / `serverSideViewers` on `PlayerProgressStore`.
+- `serverStatsPollTask` State + `startServerStatsPoll` /
+  `stopServerStatsPoll` / `fetchOnce` helpers from both
+  `PlayerView` and `MultiviewContainerView`.
+
+### Kept from v1.6.18
+
+- `streamInfoIsVisible` flag on `NowPlayingManager` (drives the
+  channel info banner suppression while Stream Info is open) —
+  retained.
+- `.ignoresSafeArea(edges: .top)` on the chrome / banner /
+  Stream Info overlays (fixes the v1.6.17 iPhone-portrait
+  safe-area double-count) — retained.
+
 ## v1.6.18 — 2026-04-29
 
 ### Added

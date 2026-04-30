@@ -80,13 +80,6 @@ struct MultiviewContainerView: View {
     /// the unified path (still fires in the legacy path's
     /// `PlayerView`, which is unaffected).
     @State private var showStreamInfo: Bool = false
-    /// v1.6.18: handle for the Dispatcharr server-side stats poller.
-    /// Started when `showStreamInfo` flips on (audio tile + Dispatcharr
-    /// API only), cancelled when it flips off or the view tears down.
-    /// Mirrors the same shape as PlayerView.swift's
-    /// `serverStatsPollTask` so both playback paths surface
-    /// server-side stats consistently.
-    @State private var serverStatsPollTask: Task<Void, Never>? = nil
 
     #if os(tvOS)
     /// tvOS N=1 chrome focus targets. Binding flows into
@@ -517,17 +510,6 @@ struct MultiviewContainerView: View {
             // while Stream Info is open so the two overlays don't
             // overlap on iPhone.
             nowPlaying.streamInfoIsVisible = visible
-            // v1.6.18: also drive the Dispatcharr server-side stats
-            // poll for the audio tile when the active server is
-            // Dispatcharr API. Same pattern as PlayerView's legacy
-            // path. Polls every 5s while overlay is visible; writes
-            // results to the audio tile's `serverSideStats` /
-            // `serverSideViewers` published fields.
-            if visible {
-                startServerStatsPoll()
-            } else {
-                stopServerStatsPoll()
-            }
         }
         #if os(tvOS)
         // Force focus onto the audio tile on mount.
@@ -1006,60 +988,6 @@ struct MultiviewContainerView: View {
         }
     }
 
-    // MARK: - Dispatcharr server-side stats (v1.6.18)
-
-    /// Mirror of `PlayerView.startServerStatsPoll` — polls
-    /// Dispatcharr's `/api/channels/streams/{id}/` every 5s while the
-    /// Stream Info overlay is visible AND the audio tile is on a
-    /// Dispatcharr server. Writes results to the audio tile's
-    /// `serverSideStats` / `serverSideViewers` published fields so
-    /// `StreamInfoCardView` renders server-side values when present
-    /// and falls back to mpv-derived values otherwise. No-op for
-    /// XC / M3U servers and for streams Dispatcharr hasn't populated
-    /// yet.
-    private func startServerStatsPoll() {
-        stopServerStatsPoll()
-        guard let server = ChannelStore.shared.activeServer,
-              server.type == .dispatcharrAPI,
-              let audioTile = store.tiles.first(where: { $0.id == store.audioTileID }),
-              let streamID = audioTile.item.dispatcharrStreamIDs?.first,
-              let audioStore = store.audioProgressStore else {
-            return
-        }
-        let baseURL = server.effectiveBaseURL
-        let apiKey  = server.effectiveApiKey
-        let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
-        serverStatsPollTask = Task { @MainActor in
-            await fetchOnce(api: api, streamID: streamID, audioStore: audioStore)
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                if Task.isCancelled { break }
-                // Re-fetch the audio store on each tick — multiview
-                // audio-tile changes can swap which store the user
-                // is observing. If it's gone, bail.
-                guard let store = self.store.audioProgressStore else { break }
-                await fetchOnce(api: api, streamID: streamID, audioStore: store)
-            }
-        }
-    }
-
-    private func stopServerStatsPoll() {
-        serverStatsPollTask?.cancel()
-        serverStatsPollTask = nil
-    }
-
-    @MainActor
-    private func fetchOnce(api: DispatcharrAPI, streamID: Int, audioStore: PlayerProgressStore) async {
-        do {
-            let detail = try await api.getStreamDetail(streamID: streamID)
-            audioStore.serverSideStats = detail.streamStats
-            audioStore.serverSideViewers = detail.currentViewers
-        } catch {
-            // Quiet failure — leave stale stats in place; mpv-derived
-            // fallback covers any gaps in StreamInfoCardView's render.
-        }
-    }
-
     /// Body text for the exit-confirmation dialog. Explains what
     /// happens after tapping the primary button so the user isn't
     /// surprised by the destination view.
@@ -1314,11 +1242,7 @@ struct MultiviewContainerView: View {
         VStack {
             Spacer()
             HStack {
-                StreamInfoCardView(
-                    info: audioStore.streamInfo,
-                    serverStats: audioStore.serverSideStats,
-                    serverViewers: audioStore.serverSideViewers
-                )
+                StreamInfoCardView(info: audioStore.streamInfo)
                     .padding(.leading, 40)
                     .padding(.bottom, 32)
                 Spacer()
@@ -1357,11 +1281,7 @@ struct MultiviewContainerView: View {
     @ViewBuilder
     private func streamInfoCardWithCloseButton(audioStore: PlayerProgressStore) -> some View {
         ZStack(alignment: .topTrailing) {
-            StreamInfoCardView(
-                info: audioStore.streamInfo,
-                serverStats: audioStore.serverSideStats,
-                serverViewers: audioStore.serverSideViewers
-            )
+            StreamInfoCardView(info: audioStore.streamInfo)
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     showStreamInfo = false

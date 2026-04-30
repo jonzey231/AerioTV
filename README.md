@@ -118,10 +118,12 @@ Click each section for the full list:
 - AirPlay
 - Picture-in-Picture on iOS — swipe home during playback and
   the stream continues in a floating window
-- **Stream Info overlay** — Resolution, FPS, video codec,
-  audio codec, data rate. On Dispatcharr, also pulls live
-  server-side stats (output bitrate, viewer count) directly
-  from the server every 5 seconds *(v1.6.18+)*
+- **Stream Info overlay** — codec, resolution, FPS, pixel
+  format, hardware decode status, audio codec + sample rate +
+  channel count, cache duration, bitrate, A/V sync, and
+  dropped-frame count. Sourced from mpv on every server type
+  (Dispatcharr, Xtream Codes, M3U) so you see what the device
+  is actually decoding, not what the upstream server reports
 - **Channel-flip gestures** — Up/Down on the Siri Remote
   (Apple TV) or swipe up/down with chrome visible (iPhone /
   iPad) to flip channels in single-stream playback
@@ -223,12 +225,6 @@ See the linked GitHub.
 - **Bulk EPG fetch** — one network call returns -1h to +24h for
   every channel via `/api/epg/grid/`. Xtream Codes uses per-stream
   EPG calls; M3U pulls XMLTV from a separate URL.
-- **Live server-side Stream Info overlay** *(v1.6.18+)* —
-  resolution, FPS, video / audio codec, output bitrate, and
-  current viewer count, pulled from Dispatcharr every 5s while
-  the overlay is visible. More authoritative than mpv-derived
-  numbers because Dispatcharr analyzes the source feed directly.
-  XC and M3U fall back to the same 5 fields rendered from mpv.
 - **Per-server custom User-Agent override** — set in Settings →
   Edit Playlist. Sent on every Dispatcharr API request and to mpv
   on playback so the value shows up in Dispatcharr's admin Stats
@@ -296,8 +292,6 @@ AerioTV pulls live TV, movies, and series.
 - **No server-side stream failover.** When a stream dies your
   client-side `.m3u8` → `.ts` fallback is the only failover layer
   — the provider has to fix anything beyond that.
-- **Stream Info shows mpv-derived stats only.** What your
-  device's decoder reports, not what the source feed actually is.
 - **EPG depth varies by provider** — some give you a few days,
   some give you a few hours.
 - **No custom User-Agent or external XMLTV URL override.**
@@ -341,7 +335,6 @@ URL — including providers that don't support the Xtream Codes API.
   the provider has to fix the playlist — there's no `.m3u8`/`.ts`
   client fallback like XC has, and no server-side swap like
   Dispatcharr has.
-- **Stream Info shows mpv-derived stats only.** No server to query.
 - **No custom User-Agent override.**
 - **Large M3U files can be slow to parse** on first launch — a
   20,000-channel playlist takes a noticeable beat to ingest.
