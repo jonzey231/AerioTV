@@ -13,150 +13,173 @@ Sideload using your preferred method using the .ipa from [Releases](https://gith
 
 ## Features
 
-**Multiview** *(new in v1.6.0; unified playback engine in v1.6.1)*
+A native Apple-platform IPTV client. Stream live TV with full EPG,
+browse on-demand movies and series, schedule recordings to a
+Dispatcharr server or to your device, and watch up to 9 channels
+at once with Multiview — across iPhone, iPad, Apple TV, and macOS
+(running the iPad app), with iCloud sync stitching it all
+together.
 
-- Watch up to **9 live channels at once** in a dynamically-sized grid
-- Enter from any playing channel: tap the grid button in the player
-  top bar (iPad) or **Options → Enter Multiview** (tvOS)
-- Add channels one at a time from a Favorites / Recent / All
-  Channels picker — the grid re-lays out automatically
-- Layouts adapt to tile count: 1, 2, 3 asymmetric, 2×2, 5 asymmetric,
-  3×2, 7 centered, 3×3 with center gap, full 3×3
-- **Only the most recently added stream plays audio**; every other
-  tile stays muted with a small speaker badge marking the audio tile
-- Tap any tile (iPad) or click Select (Siri Remote) to move audio
-  focus to that tile
-- **Rearrange tiles** via a dedicated Move Mode. On iPad, long-press
-  a tile → "Move Tile" → tap any other tile to swap positions, or
-  tap the source tile again to cancel. On tvOS, long-press Select
-  → "Move Tile" → the Siri Remote arrows swap with the physical
-  neighbor and Select commits.
-- **Long-press menu** on every tile with Make Audio / Full-Screen
-  in Grid / Audio Track / Subtitle Track / Move Tile / Remove
-  actions, shared between iPad and tvOS
-- **Picture-in-Picture from multiview (iPad)** — only the audio tile
-  continues in PiP; all other tiles pause to conserve resources
-- **Performance warning at the 5th tile** with a 2-hour throttle;
-  hard cap at 9 tiles
-- **Thermal watchdog** — stops new tile additions when the device
-  reaches `.critical` thermal state
+Click each section for the full list:
 
-**Live TV**
+<details>
+<summary><strong>Live TV & Guide</strong> — MPV-powered playback, list + grid views, EPG, reminders.</summary>
 
-- Stream live channels with MPV-powered, GPU-accelerated playback
-- Browse channels in a scrollable list or full EPG guide view
-- Program titles, descriptions, and time slots in the guide
-- Minimize playback to a floating mini player while browsing
+- MPV-powered, GPU-accelerated playback
+- List view + full EPG guide (grid on iPad/tvOS, list on iPhone)
+- Program titles, descriptions, and time slots
+- Channel info banner identifies the channel + program when a stream starts
 - Sort channels by number, name, or favorites
-- Tap a channel to play, long-press to add to favorites
-
-**Electronic Program Guide**
-
-- Grid and list views on tvOS and iPad, list view on iPhone
-- Program data cached locally and configurable from 6 hours to full available window
+- Tap to play, long-press for favorites
+- Long-press an upcoming program to set a reminder or schedule a recording
+- EPG reminders fire 5 minutes before the program starts; sync via iCloud
+- EPG window configurable from 6 hours up to the full available window
 - Channels without guide data still selectable from the grid
-- Long-press future programs to set reminders or schedule recordings
 
-**DVR Recording** *(new in v1.5.0)*
+</details>
 
-- Schedule live or upcoming programs to record from the Live TV guide
-- **Dispatcharr server-side recording** — continues even when AerioTV is closed; ideal for unattended recordings and recordings that need to survive app background / device sleep
-- **Local recording on this device** — records straight to `Documents/Recordings` (or a user-chosen folder on iOS) for XC, M3U, and Dispatcharr users
-- Per-recording **pre-roll** (start early) and **post-roll** (end late) buffers: None / 5 / 10 / 15 / 30 / 60 min or a custom value, to catch overruns in live sports and news
-- Optional **Remove Commercials (Comskip)** — toggle at schedule time, or trigger post-recording from the DVR tab's context menu. Processes server-side on Dispatcharr
-- **DVR tab** appears automatically when there's at least one recording (local or on the server), with Scheduled / Recording / Completed segments and live status updates
-- **Auto-discovery** — recordings scheduled from the Dispatcharr web UI (or another device) appear in AerioTV's DVR tab within ~2 minutes
-- **Download server recordings** — long-press a completed Dispatcharr recording → Save to Device
-- **Local storage quota** with live usage bar (1–200 GB, default 10 GB) and low-storage warnings
-- **iOS Files app access** — local recordings browsable and exportable under "On My iPhone → AerioTV"
-- Keep-device-awake toggle so a local recording isn't interrupted by display sleep
+<details>
+<summary><strong>Multiview</strong> <em>(v1.6.0)</em> — up to 9 streams at once.</summary>
 
-**Movies and Series**
+- Watch up to 9 live channels at once in a dynamically-sized grid
+- Enter from any playing channel: tap the grid button (iPad) or
+  Options → Enter Multiview (tvOS)
+- Layouts adapt to tile count: 1, 2, 3 asymmetric, 2×2, 5
+  asymmetric, 3×2, 7 centered, 3×3 with center gap, full 3×3
+- Only the most recently added stream plays audio; tap any tile
+  (iPad) or Select (Siri Remote) to move audio focus
+- Long-press menu on every tile: Make Audio / Full-Screen in
+  Grid / Audio Track / Subtitle Track / Move Tile / Remove
+- Move Mode for rearranging tiles (long-press → "Move Tile")
+- Picture-in-Picture from multiview on iPad — only the audio
+  tile continues; other tiles pause to conserve resources
+- Performance warning at the 5th tile (2-hour throttle); hard
+  cap at 9 tiles; thermal watchdog stops new tiles at
+  `.critical` device temp
+
+</details>
+
+<details>
+<summary><strong>DVR Recording</strong> <em>(v1.5.0)</em> — server-side on Dispatcharr, local on every server type.</summary>
+
+- Schedule live or upcoming programs from the Live TV guide
+- **Dispatcharr server-side recording** — continues even when
+  AerioTV is closed (the server runs the recording); ideal for
+  unattended recordings
+- **Local recording on this device** — records to
+  `Documents/Recordings` (or a user-chosen folder on iOS).
+  Available for Dispatcharr, Xtream Codes, and M3U
+- Per-recording pre-roll (start early) and post-roll (end late)
+  buffers: None / 5 / 10 / 15 / 30 / 60 min or custom
+- **Remove Commercials (Comskip)** — server-side processing on
+  Dispatcharr; toggle at schedule time or run post-recording
+- DVR tab appears automatically when there's at least one
+  recording, with Scheduled / Recording / Completed segments
+- Auto-discovery of recordings scheduled outside the app
+  (Dispatcharr web UI) — they show up in AerioTV within ~2 min
+- Download completed server recordings to local storage
+- Local storage quota with live usage bar (1–200 GB,
+  default 10 GB) and low-storage warnings
+- iOS Files app access ("On My iPhone → AerioTV")
+- Keep-device-awake toggle so a local recording isn't
+  interrupted by display sleep
+
+</details>
+
+<details>
+<summary><strong>Movies & TV Shows</strong> <em>(Dispatcharr & Xtream Codes)</em> — VOD library, Continue Watching, TMDB-rich metadata.</summary>
 
 - Browse and filter on-demand content by category
-- Categories pulled from the server's VOD library
-- Toggle categories on or off through the filter menu
-- Resume playback from where you left off with Continue Watching
+- TMDB-rich metadata on Dispatcharr (backdrop, plot, cast,
+  director, year, rating, runtime; per-episode air dates,
+  ratings, IMDB IDs, and per-episode artwork)
+- Provider-supplied metadata on Xtream Codes (poster, title,
+  one-line plot)
+- Continue Watching — resume movies and episodes; progress
+  syncs across devices via iCloud
+- Long-press to remove items from Continue Watching
+- Per-playlist VOD toggle in Settings → Edit Playlist
+- Series and movie detail caches make second-opens instant
 
-**Continue Watching**
+</details>
 
-- VOD watch progress tracked automatically
-- Resume movies and episodes from the Continue Watching section
-- Long-press to remove items
-- Progress syncs across all your devices via iCloud
+<details>
+<summary><strong>Player</strong> — chrome, Stream Info, Sleep Timer, AirPlay, PiP, swipe channel-flip.</summary>
 
-**Player Controls**
+- Tap to summon chrome; auto-fade after 5s of inactivity
+- Single overflow menu (iOS) / Options panel (tvOS) for all
+  secondary controls
+- Audio track + subtitle track selection
+- Playback speed (0.5×, 0.75×, 1×, 1.25×, 1.5×, 2×) for VOD —
+  not available on live streams
+- Sleep Timer (30 / 60 / 90 / 120 min), with a countdown in the
+  overflow menu
+- Audio Only mode
+- AirPlay
+- Picture-in-Picture on iOS — swipe home during playback and
+  the stream continues in a floating window
+- **Stream Info overlay** — Resolution, FPS, video codec,
+  audio codec, data rate. On Dispatcharr, also pulls live
+  server-side stats (output bitrate, viewer count) directly
+  from the server every 5 seconds *(v1.6.18+)*
+- **Channel-flip gestures** — Up/Down on the Siri Remote
+  (Apple TV) or swipe up/down with chrome visible (iPhone /
+  iPad) to flip channels in single-stream playback
 
-- All secondary controls accessible from a single overflow menu (iOS) or Options panel (tvOS)
-- Audio track selection, subtitle selection, playback speed
-- Sleep timer, stream info overlay, audio-only mode
-- Picture-in-Picture (iOS), AirPlay
+</details>
 
-**Sleep Timer**
+<details>
+<summary><strong>iCloud Sync</strong> — granular categories, scoped delete, set-up-once.</summary>
 
-- Set a timer for 30, 60, 90, or 120 minutes
-- Playback pauses automatically when the timer expires
-- Countdown displayed in the overflow menu / Options panel
-
-**Stream Info Overlay**
-
-- Real-time overlay showing video codec, resolution, FPS, pixel format, hardware decode status
-- Audio codec, sample rate, channel count
-- Cache duration, bitrate, A/V sync, dropped frames
-- Draggable anywhere on iOS, fixed top-center on tvOS
-
-**EPG Reminders**
-
-- Long-press an upcoming program in the channel list (iOS) or guide (tvOS)
-- Notification fires 5 minutes before the program starts
-- In-app banner appears when the app is in the foreground
-- Reminders sync across devices via iCloud
-
-**Audio and Subtitle Selection**
-
-- Switch between audio tracks and subtitle tracks during playback
-- Available tracks detected automatically from the stream
-- Current selection shown with checkmark in the menu
-
-**Playback Speed**
-
-- Cycle through playback speeds: 0.5x, 0.75x, 1x, 1.25x, 1.5x, 2x
-- Available for VOD content (not live streams)
-
-**Picture-in-Picture (iOS)**
-
-- Swipe home during playback and the stream continues in a floating PiP window
-- Supports AirPlay video output
-- Full playback controls in PiP mode
-
-**iCloud Sync**
-
-- Server configurations, preferences, VOD watch progress, and EPG reminders sync across devices
+- Server configurations, preferences, VOD watch progress, EPG
+  reminders, and per-playlist sort order sync across all your
+  Apple devices
 - Uses iCloud Key-Value Storage
-- Set up once on one device and all your Apple devices pick up the same data
-- Data pulled automatically on every app launch
+- Granular per-category sync controls in Settings *(v1.6.17+)*
+  — opt out of any category individually
+- Per-category "Delete from iCloud" actions for scrubbing stale
+  state without affecting local data
+- Set up once on one device and your other devices pick up the
+  same data on launch
 
-**Apple TV Optimized**
+</details>
+
+<details>
+<summary><strong>Apple TV</strong> — Siri Remote, Top Shelf, floating player, LAN detection.</summary>
 
 - Full Siri Remote support with d-pad navigation
-- Options panel for audio, subtitles, speed, sleep timer, and stream info
-- Channels and logos sized for living room viewing
-- LAN detection probes local server URL automatically (no SSID configuration needed)
+- Options panel for audio, subtitles, speed, sleep timer, and
+  stream info
+- Up/down on the Siri Remote changes channels during
+  single-stream live playback
+- Press Menu to minimize live TV to a floating corner player;
+  press Menu again to stop
+- Channels and logos sized for living-room viewing
+- LAN detection probes local server URLs automatically — no
+  SSID configuration needed
+- **Top Shelf** — your 6 most-watched channels (with the
+  current program), plus a Continue Watching row of movie and
+  episode posters. Populates as soon as AerioTV is on the top
+  row of the Apple TV Home screen — no setup
 
-**tvOS Floating Player**
+</details>
 
-- Press Menu to minimize live TV to a floating corner player
-- Press Menu again to stop playback
-- Browse channels, movies, or settings while the stream continues
+<details>
+<summary><strong>iPhone & iPad polish</strong> — gestures, layouts, mini-player, multiview safe-area carve-outs.</summary>
 
-**Top Shelf (tvOS)**
+- Mini-player (iPhone bottom bar / iPad top-right corner) keeps
+  the stream alive while you browse the guide, settings, or
+  on-demand library
+- Pinch-to-zoom-out shrinks the iPad player to the corner mini
+  *(v1.6.13+)*
+- Swipe down to dismiss / minimize the player on iPhone
+- iPhone multiview respects the notch and Dynamic Island —
+  tiles render inside the safe area, black background fills
+  the corners around the cutout *(v1.6.17+)*
+- iPad / Mac Catalyst use the iPad app as-is; macOS gets the
+  full iPad experience including multiview
 
-- Shows your 6 most-watched channels with currently airing program
-- Continue Watching row with posters for movies and episodes you haven't finished
-- Click a channel card to instantly start playing it in AerioTV
-- Click a movie card to jump straight to its detail view
-- Click an episode card to jump to its parent series detail view
-- Populates as soon as AerioTV is on the top row of the Home screen — no extra setup
+</details>
 
 ## Supported Server Types
 
