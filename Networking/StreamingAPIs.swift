@@ -918,6 +918,35 @@ struct DispatcharrAPI {
         try await fetchAllPages(DispatcharrChannel.self, firstPath: "/api/channels/channels/")
     }
 
+    // MARK: - Stream detail (Stream Info overlay) — v1.6.18
+
+    /// Fetch a single stream's metadata + live `stream_stats` blob.
+    /// Used by the Stream Info overlay on Dispatcharr API playback to
+    /// surface server-side stats (resolution, FPS, codec, bitrate)
+    /// alongside / in place of the mpv-derived client-side values.
+    /// Returns `DispatcharrStreamDetail` whose `streamStats` is `nil`
+    /// for streams Dispatcharr hasn't actively served yet.
+    func getStreamDetail(streamID: Int) async throws -> DispatcharrStreamDetail {
+        let url = try buildURL(path: "/api/channels/streams/\(streamID)/")
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 10
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await HTTPRouter.data(for: request, using: URLSession.shared)
+        guard let http = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        switch http.statusCode {
+        case 200...299:
+            return try JSONDecoder().decode(DispatcharrStreamDetail.self, from: data)
+        case 401, 403:
+            throw APIError.unauthorized
+        case 404:
+            throw APIError.serverError(404)
+        default:
+            throw APIError.serverError(http.statusCode)
+        }
+    }
+
     // MARK: - Lightweight channel summary (fast guide UI)
     func getChannelSummaries() async throws -> [DispatcharrChannelSummary] {
         try await fetchAllPages(DispatcharrChannelSummary.self, firstPath: "/api/channels/summary/")
@@ -2706,5 +2735,108 @@ struct DispatcharrChannelGroup: Decodable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, name
         case channelCount = "channel_count"
+    }
+}
+
+// MARK: - Stream Stats (v1.6.18)
+//
+// Server-side stats Dispatcharr publishes for streams that have been
+// played through its proxy at least once. The web UI shows these as
+// the stack of pill badges in the channel-streams table (resolution,
+// FPS, codec, bitrate). Aerio surfaces them in the Stream Info
+// overlay when the active server is Dispatcharr API — augments
+// (and where possible replaces) the mpv-derived client-side stats.
+//
+// Schema sourced from Dispatcharr's `apps/proxy/ts_proxy/services/
+// channel_service.py:_update_stream_stats_in_db` and verified live
+// against `192.168.50.163:9191/api/channels/streams/?search=ESPN`
+// on 2026-04-29. All fields are optional because Dispatcharr only
+// populates stats once a stream has been actively played, and even
+// then some fields (e.g. `width`/`height`) may be absent on older
+// builds — the JSON blob is `JSONField(null=True, blank=True)` on
+// the Stream model.
+
+/// Live stats Dispatcharr's TS proxy collects from each stream.
+/// Decoded from `Stream.stream_stats` (a Postgres JSONB column).
+struct DispatcharrStreamStats: Decodable, Equatable {
+    /// Pre-formatted "WIDTHxHEIGHT" (e.g. "1920x1080"). Prefer this
+    /// over `width` × `height` for display since it matches the
+    /// upstream-reported aspect even when Dispatcharr re-encodes.
+    let resolution: String?
+    let width: Int?
+    let height: Int?
+
+    /// Source FPS as float (e.g. 29.97, 59.94, 30.0). Some streams
+    /// only report `container-fps` shape so the value can be a clean
+    /// integer like 30.0; format with up to 2 decimals on display.
+    let sourceFps: Double?
+
+    /// Lower-case codec slug ("h264", "hevc", "mpeg2video", "av1").
+    /// UI uppercases for badge display.
+    let videoCodec: String?
+
+    /// Source video bitrate in **kbps** when known.
+    let videoBitrate: Double?
+
+    /// Pixel format ("yuv420p", "yuv420p10le"). Diagnostic — not
+    /// shown in the v1.6.18 overlay layout but parsed for parity
+    /// with Dispatcharr's web UI table.
+    let pixelFormat: String?
+
+    let audioCodec: String?
+    /// "stereo", "mono", "5.1" — string, not numeric channel count.
+    let audioChannels: String?
+    /// Audio bitrate in **kbps**.
+    let audioBitrate: Double?
+    /// Audio sample rate in Hz (e.g. 48000).
+    let sampleRate: Int?
+
+    /// Container / transport ("mpegts", "hls", etc).
+    let streamType: String?
+
+    /// Output bitrate after Dispatcharr's ffmpeg processing, in
+    /// **kbps**. This is the closest to the screenshot's "current
+    /// Mbps" value when a stream is being actively transcoded.
+    let ffmpegOutputBitrate: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case resolution, width, height
+        case sourceFps        = "source_fps"
+        case videoCodec       = "video_codec"
+        case videoBitrate     = "video_bitrate"
+        case pixelFormat      = "pixel_format"
+        case audioCodec       = "audio_codec"
+        case audioChannels    = "audio_channels"
+        case audioBitrate     = "audio_bitrate"
+        case sampleRate       = "sample_rate"
+        case streamType       = "stream_type"
+        case ffmpegOutputBitrate = "ffmpeg_output_bitrate"
+    }
+}
+
+/// Slim Stream record returned by `/api/channels/streams/{id}/`,
+/// containing the fields Aerio uses for the Stream Info overlay.
+/// The full Stream model has many more fields (logo_url, m3u_account,
+/// channel_group, …) that Aerio doesn't need at the per-playback
+/// stats level — keeping the decoder lean reduces the JSON parse
+/// cost on every poll.
+struct DispatcharrStreamDetail: Decodable {
+    let id: Int
+    let name: String?
+    let streamStats: DispatcharrStreamStats?
+    /// ISO-8601 timestamp of the most recent stats update. Used to
+    /// detect stale stats on cold-fetch (no recent playback) so the
+    /// UI can fall back to mpv-derived values gracefully.
+    let streamStatsUpdatedAt: String?
+    /// Active viewer count (number of clients currently consuming
+    /// the proxied stream). Surfaced as the "viewers" badge in the
+    /// overlay.
+    let currentViewers: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case streamStats = "stream_stats"
+        case streamStatsUpdatedAt = "stream_stats_updated_at"
+        case currentViewers = "current_viewers"
     }
 }

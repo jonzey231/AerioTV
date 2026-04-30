@@ -172,7 +172,24 @@ final class PlayerSession: ObservableObject {
     /// transport bar's "Exit Multiview" button when the user wants
     /// to stop watching, not just collapse to one stream.
     func exit() {
-        MultiviewStore.shared.reset()
+        // v1.6.18: capture the audio tile's channel id BEFORE we
+        // reset the store. NowPlayingManager.lastPlayedChannelID is
+        // the persistent breadcrumb the Live TV guide reads for its
+        // default-focused row — without this capture, a full exit
+        // from multiview clears playingItem AND wipes the audio
+        // tile id from MultiviewStore in the same beat, leaving the
+        // guide with no signal at all and falling back to row 0.
+        // Capturing here keeps "exit multiview → guide lands on the
+        // channel I was just listening to" as the consistent
+        // behaviour. `startPlaying(...)` writes the same field on
+        // single-stream entry, so this only matters on the
+        // multiview-exit path.
+        let store = MultiviewStore.shared
+        if let audioID = store.audioTileID,
+           let audioTile = store.tiles.first(where: { $0.id == audioID }) {
+            NowPlayingManager.shared.lastPlayedChannelID = audioTile.item.id
+        }
+        store.reset()
         mode = .idle
         NowPlayingManager.shared.configuredAsMultiviewAdapter = false
         // Explicit bridge teardown: during multiview, the audio tile's

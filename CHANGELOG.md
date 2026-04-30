@@ -1,5 +1,145 @@
 # Changelog
 
+## v1.6.18 — 2026-04-29
+
+### Added
+
+- **Stream Info overlay now pulls live server-side stats from
+  Dispatcharr** *(Dispatcharr API playlists only)*. The overlay
+  fetches `/api/channels/streams/{id}/` every 5 seconds while
+  visible and surfaces Dispatcharr's authoritative
+  `stream_stats` blob (resolution, source FPS, video codec,
+  audio codec + channel layout, ffmpeg output bitrate) plus the
+  current viewer count. Server-side values take precedence over
+  mpv-derived client-side values when present — Dispatcharr
+  analyzes the source feed directly, so its numbers reflect the
+  upstream stream rather than the device's decoder pipeline. On
+  XC / M3U servers (or for Dispatcharr streams Dispatcharr
+  hasn't populated stats for yet) the overlay falls back to the
+  mpv-derived values, so the same 5 fields always render
+  consistently across server types.
+
+- **Stream Info overlay redesigned to a clean 5-field layout.**
+  Previously the overlay showed 6 rows of mixed-purpose data
+  (cache duration, sync, dropped frames, hwdec mode) that read
+  more like an mpv debug dump than a viewer-facing card. v1.6.18
+  trims to Resolution / FPS / Video Codec / Audio Codec / Data
+  Rate (per user spec for non-API playback), with an optional
+  Viewers row when on Dispatcharr API. Same overlay shape on
+  iPhone, iPad, and Apple TV; same render path for the legacy
+  single-stream player and the unified multiview audio tile.
+
+- **Swipe up/down to change channels on iPhone and iPad.** Mirrors
+  the Apple TV up/down channel-flip on the Siri Remote, but for
+  touch. To prevent accidental swipes during normal viewing, the
+  gesture is gated on chrome being visible — tap once to summon
+  the player chrome, then swipe up (next channel) / down (previous
+  channel). Each flip refreshes the chrome fade timer so the
+  Tap → Swipe → Swipe → Swipe flow keeps working without
+  re-tapping. Live streams only (recordings and VOD don't have a
+  channel concept). Single-stream playback only — multi-tile
+  multiview keeps gestures for tile interaction. Vertical-bias
+  threshold (≥ 40pt vertical movement, ≥ 1.5× dominance over
+  horizontal) keeps iPad split-view drag-from-edge gestures from
+  being misread as channel flips. Direction convention matches
+  Apple TV: up = next channel (higher number), down = previous —
+  per the IPTV remote idiom. Implemented in both the unified
+  multiview path (`MultiviewContainerView`) and the legacy
+  single-stream path (`PlayerView`) so users on either path get
+  the feature.
+
+### Fixed
+
+- **Apple TV: returning to the guide after watching a channel
+  now lands focus on the channel you were just watching.** The
+  guide had been auto-focusing the first row in the visible
+  filter regardless of which channel was minimized into the
+  corner mini-player or just torn down via "Exit Multiview" —
+  it felt random and made the guide auto-scroll for no apparent
+  reason. v1.6.18 default-focuses the currently-playing channel
+  when minimizing from single-stream playback, and falls back
+  to the last audio-tile channel after a full multiview exit
+  (captured before the multiview store is reset). Also scrolls
+  that row into view at the same moment focus lands so the user
+  doesn't see an apparently-arbitrary jump when the channel was
+  offscreen.
+
+- **iPhone portrait: Close / Options / Add buttons no longer sit
+  too low.** v1.6.17's iPhone-only multiview safe-area carve-out
+  (which fixed tile content sliding under the Dynamic Island)
+  caused the chrome overlay's parent to start respecting safe area.
+  The chrome's existing `dynamicTopInset` formula then double-
+  counted the Dynamic Island clearance, floating the buttons
+  ~130pt below the screen top instead of the intended ~71pt.
+  Same root cause floated the channel info banner and Stream
+  Info card too far down. Fixed by adding
+  `.ignoresSafeArea(edges: .top)` to each of those three overlays
+  so their `dynamicTopInset` formula measures from the literal
+  screen top as it was originally designed. Landscape, iPad, and
+  Apple TV were always fine — affected iPhone portrait only.
+
+- **Channel info banner no longer covers the Stream Info card.**
+  On iPhone the two overlays sit at the same top-left coordinates;
+  the banner was rendering on top, hiding the stats the user just
+  asked to see. v1.6.18 suppresses the banner while
+  `showStreamInfo` is true via a new `streamInfoIsVisible` flag
+  on `NowPlayingManager` that both the legacy PlayerView and the
+  unified MultiviewContainerView publish to.
+
+- **iPhone landscape: channel info banner now sits to the right of
+  the Close button instead of below it.** Landscape has the
+  horizontal room to share the row, so squeezing the banner into
+  a second row underneath was wasted vertical real estate. iPhone
+  PORTRAIT keeps the below-close-button layout because the close
+  button column doesn't leave enough width for the banner. iPad
+  and Apple TV unchanged.
+
+- **Live channel audio no longer bleeds through when starting a
+  recording or VOD playback.** Repro (Apple TV, reported by user
+  NicolaiVdS): watching a live channel → press Back to minimize →
+  navigate to DVR (or On Demand) → start playing a recording (or
+  movie / TV episode). Pre-1.6.18 the recording's video would
+  play correctly but the live channel's audio kept playing
+  underneath — two simultaneous audio streams. Cause: Aerio's
+  player overlay sits at the MainTabView level and persists
+  across tab navigation (so a minimized live channel keeps
+  playing while the user is in DVR / On Demand). The recording
+  and VOD paths mount their player via `.fullScreenCover(item:)`,
+  which layers a NEW player on top WITHOUT unmounting the live
+  one — leaving two mpv instances both producing audio. Fixed by
+  calling `NowPlayingManager.shared.stop()` immediately before
+  setting the state that triggers `.fullScreenCover` in
+  `MyRecordingsView.playRecording`,
+  `MyRecordingsView.playServerRecording`, and
+  `VODDetailView.resolveAndLaunch`. Stop() clears the live
+  player's state → SwiftUI unmounts the live PlayerView →
+  coordinator's mpv quit fires before the new player spins up.
+  Cross-platform fix (iOS / iPadOS / tvOS); the bug had the same
+  root cause on every platform.
+
+- **Live TV List view on iPhone no longer jitters when scrolling
+  to the group-pill snap-out threshold.** Repro: open Live TV →
+  switch to List view → scroll down slightly to the threshold
+  where the group filter pills are about to collapse. Pre-1.6.18
+  the list would oscillate up and down indefinitely until the
+  user scrolled past the boundary. Cause: pills lived in a VStack
+  sibling above the List with a conditional `if !isChromeCollapsed`
+  guard. Toggling the conditional removed pills from the VStack
+  → VStack shrank → List's frame shifted → `.onScrollGeometryChange`
+  re-fired with a different content offset reading → re-triggered
+  the hysteresis check during the 0.2s collapse animation →
+  oscillation. The 60pt hysteresis window (collapse at 80pt /
+  expand at 20pt) wasn't wide enough to swallow the
+  layout-shift-induced offset jitter. Fixed by moving the iPhone
+  pills out of the VStack and into `.safeAreaInset(edge: .top)`
+  on the List itself. Show/hide now changes only the List's top
+  safe-area inset — the List's outer frame and content offset
+  stay stable across the transition, so the layout-recalibration
+  feedback loop that produced the oscillation can't form.
+  iPad and Apple TV still render pills above the List in the
+  VStack (always visible on those platforms, no scroll-collapse
+  behavior).
+
 ## v1.6.17 — 2026-04-29
 
 ### Fixed

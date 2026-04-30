@@ -99,6 +99,22 @@ struct PlaybackChromeOverlay: View {
                     .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
                     .accessibilityHidden(!chromeState.isVisible)
             }
+            // v1.6.18: explicitly bypass the parent's safe-area
+            // handling. v1.6.17's iPhone-only multiview safe-area
+            // carve-out (HomeView's `iOSMultiviewWrapper` dropped
+            // the outer `.ignoresSafeArea()` for iPhone) caused this
+            // overlay to start at safe-area-top, after which the
+            // `dynamicTopInset` formula's own `windowInset + 12`
+            // double-counted the Dynamic Island clearance and
+            // pushed the Close / Overflow / + buttons too far down
+            // in iPhone portrait. Anchoring this overlay at the
+            // literal screen top restores the absolute positioning
+            // the formula was designed around — chrome y =
+            // dynamicTopInset (~71pt on Pro Max portrait), which
+            // hugs the Dynamic Island instead of floating ~130pt
+            // below it. Landscape was already fine because
+            // dynamicTopInset bottoms out at 20pt there.
+            .ignoresSafeArea(edges: .top)
         }
         #else
         EmptyView()

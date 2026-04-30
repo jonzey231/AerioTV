@@ -649,6 +649,17 @@ struct VODDetailView: View {
             isResolvingURL = false
         }
 
+        // v1.6.18 — tear down any active live stream before mounting
+        // the VOD/episode fullScreenCover. The MainTabView-level
+        // player overlay persists across tab navigation (so a
+        // minimized live channel keeps playing while the user is
+        // in On Demand), and fullScreenCover layers on top WITHOUT
+        // unmounting underneath. Without this stop() call, the
+        // live mpv keeps decoding audio while the VOD mpv also
+        // produces audio — two simultaneous streams. Same root
+        // cause as the recording-playback fix in MyRecordingsView
+        // (v1.6.18 user report from NicolaiVdS, Apple TV).
+        NowPlayingManager.shared.stop()
         playingURL = IdentifiableURL(url: resolvedURL)
         isPlaying = true
     }

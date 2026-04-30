@@ -80,6 +80,13 @@ struct MultiviewContainerView: View {
     /// the unified path (still fires in the legacy path's
     /// `PlayerView`, which is unaffected).
     @State private var showStreamInfo: Bool = false
+    /// v1.6.18: handle for the Dispatcharr server-side stats poller.
+    /// Started when `showStreamInfo` flips on (audio tile + Dispatcharr
+    /// API only), cancelled when it flips off or the view tears down.
+    /// Mirrors the same shape as PlayerView.swift's
+    /// `serverStatsPollTask` so both playback paths surface
+    /// server-side stats consistently.
+    @State private var serverStatsPollTask: Task<Void, Never>? = nil
 
     #if os(tvOS)
     /// tvOS N=1 chrome focus targets. Binding flows into
@@ -505,6 +512,22 @@ struct MultiviewContainerView: View {
         // path uses (PlayerView.swift onChange of showStreamInfo).
         .onChange(of: showStreamInfo) { _, visible in
             store.audioProgressStore?.isStreamInfoVisible = visible
+            // v1.6.18: see the matching note in PlayerView.swift —
+            // ChannelInfoBanner reads this flag to suppress itself
+            // while Stream Info is open so the two overlays don't
+            // overlap on iPhone.
+            nowPlaying.streamInfoIsVisible = visible
+            // v1.6.18: also drive the Dispatcharr server-side stats
+            // poll for the audio tile when the active server is
+            // Dispatcharr API. Same pattern as PlayerView's legacy
+            // path. Polls every 5s while overlay is visible; writes
+            // results to the audio tile's `serverSideStats` /
+            // `serverSideViewers` published fields.
+            if visible {
+                startServerStatsPoll()
+            } else {
+                stopServerStatsPoll()
+            }
         }
         #if os(tvOS)
         // Force focus onto the audio tile on mount.
@@ -599,6 +622,43 @@ struct MultiviewContainerView: View {
         // takes audio) rather than stealing it.
         .simultaneousGesture(
             TapGesture().onEnded { chromeState.reportInteraction() }
+        )
+        // v1.6.18: vertical swipe = channel flip (single-stream
+        // live only). Gated on chrome being VISIBLE — the user
+        // taps once to summon chrome, then swipes up/down to
+        // flip channels. Each flip refreshes the chrome fade
+        // timer so the Tap → Swipe → Swipe → Swipe flow keeps
+        // working without re-tapping. Inverted from the tvOS
+        // gate (which flips on chrome HIDDEN, since on tvOS
+        // chrome-visible up/down navigates between Options /
+        // Record / Add Stream pills) — on iOS chrome doesn't
+        // have D-pad navigable elements above the tile, so
+        // gating on visible-chrome is the cleanest way to keep
+        // accidental swipes during normal viewing from changing
+        // the channel. `.simultaneousGesture` so the tile's own
+        // tap-to-take-audio path still works (taps require
+        // minimal movement; vertical swipes have lots, so the
+        // tap recognizer won't fire). Direction matches tvOS:
+        // up = next channel (+1), down = previous (-1).
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 30)
+                .onEnded { value in
+                    guard chromeState.isVisible,
+                          nowPlaying.isLive,
+                          store.tiles.count == 1,
+                          !nowPlaying.isMinimized else { return }
+                    let dy = value.translation.height
+                    let dx = abs(value.translation.width)
+                    // Strong vertical bias: at least 40pt of
+                    // vertical movement and at least 1.5×
+                    // dominance over horizontal so iPad split-
+                    // view drag-from-edge gestures don't get
+                    // misread as channel flips.
+                    guard abs(dy) > 40, abs(dy) > dx * 1.5 else { return }
+                    let direction = dy < 0 ? +1 : -1
+                    nowPlaying.changeChannel(direction: direction)
+                    chromeState.reportInteraction()
+                }
         )
         #endif
         #if os(tvOS)
@@ -946,6 +1006,60 @@ struct MultiviewContainerView: View {
         }
     }
 
+    // MARK: - Dispatcharr server-side stats (v1.6.18)
+
+    /// Mirror of `PlayerView.startServerStatsPoll` — polls
+    /// Dispatcharr's `/api/channels/streams/{id}/` every 5s while the
+    /// Stream Info overlay is visible AND the audio tile is on a
+    /// Dispatcharr server. Writes results to the audio tile's
+    /// `serverSideStats` / `serverSideViewers` published fields so
+    /// `StreamInfoCardView` renders server-side values when present
+    /// and falls back to mpv-derived values otherwise. No-op for
+    /// XC / M3U servers and for streams Dispatcharr hasn't populated
+    /// yet.
+    private func startServerStatsPoll() {
+        stopServerStatsPoll()
+        guard let server = ChannelStore.shared.activeServer,
+              server.type == .dispatcharrAPI,
+              let audioTile = store.tiles.first(where: { $0.id == store.audioTileID }),
+              let streamID = audioTile.item.dispatcharrStreamIDs?.first,
+              let audioStore = store.audioProgressStore else {
+            return
+        }
+        let baseURL = server.effectiveBaseURL
+        let apiKey  = server.effectiveApiKey
+        let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+        serverStatsPollTask = Task { @MainActor in
+            await fetchOnce(api: api, streamID: streamID, audioStore: audioStore)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if Task.isCancelled { break }
+                // Re-fetch the audio store on each tick — multiview
+                // audio-tile changes can swap which store the user
+                // is observing. If it's gone, bail.
+                guard let store = self.store.audioProgressStore else { break }
+                await fetchOnce(api: api, streamID: streamID, audioStore: store)
+            }
+        }
+    }
+
+    private func stopServerStatsPoll() {
+        serverStatsPollTask?.cancel()
+        serverStatsPollTask = nil
+    }
+
+    @MainActor
+    private func fetchOnce(api: DispatcharrAPI, streamID: Int, audioStore: PlayerProgressStore) async {
+        do {
+            let detail = try await api.getStreamDetail(streamID: streamID)
+            audioStore.serverSideStats = detail.streamStats
+            audioStore.serverSideViewers = detail.currentViewers
+        } catch {
+            // Quiet failure — leave stale stats in place; mpv-derived
+            // fallback covers any gaps in StreamInfoCardView's render.
+        }
+    }
+
     /// Body text for the exit-confirmation dialog. Explains what
     /// happens after tapping the primary button so the user isn't
     /// surprised by the destination view.
@@ -1200,7 +1314,11 @@ struct MultiviewContainerView: View {
         VStack {
             Spacer()
             HStack {
-                StreamInfoCardView(info: audioStore.streamInfo)
+                StreamInfoCardView(
+                    info: audioStore.streamInfo,
+                    serverStats: audioStore.serverSideStats,
+                    serverViewers: audioStore.serverSideViewers
+                )
                     .padding(.leading, 40)
                     .padding(.bottom, 32)
                 Spacer()
@@ -1219,6 +1337,15 @@ struct MultiviewContainerView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // v1.6.18: same safe-area carve-out as the chrome overlay
+        // — see PlaybackChromeOverlay.swift for the rationale. The
+        // `iOSStreamInfoTopInset` formula was designed against an
+        // absolute screen-top reference; v1.6.17's iPhone safe-
+        // area fix made the parent honor safe area, which would
+        // otherwise double-count the Dynamic Island clearance and
+        // float the Stream Info card too far down in iPhone
+        // portrait.
+        .ignoresSafeArea(edges: .top)
         #endif
     }
 
@@ -1230,7 +1357,11 @@ struct MultiviewContainerView: View {
     @ViewBuilder
     private func streamInfoCardWithCloseButton(audioStore: PlayerProgressStore) -> some View {
         ZStack(alignment: .topTrailing) {
-            StreamInfoCardView(info: audioStore.streamInfo)
+            StreamInfoCardView(
+                info: audioStore.streamInfo,
+                serverStats: audioStore.serverSideStats,
+                serverViewers: audioStore.serverSideViewers
+            )
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     showStreamInfo = false

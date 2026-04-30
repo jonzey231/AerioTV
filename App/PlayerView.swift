@@ -83,17 +83,36 @@ struct StreamInfo: Equatable {
 /// `showStreamInfo` toggle wired but no actual overlay mount —
 /// toggling the row in Options did nothing visible. Sharing one card
 /// view keeps the visual treatment identical across both paths.
+///
+/// v1.6.18: standardized to a 5-field clean layout (Resolution, FPS,
+/// Video Codec, Audio Codec, Data Rate) plus an optional viewer
+/// badge. When `serverStats` is non-nil (Dispatcharr API path), the
+/// values come from Dispatcharr's server-side `stream_stats` blob —
+/// more authoritative than mpv-derived values since Dispatcharr
+/// analyzes the source feed directly. When `serverStats` is nil
+/// (XC / M3U / Dispatcharr stream not yet populated), values come
+/// from mpv via the `info` parameter. Both paths render the same
+/// 5 fields so the UI is consistent across server types.
 struct StreamInfoCardView: View {
     let info: StreamInfo
+    /// v1.6.18: Dispatcharr server-side stats. When non-nil, values
+    /// from this blob take precedence over `info` for the
+    /// matching fields.
+    var serverStats: DispatcharrStreamStats? = nil
+    /// v1.6.18: viewer count from Dispatcharr. Renders as a small
+    /// badge under the main stats grid when non-nil.
+    var serverViewers: Int? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            row(label: "VIDEO", value: "\(info.videoCodec)  \(info.width)×\(info.height)")
-            row(label: "", value: "\(String(format: "%.2f", info.fps))fps  \(info.pixelFormat)")
-            row(label: "", value: "hwdec: \(info.hwdec)")
-            row(label: "AUDIO", value: "\(info.audioCodec)  \(info.sampleRate)Hz  \(info.channels)ch")
-            row(label: "CACHE", value: "\(String(format: "%.1f", info.cacheDuration))s  \(StreamInfoCardView.formatBitrate(info.bitrate))")
-            row(label: "SYNC", value: "\(String(format: "%.3f", info.avsync))s  drops: \(info.droppedFrames)")
+            row(label: "RES",   value: resolutionString)
+            row(label: "FPS",   value: fpsString)
+            row(label: "VIDEO", value: videoCodecString)
+            row(label: "AUDIO", value: audioCodecString)
+            row(label: "RATE",  value: dataRateString)
+            if let viewers = serverViewers {
+                row(label: "VIEW", value: "\(viewers) \(viewers == 1 ? "viewer" : "viewers")")
+            }
         }
         #if os(tvOS)
         .padding(20)
@@ -107,6 +126,69 @@ struct StreamInfoCardView: View {
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+    }
+
+    // MARK: - Field resolution (server-side first, mpv fallback)
+
+    private var resolutionString: String {
+        if let s = serverStats?.resolution, !s.isEmpty { return s }
+        if let w = serverStats?.width, let h = serverStats?.height, w > 0, h > 0 {
+            return "\(w)×\(h)"
+        }
+        if info.width > 0 && info.height > 0 {
+            return "\(info.width)×\(info.height)"
+        }
+        return "—"
+    }
+
+    private var fpsString: String {
+        if let fps = serverStats?.sourceFps, fps > 0 {
+            return String(format: "%.2f", fps)
+        }
+        if info.fps > 0 {
+            return String(format: "%.2f", info.fps)
+        }
+        return "—"
+    }
+
+    private var videoCodecString: String {
+        if let codec = serverStats?.videoCodec, !codec.isEmpty {
+            return codec.uppercased()
+        }
+        if !info.videoCodec.isEmpty {
+            return info.videoCodec.uppercased()
+        }
+        return "—"
+    }
+
+    private var audioCodecString: String {
+        var pieces: [String] = []
+        if let codec = serverStats?.audioCodec, !codec.isEmpty {
+            pieces.append(codec.uppercased())
+        } else if !info.audioCodec.isEmpty {
+            pieces.append(info.audioCodec.uppercased())
+        }
+        if let channels = serverStats?.audioChannels, !channels.isEmpty {
+            pieces.append(channels)
+        } else if info.channels > 0 {
+            pieces.append("\(info.channels)ch")
+        }
+        return pieces.isEmpty ? "—" : pieces.joined(separator: " · ")
+    }
+
+    /// Server-side bitrate when available (Dispatcharr ffmpeg output
+    /// rate), else mpv-derived demuxer raw input rate.
+    private var dataRateString: String {
+        if let kbps = serverStats?.ffmpegOutputBitrate, kbps > 0 {
+            return StreamInfoCardView.formatKbps(kbps)
+        }
+        if let kbps = serverStats?.videoBitrate, kbps > 0 {
+            return StreamInfoCardView.formatKbps(kbps)
+        }
+        if info.bitrate > 0 {
+            return StreamInfoCardView.formatBitrate(info.bitrate)
+        }
+        return "—"
     }
 
     @ViewBuilder
@@ -134,12 +216,24 @@ struct StreamInfoCardView: View {
         }
     }
 
+    /// Format mpv-derived bitrate (bytes/sec) as a human string.
     static func formatBitrate(_ bytesPerSec: Double) -> String {
         let mbps = bytesPerSec * 8.0 / 1_000_000.0
         if mbps >= 1.0 {
-            return String(format: "%.1f Mbps", mbps)
+            return String(format: "%.2f Mbps", mbps)
         } else {
             return String(format: "%.0f kbps", mbps * 1000)
+        }
+    }
+
+    /// Format Dispatcharr-side bitrate (already in kbps) as a human
+    /// string. Dispatcharr returns its bitrate fields in kilobits per
+    /// second already, so this is just a unit-aware formatter.
+    static func formatKbps(_ kbps: Double) -> String {
+        if kbps >= 1000 {
+            return String(format: "%.2f Mbps", kbps / 1000.0)
+        } else {
+            return String(format: "%.0f kbps", kbps)
         }
     }
 }
@@ -189,12 +283,27 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// background handler can keep mpv's audio decoder running when the
     /// user has explicitly opted into background audio. Default false.
     @Published var isAudioOnly: Bool = false
-    /// Stream technical info (codec, resolution, bitrate, etc.)
+    /// Stream technical info (codec, resolution, bitrate, etc.) sourced
+    /// from mpv. Always populated for live playback; used as the
+    /// fallback when server-side stats aren't available.
     @Published var streamInfo = StreamInfo()
     /// When true, the stream info overlay is visible and the volatile
     /// stats timer should be running. When false, the timer is paused
     /// to avoid mpv lock contention that causes frame-delivery jitter.
     var isStreamInfoVisible: Bool = false
+    /// v1.6.18: Server-side stream stats fetched from Dispatcharr's
+    /// `/api/channels/streams/{id}/` endpoint. Populated by a polling
+    /// Task that runs while `isStreamInfoVisible` is true AND the
+    /// active server is Dispatcharr API. `nil` when the active server
+    /// is XC / M3U (no API to query) or when Dispatcharr hasn't
+    /// populated stats for this stream yet — the overlay falls back
+    /// to mpv-derived values from `streamInfo` in that case. Polled
+    /// every 5 seconds; replaced atomically on each successful fetch.
+    @Published var serverSideStats: DispatcharrStreamStats? = nil
+    /// v1.6.18: Active viewer count from Dispatcharr. Surfaced as a
+    /// "viewers" badge on the overlay for community context. `nil`
+    /// when off the Dispatcharr API path.
+    @Published var serverSideViewers: Int? = nil
 
     static let speedOptions: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
 }
@@ -412,6 +521,10 @@ private struct PlayerRootView: View {
 
     // Stream info
     @State private var showStreamInfo = false
+    /// v1.6.18: handle for the Dispatcharr server-side stats poller.
+    /// Started when `showStreamInfo` flips on (Dispatcharr API only),
+    /// cancelled when it flips off or the view tears down.
+    @State private var serverStatsPollTask: Task<Void, Never>?
     #if os(iOS)
     /// User-draggable position for the stream info overlay (nil = default top-center).
     @State private var streamInfoPosition: CGPoint?
@@ -640,10 +753,42 @@ private struct PlayerRootView: View {
             DragGesture()
                 .onChanged { value in
                     guard state == .playing, value.translation.height > 0 else { return }
+                    // v1.6.18: when chrome is visible, a downward swipe
+                    // is a channel-flip-down gesture (handled in
+                    // onEnded below) — NOT a minimize. Skip the
+                    // dragOffset assignment so the player doesn't
+                    // visually slide while the user is trying to flip.
+                    if showControls { return }
                     dragOffset = value.translation.height
                 }
                 .onEnded { value in
                     guard state == .playing else { return }
+
+                    // v1.6.18: chrome-visible vertical swipe = channel
+                    // flip (live only). User flow: tap once to summon
+                    // chrome, then swipe up/down to flip channels;
+                    // each flip refreshes the chrome fade timer so
+                    // the Tap → Swipe → Swipe → Swipe flow stays
+                    // alive without re-tapping. Inverted from the
+                    // tvOS gate at line ~590 above (which flips on
+                    // !showControls, since tvOS chrome-visible
+                    // up/down navigates the Options pill row).
+                    // Direction matches tvOS: up = next (+1), down
+                    // = previous (-1). Strong vertical bias keeps
+                    // iPad split-view drag-from-edge from being
+                    // misread as a channel flip.
+                    if showControls, isLive {
+                        let dy = value.translation.height
+                        let dx = abs(value.translation.width)
+                        if abs(dy) > 40, abs(dy) > dx * 1.5 {
+                            let direction = dy < 0 ? +1 : -1
+                            NowPlayingManager.shared.changeChannel(direction: direction)
+                            scheduleControlsHide()
+                            withAnimation(.spring(response: 0.25)) { dragOffset = 0 }
+                            return
+                        }
+                    }
+
                     // Use the key window height for iPad/split-screen compatibility.
                     let screenH = UIApplication.shared.connectedScenes
                         .compactMap { $0 as? UIWindowScene }
@@ -734,6 +879,22 @@ private struct PlayerRootView: View {
             // only runs while the overlay is visible — avoids mpv
             // lock contention that causes frame-delivery jitter.
             progressStore.isStreamInfoVisible = visible
+            // v1.6.18: also publish to the shared NowPlayingManager
+            // so `ChannelInfoBanner` can suppress itself while the
+            // user has Stream Info open — they sit at the same
+            // top-left coordinates on iPhone and would otherwise
+            // overlap, covering the stats the user just asked for.
+            NowPlayingManager.shared.streamInfoIsVisible = visible
+            // v1.6.18: also drive the Dispatcharr server-side stats
+            // poll. Only fires when the active server is Dispatcharr
+            // API and the playing channel has a stream id —
+            // otherwise no-op (the overlay falls back to mpv-derived
+            // values).
+            if visible {
+                startServerStatsPoll()
+            } else {
+                stopServerStatsPoll()
+            }
         }
         // v1.6.15: mirror this player's chrome visibility into the
         // shared `NowPlayingManager.chromeIsVisible` flag so the
@@ -1765,7 +1926,11 @@ private struct PlayerRootView: View {
     /// the legacy single-stream path (this view) and the unified
     /// multiview path (`MultiviewContainerView`).
     private var streamInfoOverlay: some View {
-        StreamInfoCardView(info: progressStore.streamInfo)
+        StreamInfoCardView(
+            info: progressStore.streamInfo,
+            serverStats: progressStore.serverSideStats,
+            serverViewers: progressStore.serverSideViewers
+        )
     }
 
     private func liquidButton(
@@ -1879,6 +2044,59 @@ private struct PlayerRootView: View {
             await MainActor.run {
                 withAnimation(.easeInOut(duration: 0.3)) { showControls = false }
             }
+        }
+    }
+
+    // MARK: - Dispatcharr server-side stats (v1.6.18)
+
+    /// Poll the Dispatcharr API for `stream_stats` while the Stream
+    /// Info overlay is visible. Refreshes the published
+    /// `progressStore.serverSideStats` and `progressStore.serverSideViewers`
+    /// every 5 seconds. No-op when the active server isn't Dispatcharr
+    /// API or when the playing channel has no stream id — the overlay
+    /// falls back to mpv-derived values in those cases.
+    private func startServerStatsPoll() {
+        stopServerStatsPoll()
+        guard let server = ChannelStore.shared.activeServer,
+              server.type == .dispatcharrAPI,
+              let streamID = NowPlayingManager.shared.playingItem?.dispatcharrStreamIDs?.first else {
+            return
+        }
+        let baseURL = server.effectiveBaseURL
+        let apiKey  = server.effectiveApiKey
+        let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey))
+        serverStatsPollTask = Task { @MainActor in
+            // Initial fetch fires immediately so the overlay shows
+            // server-side values within the first ~200 ms instead of
+            // waiting 5 s for the next poll tick.
+            await fetchOnce(api: api, streamID: streamID)
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if Task.isCancelled { break }
+                await fetchOnce(api: api, streamID: streamID)
+            }
+        }
+    }
+
+    private func stopServerStatsPoll() {
+        serverStatsPollTask?.cancel()
+        serverStatsPollTask = nil
+        // Don't clear `serverSideStats` here — the overlay may flash
+        // if the user immediately reopens it. Stale stats are fine
+        // until the next fetch lands; if the user changes server type
+        // they can re-toggle the overlay to refresh.
+    }
+
+    @MainActor
+    private func fetchOnce(api: DispatcharrAPI, streamID: Int) async {
+        do {
+            let detail = try await api.getStreamDetail(streamID: streamID)
+            progressStore.serverSideStats = detail.streamStats
+            progressStore.serverSideViewers = detail.currentViewers
+        } catch {
+            // Quiet failure — leave whatever stats are already
+            // published in place. mpv-derived fallback covers the
+            // gaps in the overlay rendering.
         }
     }
 

@@ -431,6 +431,22 @@ struct MyRecordingsView: View {
             return
         }
         debugLog("▶️ Play local recording: \(path)")
+        // v1.6.18 — tear down any active live stream before mounting
+        // the recording's fullScreenCover. The MainTabView-level
+        // player overlay persists across tab navigation (so a
+        // minimized live channel keeps playing while the user is
+        // in DVR), and fullScreenCover layers on top WITHOUT
+        // unmounting underneath. Without this stop() call, the
+        // live mpv keeps decoding audio while the recording's mpv
+        // also produces audio — two simultaneous streams. User
+        // report (NicolaiVdS, Apple TV): "audio is recording AND
+        // live channel". Stop() clears playingItem → SwiftUI
+        // unmounts the live PlayerView → coordinator.stop() runs
+        // → mpv quit. The 0.5s mpv_terminate_destroy delay
+        // overlaps briefly with the recording's mpv spin-up but
+        // the live mpv stops decoding on `quit` command before
+        // the destroy fires, so audible overlap is sub-second.
+        NowPlayingManager.shared.stop()
         playingRecording = PlayingRecording(
             id: rec.id, url: url, title: rec.programTitle
         )
@@ -449,6 +465,11 @@ struct MyRecordingsView: View {
             return
         }
         debugLog("▶️ Play server recording: id=\(remoteID) url=\(url.absoluteString)")
+        // v1.6.18 — see `playRecording` above for the rationale.
+        // Same fix shape: stop the live stream before mounting the
+        // recording's fullScreenCover so two mpv instances aren't
+        // both producing audio.
+        NowPlayingManager.shared.stop()
         playingRecording = PlayingRecording(
             id: rec.id, url: url, title: rec.programTitle
         )

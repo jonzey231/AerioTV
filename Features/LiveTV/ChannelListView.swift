@@ -539,16 +539,27 @@ struct ChannelListView: View {
 
     private var channelListContent: some View {
         VStack(spacing: 0) {
+            // v1.6.18 — pills only live in the VStack on iPad and tvOS,
+            // where they're always visible. The iPhone scroll-collapse
+            // path moves the pills into `.safeAreaInset(.top)` on the
+            // List itself (further down) — see the comment at that
+            // attachment for the full rationale. Short version: pills
+            // here in the VStack, conditionally rendered with the iPhone
+            // `isChromeCollapsed` `if`, caused an infinite layout
+            // oscillation at the snap-out threshold. Removing the pills
+            // shrunk the VStack which shifted the List's frame, which
+            // perturbed the scroll geometry, which re-triggered the
+            // hysteresis check, which un-collapsed the pills, repeat.
+            // Pulling the iPhone pills out of the VStack and into a
+            // List-level safe area inset means show/hide changes the
+            // List's TOP INSET only — the List's content offset and
+            // outer frame are stable, so the feedback loop can't form.
             if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
                 && !compactChromeHidesFilterBar {
                 #if os(iOS)
-                // iPhone collapses the filter pills when the user scrolls
-                // down in the list to reclaim ~40% of the screen otherwise
-                // taken by chrome. iPad always shows the pills.
-                if !(UIDevice.current.userInterfaceIdiom == .phone && isChromeCollapsed) {
+                if UIDevice.current.userInterfaceIdiom != .phone {
                     groupFilterBar
                         .padding(.vertical, 10)
-                        .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 #else
                 groupFilterBar
@@ -592,14 +603,33 @@ struct ChannelListView: View {
                             // yank focus from a minimized mini
                             // player.
                             .focused($focusedGuideRowID, equals: item.id)
-                            // Marks the top row as the default-focus
-                            // target for the guide scope. When
-                            // `resetFocus(in: guideFocusNS)` fires
-                            // from the `.forceGuideFocus` handler
-                            // below, tvOS moves focus to whichever
-                            // row has this flag set — which is the
-                            // top row by construction.
-                            .prefersDefaultFocus(item.id == filteredChannels.first?.id, in: guideFocusNS)
+                            // Marks the currently-playing row as the
+                            // default-focus target for the guide
+                            // scope. When `resetFocus(in:
+                            // guideFocusNS)` fires from the
+                            // `.forceGuideFocus` handler below, tvOS
+                            // moves focus to whichever row has this
+                            // flag set. Pre-1.6.18 we marked the
+                            // top row — minimizing the player into
+                            // the corner mini left focus on row 0
+                            // regardless of what the user had been
+                            // watching, which felt random and made
+                            // the guide auto-scroll to the top
+                            // for no apparent reason. v1.6.18:
+                            // prefer the currently-playing channel's
+                            // row when present, fall back to the
+                            // top row only when no channel is
+                            // playing (or it's not in the current
+                            // filter). The corresponding scrollTo
+                            // in the `.forceGuideFocus` handler
+                            // makes sure the playing row is
+                            // actually visible when focus lands.
+                            .prefersDefaultFocus(
+                                item.id == (nowPlaying.playingItem?.id
+                                            ?? nowPlaying.lastPlayedChannelID
+                                            ?? filteredChannels.first?.id),
+                                in: guideFocusNS
+                            )
                         }
                     }
                     .padding(.vertical, 8)
@@ -637,6 +667,24 @@ struct ChannelListView: View {
                     // the reset stick.
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 400_000_000)
+                        // v1.6.18: scroll the currently-playing row
+                        // (or last-played, on full multiview exit)
+                        // into view BEFORE we hand focus to it. The
+                        // `.prefersDefaultFocus` flag picks the
+                        // right row, but if it's offscreen when
+                        // focus lands the user sees an
+                        // apparently-arbitrary jump. Scrolling
+                        // first makes the focus landing match what
+                        // the user expects: "I was watching this
+                        // channel; now I see it highlighted in the
+                        // guide where I left it."
+                        let targetID = nowPlaying.playingItem?.id ?? nowPlaying.lastPlayedChannelID
+                        if let targetID,
+                           filteredChannels.contains(where: { $0.id == targetID }) {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                proxy.scrollTo(targetID, anchor: .center)
+                            }
+                        }
                         resetFocus(in: guideFocusNS)
                     }
                 }
@@ -662,6 +710,29 @@ struct ChannelListView: View {
             .listStyle(.plain)
             .background(Color.appBackground)
             .scrollContentBackground(.hidden)
+            // v1.6.18 — iPhone pills moved here from the VStack
+            // sibling above. When the user scrolls past 80pt the
+            // pills tuck away to reclaim ~40% of vertical chrome;
+            // expanding again near the top (< 20pt) brings them
+            // back. By living in `.safeAreaInset(.top)` instead of
+            // a VStack sibling, show/hide changes only the List's
+            // top safe-area inset — the List's outer frame and
+            // content offset stay stable across the transition,
+            // so the layout-recalibration → re-trigger feedback
+            // loop that produced the v1.6.17 oscillation can't
+            // form. iPad / tvOS still render the pills above the
+            // List in the VStack at the top of `channelListContent`.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if UIDevice.current.userInterfaceIdiom == .phone
+                    && !isChromeCollapsed
+                    && (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
+                    && !compactChromeHidesFilterBar {
+                    groupFilterBar
+                        .padding(.vertical, 10)
+                        .background(Color.appBackground)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
             .refreshable {
                 await EPGCache.shared.invalidateAll()
                 await channelStore.forceRefresh(servers: servers)
@@ -1132,6 +1203,16 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// (M3U) or any future format change. `nil` for non-Dispatcharr
     /// providers; record-to-server is gated on this being non-nil.
     var dispatcharrChannelID: Int? = nil
+    /// v1.6.18: Dispatcharr-only — the channel's primary stream IDs
+    /// from `DispatcharrChannel.streams`. The Stream Info overlay
+    /// fetches `/api/channels/streams/{id}/` to surface server-side
+    /// stats (resolution, FPS, codec, bitrate, viewer count) on top
+    /// of the mpv-derived client-side stats. The first ID is the
+    /// active stream Dispatcharr is currently routing for the
+    /// channel; subsequent entries are failover candidates. `nil`
+    /// for non-Dispatcharr providers (XC, M3U) — those use
+    /// mpv-derived stats only.
+    var dispatcharrStreamIDs: [Int]? = nil
     var currentProgram: String? = nil
     var currentProgramDescription: String? = nil
     var currentProgramStart: Date? = nil

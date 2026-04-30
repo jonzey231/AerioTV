@@ -1519,6 +1519,10 @@ final class ChannelStore: ObservableObject {
             // string-parse `item.id` to build a Dispatcharr
             // recording request.
             item.dispatcharrChannelID = ch.id
+            // v1.6.18: stream IDs for the Stream Info overlay's
+            // server-side stats fetch. `ch.streams` is `[Int]?` —
+            // typically a single primary plus optional failovers.
+            item.dispatcharrStreamIDs = ch.streams
             return item
         }
         items = sortChannels(items, groupOrder: groupOrder)
@@ -2077,6 +2081,25 @@ final class NowPlayingManager: ObservableObject {
     /// chrome's auto-fade — banner + chrome appear/disappear together.
     @Published var chromeIsVisible: Bool = false
 
+    /// v1.6.18: mirror of whether the Stream Info overlay is open.
+    /// Both the legacy PlayerView and unified MultiviewContainerView
+    /// write this when their `showStreamInfo` flips. Read by
+    /// `ChannelInfoBanner` to suppress itself while Stream Info is
+    /// visible — without this, on iPhone the banner's top-left
+    /// position overlaps the Stream Info card's top-left position
+    /// and covers the stats the user explicitly opened.
+    @Published var streamInfoIsVisible: Bool = false
+
+    /// v1.6.18: most recent channel id the user was actively
+    /// watching/listening to. Set on every `startPlaying(...)` call
+    /// (single-stream path) and captured from the multiview audio
+    /// tile in `PlayerSession.exit()` before the store is reset.
+    /// Survives `stop()` so the Live TV guide can default-focus the
+    /// row the user JUST exited. Pre-1.6.18 the guide always focused
+    /// row 0 after a full multiview exit, which felt random and made
+    /// the guide auto-scroll for no apparent reason.
+    @Published var lastPlayedChannelID: String? = nil
+
     var isActive: Bool { playingItem != nil }
 
     /// v1.6.15: pending steps for the debounced channel-flip helper.
@@ -2091,6 +2114,9 @@ final class NowPlayingManager: ObservableObject {
     func startPlaying(_ item: ChannelDisplayItem, headers: [String: String], isLive: Bool = true, wakeChrome: Bool = true) {
         debugLog("🎮 NowPlaying.startPlaying: \(item.name) (id=\(item.id)), isLive=\(isLive), wakeChrome=\(wakeChrome), wasMinimized=\(isMinimized), wasPlaying=\(playingItem?.name ?? "nil")")
         playingItem = item
+        // v1.6.18: persistent breadcrumb for guide focus default —
+        // see the property docstring above.
+        lastPlayedChannelID = item.id
         playingHeaders = headers
         self.isLive = isLive
         isMinimized = false
@@ -4146,12 +4172,18 @@ private struct ChannelInfoBanner: View {
     /// banner is a "what just started playing in the player" cue,
     /// so it shouldn't drift over to the TV Guide tab when the
     /// user has dropped the player to the corner or closed it.
+    ///
+    /// v1.6.18: also suppressed while the Stream Info overlay is
+    /// open. On iPhone the two overlays render at the same
+    /// top-left coordinates and would otherwise overlap — banner
+    /// would cover the stats card the user explicitly opened.
     private var shouldRender: Bool {
         let isSingleStream = multiviewStore.tiles.count <= 1
         let isFullscreenActive = nowPlaying.isActive && !nowPlaying.isMinimized
         return (nowPlaying.chromeIsVisible || bannerWindowActive)
             && isSingleStream
             && isFullscreenActive
+            && !nowPlaying.streamInfoIsVisible
     }
 
     /// Resolve current program for this channel. First the
@@ -4184,6 +4216,18 @@ private struct ChannelInfoBanner: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .allowsHitTesting(false)
+        // v1.6.18: same safe-area carve-out as the chrome and
+        // Stream Info overlays — the `iOSDynamicTopInset` formula
+        // was designed against an absolute screen-top reference.
+        // Without ignoresSafeArea, the parent's safe-area-top
+        // (~59pt on Dynamic Island devices) gets added on top of
+        // the formula's own clearance, floating the banner ~130pt
+        // below the screen top in iPhone portrait. Anchoring at
+        // the literal screen top restores the intended ~71pt
+        // offset that hugs the Dynamic Island.
+        #if os(iOS)
+        .ignoresSafeArea(edges: .top)
+        #endif
         // Open the 5s banner-window every time a new stream starts
         // (live only — token only bumps for live in NowPlayingManager).
         // Independent of chrome so a channel-scroll surfaces just the
@@ -4346,10 +4390,16 @@ private struct ChannelInfoBanner: View {
         #if os(tvOS)
         return 32
         #else
-        // iPhone: below the chrome's close button row. iPad / Mac:
-        // align with the close button's vertical center (banner sits
-        // to its right).
-        if isiPhoneIdiom {
+        // iPhone PORTRAIT: below the chrome's close button row
+        // (close button column is too narrow to share with the
+        // banner). iPhone LANDSCAPE / iPad / Mac: align with the
+        // close button's vertical center; banner sits to its right
+        // since the wider screen has horizontal headroom.
+        // v1.6.18: split iPhone landscape from portrait per
+        // user feedback — landscape has plenty of horizontal room
+        // and the previous "below close button" placement looked
+        // awkward.
+        if isiPhonePortrait {
             return iOSDynamicTopInset + 60  // close-button height (52) + 8pt spacing
         } else {
             return iOSDynamicTopInset
@@ -4360,11 +4410,14 @@ private struct ChannelInfoBanner: View {
         #if os(tvOS)
         return 40
         #else
-        // iPhone: left edge (banner sits below the close button so
-        // there's no horizontal conflict). iPad / Mac: clear the
-        // close button — `chrome.padding(.horizontal, 16)` + 52pt
-        // close-button width + 12pt breathing room = 80pt.
-        if isiPhoneIdiom {
+        // iPhone PORTRAIT: left edge (banner sits below the close
+        // button so there's no horizontal conflict). iPhone
+        // LANDSCAPE / iPad / Mac: clear the close button —
+        // `chrome.padding(.horizontal, 16)` + 52pt close-button
+        // width + 12pt breathing room = 80pt. v1.6.18: iPhone
+        // landscape now matches iPad here so the banner sits to
+        // the right of the close button instead of below it.
+        if isiPhonePortrait {
             return 8
         } else {
             return 80
@@ -4405,6 +4458,19 @@ private struct ChannelInfoBanner: View {
     /// iPad / Mac Catalyst / Apple TV all return false.
     private var isiPhoneIdiom: Bool {
         UIDevice.current.userInterfaceIdiom == .phone
+    }
+
+    /// v1.6.18: True only on iPhone in portrait orientation. Used
+    /// to gate the banner's "below close button" layout — landscape
+    /// iPhone now sits the banner to the right of the close button
+    /// (matching iPad) since the wider screen has horizontal room.
+    private var isiPhonePortrait: Bool {
+        guard isiPhoneIdiom else { return false }
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first(where: { $0.activationState == .foregroundActive })
+            ?? scenes.first
+        return scene?.interfaceOrientation.isPortrait ?? true
     }
     #endif
 }

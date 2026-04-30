@@ -57,6 +57,21 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.6.18",
+            title: "What's new in 1.6.18",
+            bullets: [
+                "Swipe up or down to change channels on iPhone and iPad — tap the player to show the chrome, then swipe to flip through live channels (mirrors the Apple TV Siri Remote up/down channel-flip)",
+                "Stream Info now shows live server-side stats from your Dispatcharr server when available (Dispatcharr API playlists only) — resolution, FPS, codec, output bitrate, and viewer count. Plain M3U / Xtream playlists still get the same five fields from the local player",
+                "Apple TV: returning to the guide after watching a channel now focuses on that channel's row — no more random scrolling to the top",
+                "iPhone portrait: Close / Options / Add buttons now hug the Dynamic Island instead of sitting too far below it — fixes a positioning regression introduced by the v1.6.17 multiview safe-area work",
+                "Channel info banner no longer covers the Stream Info card on iPhone — banner hides itself while Stream Info is open, then comes back when you close it",
+                "iPhone landscape: channel info banner now sits to the right of the Close button instead of below it (matching iPad), reclaiming the vertical room",
+                "Live channel audio no longer keeps playing underneath when you start a recording or open a movie / TV episode — the live stream now stops cleanly the moment the new playback begins",
+                "Live TV List view on iPhone no longer jitters up and down when you scroll to the spot where the group filter pills snap out of view"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.18")
+        ),
+        WhatsNewRelease(
             version: "1.6.17",
             title: "What's new in 1.6.17",
             bullets: [
