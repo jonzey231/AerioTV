@@ -164,15 +164,6 @@ AerioTV connects to three different playlist types. Each unlocks a
 different set of features. If you're choosing between them, the
 short version is:
 
-- **Dispatcharr API** *(Recommended)* — most powerful (server-side
-  DVR, rich VOD, comskip, live stream stats), but you have to run
-  it yourself.
-- **Xtream Codes** — middle ground. Live TV + VOD with no
-  self-hosting, but DVR is local-only and VOD metadata is sparser.
-- **M3U Playlist** — simplest. Works with any IPTV provider that
-  hands you a URL, but it's live TV only — no VOD library, no
-  server-side DVR.
-
 Click each type for the full breakdown:
 
 <details>
