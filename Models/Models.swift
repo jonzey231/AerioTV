@@ -208,8 +208,9 @@ final class ServerConnection {
 
     /// Resolves a credential from Keychain. When iCloud credential sync is
     /// enabled, prefer the synchronizable copy so remote updates win over a
-    /// stale local-only cache. When sync is off, keep the historical local-
-    /// first order so this device still works offline / local-only.
+    /// stale local-only cache. Otherwise — including when iCloud Sync is
+    /// off or the Credentials sync category is disabled — keep the historical
+    /// local-first order so this device still works offline / local-only.
     private func resolvedCredential(for key: String, fallback: String) -> String {
         if UserDefaults.standard.bool(forKey: "iCloudSyncEnabled") && SyncCategory.credentials.isEnabled {
             return KeychainHelper.load(key: key, synchronizable: true)
