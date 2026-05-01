@@ -238,18 +238,6 @@ See the linked GitHub.
   AerioTV's DVR tab within ~2 minutes. XC / M3U don't have a
   server-side scheduler to discover from.
 
-**Drawbacks**
-
-- **Requires self-hosting.** You need to run Dispatcharr (Docker,
-  NAS, home server) — there's no SaaS offering. If you just want
-  to paste a provider URL and watch, M3U or Xtream Codes is faster
-  to get going.
-- **Initial scrape time.** Adding a Dispatcharr server with a
-  large upstream provider can take a few minutes to populate the
-  channel list, EPG, and VOD library on the first launch.
-- **You're on the hook for keeping it running.** Server-side DVR
-  is great until the server is down at recording time.
-
 </details>
 
 <details>
@@ -289,12 +277,8 @@ AerioTV pulls live TV, movies, and series.
 - **No server-side DVR.** Recordings are local-only — must keep
   AerioTV running for the recording duration. No comskip
   (Dispatcharr-only).
-- **No server-side stream failover.** When a stream dies your
-  client-side `.m3u8` → `.ts` fallback is the only failover layer
-  — the provider has to fix anything beyond that.
 - **EPG depth varies by provider** — some give you a few days,
   some give you a few hours.
-- **No custom User-Agent or external XMLTV URL override.**
 
 </details>
 
@@ -335,7 +319,6 @@ URL — including providers that don't support the Xtream Codes API.
   the provider has to fix the playlist — there's no `.m3u8`/`.ts`
   client fallback like XC has, and no server-side swap like
   Dispatcharr has.
-- **No custom User-Agent override.**
 - **Large M3U files can be slow to parse** on first launch — a
   20,000-channel playlist takes a noticeable beat to ingest.
 
