@@ -214,7 +214,7 @@ See the linked GitHub.
 - **Server-side stream failover via channel UUID** — when a primary
   stream dies mid-playback, Dispatcharr swaps to a backup provider
   transparently. The player doesn't even hiccup. (Xtream Codes has
-  client-side URL fallback — Aerio tries `.m3u8` then `.ts` — but
+  client-side URL fallback — AerioTV tries `.m3u8` then `.ts` — but
   the server can't swap to a different provider on its own.)
 - **TMDB-enriched VOD metadata** — backdrops, plots, cast, director,
   year, rating, runtime, plus per-episode air dates, TMDB ratings,
