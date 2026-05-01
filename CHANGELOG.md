@@ -1,5 +1,150 @@
 # Changelog
 
+## v1.6.21 - 2026-05-01
+
+### Fixed
+
+- **Plain-HTTP Dispatcharr connections no longer fail with auth
+  errors.** `NWHTTPClient` (the Network.framework client used for
+  HTTP requests that URLSession rejects under ATS) built its request
+  lines from Foundation's `URL.path`, which drops the trailing slash
+  whenever a query string is present. So
+  `/api/channels/groups/?page_size=1` was silently rewritten to
+  `/api/channels/groups?page_size=1`. Django/DRF requires the
+  trailing slash; without it, the request misses the channel-groups
+  view, falls through to a catch-all that returns 401 or 404, and
+  AerioTV's verify code treats the response as auth-rejected.
+  v1.6.21 switches `NWHTTPClient.buildRequestBytes` to
+  `URLComponents.percentEncodedPath` + `percentEncodedQuery`, which
+  preserve the original URL exactly. Affects anyone running AerioTV
+  against a plain-HTTP Dispatcharr URL whose TLD is on iOS's HSTS
+  preload list, or any HTTP URL that hit URLSession's -1022 ATS
+  fallback path.
+- **Adding a Dispatcharr server with a large library no longer
+  freezes the server during initial sync.** A real-world repro on
+  Apple TV against a server with 3,640 channel groups, 1,574 VOD
+  categories, and 2,174 channels showed AerioTV firing channels +
+  VOD movies + VOD series + EPG fetches in parallel during initial
+  sync. The combined paginated request burst exhausted the upstream
+  uwsgi/Daphne worker pool, EPG prefetches timed out, the container
+  locked up, and a force-restart was required. Multiple coordinated
+  fixes:
+  - **Concurrency cap of 2**: a new `AsyncSemaphore` actor caps
+    in-flight DispatcharrAPI requests at 2 across the entire app.
+    Routed every paginated stream through the shared session so it
+    counts against the cap (VOD pagination previously created its
+    own URLSession and bypassed any throttle). The cap stays well
+    under a typical self-hosted Dispatcharr's 4-to-8 worker pool.
+    XMLTV runs through a separate session so peak in-flight is
+    cap+1 = 3 simultaneous requests during EPG phase.
+  - **Single orchestrator task**: replaces two parallel `.task(id:)`
+    blocks. The original split sequenced across `channelServerKey`
+    and `vodServerKey`, but SwiftUI starts those blocks in
+    non-deterministic order, so the VOD task could fire first,
+    observe `channelStore.isLoading == false` before the channel
+    task had even called `refresh()`, and fall straight through to
+    fan VOD movies + VOD series in parallel with channels and EPG.
+    Collapsing into one orchestrator on a combined key
+    (`channel || vod`) removes the race. Sequencing is now
+    enforced by `await`, not by polling shared state.
+  - **Sequenced initial sync**: phases run strictly in order:
+    channels, then EPG, then VOD movies, then VOD series. Live TV
+    List populates first (a few seconds), then the guide fills in,
+    then VOD which the user is least likely to be staring at on
+    first launch.
+  - **VOD pagination item cap (5,000 per type)**: real-world
+    probing of a self-hosted Dispatcharr 0.23.0 found a server
+    with 351,644 movies and 85,446 series. Even with the cap of 2
+    in flight, paginating the entire library at 25 items per page
+    would take 14,000+ sequential pages and 12+ hours of HTTP
+    work. AerioTV now stops after 5,000 items per type. Most users
+    have well under 5,000 VOD items per type, so the typical
+    experience is unchanged; this protects against pathological
+    setups.
+  - **VOD pagination circuit breaker**: mirrors the EPG breaker.
+    Three consecutive page-fetch timeouts abort the stream with a
+    clear error rather than burning the full 60s per page on a
+    server that's already overloaded.
+  - **Skip secondary XMLTV when bulk EPG fails**: if `/api/epg/grid/`
+    returns an error, AerioTV no longer follows up with the XMLTV
+    bulk download (which would tie up another server worker for
+    30+ seconds chasing data the server can't provide). Falls back
+    to lazy per-cell loading instead.
+  - **Request timeout bumped from 20s to 60s**:
+    `URLSessionConfiguration.timeoutIntervalForRequest` was 20s,
+    which cut off `/api/epg/grid/` mid-stream on the same large
+    server (24.3 MB JSON, ~30s download). 60s comfortably covers
+    the EPG grid plus headroom for slower deployments.
+- **iCloud Keychain credential sync no longer leaves a stale local
+  Keychain entry winning over the freshly synced value.** Adding a
+  Dispatcharr server on one device and syncing it to a second device
+  could leave Test Connection failing on the second device with HTTP
+  401 because a stale local-only Keychain entry shadowed the
+  iCloud Keychain copy. `effectivePassword` and `effectiveApiKey`
+  now prefer the iCloud Keychain copy when credential sync is
+  enabled, falling back to the local copy for offline-first
+  semantics when sync is off. The save path also now prefers
+  in-memory edits over cached Keychain values so a user can rotate
+  credentials on this device even when an older value is still
+  present locally or in iCloud Keychain.
+- **tvOS Configure-screen text fields no longer hide typed text.**
+  When a `TextField` is focused on tvOS the system fills it white
+  and expects dark text, but our explicit `.foregroundColor(.textPrimary)`
+  (light) was overriding that and leaving the typed text invisible
+  on the white fill. On tvOS, `AppTextField` now switches to
+  `.black` foreground when focused so typed text contrasts.
+- **tvOS Configure-screen text not vertically centered when
+  focused.** The focused `TVTextField` paints typed text top-aligned
+  within the 52pt field height, leaving it visually misaligned with
+  the leading icon. `.frame(maxHeight: .infinity, alignment: .center)`
+  on the inner field tells SwiftUI to expand and center the text.
+
+### Added
+
+- **`/api/core/version/` to verify candidate paths.** Dispatcharr
+  v0.23.0+ moved the version endpoint from `/api/version/` to
+  `/api/core/version/`. Legacy paths stay in the candidate list for
+  older builds.
+- **Cloudflare Tunnel / origin-unreachable error detection in the
+  verify error message.** When the response is an HTTP 5xx with a
+  body that names a Cloudflare 1xxx error (1033, 1016, 521, 522,
+  523, 524) or contains "cloudflare-1xxx", AerioTV now tells the
+  user the issue is between Cloudflare and their origin (container
+  stopped, `cloudflared` daemon stopped, origin offline) instead of
+  burying it in the generic "couldn't recognise the response"
+  message.
+- **Bookend phase logs in the initial-sync orchestrator.** Each
+  phase boundary now prints `🟢 [Orchestrator] phase N BEGIN/done`
+  with elapsed seconds, so a freeze can be pinpointed to the exact
+  await that's parked.
+
+### Changed
+
+- **Verify error message updated for Dispatcharr v0.23.0+ UI.**
+  References the redesigned User Settings tabs (Account,
+  Permissions, EPG Defaults, API & XC) instead of the pre-0.23.0
+  "System -> Users -> Edit User -> API & XC" path. Calls out the
+  v0.23.0 Admin tier requirement (`user_level >= 10`) introduced
+  by PR #1190 (Hardening) when an API key authenticates but every
+  probe is rejected.
+- **tvOS focus styling cleaned up across onboarding and Configure
+  screens.** Removed the scale-up, brightness bump, and accent
+  shadow from `TVNoHighlightButtonStyle`. The 2pt accent stroke
+  ring on focus is now the only focus indicator; the previous
+  pop-out feedback was distracting and pushed text too close to
+  row borders. Same change applied to onboarding picker rows,
+  Sync via iCloud card, and the Configure screen's Test
+  Connection / Save Playlist buttons.
+- **Connect a Server now matches Sync via iCloud as a card row.**
+  Previously a filled-gradient primary CTA pill, now an outlined
+  card with leading icon tile + label + chevron, sharing the
+  `tvOnboardingCardBG` background with Sync via iCloud so the
+  welcome screen reads as a column of matching siblings.
+
+### Contributors
+
+Thanks to [@JCBird1012](https://github.com/JCBird1012) for [#12](https://github.com/jonzey231/AerioTV/pull/12), fixing a Dispatcharr API authentication issue where playlists weren't syncing properly across multiple devices.
+
 ## v1.6.20 — 2026-04-29
 
 ### Fixed

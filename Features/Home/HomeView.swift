@@ -103,6 +103,32 @@ final class VODStore: ObservableObject {
         seriesTask = Task { await loadSeries(servers: servers) }
     }
 
+    /// v1.6.21: awaitable variant of `refreshMovies` for the
+    /// initial-sync orchestrator that needs to wait for movies
+    /// to fully complete before kicking off series. The fire-and-
+    /// forget `refreshMovies` sets up a Task and returns immediately,
+    /// which left a race where the orchestrator's wait loop on
+    /// `isRefillingMovies` could fall through before `loadMovies`
+    /// had a chance to flip that flag. Awaiting `task.value`
+    /// guarantees the caller observes a completed (or cancelled)
+    /// load.
+    func refreshMoviesAndWait(servers: [ServerConnection]) async {
+        moviesTask?.cancel()
+        let task = Task { await loadMovies(servers: servers) }
+        moviesTask = task
+        await task.value
+    }
+
+    /// v1.6.21: awaitable variant of `refreshSeries` mirroring
+    /// `refreshMoviesAndWait`. Used by the initial-sync orchestrator
+    /// to sequence series strictly after movies.
+    func refreshSeriesAndWait(servers: [ServerConnection]) async {
+        seriesTask?.cancel()
+        let task = Task { await loadSeries(servers: servers) }
+        seriesTask = task
+        await task.value
+    }
+
     func searchMovies(query: String, servers: [ServerConnection]) {
         movieSearchTask?.cancel()
         guard !query.isEmpty else {
@@ -1116,6 +1142,18 @@ final class ChannelStore: ObservableObject {
 
         switch type {
         case .dispatcharrAPI:
+            // v1.6.21: track whether the bulk EPG fetch succeeded.
+            // When it fails (slow / parse error / network failure)
+            // we skip the follow-up `primeXMLTVFromURL` pass below.
+            // The XMLTV endpoint lives on the same Dispatcharr
+            // container as the bulk grid; if the grid couldn't
+            // respond after 30+ seconds, hammering the same server
+            // for another 24+ MB of XMLTV right after is the
+            // classic pile-on that wedges fragile deployments.
+            // EPGGuideView still triggers its own XMLTV fetch
+            // lazily when the user opens the Guide tab, so the
+            // category data is just deferred, not abandoned.
+            var bulkEPGSucceeded = false
             // Dispatcharr: one bulk call via /api/epg/grid/ — all channels, -1h to +24h
             do {
                 let dAPI = DispatcharrAPI(baseURL: baseURL,
@@ -1123,6 +1161,7 @@ final class ChannelStore: ObservableObject {
                                           userAgent: userAgent,
                                           authMode: authMode)
                 let programs = try await dAPI.getEPGGrid()
+                bulkEPGSucceeded = true
 
                 // Everything below (dictionary build, ~7k-item sort,
                 // cache writes, fallback loop) used to run on the
@@ -1202,7 +1241,9 @@ final class ChannelStore: ObservableObject {
             // EPGGuideView fetchXMLTVFromURL call is then a
             // dedupe/refresh (the merge logic in `mergeProgram`
             // replaces-by-overlap, so duplicates don't stack).
-            if let xmltvURL = Self.dispatcharrXMLTVURL(
+            if !bulkEPGSucceeded {
+                debugLog("📺 loadAllEPG: skipping primeXMLTVFromURL because bulk EPG failed (server likely overloaded; deferring XMLTV to lazy fetch by EPGGuideView)")
+            } else if let xmltvURL = Self.dispatcharrXMLTVURL(
                 baseURL: baseURL,
                 override: dispatcharrXMLTVOverride
             ) {
@@ -2426,6 +2467,21 @@ struct MainTabView: View {
             .joined(separator: ",")
     }
 
+    /// v1.6.21: combined key driving the unified initial-sync
+    /// orchestrator that runs channels, EPG, VOD movies, and VOD
+    /// series strictly in order. Re-fires whenever either
+    /// `channelServerKey` or `vodServerKey` changes, so a
+    /// `vodEnabled` toggle (the only field in `vodServerKey`
+    /// that isn't already in `channelServerKey`) still re-runs
+    /// the full sequence. See the `task(id:)` comment in the body
+    /// modifier chain for the race-condition rationale this
+    /// exists to fix. Distinct from `initialSyncKey` lower in
+    /// the file, which is a separate signal that gates the
+    /// loading-cover dismiss.
+    private var orchestratorKey: String {
+        "\(channelServerKey)||\(vodServerKey)"
+    }
+
     /// Restart the DVR reconcile loop whenever the set of Dispatcharr
     /// servers (or their identity) changes. The loop itself polls
     /// every 2 minutes internally.
@@ -3474,24 +3530,31 @@ struct MainTabView: View {
                 )
             )
         }
-        // Pre-fetch VOD data whenever the VOD server list changes.
-        // Delay VOD loading so it doesn't compete with channel loading on remote servers.
-        .task(id: vodServerKey) {
-            debugLog("🔶 MainTabView.task(vodServerKey): firing, servers=\(allServers.count)")
-            // Wait for channels to finish loading first to avoid overwhelming remote servers
-            while channelStore.isLoading {
-                try? await Task.sleep(for: .milliseconds(500))
-            }
-            vodStore.refresh(servers: allServers)
-            debugLog("🔶 MainTabView.task(vodServerKey): refresh called")
-        }
-        // Pre-fetch channel list (+ EPG) whenever any server changes.
-        // This runs immediately on first appear so the Live TV tab is ready
-        // before the user taps it.
-        .task(id: channelServerKey) {
-            // v1.6.13: closure body extracted to method to keep the
-            // body's modifier chain under Swift's type-checker budget
-            // on tvOS x86_64. Behavior unchanged.
+        // v1.6.21: single orchestrator task running all four initial-sync
+        // phases sequentially: channels, then EPG, then VOD movies, then
+        // VOD series. Previously this lived in two parallel `.task(id:)`
+        // blocks (one for channelServerKey, one for vodServerKey) that
+        // tried to coordinate via shared `@Published` flags, but the
+        // start order of the two tasks is non-deterministic, so the
+        // VOD task's `while channelStore.isLoading` wait loop fell
+        // through immediately whenever it raced ahead of the channel
+        // task's `channelStore.refresh()` call. The result was that
+        // channels, EPG, and both VOD streams all fanned out paginated
+        // requests in parallel, overwhelming Dispatcharr's worker pool
+        // on large libraries (the v1.6.21 Apple TV freeze repro on
+        // jesmannstl's 3,640-group server).
+        //
+        // Collapsing into a single task with a combined key removes
+        // the race: there is no second task to start before the
+        // orchestrator. The sequencing is enforced by `await`,
+        // not by polling shared state. Trade-off: when the user
+        // toggles `vodEnabled` on a server (the only thing in
+        // `vodServerKey` that isn't in `channelServerKey`), this
+        // task re-fires and re-runs every phase including channels.
+        // Channels re-fetch is fast and the new concurrency cap
+        // keeps the total request rate bounded, so it's an
+        // acceptable cost for race-free orchestration.
+        .task(id: orchestratorKey) {
             await runChannelServerTaskBody()
         }
         // DVR reconcile at tab-bar level so the DVR tab lights up as
@@ -3578,6 +3641,8 @@ struct MainTabView: View {
     /// closure that lived here in v1.6.12.
     @MainActor
     private func runChannelServerTaskBody() async {
+        let orchestratorStart = Date()
+        debugLog("🟢 [Orchestrator] BEGIN, servers=\(allServers.count)")
         debugLog("🔶 MainTabView.task(channelServerKey): firing, servers=\(allServers.count)")
         channelStore.refresh(servers: allServers)
         debugLog("🔶 MainTabView.task(channelServerKey): refresh called")
@@ -3643,6 +3708,7 @@ struct MainTabView: View {
         // await resolves immediately.
         let cacheIsFresh = await cacheLoadHandle.value
 
+        debugLog("🟢 [Orchestrator] phase 1 done (channels), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, channels=\(channelStore.channels.count)")
         if !channelStore.channels.isEmpty {
             // Try to short-circuit the expensive `loadAllEPG`
             // path by checking the SwiftData EPG cache first. On
@@ -3683,7 +3749,7 @@ struct MainTabView: View {
                 progs.contains { $0.end > futureCutoff }
             }
             if cacheIsFresh && hasFuturePrograms {
-                debugLog("🔶 MainTabView.task(channelServerKey): EPG cache is fresh + has future programs — skipping loadAllEPG")
+                debugLog("🟢 [Orchestrator] phase 2 EPG: cache fresh, seeding only (no network), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
                 // Seed EPGCache from GuideStore.programs so the
                 // List view has per-channel EPG data. Awaited so
                 // the cover doesn't dismiss before EPGCache has
@@ -3691,7 +3757,7 @@ struct MainTabView: View {
                 await guideStore.seedEPGCache(channels: channelStore.channels, server: activeServer)
                 channelStore.isEPGLoading = false
             } else {
-                debugLog("🔶 MainTabView.task(channelServerKey): EPG cache stale or empty (fresh=\(cacheIsFresh), hasFuture=\(hasFuturePrograms)) — running loadAllEPG")
+                debugLog("🟢 [Orchestrator] phase 2 EPG: starting loadAllEPG (cache stale, fresh=\(cacheIsFresh), hasFuture=\(hasFuturePrograms)), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
                 await channelStore.loadAllEPG()
             }
         } else {
@@ -3702,6 +3768,31 @@ struct MainTabView: View {
             // no way out.
             channelStore.isEPGLoading = false
         }
+        debugLog("🟢 [Orchestrator] phase 2 done (EPG), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+
+        // v1.6.21: VOD phases run sequentially after channels + EPG.
+        // Movies first, then series, both awaitable so we observe
+        // their completion deterministically (the fire-and-forget
+        // `refreshMovies`/`refreshSeries` path used to leave a
+        // race where the orchestrator's wait loops on
+        // `isRefillingMovies` / `isRefillingSeries` could fall
+        // through before `loadMovies`/`loadSeries` had time to
+        // flip those flags). Keeping channels and EPG ahead of
+        // VOD in the order means Live TV is fully usable before
+        // we start hitting the slower paginated VOD endpoints,
+        // which on a large library can take minutes against
+        // small Dispatcharr deployments.
+        guard !allServers.isEmpty else {
+            debugLog("🟢 [Orchestrator] BAILED: no servers, total elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+            return
+        }
+        debugLog("🟢 [Orchestrator] phase 3 BEGIN: VOD movies, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+        await vodStore.refreshMoviesAndWait(servers: allServers)
+        debugLog("🟢 [Orchestrator] phase 3 done (movies), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count)")
+        debugLog("🟢 [Orchestrator] phase 4 BEGIN: VOD series, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+        await vodStore.refreshSeriesAndWait(servers: allServers)
+        debugLog("🟢 [Orchestrator] phase 4 done (series), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, series=\(vodStore.series.count)")
+        debugLog("🟢 [Orchestrator] END, total elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
     }
 
     #if os(iOS)

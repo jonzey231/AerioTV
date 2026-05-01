@@ -57,6 +57,24 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.6.21",
+            title: "What's new in 1.6.21",
+            bullets: [
+                "Plain-HTTP Dispatcharr servers (http:// URLs) now connect reliably",
+                "Initial sync no longer freezes Dispatcharr containers with large libraries",
+                "Live TV fills in first while the guide and On Demand load in the background",
+                "Movies and TV Shows cap at 5,000 items per type for very large libraries",
+                "API request timeout bumped from 20s to 60s for large EPG and VOD payloads",
+                "iCloud Keychain credentials now sync correctly across multiple devices",
+                "Apple TV: cleaner focus styling on the welcome, Add Playlist, and Configure screens",
+                "Apple TV: Connect a Server now matches the Sync via iCloud card style",
+                "Apple TV: typed text in Configure-screen text fields is now readable and centered when focused",
+                "Test Connection error messages updated for Dispatcharr 0.23.0's new User Settings layout",
+                "Cloudflare Tunnel errors are now detected and surfaced with a clear \"your origin is unreachable\" message"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.21")
+        ),
+        WhatsNewRelease(
             version: "1.6.20",
             title: "What's new in 1.6.20",
             bullets: [

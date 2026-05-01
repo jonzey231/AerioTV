@@ -234,6 +234,12 @@ struct ServerSyncView: View {
                 }
                 .font(.bodyMedium)
                 .foregroundColor(.textSecondary)
+                #if os(tvOS)
+                // v1.6.21: themed focus visual instead of the system
+                // default white pill. Matches the rest of AerioTV's
+                // focus styling.
+                .buttonStyle(TVNoHighlightButtonStyle())
+                #endif
             }
 
         case .initialLaunch(_, let onContinueAnyway):
@@ -259,6 +265,11 @@ struct ServerSyncView: View {
                 }
                 .font(.bodyMedium)
                 .foregroundColor(.textSecondary)
+                #if os(tvOS)
+                // v1.6.21: themed focus visual, matching the other
+                // Skip button on the same screen.
+                .buttonStyle(TVNoHighlightButtonStyle())
+                #endif
             }
             .animation(.easeInOut(duration: 0.25), value: isTakingTooLong)
         }

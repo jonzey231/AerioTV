@@ -678,8 +678,21 @@ struct DispatcharrAPI {
     private static let redirectDelegate = RedirectPreservingDelegate()
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 20
-        config.timeoutIntervalForResource = 300
+        // v1.6.21: bumped from 20s/300s to 60s/600s. Real-world
+        // probing of a self-hosted Dispatcharr 0.23.0 with a large
+        // library showed `/api/epg/grid/` returning 24.3 MB JSON in
+        // 30.6 seconds (single bulk fetch). The previous 20s
+        // per-request timeout cut that off mid-stream, surfacing as
+        // "Bulk EPG failed: cannot parse response, falling back
+        // to lazy loading" in user logs. 60s comfortably covers
+        // the EPG grid plus headroom for slower deployments;
+        // 600s resource-wide handles the rare case where mpv-
+        // adjacent endpoints stream multi-MB payloads. Combined
+        // with the 4-concurrent gate above, this doesn't risk
+        // amplifying load: slower requests still queue politely
+        // through the semaphore.
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 600
         return URLSession(configuration: config,
                           delegate: redirectDelegate,
                           delegateQueue: nil)
@@ -751,7 +764,9 @@ struct DispatcharrAPI {
             "/api/channels/summary/",              // lightweight summary
             "/api/channels/channels/?page_size=1", // just 1 channel to prove auth works
             "/api/channels/",                      // index document (links) — allow as last resort
-            "/api/version/",
+            "/api/core/version/",                  // v0.23.0+ moved version under /api/core/
+            "/api/core/version",
+            "/api/version/",                       // legacy path kept for older Dispatcharr builds
             "/api/version"
         ]
 
@@ -957,19 +972,23 @@ struct DispatcharrAPI {
         let message: String
         if allAuth, let authCode = firstAuthErrorCode {
             message = """
-                Dispatcharr rejected every authentication shape Aerio tried \
-                (HTTP \(authCode)). The server is reachable, but it won't \
-                accept this Admin API Key. Most common causes:
-                  • The key belongs to a non-Admin user. Aerio needs an \
-                Admin-level key to list channels and groups. In \
-                Dispatcharr, go to System → Users → Edit User → API & XC, \
-                confirm the user has Admin permissions, and copy that \
-                user's API Key into the Admin API Key field above.
-                  • The key was rotated or deleted on the server. Generate \
-                a fresh Admin API Key in Dispatcharr and paste it in.
+                Dispatcharr rejected every authentication shape AerioTV \
+                tried (HTTP \(authCode)). The server is reachable, but \
+                it won't accept this Admin API Key. Most common causes:
+                  • The key belongs to a user without sufficient \
+                permissions. On Dispatcharr 0.23.0+ most API endpoints \
+                require Admin-tier access. In Dispatcharr open User \
+                Settings, check the Permissions tab to confirm the \
+                user is set to Admin, then copy the key from the API \
+                & XC tab.
+                  • The key was rotated or deleted on the server. \
+                Generate a fresh API Key from User Settings → API & XC \
+                and paste it in.
                   • The Server URL is reaching a different Dispatcharr \
-                instance than the one whose API Key you copied. Verify \
-                \(urlString) points at the correct deployment.
+                instance than the one whose API Key you copied (for \
+                example, a public URL routed through a different vhost \
+                than the LAN URL). Verify \(urlString) points at the \
+                correct deployment.
                 """
         } else if let authCode = firstAuthErrorCode {
             // Mixed outcome — some auth errors, some not. Could be a
@@ -978,31 +997,60 @@ struct DispatcharrAPI {
             // didn't anticipate. Surface what we saw.
             message = """
                 Dispatcharr returned HTTP \(authCode) on the API probe \
-                (\(urlString)). Aerio auto-tried every supported \
+                (\(urlString)). AerioTV auto-tried every supported \
                 authentication header shape (X-API-Key, Authorization: \
-                ApiKey, Authorization: Bearer); every shape was rejected. \
-                Either the Admin API Key is incorrect, or this server \
-                requires a header shape Aerio doesn't yet know about. \
-                Confirm the key is from System → Users → Edit User → \
-                API & XC for an Admin user and that the Server URL \
-                reaches the same Dispatcharr deployment.
+                ApiKey, Authorization: Bearer); every shape was \
+                rejected. Either the API Key is incorrect, the user \
+                lacks Admin permissions on Dispatcharr 0.23.0+, or \
+                this server requires a header shape AerioTV doesn't \
+                yet know about. Confirm the key is from User Settings \
+                → API & XC and the user is set to Admin in the \
+                Permissions tab, and that the Server URL reaches the \
+                same Dispatcharr deployment.
                 """
         } else if anyHTML {
             message = """
-                Dispatcharr returned the web UI instead of the API. This \
-                usually means one of:
-                  • Your Admin API Key is missing or incorrect. In \
-                Dispatcharr, go to System → Users → Edit User → API & XC, \
-                copy the API Key for an Admin user, and paste it into the \
-                Admin API Key field above.
-                  • The Server URL points at the web app but not at the API \
-                (for example, a reverse proxy that strips or rewrites /api). \
-                Verify the URL works by opening \(urlString) in a browser \
-                while logged out — you should see a JSON error, not the \
-                Dispatcharr login page.
-                  • The URL is correct but the port is wrong. Confirm the \
-                port matches the Dispatcharr API port on your server (the \
-                default is the same port as the web UI).
+                Dispatcharr returned the web UI instead of the API. \
+                This usually means one of:
+                  • Your API Key is missing or incorrect. In \
+                Dispatcharr open User Settings → API & XC, copy the \
+                API Key, and paste it into the Admin API Key field \
+                above.
+                  • The Server URL points at the web app but not at \
+                the API (for example, a reverse proxy that strips or \
+                rewrites /api). Verify the URL works by opening \
+                \(urlString) in a browser while logged out. You \
+                should see a JSON error, not the Dispatcharr login \
+                page.
+                  • The URL is correct but the port is wrong. Confirm \
+                the port matches the Dispatcharr API port on your \
+                server (the default is the same port as the web UI).
+                """
+        } else if Self.isCloudflareTunnelError(status: lastStatus, body: lastBodySnippet) {
+            // v1.6.21: Cloudflare Tunnel / origin-unreachable errors.
+            // When Dispatcharr sits behind a Cloudflare Tunnel (or
+            // any Cloudflare proxy) and the origin container is
+            // down, Cloudflare's edge returns HTTP 5xx (commonly
+            // 530 / 521 / 522 / 523) with a body describing the
+            // upstream failure. The user sees this as "AerioTV
+            // can't connect" but the cause is on the server side,
+            // not in the API key or AerioTV. Tell them to check
+            // the origin container and the Tunnel daemon.
+            let statusString = lastStatus.map(String.init) ?? "<unknown status>"
+            message = """
+                Cloudflare can't reach your Dispatcharr server (HTTP \
+                \(statusString), Cloudflare error 1033 / Tunnel \
+                error). The server URL and API Key are fine; the \
+                issue is between Cloudflare and your origin. Most \
+                common causes:
+                  • Your Dispatcharr container is stopped or \
+                unresponsive. Check `docker ps` and restart if \
+                needed.
+                  • Your `cloudflared` (Cloudflare Tunnel) daemon \
+                stopped. Restart the tunnel service.
+                  • Your origin host is offline or behind a firewall \
+                that's blocking Cloudflare's connector.
+                AerioTV can't fix this from the client side.
                 """
         } else {
             // Genuine "other" outcome — non-HTML, non-auth-error,
@@ -1428,27 +1476,93 @@ struct DispatcharrAPI {
         return makePageStream(firstPath: "/api/vod/series/?search=\(encoded)&page_size=25")
     }
 
+    /// Hard cap on total items returned by a single paginated stream.
+    /// v1.6.21: real-world probing of a self-hosted Dispatcharr 0.23.0
+    /// found a VOD library with `count: 351,644` movies and 85,446
+    /// series. Paginating the full library at 25 items/page = 14k+
+    /// sequential pages = many hours of HTTP work, and any sustained
+    /// load stalls the server's worker pool. Most users have well
+    /// under 5k VOD items per type; this cap protects against
+    /// pathological setups while keeping the typical experience
+    /// unchanged. The cap is per-call, so per-category fetches each
+    /// get their own 5,000-item budget.
+    static let vodPaginationItemCap = 5_000
+
     /// Generic paginated stream — yields `[T]` for each DRF results page.
+    ///
+    /// **v1.6.21 changes:**
+    ///
+    /// - **Concurrency gate.** Previously this method created its own
+    ///   `URLSession` (with a 30s request timeout), which bypassed the
+    ///   shared `Self.session` and therefore the v1.6.21
+    ///   `concurrencyGate` semaphore. On a Dispatcharr instance with a
+    ///   large library, two paginated streams (movies + series) would
+    ///   independently hammer the server with their own connection
+    ///   pools. We now route through the shared session via
+    ///   `loggedData(for:)` so every paginated request counts against
+    ///   the global 4-concurrent cap.
+    ///
+    /// - **Circuit breaker.** When a page fetch times out, stop the
+    ///   stream and surface a clear timeout error rather than burning
+    ///   the full per-request timeout × N pages waiting on a server
+    ///   that's already overwhelmed. Non-timeout errors (4xx, decoding
+    ///   failures) terminate immediately as before.
+    ///
+    /// - **Item cap.** Stops paginating after `vodPaginationItemCap`
+    ///   items have been yielded. Real-world repro on a 351k-movie
+    ///   server: even with 4-concurrent gating, the full library
+    ///   would take 12+ hours to enumerate, and the user would never
+    ///   actually scroll through that many entries. The cap surfaces
+    ///   a usable subset immediately. When the cap is hit, the
+    ///   stream finishes successfully (not as an error) so the UI
+    ///   shows what we did fetch.
     private func makePageStream<T: Decodable & Sendable>(firstPath: String) -> AsyncThrowingStream<[T], Error> {
-        // Capture value-type properties so the Task closure is @Sendable-safe.
-        let capturedBase    = baseURL
-        let capturedHeaders = headers
-        return AsyncThrowingStream { continuation in
+        return AsyncThrowingStream { [self] continuation in
             Task {
-                guard var nextURL = URL(string: capturedBase + firstPath) else {
+                guard var nextURL = try? buildURL(path: firstPath) else {
                     continuation.finish(throwing: APIError.invalidURL)
                     return
                 }
-                let config = URLSessionConfiguration.default
-                config.timeoutIntervalForRequest  = 30
-                config.timeoutIntervalForResource = 120
-                let sess = URLSession(configuration: config)
+                /// Consecutive timeout count for the circuit breaker.
+                /// Resets on any successful page; trips at 3.
+                var consecutiveTimeouts = 0
+                let timeoutBreakerLimit = 3
+                /// Running total of items yielded so far. Compared
+                /// against `vodPaginationItemCap` after every page
+                /// to gate the next iteration.
+                var totalYielded = 0
                 while true {
                     var request = URLRequest(url: nextURL)
-                    capturedHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+                    headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+                    let (data, response): (Data, URLResponse)
                     do {
-                        // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
-                        let (data, response) = try await HTTPRouter.data(for: request, using: sess)
+                        // Routes through the shared session +
+                        // concurrencyGate via loggedData(for:).
+                        (data, response) = try await loggedData(for: request)
+                    } catch let err {
+                        if Self.isTimeoutError(err) {
+                            consecutiveTimeouts += 1
+                            if consecutiveTimeouts >= timeoutBreakerLimit {
+                                debugLog("📺 VOD pagination: CIRCUIT BREAKER tripped after \(timeoutBreakerLimit) consecutive timeouts on \(firstPath)")
+                                continuation.finish(throwing: err)
+                                return
+                            }
+                            // Skip this page, advance via the same URL?
+                            // Without a `next` link we can't progress, so
+                            // bail. The breaker prevents this turning
+                            // into an infinite retry loop. One timeout
+                            // here means we lose at most 3 pages of data.
+                            debugLog("📺 VOD pagination: timeout \(consecutiveTimeouts)/\(timeoutBreakerLimit) on \(firstPath), aborting")
+                            continuation.finish(throwing: err)
+                            return
+                        }
+                        continuation.finish(throwing: err)
+                        return
+                    }
+
+                    consecutiveTimeouts = 0
+
+                    do {
                         guard let http = response as? HTTPURLResponse else {
                             continuation.finish(throwing: APIError.invalidResponse); return
                         }
@@ -1475,7 +1589,23 @@ struct DispatcharrAPI {
                         }
                         // DRF paginated wrapper
                         let wrapped = try JSONDecoder().decode(DispatcharrResultsWrapper<T>.self, from: data)
-                        if !wrapped.results.isEmpty { continuation.yield(wrapped.results) }
+                        if !wrapped.results.isEmpty {
+                            continuation.yield(wrapped.results)
+                            totalYielded += wrapped.results.count
+                        }
+                        // v1.6.21 item cap: stop paginating once we've
+                        // yielded enough items for the typical user.
+                        // The library may have many more, but enumerating
+                        // every page costs hours on pathological setups
+                        // and the user wouldn't scroll through them
+                        // anyway. Finishes the stream cleanly so the
+                        // already-yielded items show up in the UI.
+                        if totalYielded >= Self.vodPaginationItemCap {
+                            let serverTotal = wrapped.count.map { "\($0)" } ?? "unknown"
+                            debugLog("📺 VOD pagination: hit item cap \(Self.vodPaginationItemCap) for \(firstPath) (server reported total: \(serverTotal))")
+                            continuation.finish()
+                            return
+                        }
                         if let nextStr = wrapped.next, let next = URL(string: nextStr) {
                             nextURL = next
                         } else {
@@ -1489,6 +1619,51 @@ struct DispatcharrAPI {
                 }
             }
         }
+    }
+
+    /// v1.6.21: detects Cloudflare Tunnel / origin-unreachable
+    /// responses (HTTP 5xx with a body that names a Cloudflare
+    /// 1xxx error code). When Dispatcharr sits behind Cloudflare
+    /// and the origin is dead, the user sees a generic "couldn't
+    /// recognise the response" message that buries the real
+    /// cause; surfacing the Cloudflare angle saves them
+    /// debugging the wrong layer.
+    ///
+    /// Detection signals (any one is sufficient):
+    ///  - Status 530 with body containing "cloudflare-1xxx"
+    ///  - Body contains "Error 1033" / "Error 1016" / "Error 521"
+    ///    / "Error 522" / "Error 523" / "Error 524" (the canonical
+    ///    Cloudflare origin-failure codes)
+    ///  - Body contains "cloudflare.com/support/troubleshooting/
+    ///    http-status-codes"
+    private static func isCloudflareTunnelError(status: Int?, body: String) -> Bool {
+        guard let status, status >= 500 else { return false }
+        let lower = body.lowercased()
+        if lower.contains("cloudflare-1xxx") { return true }
+        if lower.contains("cloudflare.com/support/troubleshooting/http-status-codes") { return true }
+        for code in ["1033", "1016", "521", "522", "523", "524"] {
+            if lower.contains("error \(code)") || lower.contains("error-\(code)") {
+                return true
+            }
+        }
+        return false
+    }
+
+    /// True if an error is a request timeout (URLError.timedOut /
+    /// NSURLErrorTimedOut). Used by the v1.6.21 VOD pagination
+    /// circuit breaker so it only trips on server-unresponsive
+    /// signals and keeps going through transient 4xx/5xx-style
+    /// failures (which it doesn't see anyway because those are
+    /// surfaced as APIError).
+    fileprivate static func isTimeoutError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorTimedOut {
+            return true
+        }
+        if let urlError = error as? URLError, urlError.code == .timedOut {
+            return true
+        }
+        return false
     }
 
     func getVODSeriesEpisodes(seriesID: Int) async throws -> [DispatcharrVODEpisode] {
@@ -2050,12 +2225,58 @@ struct DispatcharrAPI {
         }
     }
 
-    /// Wraps the data fetch with DebugLogger timing and result logging.
-    /// v1.6.10: routed through `HTTPRouter` so plain-HTTP requests against
-    /// HSTS-preloaded TLDs (`.app`, `.dev`, etc.) bypass URLSession's
-    /// HSTS layer via Network.framework. URLSession remains the path for
-    /// HTTPS, IP literals, and non-preloaded TLDs.
+    /// Global cap on concurrent in-flight DispatcharrAPI requests.
+    ///
+    /// **Why this exists.** v1.6.20 logs from a real Apple TV repro
+    /// showed AerioTV firing channels + VOD movies + VOD series + EPG
+    /// fetches in parallel during initial sync, each with their own
+    /// pagination fanout. Against a Dispatcharr instance with a
+    /// large library (3,640 channel groups, 1,574 VOD categories,
+    /// 2,174 channels in the captured case), the resulting burst
+    /// of concurrent HTTP requests overwhelmed the upstream
+    /// uwsgi/Daphne worker pool, EPG prefetches timed out, the
+    /// container locked up, and a force-restart was required.
+    ///
+    /// **Why 2 instead of 4.** A v1.6.21 follow-up test showed even
+    /// a 4-concurrent cap could overwhelm a particularly fragile
+    /// Dispatcharr 0.23.0 deployment serving a 351k-movie library.
+    /// The XMLTV bulk fetch (24+ MB) ties up one worker for 30+
+    /// seconds on its own; combined with 3-4 per-cell EPG prefetches
+    /// at the same time, we'd routinely hit 4-5 simultaneous
+    /// long-running requests, and the smallest worker-pool deployments
+    /// (default uwsgi: 4 workers in some Docker images) wedged.
+    /// Lowering to 2 gives the server breathing room without
+    /// noticeably slowing sync on healthy servers (each phase is
+    /// still effectively parallel-of-2, and individual endpoints
+    /// dominate latency anyway). XMLTV is a separate code path
+    /// outside this gate (`XMLTVParser` has its own URLSession),
+    /// so peak in-flight is `cap + 1` = 3 simultaneous requests
+    /// against the server during EPG phase.
+    ///
+    /// Global rather than per-host because the typical user has
+    /// one Dispatcharr server. Users with multiple servers still
+    /// share the cap, which is fine: total in-flight stays bounded
+    /// regardless of how many servers are syncing simultaneously.
+    private static let concurrencyGate = AsyncSemaphore(value: 2)
+
+    /// Wraps the data fetch with DebugLogger timing, result logging,
+    /// and the v1.6.21 concurrency gate. The gate cap (4 in-flight
+    /// requests across all DispatcharrAPI instances) prevents the
+    /// initial-sync request burst from overwhelming small Dispatcharr
+    /// deployments. See `concurrencyGate` doc for the rationale.
+    ///
+    /// v1.6.10: routed through `HTTPRouter` so plain-HTTP requests
+    /// against HSTS-preloaded TLDs (`.app`, `.dev`, etc.) bypass
+    /// URLSession's HSTS layer via Network.framework. URLSession
+    /// remains the path for HTTPS, IP literals, and non-preloaded
+    /// TLDs.
     private func loggedData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        await Self.concurrencyGate.wait()
+        defer {
+            // `defer` can't `await`, so signal in a fire-and-forget
+            // task. Ordering doesn't matter for a counting semaphore.
+            Task { await Self.concurrencyGate.signal() }
+        }
         let method = request.httpMethod ?? "GET"
         let urlStr = request.url?.absoluteString ?? "<unknown>"
         let start  = Date()
@@ -2104,6 +2325,57 @@ struct DispatcharrAPI {
             code: -2,
             userInfo: [NSLocalizedDescriptionKey: "Unrecognized /api/version/ response. Body: \(String(body.prefix(800)))"]
         ))
+    }
+}
+
+// MARK: - AsyncSemaphore
+/// Minimal counting semaphore for bounded async concurrency.
+///
+/// Used by `DispatcharrAPI.concurrencyGate` to cap concurrent
+/// in-flight HTTP requests against Dispatcharr so initial-sync
+/// fanout (channels + EPG + VOD movies + VOD series, each
+/// paginated) doesn't overwhelm the upstream uwsgi/Daphne worker
+/// pool of a self-hosted deployment. See the
+/// `DispatcharrAPI.concurrencyGate` doc comment for the v1.6.21
+/// real-world repro that motivated this gate.
+///
+/// Implementation notes:
+///  - `actor` isolation guarantees `wait()` and `signal()` mutate
+///    `available` and `waiters` race-free.
+///  - `withCheckedContinuation` parks the calling Task without
+///    blocking a thread; resumption goes through Swift Concurrency's
+///    cooperative pool.
+///  - Strict FIFO order on `waiters` so callers don't starve.
+actor AsyncSemaphore {
+    private var available: Int
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(value: Int) {
+        precondition(value > 0, "AsyncSemaphore initial value must be > 0")
+        self.available = value
+    }
+
+    /// Blocks (asynchronously) until a slot is available, then takes it.
+    /// Pair with a matching `signal()` to release the slot.
+    func wait() async {
+        if available > 0 {
+            available -= 1
+            return
+        }
+        await withCheckedContinuation { cont in
+            waiters.append(cont)
+        }
+    }
+
+    /// Releases a slot. Resumes the oldest waiter if any are queued,
+    /// otherwise increments the available count.
+    func signal() {
+        if !waiters.isEmpty {
+            let next = waiters.removeFirst()
+            next.resume()
+        } else {
+            available += 1
+        }
     }
 }
 

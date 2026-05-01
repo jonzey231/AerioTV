@@ -430,7 +430,6 @@ private struct TVOnboardingImportButton: View {
         .focused($isFocused)
         .disabled(isImporting)
         .background(tvOnboardingCardBG(isFocused))
-        .scaleEffect(isFocused ? 1.02 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
@@ -509,47 +508,55 @@ private struct TVOnboardingPickerOption: View {
         }
         .buttonStyle(TVNoHighlightButtonStyle())
         .focused($isFocused)
-        .scaleEffect(isFocused ? 1.05 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
 
-/// Primary or secondary navigation button with teal focus card.
+/// Onboarding navigation card. Same card shape as
+/// `TVOnboardingImportButton` so the welcome screen reads as a column
+/// of matching pill rows. v1.6.21: previously a filled-gradient
+/// primary CTA; reshaped to the outlined card style after user
+/// feedback that the two onboarding rows should look like siblings.
+/// The icon stays in the leading 44pt tile, the title fills the
+/// middle, and a chevron sits on the right matching the action-row
+/// pattern used elsewhere in Settings.
 private struct TVOnboardingNavButton<Destination: View>: View {
     let destination: Destination
     let icon: String
     let label: String
+    /// Retained as a parameter for source compatibility with the
+    /// pre-v1.6.21 callsite in this file. Both modes now render
+    /// the same card style; the parameter is reserved for future
+    /// use (e.g., emphasising one row over another with a slightly
+    /// brighter accent) but currently has no visual effect.
     let isPrimary: Bool
     @FocusState private var isFocused: Bool
 
     var body: some View {
         NavigationLink(destination: destination) {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 22, weight: .semibold))
+            HStack(spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.accentPrimary.opacity(0.15))
+                        .frame(width: 44, height: 44)
+                    Image(systemName: icon)
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(.accentPrimary)
+                }
                 Text(label)
-                    .font(.system(size: 26, weight: .semibold))
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundColor(.textPrimary)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(isFocused ? .accentPrimary : .textTertiary)
             }
-            .foregroundColor(isPrimary ? .white : .textPrimary)
-            .frame(maxWidth: .infinity)
-            .frame(height: 66)
-            .background(
-                isPrimary
-                    ? AnyView(LinearGradient.accentGradient)
-                    : AnyView(Color.elevatedBackground)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(
-                        isFocused ? Color.accentPrimary : (isPrimary ? Color.clear : Color.borderMedium),
-                        lineWidth: isFocused ? 2.5 : 1
-                    )
-            )
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
         }
         .buttonStyle(TVNoHighlightButtonStyle())
         .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .background(tvOnboardingCardBG(isFocused))
         .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }

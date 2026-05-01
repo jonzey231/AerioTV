@@ -3,20 +3,32 @@ import SwiftUI
 // MARK: - Shared tvOS Button Style
 
 /// Suppresses the default tvOS system focus highlight (white glow) and
-/// provides a subtle universal focus indication (scale + brightness).
-/// Elements that need stronger focus feedback should use TVCardButtonStyle
-/// or implement their own @FocusState + custom visuals.
+/// provides themed focus feedback. The visible focus indicator is the
+/// 2pt accent stroke ring drawn on the focused element. v1.6.21 dropped
+/// the scale, brightness, and shadow effects per user feedback that the
+/// pop-out was distracting and pushed text too close to row borders. The
+/// stroke alone is sufficient to identify focus at TV viewing distance.
+/// Press feedback is a brief opacity dip.
 #if os(tvOS)
 struct TVNoHighlightButtonStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(isFocused ? 1.05 : 1.0)
-            .brightness(isFocused ? 0.15 : 0)
-            .shadow(color: isFocused ? Color.accentPrimary.opacity(0.4) : .clear, radius: 8, y: 2)
+            .overlay(
+                // Accent stroke ring drawn on focus. 14pt corner radius
+                // matches every primary/secondary/affordance button in
+                // this codebase (PrimaryButton, SecondaryButton both
+                // use RoundedRectangle(cornerRadius: 14)). Source-type
+                // rows on Add Playlist use 16pt cards; the slight inset
+                // is invisible at TV viewing distance.
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(Color.accentPrimary,
+                            lineWidth: isFocused ? 2 : 0)
+                    .opacity(isFocused ? 1 : 0)
+                    .animation(.easeInOut(duration: 0.15), value: isFocused)
+            )
             .opacity(configuration.isPressed ? 0.7 : 1.0)
-            .animation(.easeInOut(duration: 0.15), value: isFocused)
     }
 }
 
@@ -232,7 +244,28 @@ struct AppTextField: View {
                     }
                 }
                 .font(.bodyMedium)
+                // v1.6.21 fix for the "white-on-white" tvOS bug.
+                // tvOS fills the focused TextField with white and
+                // expects dark text. Forcing `.textPrimary` (light)
+                // there made typed text invisible against the
+                // white fill. On tvOS, switch to a dark colour
+                // when focused so the entered text contrasts; on
+                // iOS the original light colour is correct.
+                #if os(tvOS)
+                .foregroundColor(isFocused ? .black : .textPrimary)
+                // v1.6.21 fix for vertical centering on tvOS. Without
+                // this, the focused TVTextField paints typed text
+                // top-aligned within the 52pt field height, leaving
+                // it visually misaligned with the leading icon (which
+                // SwiftUI centers via the HStack default alignment).
+                // `.frame(maxHeight: .infinity, alignment: .center)`
+                // tells SwiftUI to expand the TextField to fill the
+                // available height with its content centered, which
+                // overrides the top-alignment quirk.
+                .frame(maxHeight: .infinity, alignment: .center)
+                #else
                 .foregroundColor(.textPrimary)
+                #endif
                 .textInputAutocapitalization(autocapitalization)
                 .autocorrectionDisabled(!autocorrection)
                 .focused($isFocused)
@@ -246,12 +279,25 @@ struct AppTextField: View {
                     .stroke(isFocused ? Color.accentPrimary.opacity(0.6) : (text.isEmpty ? Color.borderSubtle : Color.accentPrimary.opacity(0.4)), lineWidth: isFocused ? 1.5 : 1)
                     .animation(.easeInOut(duration: 0.15), value: isFocused)
             )
-            // Tapping anywhere in the field — including the icon area — focuses the input
+            // Tapping anywhere in the field, including the icon area, focuses the input
             .contentShape(Rectangle())
             #if os(iOS)
             .onTapGesture { isFocused = true }
             #endif
         }
+        // tvOS notes: the system applies a white fill to the focused
+        // TextField. v1.6.21 attempted to suppress this with a
+        // Button-wrapped mock label and a hidden TextField behind it
+        // for the keyboard sheet, but on tvOS the system keyboard
+        // sheet only presents when the user explicitly presses
+        // Select on a directly-focused TextField. Programmatically
+        // setting `@FocusState` on a hidden field doesn't trigger
+        // the keyboard, so users couldn't type. Reverted to the
+        // direct-TextField path; the white fill on focus stays as
+        // an accepted system UX for now. A proper themed-focus tvOS
+        // text field requires UIViewRepresentable wrapping
+        // UITextField with custom focused-appearance overrides,
+        // which is bigger than v1.6.21 scope.
     }
 }
 

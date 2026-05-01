@@ -147,7 +147,17 @@ enum NWHTTPClient {
             parameters = NWParameters(tls: nil, tcp: tcpOptions)
         }
 
-        debugLog("NWHTTP → \(scheme)://\(host):\(port)\(currentURL.path) (TLS=\(useTLS), redirects-left=\(redirectsLeft))")
+        // v1.6.21: log the percent-encoded path+query so the trailing
+        // slash and query string survive (URL.path strips the slash
+        // when a query is present. See the buildRequestBytes
+        // comment for the rationale.
+        let logPath: String = {
+            let comps = URLComponents(url: currentURL, resolvingAgainstBaseURL: false)
+            var pq = comps?.percentEncodedPath ?? "/"
+            if let q = comps?.percentEncodedQuery, !q.isEmpty { pq += "?" + q }
+            return pq
+        }()
+        debugLog("NWHTTP → \(scheme)://\(host):\(port)\(logPath) (TLS=\(useTLS), redirects-left=\(redirectsLeft))")
 
         // Dedicated background queue per request. Keeps NWConnection
         // callbacks off .main and prevents one slow request from
@@ -388,9 +398,33 @@ enum NWHTTPClient {
         // Path + query for the request line. NWConnection talks to the
         // origin server directly, so we use the path-only form (not
         // the absolute form a forward proxy would expect).
+        //
+        // **v1.6.21 bug fix.** Foundation's `URL.path` STRIPS the
+        // trailing slash when the URL also has a query string. Real
+        // example caught against jexhammer's Dispatcharr 0.23.0 deployment:
+        //
+        //   URL: /api/channels/groups/?page_size=1
+        //     URL.path                        → /api/channels/groups   (slash gone!)
+        //     URLComponents.percentEncodedPath → /api/channels/groups/ (correct)
+        //
+        // Django/DRF requires the trailing slash on its routes. A
+        // request to `/api/channels/groups?page_size=1` (no slash)
+        // does NOT match the channel-groups view, falls through to
+        // a different route, and returns 401/404 depending on the
+        // catch-all that handles it. AerioTV's verify code then
+        // treats the response as auth-rejected and burns through
+        // every header-shape fallback for nothing. Switching to
+        // `URLComponents.percentEncodedPath` preserves the slash
+        // and uses the percent-encoded forms that the original URL
+        // actually carried, fixing every plain-HTTP API call routed
+        // through this client.
         let pathPart: String = {
-            var pq = url.path.isEmpty ? "/" : url.path
-            if let q = url.query, !q.isEmpty { pq += "?" + q }
+            let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            var pq = comps?.percentEncodedPath ?? ""
+            if pq.isEmpty { pq = "/" }
+            if let q = comps?.percentEncodedQuery, !q.isEmpty {
+                pq += "?" + q
+            }
             return pq
         }()
 
