@@ -764,8 +764,11 @@ final class SyncManager: ObservableObject {
             server.saveCredentialsToKeychain()
             return
         }
-        let pw  = server.effectivePassword.isEmpty ? server.password : server.effectivePassword
-        let key = server.effectiveApiKey.isEmpty ? server.apiKey : server.effectiveApiKey
+        // Prefer in-memory edits over cached keychain copies so a user can
+        // rotate credentials on this device even when an older value is still
+        // present locally or in iCloud Keychain.
+        let pw  = server.password.isEmpty ? server.effectivePassword : server.password
+        let key = server.apiKey.isEmpty ? server.effectiveApiKey : server.apiKey
         let id  = server.id.uuidString
 
         if !pw.isEmpty {

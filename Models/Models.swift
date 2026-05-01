@@ -206,22 +206,33 @@ final class ServerConnection {
 
     // MARK: - Keychain-backed credentials
 
-    /// The effective password: reads from local Keychain first, then iCloud
-    /// Keychain (synchronizable), then falls back to the SwiftData field.
-    var effectivePassword: String {
-        let key = "password_\(id.uuidString)"
+    /// Resolves a credential from Keychain. When iCloud credential sync is
+    /// enabled, prefer the synchronizable copy so remote updates win over a
+    /// stale local-only cache. When sync is off, keep the historical local-
+    /// first order so this device still works offline / local-only.
+    private func resolvedCredential(for key: String, fallback: String) -> String {
+        if UserDefaults.standard.bool(forKey: "iCloudSyncEnabled") && SyncCategory.credentials.isEnabled {
+            return KeychainHelper.load(key: key, synchronizable: true)
+                ?? KeychainHelper.load(key: key)
+                ?? fallback
+        }
         return KeychainHelper.load(key: key)
             ?? KeychainHelper.load(key: key, synchronizable: true)
-            ?? password
+            ?? fallback
     }
 
-    /// The effective API key: reads from local Keychain first, then iCloud
-    /// Keychain (synchronizable), then falls back to the SwiftData field.
+    /// The effective password. When credential sync is enabled, prefers the
+    /// iCloud Keychain copy so cross-device updates beat stale local items.
+    var effectivePassword: String {
+        let key = "password_\(id.uuidString)"
+        return resolvedCredential(for: key, fallback: password)
+    }
+
+    /// The effective API key. When credential sync is enabled, prefers the
+    /// iCloud Keychain copy so cross-device updates beat stale local items.
     var effectiveApiKey: String {
         let key = "apiKey_\(id.uuidString)"
-        return KeychainHelper.load(key: key)
-            ?? KeychainHelper.load(key: key, synchronizable: true)
-            ?? apiKey
+        return resolvedCredential(for: key, fallback: apiKey)
     }
 
     /// Persists `password` and `apiKey` to the Keychain, then clears the plaintext

@@ -1246,9 +1246,9 @@ struct RootView: View {
     ///     already exists for the same key. So re-running can't
     ///     corrupt or downgrade an already-migrated credential.
     ///   • Local Keychain items remain in place — we don't delete
-    ///     them. `effectivePassword`/`effectiveApiKey`'s read order
-    ///     (local → iCloud → SwiftData) makes the local copy a
-    ///     valid fallback if the user later disables iCloud Sync.
+    ///     them. `effectivePassword`/`effectiveApiKey` prefer the
+    ///     iCloud copy while credential sync is enabled, but fall
+    ///     back to the local copy when sync is off.
     ///
     /// v1.6.12 update: KVS plaintext is no longer written by this
     ///   version. `SyncManager.serialize` stopped emitting
@@ -1613,9 +1613,9 @@ struct RootView: View {
         // through the KVS plaintext path. The local-only write stays
         // for the case where the user later disables iCloud Sync —
         // they still need a copy of their credentials on this device.
-        // `effectivePassword` / `effectiveApiKey` already prefer local,
-        // then iCloud, then SwiftData, so the dual write is invisible
-        // to readers. v1.6.7 devices keep working because we still
+        // `effectivePassword` / `effectiveApiKey` already resolve the
+        // right copy for the current sync mode, so the dual write is
+        // invisible to readers. v1.6.7 devices keep working because we still
         // include plaintext in the KVS payload (see
         // `SyncManager.serialize`); the KVS plaintext gets phased out
         // in v1.7.x once the v1.6.7 install base has rolled forward.
