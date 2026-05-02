@@ -119,7 +119,26 @@ struct TVShowsView: View {
             #endif
             .onAppear {
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
-                if vodStore.series.isEmpty && !vodStore.isLoadingSeries {
+                // v1.6.22: only auto-refresh when we genuinely have
+                // no data for the active server. The previous
+                // `series.isEmpty && !isLoadingSeries` guard re-fired
+                // every time SwiftUI rebuilt this view after a load
+                // that legitimately returned zero series, producing
+                // an infinite refresh loop on servers whose API
+                // returns empty (Freyguy1975's Synology Dispatcharr
+                // repro). Comparing the active server's id against
+                // `currentSeriesServerID` (set the moment a load
+                // begins) lets us tell "fresh server we haven't
+                // tried yet" from "already loaded, nothing came
+                // back". Pull-to-refresh and the empty-state
+                // Try Again button still bypass this guard since
+                // they call `refreshSeries` directly.
+                let activeServerID = (servers.first(where: { $0.isActive }) ?? servers.first)?.id
+                let alreadyTriedThisServer = activeServerID != nil
+                    && vodStore.currentSeriesServerID == activeServerID
+                if vodStore.series.isEmpty
+                    && !vodStore.isLoadingSeries
+                    && !alreadyTriedThisServer {
                     vodStore.refreshSeries(servers: servers)
                 }
             }

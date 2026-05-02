@@ -378,7 +378,7 @@ struct AddServerView: View {
 
                         infoBox(
                             icon: "bolt.fill",
-                            message: "Override the XMLTV source AerioTV pulls EPG from. Leave blank to use Dispatcharr's own XMLTV output at /output/epg (the default — category data and all). Set only if you want to bypass Dispatcharr and fetch XMLTV straight from your upstream provider."
+                            message: "EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use."
                         )
                     }
                     .padding([.horizontal, .bottom], 16)

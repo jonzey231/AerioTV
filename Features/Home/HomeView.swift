@@ -44,10 +44,23 @@ final class VODStore: ObservableObject {
     private var moviesTask: Task<Void, Never>?
     private var seriesTask: Task<Void, Never>?
 
-    /// The server ID whose movies are currently loaded — used to detect server switches.
-    private var currentMoviesServerID: UUID? = nil
-    /// The server ID whose series are currently loaded — used to detect server switches.
-    private var currentSeriesServerID: UUID? = nil
+    /// The server ID whose movies were last loaded against. Set by
+    /// `loadMovies` when it begins, retained even when the load
+    /// completes with zero results so the views' `.onAppear` retry
+    /// guards can tell "we already tried for this server" from
+    /// "this is a fresh server we haven't looked at yet" without
+    /// having to keep their own per-view bookkeeping. v1.6.22:
+    /// promoted from `private` so `MoviesView.onAppear` can check
+    /// it before re-firing `refreshMovies` when `movies.isEmpty`.
+    @Published private(set) var currentMoviesServerID: UUID? = nil
+    /// Series equivalent of `currentMoviesServerID`. Same v1.6.22
+    /// promotion rationale: `TVShowsView.onAppear` was re-firing
+    /// `refreshSeries` every time the view rebuilt after a load
+    /// that returned zero series (Freyguy1975's repro looped through
+    /// dozens of identical loads). The view now checks this id and
+    /// skips the auto-refresh when we've already attempted a load
+    /// for the active server.
+    @Published private(set) var currentSeriesServerID: UUID? = nil
 
     /// Server-side search results (supplements locally-loaded items when library isn't fully fetched).
     @Published private(set) var movieSearchResults: [VODDisplayItem] = []
@@ -566,18 +579,57 @@ final class VODStore: ObservableObject {
                 enabledByID[String(cat.id)] = VODCategory(id: String(cat.id), name: cat.name)
             }
 
+            // v1.6.22 (Freyguy1975 repro on a Synology Dispatcharr
+            // 0.23.0 server with 16,357 movies + a Series library
+            // that returned 0): some Dispatcharr deployments don't
+            // populate `custom_properties.category_id` on series
+            // list items. Without a fallback, the per-item filter
+            // below skipped every series and the user saw "No
+            // Series" even when their server clearly had a series
+            // library configured.
+            //
+            // Movies has had this fallback since v1.6.16/17.
+            // Mirroring it here: when the API doesn't supply a
+            // `category_id`, bucket the series under the user's
+            // first enabled series category. Per-category grouping
+            // for series on these servers becomes best-effort
+            // (everything lands in one bucket) but the user sees
+            // their content. Search and per-show detail are
+            // unaffected.
+            let fallbackCategory: VODCategory? = enabledSeriesCats.first.map {
+                VODCategory(id: String($0.id), name: $0.name)
+            }
+
             var accumulated: [VODDisplayItem] = []
             var seenUUIDs: Set<String> = []
             var lastPublishTime = Date.distantPast
             let publishInterval: TimeInterval = 0.5
-            debugLog("📺 VODStore.loadSeries: starting unfiltered stream fetch — will keep items whose category_id matches one of \(enabledSeriesCats.count) enabled categories")
+            var taggedFromCategoryID = 0
+            var taggedFromFallback = 0
+            debugLog("📺 VODStore.loadSeries: starting unfiltered stream fetch. Tag by custom_properties.category_id when present, else fall back to first enabled category (\(enabledSeriesCats.count) total)")
 
             do {
                 for try await batch in api.getVODSeriesStream(category: nil) {
                     guard !Task.isCancelled else { isLoadingSeries = false; return }
                     for s in batch {
-                        guard let catID = s.customProperties?.categoryID,
-                              let category = enabledByID[catID] else { continue }
+                        // Resolve category: prefer the per-item
+                        // category_id when Dispatcharr supplies one;
+                        // otherwise use the user's first enabled
+                        // category as the bucket. Drop only when
+                        // the user has zero enabled categories,
+                        // which the early-return above already
+                        // covered.
+                        let category: VODCategory
+                        if let catID = s.customProperties?.categoryID,
+                           let resolved = enabledByID[catID] {
+                            category = resolved
+                            taggedFromCategoryID += 1
+                        } else if let fallback = fallbackCategory {
+                            category = fallback
+                            taggedFromFallback += 1
+                        } else {
+                            continue
+                        }
                         guard seenUUIDs.insert(s.uuid).inserted else { continue }
                         let show = VODSeries(
                             id: String(s.id), name: s.name,
@@ -611,7 +663,7 @@ final class VODStore: ObservableObject {
 
             series = accumulated
             isLoadingSeries = false
-            debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) series across \(enabledSeriesCats.count) enabled categories")
+            debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) series (tagged via category_id=\(taggedFromCategoryID), via fallback=\(taggedFromFallback)) across \(enabledSeriesCats.count) enabled categories")
             return
         }
 
@@ -797,22 +849,24 @@ final class ChannelStore: ObservableObject {
         Self.saveCachedCategories(merged)
     }
 
-    /// Mirror of `EPGGuideView.fetchDispatcharr`'s URL-construction
-    /// logic. Returns the URL AerioTV should pull XMLTV from for a
-    /// Dispatcharr server — the user's explicit override if set,
-    /// otherwise the derived `{base}/output/epg?tvg_id_source=tvg_id`
-    /// default that emits categories and tvg_id-keyed channels.
-    /// Returns nil when there's nothing sane to fetch (empty or
-    /// malformed base URL).
-    static func dispatcharrXMLTVURL(baseURL: String, override: String) -> URL? {
+    /// Returns the URL AerioTV should pull XMLTV from for a
+    /// Dispatcharr server when the user has set an EXPLICIT
+    /// override. v1.6.22 retired the auto-derived
+    /// `{base}/output/epg?tvg_id_source=tvg_id` fallback because
+    /// Dispatcharr 0.23.0 (commit 3c55649, 2026-02-01) made
+    /// `/output/epg` LAN-only by default and most public-facing
+    /// deployments now block it for security. The default EPG
+    /// path is REST-only via `/api/epg/grid/` + `/api/epg/epgdata/`.
+    /// This override is honored only when the user types a URL
+    /// in Settings, so power users with a reachable XMLTV source
+    /// (their own Dispatcharr LAN URL, a third-party EPG
+    /// aggregator, etc.) can still get category-tinted guide
+    /// rows. Returns nil when the override is blank or
+    /// unparseable.
+    static func dispatcharrXMLTVURL(override: String) -> URL? {
         let explicit = override.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !explicit.isEmpty, let url = URL(string: explicit) {
-            return url
-        }
-        let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !base.isEmpty else { return nil }
-        let trimmed = base.hasSuffix("/") ? String(base.dropLast()) : base
-        return URL(string: "\(trimmed)/output/epg?tvg_id_source=tvg_id")
+        guard !explicit.isEmpty, let url = URL(string: explicit) else { return nil }
+        return url
     }
 
     /// Full XMLTV pass that feeds the SAME `GuideStore.programs`
@@ -831,7 +885,7 @@ final class ChannelStore: ObservableObject {
     /// dedupes by title + time). On iPhone this is the only
     /// XMLTV pass that happens — which is exactly why we need it
     /// here.
-    func primeXMLTVFromURL(_ url: URL) async {
+    func primeXMLTVFromURL(_ url: URL, headers: [String: String] = [:]) async {
         let now = Date()
         let windowStart = now.addingTimeInterval(-3600)
         let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
@@ -849,7 +903,8 @@ final class ChannelStore: ObservableObject {
             url: url,
             channels: snapshot,
             windowStart: windowStart,
-            windowEnd: windowEnd
+            windowEnd: windowEnd,
+            headers: headers
         )
         // Propagate into EPGCache so List-view `fetchUpcoming`
         // (which reads EPGCache) picks up category-enriched
@@ -1163,6 +1218,22 @@ final class ChannelStore: ObservableObject {
                 let programs = try await dAPI.getEPGGrid()
                 bulkEPGSucceeded = true
 
+                // v1.6.22: fetch the EPGData lookup so we can bridge
+                // `Channel.epg_data_id → EPGData.tvg_id` when
+                // `Channel.tvg_id` doesn't agree with how the bulk
+                // grid keys programs. On a real Dispatcharr instance
+                // about 25% of channels with EPG have mismatched
+                // ids; without the bridge those channels show up
+                // blank in the Live TV guide. Failure is non-fatal:
+                // an empty map degrades gracefully to today's behavior.
+                var epgDataMap: [Int: String] = [:]
+                do {
+                    epgDataMap = try await dAPI.getAllEPGData()
+                    debugLog("📺 Bulk EPG: fetched epg_data_id → tvg_id map (\(epgDataMap.count) rows)")
+                } catch {
+                    debugLog("📺 Bulk EPG: epg_data_id map fetch failed (\(error.localizedDescription)); channels with mismatched tvg_id won't be bridged")
+                }
+
                 // Everything below (dictionary build, ~7k-item sort,
                 // cache writes, fallback loop) used to run on the
                 // MainActor here and produced a ~560 ms hang while
@@ -1172,6 +1243,7 @@ final class ChannelStore: ObservableObject {
                 // reach back into the MainActor-isolated store.
                 let channelSnapshot = self.channels
                 let base = baseURL
+                let bridgeMap = epgDataMap
                 await Task.detached(priority: .utility) {
                     let now = Date()
 
@@ -1185,69 +1257,146 @@ final class ChannelStore: ObservableObject {
                         let entry = EPGEntry(title: p.title, description: p.description, startTime: start, endTime: end)
                         byTvgID[key, default: []].append(entry)
                     }
-                    // Sort each channel's programs then cache them
+                    // Sort each channel's programs then cache them by
+                    // the program's own tvg_id key. This covers the
+                    // case `Channel.tvg_id == program.tvg_id` (the 75%
+                    // path on a real instance).
                     for (tvgID, entries) in byTvgID {
                         let sorted = entries.sorted { ($0.startTime ?? .distantPast) < ($1.startTime ?? .distantPast) }
                         await EPGCache.shared.set(sorted, for: "d_\(base)_\(tvgID)")
                     }
                     debugLog("📺 Bulk EPG loaded: \(programs.count) programs across \(byTvgID.count) channels")
 
-                    // Populate empty-array fallbacks for channels the
-                    // bulk didn't cover, so per-card expansion can't
-                    // trigger post-loading network fetches. Uses the
-                    // same cache-key scheme ChannelListView's
-                    // makeFetchUpcoming expects: "d_<base>_<tvgID or channelID>".
+                    // Populate cache entries for each channel at the
+                    // EXACT key its reader will look at:
+                    //   `d_<base>_<channel.tvgID ?? channel.id>`
+                    // matches `ChannelListView.makeFetchUpcoming`.
+                    //
+                    // For channels where `Channel.tvg_id !=
+                    // EPGData.tvg_id` (the 25% mismatch case), the
+                    // first-pass write above landed under the EPGData
+                    // tvg_id, which doesn't match the reader's key.
+                    // Bridge via `epg_data_id → EPGData.tvg_id` to
+                    // copy the same programs to the reader's key.
+                    // Falls through to an empty fallback so per-cell
+                    // prefetch can't trigger post-loading network
+                    // fetches for genuinely EPG-less channels.
+                    var bridgedCount = 0
                     var filledFallbacks = 0
                     for channel in channelSnapshot {
                         let tvgID = channel.tvgID ?? ""
                         let keyPart = tvgID.isEmpty ? channel.id : tvgID
                         let cacheKey = "d_\(base)_\(keyPart)"
-                        if await EPGCache.shared.get(cacheKey) == nil {
-                            await EPGCache.shared.set([], for: cacheKey)
-                            filledFallbacks += 1
+                        if await EPGCache.shared.get(cacheKey) != nil {
+                            continue // already populated by the program-keyed write above
                         }
+                        // Try the EPGData bridge before giving up.
+                        if let epgID = channel.dispatcharrEPGDataID,
+                           let epgTvgID = bridgeMap[epgID],
+                           let bridgeEntries = byTvgID[epgTvgID] {
+                            let sorted = bridgeEntries.sorted { ($0.startTime ?? .distantPast) < ($1.startTime ?? .distantPast) }
+                            await EPGCache.shared.set(sorted, for: cacheKey)
+                            bridgedCount += 1
+                            continue
+                        }
+                        await EPGCache.shared.set([], for: cacheKey)
+                        filledFallbacks += 1
                     }
-                    debugLog("📺 Bulk EPG: filled \(filledFallbacks) empty fallbacks so no post-loading network fetches fire")
+                    debugLog("📺 Bulk EPG: bridged \(bridgedCount) channels via epg_data_id, filled \(filledFallbacks) empty fallbacks")
                 }.value
 
                 // Refresh Top Shelf with updated program info
                 TopShelfDataManager.syncTopChannels(channels: self.channels)
+
+                // v1.6.22: API-only category enrichment.
+                // `/api/epg/grid/` deliberately strips `<category>`
+                // tags (server-side serializer omission, see
+                // Dispatcharr's `EPGGridAPIView`). The fix:
+                // `/api/epg/programs/<id>/` returns categories per
+                // program. We fan out detail fetches for the
+                // CURRENTLY-AIRING program of each channel,
+                // throttled at cap-of-4 concurrency, fire-and-forget
+                // so initial sync isn't blocked. ~330 calls at 41ms
+                // each = ~3-7s background; channel cards tint
+                // progressively as results land. Strictly /api/*;
+                // no XMLTV stream involved.
+                let chSnapForEnrich = self.channels
+                let progSnap = programs
+                let bridgeMapForEnrich = epgDataMap
+                let dAPIForEnrich = DispatcharrAPI(baseURL: baseURL,
+                                                   auth: .apiKey(apiKey),
+                                                   userAgent: userAgent,
+                                                   authMode: authMode)
+                Task.detached(priority: .utility) {
+                    let now = Date()
+                    // Build the same channel lookup used by the bulk
+                    // cache write (Channel.tvg_id + EPGData.tvg_id
+                    // bridge), so currently-airing matching covers
+                    // the 25% of channels with mismatched ids.
+                    var tvgToChan: [String: String] = [:]
+                    for ch in chSnapForEnrich {
+                        if let tvg = ch.tvgID, !tvg.isEmpty {
+                            tvgToChan[tvg.lowercased()] = ch.id
+                        }
+                    }
+                    for ch in chSnapForEnrich {
+                        guard let epgID = ch.dispatcharrEPGDataID,
+                              let bridgedTvg = bridgeMapForEnrich[epgID],
+                              !bridgedTvg.isEmpty else { continue }
+                        let key = bridgedTvg.lowercased()
+                        if tvgToChan[key] == nil { tvgToChan[key] = ch.id }
+                    }
+
+                    var currentByChannelID: [String: Int] = [:]
+                    for p in progSnap {
+                        guard let pid = p.programID,
+                              let start = p.startTime?.toDate(),
+                              let end = p.endTime?.toDate(),
+                              start <= now, end > now,
+                              let tvg = p.tvgID, !tvg.isEmpty,
+                              let cid = tvgToChan[tvg.lowercased()] else { continue }
+                        if currentByChannelID[cid] == nil {
+                            currentByChannelID[cid] = pid
+                        }
+                    }
+                    let pids = Array(currentByChannelID.values)
+                    debugLog("📺 Category enrichment: \(pids.count) currently-airing programs across \(currentByChannelID.count) channels; fetching /api/epg/programs/<id>/")
+                    let cats = await dAPIForEnrich.enrichCategories(programIDs: pids)
+                    var byChan: [String: String] = [:]
+                    for (cid, pid) in currentByChannelID {
+                        if let c = cats[pid] { byChan[cid] = c }
+                    }
+                    debugLog("📺 Category enrichment: \(byChan.count)/\(currentByChannelID.count) channels got categories")
+                    await MainActor.run {
+                        ChannelStore.shared.applyXMLTVCategories(byChan)
+                    }
+                }
             } catch {
-                debugLog("📺 Bulk EPG failed: \(error.localizedDescription) — falling back to lazy loading")
+                debugLog("📺 Bulk EPG failed: \(error.localizedDescription); falling back to lazy loading")
             }
 
-            // XMLTV pass through the shared GuideStore so BOTH the
-            // Live-TV list tint AND the Guide grid read from one
-            // dataset (user feedback: "they should both be using
-            // the same dataset"). iPhone never mounts EPGGuideView,
-            // so without this call GuideStore.programs would stay
-            // empty on phone and the List-view expanded schedule
-            // would have no category data to tint with.
+            // v1.6.22: dropped the secondary auto-derived
+            // `{base}/output/epg?tvg_id_source=tvg_id` XMLTV pass.
+            // Dispatcharr 0.23.0+ (commit 3c55649, 2026-02-01) gates
+            // `/output/epg` LAN-only by default; every Cloudflare,
+            // Synology QuickConnect, or port-forward user hit HTTP
+            // 403. The default EPG path is now REST-only.
             //
-            // Awaited (not Task.detached) on purpose: the user
-            // specifically asked for the category cache to land
-            // "when EPG is loading while ServerSyncView is
-            // showing." Since `isEPGLoading` stays true until this
-            // function returns, and `MainTabView.initialSyncKey`
-            // observes `isEPGLoading`, the ServerSyncView cover
-            // now only dismisses after the XMLTV parse has
-            // completed and `seedEPGCache` has written
-            // category-enriched EPGEntries into EPGCache. Net
-            // effect: first frame of Live TV shows all tints
-            // (current-program gradient on cards AND per-program
-            // gradients on expanded rows) with zero fade-in lag.
-            //
-            // iPad / Mac / tvOS also hit this path — the later
-            // EPGGuideView fetchXMLTVFromURL call is then a
-            // dedupe/refresh (the merge logic in `mergeProgram`
-            // replaces-by-overlap, so duplicates don't stack).
-            if !bulkEPGSucceeded {
-                debugLog("📺 loadAllEPG: skipping primeXMLTVFromURL because bulk EPG failed (server likely overloaded; deferring XMLTV to lazy fetch by EPGGuideView)")
-            } else if let xmltvURL = Self.dispatcharrXMLTVURL(
-                baseURL: baseURL,
-                override: dispatcharrXMLTVOverride
-            ) {
-                await primeXMLTVFromURL(xmltvURL)
+            // We DO still honor an explicit user-provided XMLTV
+            // override here. Power users who have a reachable
+            // XMLTV source (their own LAN-side Dispatcharr URL, a
+            // separate XMLTV aggregator, etc.) can paste it into
+            // Settings → Custom XMLTV URL and get the
+            // `<category>` data the bulk grid omits, layered on
+            // top of the REST data already cached above.
+            if bulkEPGSucceeded,
+               let xmltvURL = Self.dispatcharrXMLTVURL(override: dispatcharrXMLTVOverride) {
+                let dAPIForXMLTV = DispatcharrAPI(baseURL: baseURL,
+                                                  auth: .apiKey(apiKey),
+                                                  userAgent: userAgent,
+                                                  authMode: authMode)
+                debugLog("📺 loadAllEPG: honoring user XMLTV override at \(xmltvURL.host ?? "?") (in addition to /api/epg/grid/)")
+                await primeXMLTVFromURL(xmltvURL, headers: dAPIForXMLTV.streamAuthHeaders)
             }
 
         case .xtreamCodes:
@@ -1596,6 +1745,11 @@ final class ChannelStore: ObservableObject {
             // string-parse `item.id` to build a Dispatcharr
             // recording request.
             item.dispatcharrChannelID = ch.id
+            // v1.6.22: carry the epg_data_id FK so the EPG matcher
+            // can bridge `Channel.epg_data_id → EPGData.tvg_id`
+            // when `Channel.tvg_id` doesn't agree with how the
+            // bulk grid keys programs (the 25% mismatch case).
+            item.dispatcharrEPGDataID = ch.epgDataID
             return item
         }
         items = sortChannels(items, groupOrder: groupOrder)
@@ -3748,7 +3902,33 @@ struct MainTabView: View {
             let hasFuturePrograms = guideStore.programs.contains { _, progs in
                 progs.contains { $0.end > futureCutoff }
             }
-            if cacheIsFresh && hasFuturePrograms {
+            // v1.6.22: detect a "fresh but pathologically sparse"
+            // cache and force a refetch.
+            //
+            // The trap this closes: if a previous run failed the
+            // XMLTV pass (auth gate, timeout, parse error) AND the
+            // bulk grid pass also failed/partially-failed, the
+            // saveToCache step may persist EPG data for only a
+            // handful of channels. Subsequent launches read that
+            // partial cache, see it's recent enough to be "fresh",
+            // and skip `loadAllEPG` entirely, leaving the user
+            // permanently stuck with a near-empty guide. Freyguy1975
+            // hit this with 8 of 333 channels (2.4%) cached from a
+            // run where Dispatcharr's `/output/epg` returned 403.
+            //
+            // The 25% threshold is conservative: a real Dispatcharr
+            // instance with healthy EPG covers >70% of channels
+            // typically. M3U/Xtream paths populate the cache
+            // differently (per-channel rather than bulk XMLTV) and
+            // can land below 25% legitimately, but those servers
+            // also benefit from a refetch attempt; the worst case
+            // is one extra network round trip per cold launch on a
+            // genuinely sparse dataset, which the existing
+            // freshness window then catches on the next try.
+            let totalChannels = max(channelStore.channels.count, 1)
+            let coverageRatio = Double(guideStore.programs.count) / Double(totalChannels)
+            let cacheCoverageOK = coverageRatio >= 0.25
+            if cacheIsFresh && hasFuturePrograms && cacheCoverageOK {
                 debugLog("🟢 [Orchestrator] phase 2 EPG: cache fresh, seeding only (no network), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
                 // Seed EPGCache from GuideStore.programs so the
                 // List view has per-channel EPG data. Awaited so
@@ -3757,7 +3937,12 @@ struct MainTabView: View {
                 await guideStore.seedEPGCache(channels: channelStore.channels, server: activeServer)
                 channelStore.isEPGLoading = false
             } else {
-                debugLog("🟢 [Orchestrator] phase 2 EPG: starting loadAllEPG (cache stale, fresh=\(cacheIsFresh), hasFuture=\(hasFuturePrograms)), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+                let coveragePct = Int(coverageRatio * 100)
+                if cacheIsFresh && hasFuturePrograms && !cacheCoverageOK {
+                    debugLog("🟢 [Orchestrator] phase 2 EPG: cache fresh but sparse, only \(guideStore.programs.count)/\(totalChannels) channels (\(coveragePct)%) covered. Forcing refetch via loadAllEPG.")
+                } else {
+                    debugLog("🟢 [Orchestrator] phase 2 EPG: starting loadAllEPG (cache stale, fresh=\(cacheIsFresh), hasFuture=\(hasFuturePrograms), coverage=\(coveragePct)%), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+                }
                 await channelStore.loadAllEPG()
             }
         } else {

@@ -57,6 +57,18 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.6.22",
+            title: "What's new in 1.6.22",
+            bullets: [
+                "Series now show up on Dispatcharr servers that don't tag VOD items with a category. Movies already had this fallback; series now mirrors it",
+                "Stopped a refresh loop where the Movies and TV Shows tabs would keep retrying after a server returned zero items",
+                "Dispatcharr EPG now uses the official REST API exclusively. Channels with mismatched IDs populate correctly, and program categories are pulled per-program so channel cards stay tinted",
+                "Watch in-progress Dispatcharr recordings via the new HLS DVR pipeline. Tap the row or use Watch Live in the context menu",
+                "Faster VOD loading on large libraries. Bumped page size 4x to match the Dispatcharr server cap"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.22")
+        ),
+        WhatsNewRelease(
             version: "1.6.21",
             title: "What's new in 1.6.21",
             bullets: [

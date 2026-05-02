@@ -74,17 +74,23 @@ struct RecordProgramSheet: View {
         .onAppear {
             preRoll = isLive ? 0 : defaultPreRoll
             postRoll = defaultPostRoll
-            // v1.6.13.x: pre-fill from the server's default
-            // destination preference. The user can still switch via
-            // the destination picker — for future Dispatcharr
-            // recordings, picking "This device" leaves the recording
-            // as `.scheduled` in MyRecordings (won't auto-start;
-            // user starts manually when ready). v1.6.8's silent
-            // force-to-server for future programs was removed
-            // because it overrode the user's default preference and
-            // hid the picker, leading to a confusing "Comskip
-            // option appears even though I chose local default" UX.
-            destination = activeServer?.defaultRecordingDestination ?? .local
+            // v1.6.22 fix (Codex finding 1): future recordings on
+            // Dispatcharr playlists are forced to `.dispatcharrServer`.
+            // AerioTV doesn't run iOS background tasks for DVR;
+            // there's no path to wake the app at the scheduled
+            // start time, so a future `.local` row would be
+            // permanently stuck as `.scheduled` and never start.
+            // Previously the picker still offered "This device"
+            // for future programs, creating an impossible state
+            // the user couldn't recover from. For live programs
+            // ("Record from Now"), both destinations remain valid
+            // because the recording starts immediately while the
+            // app is foregrounded.
+            if isLive {
+                destination = activeServer?.defaultRecordingDestination ?? .local
+            } else {
+                destination = .dispatcharrServer
+            }
         }
         .sheet(isPresented: $showCustomPreRoll) {
             customSheet { preRoll = customValue }
@@ -135,10 +141,13 @@ struct RecordProgramSheet: View {
                 )
             }
 
-            // Destination — always shown for Dispatcharr; default
-            // pre-filled from the server's `defaultRecordingDestination`,
-            // user can switch to the secondary option.
-            if isDispatcharr {
+            // Destination picker, only shown for live recordings on
+            // Dispatcharr playlists. For future programs (`!isLive`),
+            // destination is forced to `.dispatcharrServer` (see
+            // `.onAppear` above) because AerioTV can't auto-start a
+            // local recording at a scheduled future time, so we
+            // never offer the choice in the first place. v1.6.22.
+            if isDispatcharr && isLive {
                 Section {
                     Picker("Record to", selection: $destination) {
                         Text("Dispatcharr server").tag(RecordingDestination.dispatcharrServer)
@@ -279,14 +288,18 @@ struct RecordProgramSheet: View {
                         label: { $0 == 0 ? "None" : "\($0) min" }
                     )
 
-                    // Always show the destination row for Dispatcharr —
-                    // user can switch from default to secondary.
-                    // Comskip row also always shown for Dispatcharr;
-                    // it disables itself (with explainer) when
-                    // destination == .local since Comskip is a
-                    // server-side feature.
-                    if isDispatcharr {
+                    // Destination row only for live recordings on
+                    // Dispatcharr playlists; future Dispatcharr
+                    // recordings are forced to `.dispatcharrServer`
+                    // (no path to start a future local recording on
+                    // iOS without background tasks). Comskip row
+                    // still shown for any Dispatcharr context; it
+                    // disables itself with an explainer when
+                    // destination == .local. v1.6.22 (Codex finding 1).
+                    if isDispatcharr && isLive {
                         destinationRow
+                    }
+                    if isDispatcharr {
                         comskipRow
                     }
 
@@ -547,6 +560,20 @@ struct RecordProgramSheet: View {
     // MARK: - Schedule
 
     private func scheduleRecording() {
+        // v1.6.22 (Codex finding 1): belt-and-suspenders. The UI
+        // already prevents this combination (the destination picker
+        // is hidden for `!isLive`, and `.onAppear` forces destination
+        // to `.dispatcharrServer` for future programs), but if any
+        // future call site bypasses the picker, we'd otherwise insert
+        // a `.scheduled` local row that can never start. Coerce here
+        // so the SwiftData state is always coherent.
+        let effectiveDestination: RecordingDestination
+        if !isLive && destination == .local {
+            debugLog("⚠️ RecordProgramSheet: future + local is unsupported; coercing destination to .dispatcharrServer")
+            effectiveDestination = .dispatcharrServer
+        } else {
+            effectiveDestination = destination
+        }
         let rec = Recording(
             channelID: channelID,
             channelName: channelName,
@@ -556,7 +583,7 @@ struct RecordProgramSheet: View {
             scheduledEnd: scheduledEnd,
             preRollMinutes: isLive ? 0 : preRoll,
             postRollMinutes: postRoll,
-            destination: destination,
+            destination: effectiveDestination,
             serverID: activeServer?.id.uuidString ?? "unknown"
         )
         modelContext.insert(rec)
@@ -564,7 +591,7 @@ struct RecordProgramSheet: View {
 
         // Kick off the recording
         Task {
-            if destination == .dispatcharrServer, let server = activeServer {
+            if effectiveDestination == .dispatcharrServer, let server = activeServer {
                 // v1.6.8 (Codex A2): use the explicit numeric ID
                 // plumbed through `ChannelDisplayItem.dispatcharrChannelID`
                 // — populated at Dispatcharr load time in
@@ -617,7 +644,7 @@ struct RecordProgramSheet: View {
             // destination footer warns the user about this so
             // expectations are set up-front rather than at
             // missed-start time.
-            if destination == .local && rec.effectiveStart <= Date() {
+            if effectiveDestination == .local && rec.effectiveStart <= Date() {
                 guard let streamURL else {
                     debugLog("⚠️ RecordProgramSheet: cannot start local recording — no streamURL plumbed in for channel \"\(channelName)\"")
                     DebugLogger.shared.log(

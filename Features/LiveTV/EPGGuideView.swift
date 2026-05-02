@@ -99,7 +99,7 @@ final class GuideStore: ObservableObject {
     /// instead of starting a duplicate download. Different URLs
     /// (e.g. an explicit per-server override vs. the derived
     /// `/output/epg`) don't coalesce — only exact URL matches.
-    private var inFlightXMLTVTask: (url: URL, task: Task<Void, Never>)? = nil
+    private var inFlightXMLTVTask: (url: URL, task: Task<Bool, Never>)? = nil
 
     /// Signature of the last seedEPGCache run — "serverID|channelCount|programCount".
     /// Warm relaunch fires `seedEPGCache` three times with identical
@@ -541,43 +541,26 @@ final class GuideStore: ObservableObject {
     // MARK: - Dispatcharr
     private func fetchDispatcharr(server: ServerConnection, channels: [ChannelDisplayItem],
                                    windowStart: Date, windowEnd: Date) async {
-        // Prefer Dispatcharr's XMLTV output endpoint over the JSON REST
-        // API. The `/api/epg/*` endpoints strip category data, but
-        // `{baseURL}/output/epg` re-emits the upstream XMLTV including
-        // `<category>` tags — see `apps/output/views.py`'s
-        // `generate_epg()`. This is also what third-party clients like
-        // Emby / Jellyfin consume, so it's the canonical "give me my
-        // guide data" URL. The user's explicit override wins when set
-        // (some setups need a different XMLTV source or auth token).
-        //
-        // NOTE: handled before beginBatch() to avoid nested batch sessions —
-        // fetchXMLTVFromURL manages its own begin/endBatch pair.
-        let explicitURL = server.dispatcharrXMLTVURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let base = server.effectiveBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let derivedOutputURL: String? = {
-            guard !base.isEmpty else { return nil }
-            let trimmed = base.hasSuffix("/") ? String(base.dropLast()) : base
-            // Append `?tvg_id_source=tvg_id` so Dispatcharr emits the
-            // <channel id="..."> + <programme channel="..."> attributes
-            // using each channel's tvg_id. Without this, Dispatcharr
-            // defaults to the channel NUMBER, which is effectively
-            // random for our tvg_id-keyed channel matching. See
-            // Dispatcharr's apps/output/views.py `generate_epg()`:
-            //
-            //   if tvg_id_source == 'tvg_id' and channel.tvg_id:
-            //       channel_id = channel.tvg_id
-            //   else:
-            //       channel_id = str(formatted_channel_number)
-            return "\(trimmed)/output/epg?tvg_id_source=tvg_id"
-        }()
-        if let xmltvURL = (explicitURL.isEmpty ? derivedOutputURL : explicitURL),
-           let parsedURL = URL(string: xmltvURL) {
-            debugLog("📺 [EPG source=xmltv-direct source=\(explicitURL.isEmpty ? "dispatcharr-output" : "custom-override")] server=\(server.name) url=\(parsedURL.host ?? "?")")
-            await fetchXMLTVFromURL(url: parsedURL, channels: channels,
-                                     windowStart: windowStart, windowEnd: windowEnd)
-            return
-        }
-        debugLog("📺 [EPG source=dispatcharr-api fallback] server=\(server.name) (could not build XMLTV URL)")
+        // v1.6.22: use Dispatcharr's REST API exclusively. The
+        // previous `{baseURL}/output/epg` XMLTV path was attractive
+        // because it included `<category>` tags, but it's:
+        //   1. Not part of Dispatcharr's documented API surface.
+        //   2. Gated by a LAN-only network access policy by default
+        //      since Dispatcharr 0.23.0 (commit 3c55649, Feb 2026).
+        //      Every WAN / Cloudflare / Synology QuickConnect user
+        //      gets HTTP 403 on the public hostname.
+        //   3. A separate Django view from `/api/*`, with its own
+        //      auth model. Using it meant maintaining two access
+        //      paths to the same underlying data.
+        // The `/api/epg/grid/` JSON endpoint covers programs+timing
+        // for every Dispatcharr deployment regardless of network
+        // policy. Categories are missing from the bulk grid response
+        // (server-side serializer omission, ProgramData.custom_properties
+        // has them but the hand-rolled grid view drops them; see
+        // `apps/epg/api_views.py`'s EPGGridAPIView). Acceptable
+        // trade-off: programs render universally, categories can be
+        // lazily backfilled per visible cell via /api/epg/programs/<id>/
+        // in a future pass if the visual loss matters.
 
         beginBatch()
         defer { endBatch() }
@@ -585,15 +568,68 @@ final class GuideStore: ObservableObject {
                                   auth: .apiKey(server.effectiveApiKey),
                                   userAgent: server.effectiveUserAgent,
                                   authMode: server.dispatcharrHeaderMode)
+        debugLog("📺 [EPG source=dispatcharr-api grid] server=\(server.name)")
 
-        // Build tvgID ↔ channelID mapping (case-insensitive keys for matching)
-        let tvgIDToChannelID: [String: String] = Dictionary(
-            channels.compactMap { ch in
-                guard let tvg = ch.tvgID, !tvg.isEmpty else { return nil }
-                return (tvg.lowercased(), ch.id)
-            },
-            uniquingKeysWith: { first, _ in first }
-        )
+        // v1.6.22: honor user-provided XMLTV override URL if set.
+        // The auto-derived `/output/epg` fallback is gone, but power
+        // users who have a reachable XMLTV source can opt in via
+        // Settings → Custom XMLTV URL to pick up `<category>` data
+        // the bulk grid omits. We layer the XMLTV merge on top of
+        // the REST grid below so categories enrich the same dict.
+        let explicitXMLTV = server.dispatcharrXMLTVURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !explicitXMLTV.isEmpty, let xmltvURL = URL(string: explicitXMLTV) {
+            debugLog("📺 [EPG source=dispatcharr-api grid + xmltv-override] server=\(server.name) override=\(xmltvURL.host ?? "?")")
+            await fetchXMLTVFromURL(url: xmltvURL, channels: channels,
+                                     windowStart: windowStart, windowEnd: windowEnd,
+                                     headers: api.streamAuthHeaders)
+            // Fall through to bulk grid below: the merge dedupes by
+            // (channel, time) so the REST data fills any gaps the
+            // override XMLTV missed.
+        }
+
+        // v1.6.22: fetch the EPGData lookup so we can bridge
+        // `Channel.epg_data_id → EPGData.tvg_id` when
+        // `Channel.tvg_id` doesn't match how the bulk grid keys
+        // programs. About 25% of channels on a real Dispatcharr
+        // instance have mismatched ids (EPGData is set at XMLTV
+        // ingest, Channel.tvg_id is user-configurable). Without
+        // this, those channels appear blank in the guide. Failure
+        // is non-fatal: an empty map degrades to today's behavior.
+        var epgDataIDToTvgID: [Int: String] = [:]
+        do {
+            epgDataIDToTvgID = try await api.getAllEPGData()
+            debugLog("📺 Dispatcharr: fetched epg_data_id → tvg_id map (\(epgDataIDToTvgID.count) rows)")
+        } catch {
+            debugLog("📺 Dispatcharr: epg_data_id map fetch failed (\(error.localizedDescription)); channels with mismatched tvg_id won't be bridged")
+        }
+
+        // Build tvgID ↔ channelID mapping (case-insensitive keys for matching).
+        // Includes BOTH the channel's own tvg_id AND its bridged
+        // EPGData.tvg_id (via Channel.epg_data_id) so the program
+        // match loop below resolves either casing in a single
+        // dictionary lookup. Channel.tvg_id wins when both are
+        // present and differ.
+        var tvgIDToChannelIDBuild: [String: String] = [:]
+        for ch in channels {
+            if let tvg = ch.tvgID, !tvg.isEmpty {
+                tvgIDToChannelIDBuild[tvg.lowercased()] = ch.id
+            }
+        }
+        var bridgedEntryCount = 0
+        for ch in channels {
+            guard let epgID = ch.dispatcharrEPGDataID,
+                  let bridgedTvgID = epgDataIDToTvgID[epgID],
+                  !bridgedTvgID.isEmpty else { continue }
+            let key = bridgedTvgID.lowercased()
+            if tvgIDToChannelIDBuild[key] == nil {
+                tvgIDToChannelIDBuild[key] = ch.id
+                bridgedEntryCount += 1
+            }
+        }
+        if bridgedEntryCount > 0 {
+            debugLog("📺 Dispatcharr: bridged \(bridgedEntryCount) channels via epg_data_id → EPGData.tvg_id")
+        }
+        let tvgIDToChannelID = tvgIDToChannelIDBuild
         // Also build channel int ID → display ID mapping for fallback
         let intIDToChannelID: [Int: String] = Dictionary(
             channels.compactMap { ch in
@@ -664,6 +700,30 @@ final class GuideStore: ObservableObject {
             #if DEBUG
             debugLog("📺 Dispatcharr: EPG grid matched \(matched) programs to channels (\(matchedViaUUID) via Dummy EPG UUID key)")
             #endif
+
+            // v1.6.22: API-only category enrichment for Guide cells
+            // and Live-TV cards. Walks the gridPrograms we just
+            // merged, identifies the currently-airing program per
+            // channel, fans out `/api/epg/programs/<id>/` (the only
+            // REST endpoint with categories), throttles at cap-of-4,
+            // applies results to BOTH `GuideStore.programs[cid]`
+            // (the matching airing GuideProgram's `category` for
+            // grid cell tinting) AND `ChannelStore.applyXMLTVCategories`
+            // (channel card stripe). API-only. No XMLTV stream.
+            //
+            // Fire-and-forget: don't block the Guide tab from
+            // becoming interactive on the enrichment fan-out (which
+            // can be 300+ requests, several seconds of background
+            // work even on a healthy server). The Guide cells render
+            // with grid data immediately; categories tint in
+            // progressively as detail responses land.
+            Task { [self] in
+                await self.enrichDispatcharrCategories(gridPrograms: gridPrograms,
+                                                        api: api,
+                                                        tvgIDToChannelID: tvgIDToChannelID,
+                                                        uuidToChannelID: uuidToChannelID)
+            }
+
             return // Grid endpoint succeeded — no need for fallback
         } catch {
             #if DEBUG
@@ -772,6 +832,73 @@ final class GuideStore: ObservableObject {
         }
     }
 
+    // MARK: - Dispatcharr Category Enrichment (v1.6.22)
+
+    /// Pulls categories for the currently-airing program per channel
+    /// via `/api/epg/programs/<id>/` (the only REST endpoint with
+    /// the `categories` array (the bulk `/api/epg/grid/` strips
+    /// them server-side). Fans out at cap-of-4 concurrency, then
+    /// writes the result to BOTH the matching `GuideProgram.category`
+    /// in `programs[channelID]` (for Guide-grid cell tinting) AND
+    /// `ChannelStore.applyXMLTVCategories` (for Live-TV card stripe).
+    /// Pure REST API path; no XMLTV stream involved.
+    private func enrichDispatcharrCategories(
+        gridPrograms: [DispatcharrCurrentProgram],
+        api: DispatcharrAPI,
+        tvgIDToChannelID: [String: String],
+        uuidToChannelID: [String: String]
+    ) async {
+        let now = Date()
+        var currentByChannelID: [String: Int] = [:]
+        var programIDByChannelID: [String: Int] = [:]
+        for prog in gridPrograms {
+            guard let pid = prog.programID,
+                  let start = prog.startTime?.toDate(),
+                  let end = prog.endTime?.toDate(),
+                  start <= now, end > now else { continue }
+            let key = (prog.tvgID ?? "").lowercased()
+            guard !key.isEmpty,
+                  let cid = tvgIDToChannelID[key] ?? uuidToChannelID[key] else { continue }
+            if currentByChannelID[cid] == nil {
+                currentByChannelID[cid] = pid
+                programIDByChannelID[cid] = pid
+            }
+        }
+        guard !currentByChannelID.isEmpty else { return }
+        debugLog("📺 Dispatcharr category enrichment: \(currentByChannelID.count) currently-airing programs; fetching /api/epg/programs/<id>/ at cap-of-4")
+        let cats = await api.enrichCategories(programIDs: Array(currentByChannelID.values))
+        var byChannel: [String: String] = [:]
+        for (cid, pid) in currentByChannelID {
+            if let c = cats[pid] { byChannel[cid] = c }
+        }
+        debugLog("📺 Dispatcharr category enrichment: \(byChannel.count)/\(currentByChannelID.count) channels got categories")
+
+        // Write categories to the matching airing GuideProgram in
+        // `programs[cid]` so Guide-grid cells tint. Single
+        // @Published mutation at end (COW snapshot + reassign) keeps
+        // SwiftUI invalidations to one even with many channels.
+        var updated = self.programs
+        for (cid, cats) in byChannel {
+            guard var progs = updated[cid] else { continue }
+            guard let idx = progs.firstIndex(where: { $0.start <= now && $0.end > now }) else { continue }
+            // GuideProgram.category is `let` (struct value). Build a
+            // fresh one with the same fields plus the enriched
+            // category and swap it in.
+            let old = progs[idx]
+            progs[idx] = GuideProgram(channelID: old.channelID,
+                                       title: old.title,
+                                       description: old.description,
+                                       start: old.start,
+                                       end: old.end,
+                                       category: cats)
+            updated[cid] = progs
+        }
+        self.programs = updated
+
+        // Apply to Live-TV channel-card stripe.
+        ChannelStore.shared.applyXMLTVCategories(byChannel)
+    }
+
     // MARK: - M3U + XMLTV
     private func fetchXMLTV(server: ServerConnection, channels: [ChannelDisplayItem],
                              windowStart: Date, windowEnd: Date) async {
@@ -809,8 +936,17 @@ final class GuideStore: ObservableObject {
     /// Both call sites end up populating `programs` + seeding
     /// `EPGCache` via `seedEPGCache`, so Guide view and List view
     /// read from one unified dataset.
+    /// Returns `true` when the XMLTV fetch produced parsed programs
+    /// (which were merged into `GuideStore.programs`). Returns
+    /// `false` when the fetch failed (network error, HTTP 4xx/5xx,
+    /// parse error). Callers can use the result to fall through to
+    /// a backstop. See `fetchDispatcharr` for the Dispatcharr 403
+    /// path (LAN-only `/output/epg` policy on WAN deployments,
+    /// v1.6.22 fix).
+    @discardableResult
     func fetchXMLTVFromURL(url: URL, channels: [ChannelDisplayItem],
-                                    windowStart: Date, windowEnd: Date) async {
+                                    windowStart: Date, windowEnd: Date,
+                                    headers: [String: String] = [:]) async -> Bool {
         // In-flight coalescing — see `inFlightXMLTVTask` doc. On
         // cold install two call sites hit this method with the
         // same URL back-to-back; without dedupe we pay the XMLTV
@@ -818,8 +954,7 @@ final class GuideStore: ObservableObject {
         // torture playlist).
         if let inFlight = inFlightXMLTVTask, inFlight.url == url {
             debugLog("📺 GuideStore.fetchXMLTVFromURL: joining in-flight parse (url=\(url.host ?? "?"))")
-            await inFlight.task.value
-            return
+            return await inFlight.task.value
         }
 
         // Wrap the fetch+parse+merge body in a Task so a concurrent
@@ -827,18 +962,20 @@ final class GuideStore: ObservableObject {
         // Inherits @MainActor from the enclosing GuideStore, which
         // matters for the `beginBatch`/`endBatch` + `mergeProgram`
         // calls that follow.
-        let fetchTask = Task<Void, Never> { [self] in
-            await performXMLTVFetch(url: url, channels: channels,
-                                    windowStart: windowStart, windowEnd: windowEnd)
+        let fetchTask = Task<Bool, Never> { [self] in
+            return await performXMLTVFetch(url: url, channels: channels,
+                                           windowStart: windowStart, windowEnd: windowEnd,
+                                           headers: headers)
         }
         inFlightXMLTVTask = (url: url, task: fetchTask)
-        await fetchTask.value
+        let success = await fetchTask.value
         // Only clear if we're still the registered in-flight task
         // for this URL. A different URL starting later would have
         // overwritten the entry; don't stomp it.
         if inFlightXMLTVTask?.url == url {
             inFlightXMLTVTask = nil
         }
+        return success
     }
 
     /// Body of `fetchXMLTVFromURL`, split out so the outer function
@@ -871,11 +1008,43 @@ final class GuideStore: ObservableObject {
     /// with partial XMLTV coverage lose their stub until the next
     /// per-cell prefetch lands — acceptable given the alternative
     /// is a multi-second frozen UI.
+    /// Returns `true` when the fetch+parse+merge completed and at
+    /// least some programs landed in `programs`. Returns `false` on
+    /// network/HTTP/parse failure so callers can fall through to a
+    /// non-XMLTV backstop. The Dispatcharr-specific 403 case
+    /// (LAN-only `/output/epg` policy) is the v1.6.22 reason this
+    /// signal exists; Dispatcharr also publishes its programs via
+    /// `/api/epg/grid/` (no categories), and `EPGGuideView.fetchDispatcharr`
+    /// uses the false return to fall through to that endpoint
+    /// instead of leaving the Guide grid empty.
     private func performXMLTVFetch(url: URL, channels: [ChannelDisplayItem],
-                                   windowStart: Date, windowEnd: Date) async {
-        guard let parsed = try? await XMLTVParser.fetchAndParse(url: url) else {
-            debugLog("📺 XMLTV fetch/parse failed for \(url.host ?? "?")")
-            return
+                                   windowStart: Date, windowEnd: Date,
+                                   headers: [String: String]) async -> Bool {
+        // v1.6.22: log the actual error instead of swallowing it via
+        // `try?`. The previous "XMLTV fetch/parse failed for <host>"
+        // line told us nothing about WHY (auth? timeout? parse error?),
+        // which made Freyguy1975's 403-on-/output/epg invisible until
+        // we curl-probed the endpoint manually. Surface status + error
+        // so the next case is diagnosable from the log alone.
+        let parsed: [ParsedEPGProgram]
+        do {
+            parsed = try await XMLTVParser.fetchAndParse(url: url, headers: headers)
+            debugLog("📺 XMLTV fetched OK from \(url.host ?? "?") (headers=\(headers.count), \(parsed.count) programs parsed)")
+        } catch let APIError.serverError(code) {
+            // v1.6.22: spell out the most common WAN-deployment
+            // root cause when we hit 403. Dispatcharr 0.23.0+
+            // defaults `/output/epg` to LAN-only. Every Cloudflare
+            // tunnel / Synology QuickConnect / public hostname user
+            // hits this.
+            if code == 403 {
+                debugLog("📺 XMLTV fetch failed for \(url.host ?? "?"): HTTP 403 (headers=\(headers.count)). Likely Dispatcharr's M3U/EPG Network Access policy blocking non-LAN clients (default since Dispatcharr 0.23.0). Fix in Dispatcharr → Settings → Network Access → 'M3U / EPG Endpoints': add 0.0.0.0/0,::/0 or the client's public IP.")
+            } else {
+                debugLog("📺 XMLTV fetch failed for \(url.host ?? "?"): HTTP \(code) (headers=\(headers.count))")
+            }
+            return false
+        } catch {
+            debugLog("📺 XMLTV fetch failed for \(url.host ?? "?"): \(error.localizedDescription) (headers=\(headers.count))")
+            return false
         }
 
         // Build channel-lookup dictionaries on the MainActor. All
@@ -964,13 +1133,14 @@ final class GuideStore: ObservableObject {
 
         // Single @Published write on MainActor. SwiftUI sees one
         // invalidation instead of 98k (which is what the old
-        // beginBatch/endBatch pair was also designed to do — but
+        // beginBatch/endBatch pair was also designed to do, but
         // that version still ran the merge loop on main).
         programs = result.dict
         debugLog("📺 XMLTV \(hostLabel): \(result.matched) programs matched, \(result.missed) skipped (no channel)")
         // Back-fill ChannelStore so Tint Channel Cards reflects
         // the XMLTV categories on every channel row.
         ChannelStore.shared.applyXMLTVCategories(result.currentCategoriesByChannelID)
+        return true
     }
 
     // MARK: - Rolling Prefetch
@@ -1105,6 +1275,20 @@ final class GuideStore: ObservableObject {
         // would otherwise keep working its way through the entire
         // visible channel list, each cell taking 5s to fail.
         guard !prefetchCircuitBreakerTripped else { return }
+        // v1.6.22: don't fire per-cell prefetch while a bulk
+        // `fetchUpcoming` is in flight. On large Dispatcharr
+        // instances (jesmannstl: 2,186 channels, ~19,500 EPGData
+        // rows) the bulk grid fetch can take 90+ seconds, and
+        // racing 20 visible-cell requests against it on the same
+        // worker pool drowns the upstream uWSGI workers; the
+        // grid response gets truncated mid-stream, returning
+        // NSURLError -1017 "cannot parse response", and per-cell
+        // requests time out at 5s each, tripping the circuit
+        // breaker. Deferring per-cell prefetch until the bulk
+        // path completes lets the server breathe. After the bulk
+        // finishes successfully, cells already have data; if the
+        // bulk fails, the user can pull-to-refresh to retry.
+        guard !isLoading else { return }
 
         // Skip the per-channel network fetch when we already have
         // upcoming program data for this channel from the bulk

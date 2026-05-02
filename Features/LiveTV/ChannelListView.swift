@@ -1207,6 +1207,17 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// (M3U) or any future format change. `nil` for non-Dispatcharr
     /// providers; record-to-server is gated on this being non-nil.
     var dispatcharrChannelID: Int? = nil
+    /// Dispatcharr-only: the channel's `epg_data_id` foreign-key
+    /// integer (`Channel.epg_data_id` in Dispatcharr's models). v1.6.22
+    /// uses this to bridge to `/api/epg/epgdata/`'s `tvg_id` value
+    /// when matching the bulk grid response to channels. About 25%
+    /// of real-world channels have `Channel.tvg_id !=
+    /// EPGData.tvg_id` (EPGData is set at XMLTV ingest, Channel is
+    /// user-configurable). Without this bridge, those channels
+    /// render blank in the Live TV guide. `nil` for non-Dispatcharr
+    /// providers, or for Dispatcharr channels with no linked EPG
+    /// source.
+    var dispatcharrEPGDataID: Int? = nil
     var currentProgram: String? = nil
     var currentProgramDescription: String? = nil
     var currentProgramStart: Date? = nil

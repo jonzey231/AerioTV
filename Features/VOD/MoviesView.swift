@@ -172,7 +172,22 @@ struct MoviesView: View {
             #endif
             .onAppear {
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
-                if vodStore.movies.isEmpty && !vodStore.isLoadingMovies {
+                // v1.6.22: same guard as TVShowsView.onAppear. The
+                // previous `movies.isEmpty && !isLoadingMovies`
+                // check re-fired refreshMovies every time SwiftUI
+                // rebuilt the view after a legitimately-empty load,
+                // producing a refresh loop. Compare the active
+                // server's id to `currentMoviesServerID` (set when
+                // a load begins) so we tell "fresh server" from
+                // "already tried this server, server has no
+                // movies". Pull-to-refresh and the Try Again
+                // button still bypass this guard.
+                let activeServerID = (servers.first(where: { $0.isActive }) ?? servers.first)?.id
+                let alreadyTriedThisServer = activeServerID != nil
+                    && vodStore.currentMoviesServerID == activeServerID
+                if vodStore.movies.isEmpty
+                    && !vodStore.isLoadingMovies
+                    && !alreadyTriedThisServer {
                     vodStore.refreshMovies(servers: servers)
                 }
             }

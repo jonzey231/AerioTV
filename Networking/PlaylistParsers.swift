@@ -157,14 +157,31 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
         return instance.programmes
     }
 
-    static func fetchAndParse(url: URL) async throws -> [ParsedEPGProgram] {
+    /// Fetches and parses an XMLTV document.
+    ///
+    /// `headers` lets callers attach auth that the XMLTV endpoint
+    /// requires. Dispatcharr's `/output/epg` returns HTTP 403 on
+    /// locked-down deployments (e.g. Freyguy1975's Synology setup,
+    /// v1.6.22) when called without an X-API-Key + Authorization
+    /// pair, even though the same key works for `/api/epg/grid/`.
+    /// Passing `DispatcharrAPI.streamAuthHeaders` here closes the
+    /// gap. Empty dict for M3U / public XMLTV URLs preserves the
+    /// previous behaviour.
+    static func fetchAndParse(url: URL, headers: [String: String] = [:]) async throws -> [ParsedEPGProgram] {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 60
         let session = URLSession(configuration: config)
-        let (data, response) = try await session.data(from: url)
-        guard let http = response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode) else {
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
+        }
+        guard (200...299).contains(http.statusCode) else {
+            // Surface the status as `serverError` so callers can
+            // distinguish 401/403/404/etc from generic invalidResponse
+            // and surface a useful diagnostic in the log.
+            throw APIError.serverError(http.statusCode)
         }
         return parse(data: data)
     }

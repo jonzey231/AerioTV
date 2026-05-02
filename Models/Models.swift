@@ -583,6 +583,15 @@ final class Recording {
     var localFilePath: String?
     /// Dispatcharr-assigned integer recording ID. Nil for local recordings.
     var remoteRecordingID: Int?
+    /// Server-provided playback URL path (relative, e.g.
+    /// `/api/channels/recordings/<id>/file/` for completed,
+    /// `/api/channels/recordings/<id>/hls/index.m3u8` for
+    /// in-progress on Dispatcharr's new DVR pipeline). Stored
+    /// here so `MyRecordingsView` can hand mpv the right URL
+    /// without inspecting status. Nil on older Dispatcharr builds
+    /// that don't emit `custom_properties.file_url`; callers
+    /// fall back to the constructed `/file/` path. v1.6.22.
+    var dispatcharrFileURL: String?
     var fileSizeBytes: Int64
     /// Which `ServerConnection` this recording belongs to (UUID string).
     var serverID: String
@@ -602,6 +611,7 @@ final class Recording {
          status: RecordingStatus = .scheduled,
          localFilePath: String? = nil,
          remoteRecordingID: Int? = nil,
+         dispatcharrFileURL: String? = nil,
          fileSizeBytes: Int64 = 0,
          serverID: String,
          failureReason: String? = nil) {
@@ -618,6 +628,7 @@ final class Recording {
         self.statusRaw = status.rawValue
         self.localFilePath = localFilePath
         self.remoteRecordingID = remoteRecordingID
+        self.dispatcharrFileURL = dispatcharrFileURL
         self.fileSizeBytes = fileSizeBytes
         self.serverID = serverID
         self.createdAt = Date()

@@ -311,6 +311,24 @@ struct MyRecordingsView: View {
         }
 
         if rec.isInProgress {
+            // v1.6.22: Dispatcharr's new DVR pipeline serves an HLS
+            // playlist for in-progress recordings via
+            // `/api/channels/recordings/<id>/hls/index.m3u8`. When
+            // the server emitted that URL into custom_properties.file_url
+            // (which we mirror to `rec.dispatcharrFileURL`), expose
+            // a "Watch Live" action so the user can play the
+            // recording as it captures. Older Dispatcharr builds
+            // without this pipeline don't populate the URL, so the
+            // button stays hidden for them.
+            if rec.destination == .dispatcharrServer,
+               rec.dispatcharrFileURL != nil,
+               rec.remoteRecordingID != nil {
+                Button {
+                    playServerRecording(rec)
+                } label: {
+                    Label("Watch Live", systemImage: "play.fill")
+                }
+            }
             Button {
                 stopRecording(rec)
             } label: {
@@ -424,11 +442,30 @@ struct MyRecordingsView: View {
                               authMode: server.dispatcharrHeaderMode)
     }
 
-    /// tvOS-only: tapping a completed row plays it without requiring the
-    /// context menu. In-progress/scheduled rows do nothing on tap —
-    /// interaction goes through the context menu (Stop / Cancel).
+    /// tvOS-only: tapping a row plays it without requiring the
+    /// context menu. v1.6.22: in-progress Dispatcharr-server
+    /// recordings are now playable via the server's new HLS DVR
+    /// pipeline (`/api/channels/recordings/<id>/hls/index.m3u8`),
+    /// so a row whose status is `.recording` can also tap-to-play
+    /// as long as the server emitted `custom_properties.file_url`
+    /// in the recording metadata (we read it into
+    /// `rec.dispatcharrFileURL`). Local in-progress recordings
+    /// can't play yet (the file is open by `LocalRecordingSession`
+    /// and reading it concurrently is fragile). Scheduled rows
+    /// still no-op on tap; the user uses the context menu to
+    /// cancel them.
     private func playIfCompleted(_ rec: Recording) {
-        guard rec.isCompleted || rec.status == .stopped else { return }
+        let canPlay: Bool
+        if rec.isCompleted || rec.status == .stopped {
+            canPlay = true
+        } else if rec.status == .recording,
+                  rec.destination == .dispatcharrServer,
+                  rec.dispatcharrFileURL != nil {
+            canPlay = true
+        } else {
+            canPlay = false
+        }
+        guard canPlay else { return }
         if rec.destination == .local, let path = rec.localFilePath {
             playRecording(rec, path: path)
         } else if rec.destination == .dispatcharrServer, rec.remoteRecordingID != nil {
@@ -474,29 +511,62 @@ struct MyRecordingsView: View {
         )
     }
 
-    /// v1.6.8 (B2-partial): plays a completed Dispatcharr server
-    /// recording. The `/api/channels/recordings/<id>/file/` endpoint
-    /// was originally documented as `AllowAny` (no auth needed), but
-    /// v1.6.20 saw HTTP 503 from a user's deployment on this exact
-    /// path. Some Dispatcharr builds tightened the route to require
-    /// the same auth shape as the rest of the API. Now we pass the
-    /// per-server `authHeaders` (which honour the auto-detected
-    /// `dispatcharrHeaderMode`, whether X-API-Key alone, dual, or bearer)
-    /// to mpv via `http-header-fields`. Harmless on builds that are
-    /// still AllowAny (the extra headers are simply ignored), and
-    /// fixes 503 on builds that aren't.
+    /// v1.6.8 (B2-partial), evolved in v1.6.22: plays a Dispatcharr
+    /// server recording (completed OR in-progress).
+    ///
+    /// URL strategy:
+    ///   1. Prefer `rec.dispatcharrFileURL`: the server-provided
+    ///      `custom_properties.file_url` field. For completed
+    ///      recordings this is `/api/channels/recordings/<id>/file/`
+    ///      (raw media file). For in-progress recordings on
+    ///      Dispatcharr's new DVR pipeline it's
+    ///      `/api/channels/recordings/<id>/hls/index.m3u8`
+    ///      (HLS playlist that lets mpv watch the recording while
+    ///      it's still being captured).
+    ///   2. Fall back to the constructed `/file/` URL on older
+    ///      Dispatcharr builds that don't emit `file_url`. Those
+    ///      builds also don't have the HLS pipeline, so the only
+    ///      playable recordings on them are completed ones, and
+    ///      `/file/` is correct.
+    ///
+    /// Auth headers: the `/file/` endpoint was historically AllowAny
+    /// but v1.6.20 found a deployment that tightened it to require
+    /// the per-server auth shape. The new `/hls/...` endpoint is
+    /// JWT/ApiKey-required from day one. We always pass
+    /// `server.authHeaders` (X-API-Key + UA, plus Authorization in
+    /// `.both` mode) to mpv via `http-header-fields`; the segment
+    /// fetches inside the HLS playlist also re-route through
+    /// `/api/channels/recordings/<id>/hls/<segment>` so the same
+    /// headers carry through.
     private func playServerRecording(_ rec: Recording) {
         guard let server = servers.first(where: { $0.id.uuidString == rec.serverID }),
               server.type == .dispatcharrAPI,
               let api = apiForRecording(rec),
-              let remoteID = rec.remoteRecordingID,
-              let url = api.recordingPlaybackURL(id: remoteID) else {
-            debugLog("⚠️ Cannot play server recording. Missing server / api / remoteID / URL for \(rec.programTitle)")
+              let remoteID = rec.remoteRecordingID else {
+            debugLog("⚠️ Cannot play server recording. Missing server / api / remoteID for \(rec.programTitle)")
+            return
+        }
+        // Prefer the server's reported file_url (HLS for in-progress,
+        // direct file for completed). Fall back to the constructed
+        // legacy /file/ URL for older builds.
+        let url: URL
+        let urlSource: String
+        if let fileURL = rec.dispatcharrFileURL,
+           !fileURL.isEmpty,
+           let resolved = resolveRecordingURL(server: server, relative: fileURL) {
+            url = resolved
+            urlSource = fileURL.contains(".m3u8") ? "server-hls" : "server-file"
+        } else if let fallback = api.recordingPlaybackURL(id: remoteID) {
+            url = fallback
+            urlSource = "legacy-file"
+        } else {
+            debugLog("⚠️ Cannot play server recording. URL construction failed for \(rec.programTitle)")
             return
         }
         let headers = server.authHeaders
         let headerKeys = headers.keys.sorted().joined(separator: ",")
-        debugLog("▶️ Play server recording: id=\(remoteID) url=\(url.absoluteString) headers=\(headerKeys)")
+        let inProgressTag = (rec.status == .recording) ? " [IN-PROGRESS]" : ""
+        debugLog("▶️ Play server recording\(inProgressTag): id=\(remoteID) url=\(url.absoluteString) source=\(urlSource) headers=\(headerKeys)")
         // v1.6.18 — see `playRecording` above for the rationale.
         // Same fix shape: stop the live stream before mounting the
         // recording's fullScreenCover so two mpv instances aren't
@@ -505,6 +575,24 @@ struct MyRecordingsView: View {
         playingRecording = PlayingRecording(
             id: rec.id, url: url, title: rec.programTitle, headers: headers
         )
+    }
+
+    /// Resolves the server-provided `file_url` (which Dispatcharr
+    /// emits as a relative path, e.g.
+    /// `/api/channels/recordings/61/hls/index.m3u8`) against the
+    /// active server's effective base URL. Some deployments emit
+    /// an absolute URL already; `URL(string:relativeTo:)` handles
+    /// both forms; an absolute string ignores the base, a relative
+    /// one is anchored to it.
+    private func resolveRecordingURL(server: ServerConnection, relative: String) -> URL? {
+        let trimmed = relative.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let absolute = URL(string: trimmed), absolute.scheme != nil {
+            return absolute
+        }
+        let base = server.effectiveBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let baseURL = URL(string: base) else { return nil }
+        return URL(string: trimmed, relativeTo: baseURL)?.absoluteURL
     }
 
     private func stopRecording(_ rec: Recording) {

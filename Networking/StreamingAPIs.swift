@@ -102,6 +102,11 @@ struct XtreamCodesAPI {
     }()
     private var session: URLSession { Self.session }
 
+    /// Reusable decoder. v1.6.22: previously every decode call
+    /// allocated a fresh `JSONDecoder()`. JSONDecoder is thread-safe
+    /// for concurrent `decode(...)` so a single static instance is fine.
+    private static let jsonDecoder = JSONDecoder()
+
     // MARK: - Account Info / Verify
     func verifyConnection() async throws -> XtreamAccountInfo {
         let url = try buildURL(path: "/player_api.php", params: ["action": ""])
@@ -192,12 +197,6 @@ struct XtreamCodesAPI {
         DebugLogger.shared.log("XC get_series: non-array response (\(data.count) bytes) — treating as empty",
                                category: "VOD", level: .warning)
         return []
-    }
-
-    // MARK: - XMLTV EPG URL (for guide)
-    func xmltvURL() -> URL? {
-        let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        return URL(string: "\(base)/xmltv.php?username=\(username)&password=\(password)")
     }
 
     // MARK: - EPG (short)
@@ -363,14 +362,14 @@ struct XtreamCodesAPI {
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do {
-            return try JSONDecoder().decode(type, from: data)
+            return try Self.jsonDecoder.decode(type, from: data)
         } catch {
             throw APIError.decodingError(error)
         }
     }
 
     private func decodeDispatcharrServerInfo(from data: Data) throws -> DispatcharrServerInfo {
-        let decoder = JSONDecoder()
+        let decoder = Self.jsonDecoder
 
         // Most common: { "version": "...", ... }
         if let direct = try? decoder.decode(DispatcharrServerInfo.self, from: data) {
@@ -699,10 +698,38 @@ struct DispatcharrAPI {
     }()
     private var session: URLSession { Self.session }
 
+    /// Reusable decoder. v1.6.22: previously every decode site
+    /// (~18 in this class) constructed a fresh `JSONDecoder()`,
+    /// which is wasteful on the initial-sync hot path. JSONDecoder
+    /// is thread-safe for concurrent `decode(...)` calls so a
+    /// single static instance is fine. No custom strategies are
+    /// configured anywhere in DispatcharrAPI (key strategies and
+    /// date strategies are explicit per-model via CodingKeys +
+    /// per-field type juggling), so a default decoder suffices.
+    private static let jsonDecoder = JSONDecoder()
+    private var decoder: JSONDecoder { Self.jsonDecoder }
+
     /// Headers for the current `authMode`. All other DispatcharrAPI
     /// methods read this — only `verifyConnection` overrides it during
     /// auth-shape discovery (see `headers(for:)`).
     private var headers: [String: String] { headers(for: authMode) }
+
+    /// Auth + UA headers only, no JSON content negotiation.
+    ///
+    /// Use this when calling Dispatcharr endpoints that don't return
+    /// JSON, notably `/output/epg` (XMLTV stream). Locked-down
+    /// deployments require the same X-API-Key / Authorization that
+    /// `/api/*` does, but adding `Accept: application/json` to a
+    /// non-JSON endpoint can trip content-type middleware on some
+    /// builds. Stripped here to keep the request minimal.
+    /// v1.6.22: Freyguy1975's Synology setup returned 403 on the
+    /// XMLTV stream until headers were attached.
+    var streamAuthHeaders: [String: String] {
+        var h = headers
+        h.removeValue(forKey: "Content-Type")
+        h.removeValue(forKey: "Accept")
+        return h
+    }
 
     /// Builds the request header dictionary for an explicit auth mode.
     /// Used by `verifyConnection` to iterate header shapes against a
@@ -1085,7 +1112,7 @@ struct DispatcharrAPI {
             let (data, response) = try await loggedData(for: request)
             try validate(response: response, data: data)
 
-            if let list = try? JSONDecoder().decode([T].self, from: data) {
+            if let list = try? Self.jsonDecoder.decode([T].self, from: data) {
                 allItems += list
                 break
             }
@@ -1142,7 +1169,7 @@ struct DispatcharrAPI {
         }
         let (data, response) = try await loggedData(for: request)
         try validate(response: response)
-        if let list = try? JSONDecoder().decode([DispatcharrCurrentProgram].self, from: data) {
+        if let list = try? Self.jsonDecoder.decode([DispatcharrCurrentProgram].self, from: data) {
             return list
         }
         let wrapped = try decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data)
@@ -1157,39 +1184,150 @@ struct DispatcharrAPI {
         let url = try buildURL(path: "/api/epg/grid/")
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        // 60s for the initial response headers + body start. Bumped
-        // from 30s because large Dispatcharr instances (thousands of
-        // channels × 25 hours of EPG) serialize a response big enough
-        // that the database query + JSON encode genuinely needs more
-        // time. Callers treat failure as non-fatal (per-cell prefetch
-        // takes over), so false positives cost more UX pain than the
-        // 30s extra worst case.
-        request.timeoutInterval = 60
+        // v1.6.22: bumped 60s → 180s for the request, 180s → 600s
+        // for the resource. jesmannstl's 2,186-channel Dispatcharr
+        // instance with 19,500+ EPGData rows serializes a grid
+        // response so large that the upstream uWSGI worker needs
+        // 90+ seconds to assemble it; the prior 60s fail-fast was
+        // too aggressive. We also see `NSURLError -1017 cannot
+        // parse response` when the reverse proxy gives up on the
+        // upstream and returns a truncated body. Longer timeouts
+        // give the server room to finish; the client-side cost of
+        // a false-positive timeout is paying it once per launch
+        // (the call is non-fatal: bulk grid failure falls through
+        // to lazy per-cell on the Guide tab).
+        request.timeoutInterval = 180
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
 
         // Use a dedicated session with generous timeout for this large response
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 180
+        config.timeoutIntervalForRequest = 180
+        config.timeoutIntervalForResource = 600
         let session = URLSession(configuration: config)
 
         // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
-        let (data, response) = try await HTTPRouter.data(for: request, using: session)
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await HTTPRouter.data(for: request, using: session)
+        } catch let err as URLError where err.code.rawValue == -1017 {
+            // v1.6.22: NSURLError -1017 "cannot parse response"
+            // means the reverse proxy in front of Dispatcharr
+            // (typically nginx) gave up on the upstream uWSGI
+            // worker mid-response and returned a truncated body.
+            // Surface a more actionable message than Foundation's
+            // default. The user's server is overloaded; their
+            // worker pool can't serialize the full 25-hour grid
+            // in time. Retrying won't help unless they restart /
+            // upgrade the container.
+            debugLog("📺 getEPGGrid: HTTP -1017 (cannot parse response). Reverse proxy truncated the upstream response, almost always means the Dispatcharr container is overloaded and worker pool can't serialize the full grid. Retry won't help client-side; user needs to restart or scale their server.")
+            throw err
+        }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw APIError.serverError((response as? HTTPURLResponse)?.statusCode ?? 0)
         }
 
         // Try {"data": [...]} wrapper (current Dispatcharr format)
-        if let dataWrapper = try? JSONDecoder().decode(DispatcharrDataWrapper<DispatcharrCurrentProgram>.self, from: data) {
+        if let dataWrapper = try? Self.jsonDecoder.decode(DispatcharrDataWrapper<DispatcharrCurrentProgram>.self, from: data) {
             return dataWrapper.data
         }
         // Try flat array
-        if let list = try? JSONDecoder().decode([DispatcharrCurrentProgram].self, from: data) {
+        if let list = try? Self.jsonDecoder.decode([DispatcharrCurrentProgram].self, from: data) {
             return list
         }
         // Try {"results": [...]} DRF wrapper
         let wrapped = try decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data)
         return wrapped.results
+    }
+
+    /// Fetches every `EPGData` row from `/api/epg/epgdata/` and
+    /// returns a map from the row's primary key to its `tvg_id`.
+    ///
+    /// Why this exists: `/api/epg/grid/` programs are keyed by the
+    /// EPGData row's `tvg_id`, NOT by the channel's `tvg_id`.
+    /// Channels link to EPGData via the `epg_data_id` integer FK,
+    /// and on real instances 25% of channels have a `tvg_id` that
+    /// disagrees with the EPGData row they point to (EPGData is
+    /// set at XMLTV ingest time; Channel.tvg_id is
+    /// user-configurable). Without resolving channels through
+    /// `epg_data_id → EPGData.tvg_id`, those channels show up as
+    /// blank rows in the guide because the grid lookup misses.
+    /// ECM (Enhanced Channel Manager) uses this same pattern.
+    ///
+    /// EPGData can be very large (40k+ rows on a Schedules Direct
+    /// + multi-source setup), so this paginates via fetchAllPages.
+    /// Callers should cache the result for the life of the EPG
+    /// fetch (it doesn't change between bulk grid calls).
+    func getAllEPGData() async throws -> [Int: String] {
+        let rows = try await fetchAllPages(DispatcharrEPGData.self,
+                                            firstPath: "/api/epg/epgdata/?page_size=500")
+        var map: [Int: String] = [:]
+        map.reserveCapacity(rows.count)
+        for row in rows where !row.tvgID.isEmpty {
+            map[row.id] = row.tvgID
+        }
+        return map
+    }
+
+    /// Fetches one program's rich detail (categories, rating, etc.)
+    /// from `/api/epg/programs/<id>/`. v1.6.22 uses this to recover
+    /// the `<category>` data that `/api/epg/grid/` deliberately
+    /// strips, so the Live-TV "Tint Channel Cards" stripe and Guide
+    /// grid cell tinting work on Dispatcharr-API mode without any
+    /// XMLTV-stream dependency. API-only path. ~40ms per call on a
+    /// typical Dispatcharr instance, so fanning out N=300+ for
+    /// currently-airing programs at cap-of-4 concurrency completes
+    /// in a few seconds in the background.
+    func getProgramDetail(id: Int) async throws -> DispatcharrProgramDetail {
+        let url = try buildURL(path: "/api/epg/programs/\(id)/")
+        // v1.6.22: bumped 8s → 30s. The fan-out runs after a
+        // successful bulk grid (which itself can take 90s+ on
+        // overloaded servers). 8s was misaligned with that regime
+        // and silently failed enrichment exactly when the grid
+        // was already proving the server is responsive but slow.
+        // 30s gives slow-but-alive servers room while still failing
+        // fast enough on a truly dead one.
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.httpMethod = "GET"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await HTTPRouter.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw APIError.serverError((response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        return try Self.jsonDecoder.decode(DispatcharrProgramDetail.self, from: data)
+    }
+
+    /// Bulk category enrichment: takes a set of program IDs and
+    /// returns `[programID: categoriesString]`. Categories are
+    /// joined with commas (matches the format `applyXMLTVCategories`
+    /// expects). Throttled at cap-of-4 concurrency by an internal
+    /// AsyncSemaphore so we don't hammer the upstream Dispatcharr
+    /// uWSGI / Daphne pool. Errors per program are swallowed (we
+    /// just skip enrichment for that one) so a single 5xx can't
+    /// block the whole batch.
+    func enrichCategories(programIDs: [Int]) async -> [Int: String] {
+        guard !programIDs.isEmpty else { return [:] }
+        let semaphore = AsyncSemaphore(value: 4)
+        var results: [Int: String] = [:]
+        await withTaskGroup(of: (Int, String?).self) { group in
+            for pid in programIDs {
+                group.addTask { [self] in
+                    await semaphore.wait()
+                    defer { Task { await semaphore.signal() } }
+                    do {
+                        let detail = try await getProgramDetail(id: pid)
+                        let cats = detail.categories.joined(separator: ",")
+                        return (pid, cats.isEmpty ? nil : cats)
+                    } catch {
+                        return (pid, nil)
+                    }
+                }
+            }
+            for await (pid, cats) in group {
+                if let cats = cats { results[pid] = cats }
+            }
+        }
+        return results
     }
 
     // MARK: - Upcoming programs (next N programs after the current one)
@@ -1209,14 +1347,18 @@ struct DispatcharrAPI {
         }
 
         let url = try buildURL(path: queryPath)
-        // 5s fail-fast. The prior 10s tied up one uwsgi worker per
-        // visible guide cell for 10 seconds when the server was
-        // under duress, and per-cell prefetch is non-essential — the
-        // bulk `getEPGGrid` path normally carries the data. Shorter
-        // timeouts mean faster per-cell failure, which pairs with
-        // the GuideStore circuit breaker to stop firing at all
-        // once the server is proven unresponsive.
-        var request = URLRequest(url: url, timeoutInterval: 5)
+        // v1.6.22: bumped 5s → 15s. The prior fail-fast was set
+        // when per-cell prefetch raced the bulk grid on the same
+        // worker pool; jesmannstl's overloaded server failed every
+        // 5s call, tripping the circuit breaker before the bulk
+        // grid even started. Now that `prefetchIfNeeded` waits for
+        // `isLoading == false` (so it never races the bulk grid),
+        // the per-cell budget can be more generous. 15s is short
+        // enough to fail fast on a truly dead server and pair with
+        // the circuit breaker, but long enough to succeed on a
+        // slow-but-alive Dispatcharr that needs a few seconds per
+        // channel-filtered programs query.
+        var request = URLRequest(url: url, timeoutInterval: 15)
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
         let (data, response) = try await HTTPRouter.data(for: request)
@@ -1225,7 +1367,7 @@ struct DispatcharrAPI {
         }
 
         var allItems: [DispatcharrCurrentProgram] = []
-        if let list = try? JSONDecoder().decode([DispatcharrCurrentProgram].self, from: data) {
+        if let list = try? Self.jsonDecoder.decode([DispatcharrCurrentProgram].self, from: data) {
             allItems = list
         } else if let wrapped = try? decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data) {
             allItems = wrapped.results
@@ -1285,7 +1427,7 @@ struct DispatcharrAPI {
             let (data, response) = try await HTTPRouter.data(for: request, using: epgSession)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { break }
 
-            if let list = try? JSONDecoder().decode([DispatcharrCurrentProgram].self, from: data) {
+            if let list = try? Self.jsonDecoder.decode([DispatcharrCurrentProgram].self, from: data) {
                 allItems += list
                 break // flat array = no pagination
             } else if let wrapped = try? decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data) {
@@ -1318,7 +1460,7 @@ struct DispatcharrAPI {
     // server). Smaller pages = faster per-request serialization =
     // workers freed quicker. More round trips, but each is cheap.
     func getVODMovies() async throws -> [DispatcharrVODMovie] {
-        try await fetchAllPages(DispatcharrVODMovie.self, firstPath: "/api/vod/movies/?page_size=25")
+        try await fetchAllPages(DispatcharrVODMovie.self, firstPath: "/api/vod/movies/?page_size=100")
     }
 
     /// v1.6.12: cheap library-size probe used by the AddServer
@@ -1344,10 +1486,10 @@ struct DispatcharrAPI {
         // older Dispatcharr builds return an unwrapped list, in which
         // case we fall back to `.count` of whatever we can decode
         // (defensive only — the modern API always wraps).
-        if let wrapped = try? JSONDecoder().decode(DispatcharrResultsWrapper<DispatcharrVODMovie>.self, from: data) {
+        if let wrapped = try? Self.jsonDecoder.decode(DispatcharrResultsWrapper<DispatcharrVODMovie>.self, from: data) {
             return wrapped.count ?? wrapped.results.count
         }
-        if let list = try? JSONDecoder().decode([DispatcharrVODMovie].self, from: data) {
+        if let list = try? Self.jsonDecoder.decode([DispatcharrVODMovie].self, from: data) {
             return list.count
         }
         return 0
@@ -1361,10 +1503,10 @@ struct DispatcharrAPI {
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         let (data, response) = try await loggedData(for: request)
         try validate(response: response, data: data)
-        if let wrapped = try? JSONDecoder().decode(DispatcharrResultsWrapper<DispatcharrVODSeries>.self, from: data) {
+        if let wrapped = try? Self.jsonDecoder.decode(DispatcharrResultsWrapper<DispatcharrVODSeries>.self, from: data) {
             return wrapped.count ?? wrapped.results.count
         }
-        if let list = try? JSONDecoder().decode([DispatcharrVODSeries].self, from: data) {
+        if let list = try? Self.jsonDecoder.decode([DispatcharrVODSeries].self, from: data) {
             return list.count
         }
         return 0
@@ -1412,7 +1554,7 @@ struct DispatcharrAPI {
     }
 
     func getVODSeries() async throws -> [DispatcharrVODSeries] {
-        try await fetchAllPages(DispatcharrVODSeries.self, firstPath: "/api/vod/series/?page_size=25")
+        try await fetchAllPages(DispatcharrVODSeries.self, firstPath: "/api/vod/series/?page_size=100")
     }
 
     /// Fetches VOD categories from `/api/vod/categories/`.
@@ -1424,7 +1566,7 @@ struct DispatcharrAPI {
     // MARK: - Progressive VOD streams
     // Yields one page at a time so the UI can display partial results immediately
     // instead of waiting for the entire library to load. Critical for large libraries
-    // (e.g. 20 000+ movies ≈ 800 sequential API calls at page_size=25). The
+    // (e.g. 20 000+ movies = 200 sequential API calls at page_size=100). The
     // smaller page size trades more round-trips for shorter per-worker hold time
     // on the Dispatcharr side — a single page_size=100 request was slow enough
     // on big libraries to pin a uwsgi worker for 10+ seconds, which under
@@ -1451,29 +1593,29 @@ struct DispatcharrAPI {
 
     private static func moviesPath(category: String?) -> String {
         guard let category, !category.isEmpty else {
-            return "/api/vod/movies/?page_size=25"
+            return "/api/vod/movies/?page_size=100"
         }
         let encoded = category.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? category
-        return "/api/vod/movies/?page_size=25&category=\(encoded)"
+        return "/api/vod/movies/?page_size=100&category=\(encoded)"
     }
 
     private static func seriesPath(category: String?) -> String {
         guard let category, !category.isEmpty else {
-            return "/api/vod/series/?page_size=25"
+            return "/api/vod/series/?page_size=100"
         }
         let encoded = category.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? category
-        return "/api/vod/series/?page_size=25&category=\(encoded)"
+        return "/api/vod/series/?page_size=100&category=\(encoded)"
     }
 
     /// Server-side search — uses DRF's ?search= filter so items not yet locally fetched are found.
     func searchVODMoviesStream(query: String) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        return makePageStream(firstPath: "/api/vod/movies/?search=\(encoded)&page_size=25")
+        return makePageStream(firstPath: "/api/vod/movies/?search=\(encoded)&page_size=100")
     }
 
     func searchVODSeriesStream(query: String) -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
         let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        return makePageStream(firstPath: "/api/vod/series/?search=\(encoded)&page_size=25")
+        return makePageStream(firstPath: "/api/vod/series/?search=\(encoded)&page_size=100")
     }
 
     /// Hard cap on total items returned by a single paginated stream.
@@ -1583,12 +1725,12 @@ struct DispatcharrAPI {
                         }
 
                         // Flat array (non-paginated response)
-                        if let list = try? JSONDecoder().decode([T].self, from: data) {
+                        if let list = try? Self.jsonDecoder.decode([T].self, from: data) {
                             if !list.isEmpty { continuation.yield(list) }
                             continuation.finish(); return
                         }
                         // DRF paginated wrapper
-                        let wrapped = try JSONDecoder().decode(DispatcharrResultsWrapper<T>.self, from: data)
+                        let wrapped = try Self.jsonDecoder.decode(DispatcharrResultsWrapper<T>.self, from: data)
                         if !wrapped.results.isEmpty {
                             continuation.yield(wrapped.results)
                             totalYielded += wrapped.results.count
@@ -1782,7 +1924,7 @@ struct DispatcharrAPI {
         // Some endpoints return a flat array when there's only one
         // page worth of items. Normalise to the wrapper shape so
         // the caller can branch on `count` uniformly.
-        if let flat = try? JSONDecoder().decode([DispatcharrVODEpisode].self, from: data) {
+        if let flat = try? Self.jsonDecoder.decode([DispatcharrVODEpisode].self, from: data) {
             return DispatcharrResultsWrapper(results: flat, next: nil, count: flat.count)
         }
         return try decode(DispatcharrResultsWrapper<DispatcharrVODEpisode>.self, from: data)
@@ -1939,6 +2081,18 @@ struct DispatcharrAPI {
         let status: String?
         let filePath: String?
         let fileName: String?
+        /// Server-provided playback URL (relative path, e.g.
+        /// `/api/channels/recordings/<id>/file/` for completed
+        /// recordings, or `/api/channels/recordings/<id>/hls/index.m3u8`
+        /// for in-progress ones once the new DVR pipeline is enabled
+        /// on the server). v1.6.22: replaced our hardcoded
+        /// `/file/` URL with this server-provided value so we can
+        /// hand mpv the right URL whether the recording is still
+        /// being captured or already finalized. Nil on older
+        /// Dispatcharr deployments that don't emit this field;
+        /// callers should fall back to the constructed `/file/`
+        /// path in that case.
+        let fileURL: String?
         let programTitle: String?
         let programDescription: String?
         let comskip: Bool
@@ -1972,6 +2126,14 @@ struct DispatcharrAPI {
             self.status = props["status"] as? String
             self.filePath = props["file_path"] as? String
             self.fileName = props["file_name"] as? String
+            // v1.6.22: prefer `output_file_url` if present (the
+            // remuxed final file for completed recordings). Both
+            // are populated by the new DVR pipeline; for in-progress
+            // recordings only `file_url` is set and points at the
+            // HLS playlist. Older Dispatcharr builds emit only
+            // `file_url`, also fine.
+            self.fileURL = (props["output_file_url"] as? String)
+                ?? (props["file_url"] as? String)
             if let program = props["program"] as? [String: Any] {
                 self.programTitle = program["title"] as? String
                 self.programDescription = program["description"] as? String
@@ -2296,7 +2458,7 @@ struct DispatcharrAPI {
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do {
-            return try JSONDecoder().decode(type, from: data)
+            return try Self.jsonDecoder.decode(type, from: data)
         } catch {
             DebugLogger.shared.logDecodeError(type: String(describing: T.self), error: error,
                                               payloadSnippet: String(data: data, encoding: .utf8).map { String($0.prefix(200)) })
@@ -2305,7 +2467,7 @@ struct DispatcharrAPI {
     }
 
     private func decodeDispatcharrServerInfo(from data: Data) throws -> DispatcharrServerInfo {
-        let decoder = JSONDecoder()
+        let decoder = Self.jsonDecoder
 
         // Most common: { "version": "...", ... }
         if let direct = try? decoder.decode(DispatcharrServerInfo.self, from: data) {
@@ -2504,11 +2666,41 @@ struct DispatcharrChannelSummary: Decodable, Identifiable {
     }
 }
 
+/// One row from `/api/epg/epgdata/`. Provides the bridge between
+/// `Channel.epg_data_id` (FK integer on Channel) and the `tvg_id`
+/// the bulk EPG grid keys programs by. v1.6.22: 25% of channels
+/// on a real Dispatcharr instance have `Channel.tvg_id !=
+/// EPGData.tvg_id` (EPGData is set at XMLTV ingest time, Channel is
+/// user-configurable). Without this lookup, those channels miss
+/// the bulk grid match and render as blank rows in the Live TV
+/// guide. ECM (Enhanced Channel Manager) uses the same pattern.
+struct DispatcharrEPGData: Decodable, Identifiable {
+    let id: Int
+    let tvgID: String
+    let name: String
+    let iconURL: String?
+    let epgSource: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case tvgID = "tvg_id"
+        case iconURL = "icon_url"
+        case epgSource = "epg_source"
+    }
+}
+
 /// Current program for a channel as returned by `/api/epg/current-programs/` or `/api/epg/programs/`.
 /// Schema: ProgramData — fields include tvg_id, title, start_time, end_time, channel, channel_name.
 struct DispatcharrCurrentProgram: Decodable, Identifiable {
     var id: String { "\(tvgID ?? channel.map(String.init) ?? "?")-\(title)-\(startTime?.toDate()?.timeIntervalSince1970 ?? 0)" }
 
+    /// Dispatcharr's server-side primary key for this `ProgramData`
+    /// row. Required to call `/api/epg/programs/<id>/` for the rich
+    /// detail (categories, rating, credits, icons) the bulk grid
+    /// strips. v1.6.22 introduced this field; the synthetic `id`
+    /// computed property above stays for backwards compat with any
+    /// caller that needs a stable identity for diffing.
+    let programID: Int?
     let tvgID: String?
     let channel: Int?        // Dispatcharr channel ID
     let channelName: String? // Channel display name (if returned)
@@ -2519,6 +2711,7 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
     let endTime: DispatcharrDateValue?
 
     enum CodingKeys: String, CodingKey {
+        case programID = "id"
         case tvgID = "tvg_id"
         case channel
         case channelName = "channel_name"
@@ -2531,6 +2724,11 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Server returns id as Int; some legacy/dummy entries use a
+        // string ("dummy-custom-..."). Try Int first, fall back to
+        // nil for non-numeric ids (the detail endpoint won't accept
+        // them anyway, so we just skip enrichment for those).
+        programID = try? c.decode(Int.self, forKey: .programID)
         tvgID = try? c.decode(String.self, forKey: .tvgID)
         channel = try? c.decode(Int.self, forKey: .channel)
         channelName = try? c.decode(String.self, forKey: .channelName)
@@ -2539,6 +2737,30 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
         subTitle = (try? c.decode(String.self, forKey: .subTitle)) ?? ""
         startTime = try? c.decode(DispatcharrDateValue.self, forKey: .startTime)
         endTime = try? c.decode(DispatcharrDateValue.self, forKey: .endTime)
+    }
+}
+
+/// Rich program data from `/api/epg/programs/<id>/`: the only REST
+/// endpoint that returns the `categories` array, rating, credits,
+/// and program artwork. v1.6.22 uses this for category enrichment
+/// (Tint Channel Cards) on Dispatcharr-API mode, where the bulk
+/// `/api/epg/grid/` deliberately strips category data via the
+/// server's hand-rolled serializer (`apps/epg/api_views.py`'s
+/// `EPGGridAPIView.get`). API-only path; no XMLTV stream involved.
+struct DispatcharrProgramDetail: Decodable {
+    let id: Int
+    let categories: [String]
+    let rating: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, categories, rating
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        categories = (try? c.decode([String].self, forKey: .categories)) ?? []
+        rating = try? c.decode(String.self, forKey: .rating)
     }
 }
 

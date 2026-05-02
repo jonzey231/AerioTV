@@ -1,5 +1,231 @@
 # Changelog
 
+## v1.6.22 - 2026-05-02
+
+### Fixed
+
+- **Series tab now populates on Dispatcharr servers that don't
+  tag VOD items with `custom_properties.category_id`.** Real-world
+  repro on a Synology Dispatcharr 0.23.0 deployment with 16,357
+  movies and a configured Series library: movies populated fine
+  (5,000 displayed via the v1.6.16 fallback path), but Series
+  showed "No Series" because every series item lacked
+  `category_id` and the per-item category filter rejected all of
+  them. Series now mirrors the long-standing Movies behavior:
+  when `category_id` is missing, the item is bucketed under the
+  user's first enabled series category. Per-category grouping
+  for series on these servers becomes best-effort (one bucket),
+  but the user sees their content. Added the same
+  `taggedFromCategoryID` / `taggedFromFallback` counters to the
+  done log line so future diagnoses are easy.
+- **Stopped the VOD refresh-loop on the Series and Movies tabs.**
+  `TVShowsView.onAppear` and `MoviesView.onAppear` had a guard
+  of `series.isEmpty && !isLoadingSeries` (and the movies
+  equivalent) that re-fired `refreshSeries` every time SwiftUI
+  rebuilt the view after a load that legitimately returned zero
+  items. The Freyguy1975 repro showed dozens of identical
+  `loadSeries: starting` / `done, 0 series` cycles burning CPU
+  and HTTP requests after the orchestrator had already
+  completed. The guard now compares the active server's id to
+  `currentSeriesServerID` (set the moment a load begins, retained
+  even when the load returns zero items) so we tell "fresh
+  server we haven't tried yet" from "already tried, server has
+  no series." Pull-to-refresh and the empty-state Try Again
+  button still bypass the guard since they call
+  `refreshSeries` / `refreshMovies` directly. Same fix applied
+  to `MoviesView.onAppear`.
+- **Dispatcharr EPG: API-only path with EPGData bridge for
+  mismatched tvg_ids.** This is the big one. Two compounding
+  problems were causing channels to render blank in the Live TV
+  guide on Dispatcharr-API mode for any user with a public-facing
+  hostname (Cloudflare, Synology QuickConnect, port-forward).
+
+  Problem 1: We followed the JSON bulk grid with a second pass
+  against `{baseURL}/output/epg?tvg_id_source=tvg_id` to pick up
+  `<category>` tags. That endpoint is not part of Dispatcharr's
+  REST API, and Dispatcharr 0.23.0 (commit 3c55649, 2026-02-01)
+  made it LAN-only by default via
+  `network_access_allowed("M3U_EPG")`. Verified directly: the
+  same API key returns 200 on a LAN URL and 403 on the public
+  hostname of the same instance. We fell back to the bulk grid
+  silently and the user never knew anything went wrong.
+
+  Problem 2: The bulk grid keys programs by `EPGData.tvg_id`
+  (the value Dispatcharr's XMLTV parser stamped at ingest), but
+  our channel-side lookup keyed by `Channel.tvg_id` (the value
+  the user can edit in Dispatcharr's web UI). On a real
+  instance, 25% of channels with EPG data have these two
+  fields disagreeing (verified by sampling the first 80 channels
+  with `epg_data_id` set). Those channels missed the lookup and
+  rendered blank, even with `/output/epg` working.
+
+  v1.6.22 fixes both at once. `/output/epg` is dropped entirely
+  from the Dispatcharr-API code path: `ChannelStore.loadAllEPG`
+  and `GuideStore.fetchDispatcharr` now use only `/api/epg/grid/`
+  (which works on every deployment regardless of network
+  policy). To resolve the tvg_id mismatch, both paths first call
+  the new `DispatcharrAPI.getAllEPGData()` (paginated
+  `/api/epg/epgdata/?page_size=500`) to build an
+  `epg_data_id → EPGData.tvg_id` lookup map, then bridge each
+  channel's `epg_data_id` field to the correct grid key. A new
+  `dispatcharrEPGDataID` field on `ChannelDisplayItem` carries
+  the FK from the channel fetch through to the EPG match site.
+  Net effect on tested instances: 100% bulk-grid coverage where
+  the data exists; channels that previously appeared blank now
+  populate. The pattern matches what Enhanced Channel Manager
+  (an established Dispatcharr admin tool) uses for the same
+  problem.
+
+  Audited every Dispatcharr-mode code path (VOD, channels, EPG,
+  playback) by spawning four read-only agents in parallel and
+  one large-scale comparison against Dispatcharr/Teamarr/ECM
+  upstream sources: confirmed the iOS app now uses **only**
+  `/api/*` for metadata and `/proxy/*` for stream URLs. No
+  `/output/epg`, `/output/m3u`, `/xmltv.php`, `/get.php`, or
+  `/player_api.php` calls remain in `dispatcharrAPI` mode.
+
+  Settings copy was updated to remove the now-stale
+  `/output/epg` references.
+- **Category enrichment via `/api/epg/programs/<id>/`.** The
+  bulk `/api/epg/grid/` deliberately strips category data via
+  the server's hand-rolled serializer (`EPGGridAPIView`). The
+  per-program detail endpoint is the only REST path that
+  returns the `categories` array. v1.6.22 fans out detail
+  fetches for the currently-airing program of each channel
+  after the bulk grid completes, throttled at cap-of-4 via
+  AsyncSemaphore (~330 calls at 41ms each = ~3-7s in the
+  background on a typical instance). Results are applied to
+  both `ChannelStore.applyXMLTVCategories` (Live-TV channel
+  card stripe) and the matching airing `GuideProgram.category`
+  in `programs[cid]` (Guide-grid cell tinting). Two new
+  models: `DispatcharrProgramDetail` (id, categories, rating)
+  and a `programID: Int?` field on `DispatcharrCurrentProgram`
+  parsed from the bulk grid's `id` field. Detached fan-out so
+  initial sync isn't blocked; categories tint progressively as
+  responses land.
+- **Watch in-progress Dispatcharr recordings** via the
+  server's new DVR pipeline
+  (`/api/channels/recordings/<id>/hls/{seg_path}`).
+  Dispatcharr's `custom_properties.file_url` field carries
+  either a direct file URL (completed) or an HLS playlist
+  (in-progress) for each recording; we now mirror that field
+  into a new `dispatcharrFileURL: String?` on the SwiftData
+  `Recording` model and use it in `MyRecordingsView.playServerRecording`.
+  Falls back to the legacy hardcoded `/file/` URL on older
+  Dispatcharr builds without the pipeline. Tap-to-play on a
+  `.recording` row is now allowed when the file_url is
+  present; a new "Watch Live" context menu item is gated the
+  same way. Auth headers (`server.authHeaders`) propagate to
+  mpv via `http-header-fields`, and the HLS playlist's segment
+  URLs route through the same wrapper endpoint so auth
+  carries through.
+- **Faster VOD loading on large libraries.** Bumped
+  `/api/vod/movies/` and `/api/vod/series/` paginated calls
+  from `page_size=25` to `page_size=100` (Dispatcharr's hard
+  cap, verified by probing). 4x reduction in HTTP volume per
+  load. For a 16,357-movie library that's 654 paginated calls
+  reduced to 164. Applied to every list/category/search call
+  site.
+- **Future local recordings no longer schedulable as an
+  impossible state** (Codex P1). The Record Program sheet
+  used to offer "This device" as a destination for future
+  Dispatcharr programs, but the row could never start (no iOS
+  background scheduler, no manual-start UI). Three layers of
+  defense in `RecordProgramSheet.swift`: `.onAppear` forces
+  destination to `.dispatcharrServer` when `!isLive`; the
+  destination picker is hidden entirely for future programs
+  (only one valid choice); `scheduleRecording()` coerces
+  belt-and-suspenders if any future call site bypasses the
+  UI gates. Live programs ("Record from Now") still allow
+  both destinations because the recording starts immediately
+  while the app is foregrounded.
+- **EPG performance on overloaded servers.** Three changes
+  driven by jesmannstl's 2,186-channel Cloudflare-tunneled
+  Dispatcharr where the bulk grid response was getting
+  truncated (`NSURLError -1017 cannot parse response`):
+    - `prefetchIfNeeded` now gated on `!isLoading`; per-cell
+      prefetch no longer races the bulk grid for the same
+      uWSGI worker pool. Twenty visible cells each timing out
+      at 5s used to trip the circuit breaker before the grid
+      even started.
+    - `getEPGGrid` request timeout bumped 60s -> 180s,
+      resource 180s -> 600s. Slow-but-alive servers serializing
+      a 2,000+ channel grid need the headroom.
+    - Per-cell `getUpcomingPrograms` timeout bumped 5s -> 15s
+      now that it no longer races the bulk grid.
+    - New diagnostic for `NSURLError -1017`: logs that the
+      reverse proxy truncated the upstream response (server
+      worker pool saturated; client-side retry won't help).
+- **`/api/epg/programs/<id>/` timeout aligned with slow-server
+  regime.** Bumped 8s -> 30s. The fan-out runs after the bulk
+  grid succeeds, which on overloaded servers can take 90s+;
+  8s was misaligned with that regime and silently failed
+  enrichment exactly when the grid was already proving the
+  server is responsive but slow.
+- **Self-healing cache for stuck-sparse states.** A second-order
+  bug surfaced during the XMLTV-removal investigation: when an
+  EPG fetch wrote programs for only a handful of channels (8 of
+  333 in the Freyguy1975 capture), `GuideStore.saveToCache`
+  persisted that partial dataset and `loadFromCache`'s 24h
+  freshness check treated it as canonical on every subsequent
+  launch. Pull-to-refresh worked, but no one knows to do that.
+  The orchestrator (`HomeView` phase 2 EPG) now also checks
+  coverage ratio: if `cacheIsFresh && hasFuturePrograms` BUT
+  `guideStore.programs.count < channelStore.channels.count *
+  0.25`, it logs the sparseness explicitly and forces
+  `loadAllEPG` to run anyway. Healthy Dispatcharr instances
+  cover >70% so the override only fires on genuinely broken
+  cache states.
+- **Diagnostic logging on the (now M3U-only) XMLTV fetch path.**
+  Replaced the `try?` swallow in `performXMLTVFetch` with a
+  logged do/catch that surfaces the HTTP status code, so M3U
+  XMLTV failures (which still go through this function) are
+  diagnosable from the log without curl-probing.
+  `XMLTVParser.fetchAndParse` now accepts an optional `headers`
+  dictionary for callers that need to authenticate to a private
+  XMLTV URL (infrastructure kept for future use; the Dispatcharr
+  call sites that previously passed Dispatcharr auth are
+  retired).
+
+### Changed
+
+- `currentMoviesServerID` and `currentSeriesServerID` on
+  `VODStore` promoted from `private` to
+  `@Published private(set)` so the views' onAppear guards can
+  read them.
+- `EPGGuideView.fetchDispatcharr` enrichment fan-out detached
+  so the Guide tab opens immediately on grid completion;
+  category tints land progressively as detail responses
+  arrive.
+- `DispatcharrAPI` and `XtreamCodesAPI` now share a single
+  static `JSONDecoder` instance instead of allocating one per
+  call. Replaces ~18 per-call instantiations across the
+  initial-sync hot path.
+
+### Infrastructure
+
+- **`project.yml` (XcodeGen) reconciled with the actual
+  project** (Codex P2). Was still describing an older
+  `Dispatcharr`-branded ancestor that would have produced an
+  unsignable project shape if anyone regenerated from it.
+  Renamed to Aerio, replaced bundle IDs
+  (`app.molinete.Dispatcharr` -> `app.molinete.aerio`),
+  app-group identifiers
+  (`group.app.molinete.Dispatcharr` ->
+  `group.app.molinete.aerio.topshelf`), splash resource path
+  (`App/DispatcharrSplash.mp4` -> `App/AerioSplash.mp4`),
+  Top Shelf bundle (`Dispatcharr.TopShelf` ->
+  `aerio.TopShelf`), and version markers (1.6.4 -> 1.6.22).
+  Added a header comment noting the file is informational,
+  not authoritative; `.xcodeproj` remains canonical.
+
+### Removed
+
+- Dead `XtreamCodesAPI.xmltvURL()` helper. Audit confirmed
+  zero callers; constructed credentials in a query string,
+  bad smell. Per-stream EPG enrichment via
+  `getEPG(streamID:)` is the active path for Xtream EPG.
+
 ## v1.6.21 - 2026-05-01
 
 ### Fixed

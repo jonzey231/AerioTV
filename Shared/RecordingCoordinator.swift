@@ -297,6 +297,16 @@ final class RecordingCoordinator: ObservableObject {
                     local.status = newStatus
                     didMutate = true
                 }
+                // v1.6.22: pick up the server-provided playback URL
+                // so an in-progress recording's HLS manifest path
+                // lands on the local row. Status flips during a
+                // recording's lifecycle (.recording → .completed),
+                // and the URL flips with it (HLS m3u8 → file URL),
+                // so we always overwrite.
+                if local.dispatcharrFileURL != r.fileURL {
+                    local.dispatcharrFileURL = r.fileURL
+                    didMutate = true
+                }
             } else {
                 debugLog("🧹 DVR reconcile: server \(serverID) dropped remoteID \(rid) — deleting local row")
                 modelContext.delete(local)
@@ -321,6 +331,7 @@ final class RecordingCoordinator: ObservableObject {
                 destination: .dispatcharrServer,
                 status: status,
                 remoteRecordingID: r.id,
+                dispatcharrFileURL: r.fileURL,
                 serverID: serverID
             )
             modelContext.insert(rec)

@@ -2137,7 +2137,7 @@ struct EditServerSheet: View {
                 } header: {
                     Text("EPG Source").sectionHeaderStyle()
                 } footer: {
-                    Text("Override the XMLTV source AerioTV pulls EPG from. Leave blank to use Dispatcharr's own XMLTV output at /output/epg (the default). Set only if you want to bypass Dispatcharr and fetch XMLTV straight from your upstream provider.")
+                    Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
@@ -2247,7 +2247,7 @@ struct EditServerSheet: View {
                         }
                         tvEditSection("EPG Source") {
                             tvEditField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)
-                            Text("Override the XMLTV source AerioTV pulls EPG from. Leave blank to use Dispatcharr's own XMLTV output at /output/epg (the default, with category data).")
+                            Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
                                 .font(.system(size: 22))
                                 .foregroundColor(.textTertiary)
                                 .padding(.top, 4)
@@ -2456,7 +2456,7 @@ struct EditServerPage: View {
                             }
                             tvSection("EPG Source") {
                                 tvField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)
-                                Text("Override the XMLTV source AerioTV pulls EPG from. Leave blank to use Dispatcharr's own XMLTV output at /output/epg (the default, with category data).")
+                                Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
                                     .font(.system(size: 22))
                                     .foregroundColor(.textTertiary)
                                     .padding(.top, 4)
