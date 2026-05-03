@@ -2,19 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>aps-environment</key>
-	<string>development</string>
-	<key>com.apple.developer.aps-environment</key>
-	<string>development</string>
 	<!--
 	  Required for `NEHotspotNetwork.fetchCurrent()` to return the
 	  connected WiFi SSID on iOS and iPadOS. Without this, iOS returns
 	  nil even when Location (Precise) is granted and the user is on
-	  WiFi. tvOS ignores this key — it has no WiFi-info API.
-	  Both iOS and tvOS targets point at this entitlements file per
-	  project.yml; the previous file `SupportingFiles/Aerio.entitlements`
-	  that also had this key was never referenced by the build and is
-	  now orphaned.
+	  WiFi. tvOS ignores this key (no WiFi-info API there).
+	  Active entitlements files per `Aerio.xcodeproj/project.pbxproj`:
+	  `Aerio_tvOS.entitlements` (this file) for the tvOS target,
+	  `SupportingFiles/Aerio.entitlements` for the iOS target,
+	  `TopShelfExtension/AerioTopShelf.entitlements` for the extension.
 	-->
 	<key>com.apple.developer.networking.wifi-info</key>
 	<true/>
