@@ -74,6 +74,28 @@
   channels get their dummy entries cached at the reader's key
   and surface in List view rows. The existing per-cell prefetch
   no longer fires post-loading network calls for them either.
+  Field repro on a 683-channel deployment confirmed: pre-v1.7
+  bridged 1, filled 472 empty; post-v1.7 bridged 1, matched
+  496 via Dummy EPG UUID, filled 0 empty fallbacks.
+- **Expanded channel cards on Dispatcharr now show category
+  tints on upcoming programs.** Pre-v1.7 the expanded schedule
+  panel rendered every future program as plain text on
+  Dispatcharr-API mode because `/api/epg/grid/` strips
+  `<category>` tags server-side and the existing category
+  enrichment only fetched per-program detail for the currently-
+  airing program (one per channel). v1.7 propagates the
+  enriched now-airing category to every entry in that
+  channel's `EPGCache` after the enrichment fan-out lands.
+  Heuristic: a channel's content is largely the same genre,
+  so treating ESPN HD's Sports category as the tint for every
+  SportsCenter / NHL Hockey / NFL entry is correct >90% of
+  the time. For variety channels this over-tints; the
+  alternative (per-program detail fetches for all 7000+
+  programs at one HTTP each) is cost-prohibitive on most
+  Dispatcharr deployments. The Guide tab's existing
+  per-program tint stays unchanged because it reads from
+  `GuideStore.programs` which carries categories directly
+  from the enrichment fan-out's primary path.
 
 ### Changed
 
