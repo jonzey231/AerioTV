@@ -170,11 +170,83 @@ final class DispatcharrTokenStore: @unchecked Sendable {
 
     // MARK: - Helpers
 
+    // MARK: - Warmup
+
+    /// v1.7.x: refresh (or re-login from Keychain credentials) the
+    /// JWT for a single server. Best-effort; errors are logged but
+    /// never thrown. Called from `AerioApp`'s scene-phase observer
+    /// on `.active` and from the initial-sync hook so cold launches
+    /// land with a fresh access token in the cache before the first
+    /// API call. The api_key fallback path in
+    /// `ServerConnection.authHeaders` keeps the app functional even
+    /// when warmup fails (e.g. server unreachable, network blip),
+    /// so this method's failure modes are non-fatal.
+    ///
+    /// - Parameters:
+    ///   - serverID: the `ServerConnection.id` keying this token
+    ///     pair.
+    ///   - baseURL: `server.effectiveBaseURL` snapshot. Captured by
+    ///     the caller on main so this method can run off-main.
+    ///   - username: `server.username` snapshot.
+    ///   - password: `server.effectivePassword` snapshot
+    ///     (Keychain-resolved before call).
+    ///   - userAgent: `server.effectiveUserAgent` snapshot.
+    ///
+    /// Strategy: try refresh first if a refresh token is cached.
+    /// On `.refreshExpired` (24h+ idle) or any other refresh
+    /// failure, fall back to a fresh login from username + password.
+    /// On both failures, log and return; the api_key fallback
+    /// covers the resulting requests.
+    func warmup(serverID: UUID,
+                baseURL: String,
+                username: String,
+                password: String,
+                userAgent: String) async {
+        // Phase 1: try refresh.
+        if let refresh = refreshToken(for: serverID) {
+            do {
+                let newAccess = try await DispatcharrAPI.refreshAccessToken(
+                    baseURL: baseURL,
+                    refresh: refresh,
+                    userAgent: userAgent
+                )
+                storeRefreshedAccess(serverID: serverID, access: newAccess)
+                debugLog("📺 Direct Connect warmup: refreshed access token (server=\(serverID.uuidString.prefix(8)))")
+                return
+            } catch DispatcharrDirectConnectError.refreshExpired {
+                clear(serverID: serverID)
+                // Fall through to login.
+            } catch {
+                debugLog("📺 Direct Connect warmup: refresh failed (\(error.localizedDescription)); falling back to login")
+            }
+        }
+
+        // Phase 2: fresh login. Requires both fields to be present.
+        guard !username.isEmpty, !password.isEmpty else {
+            debugLog("📺 Direct Connect warmup: no credentials cached (server=\(serverID.uuidString.prefix(8))); skipping")
+            return
+        }
+        do {
+            let pair = try await DispatcharrAPI.login(
+                baseURL: baseURL,
+                username: username,
+                password: password,
+                userAgent: userAgent
+            )
+            store(serverID: serverID, access: pair.access, refresh: pair.refresh)
+            debugLog("📺 Direct Connect warmup: logged in fresh (server=\(serverID.uuidString.prefix(8)))")
+        } catch {
+            debugLog("📺 Direct Connect warmup: login failed (\(error.localizedDescription))")
+        }
+    }
+
+    // MARK: - Helpers
+
     /// Best-effort decode of the access token's `exp` claim (Unix
-    /// epoch seconds). Returns `nil` on any parse failure — the
-    /// caller falls back to a 25-minute heuristic (5 min before the
-    /// 30 min Dispatcharr default) so we still pre-emptively refresh
-    /// without trusting a malformed token.
+    /// epoch seconds). Returns `nil` on any parse failure (the
+    /// caller falls back to a 25-minute heuristic, 5 min before the
+    /// 30 min Dispatcharr default) so we still pre-emptively
+    /// refresh without trusting a malformed token.
     private static func expiry(of jwt: String) -> Date? {
         let parts = jwt.split(separator: ".")
         guard parts.count >= 2 else { return nil }

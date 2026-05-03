@@ -802,6 +802,72 @@ struct DispatcharrAPI {
         return h
     }
 
+    // MARK: - JWT-aware request wrapper
+
+    /// v1.7.x: drop-in wrapper for `HTTPRouter.data(for:using:)` that
+    /// transparently refreshes the JWT access token on HTTP 401 and
+    /// retries the request once. No-op for `.apiKey` / `.bearer` auth
+    /// modes — those return the original response unchanged. Migrate
+    /// hot-path call sites (verifyConnection, getEPGGrid,
+    /// enrichCategories, getAllEPGData) to this wrapper so that a
+    /// session that's been idle past the 30-min access-token TTL
+    /// recovers silently instead of erroring out.
+    ///
+    /// The retry only fires when:
+    ///   1. Auth mode is `.jwtSession`
+    ///   2. The response status is exactly 401
+    ///   3. A refresh token is cached in the store
+    ///   4. The refresh call succeeds
+    ///
+    /// On any failure of those conditions, the original (401)
+    /// response is returned to the caller so existing error
+    /// handling stays intact. The token store is cleared on
+    /// `.refreshExpired` so the next request goes through the
+    /// session-warmup path (re-login from Keychain credentials).
+    func dataWithJWTRetry(for request: URLRequest) async throws -> (Data, URLResponse) {
+        let (data, response) = try await HTTPRouter.data(for: request, using: session)
+
+        // Fast path: not JWT mode, or not 401. Return verbatim.
+        guard case .jwtSession(let serverID) = auth,
+              let http = response as? HTTPURLResponse,
+              http.statusCode == 401
+        else {
+            return (data, response)
+        }
+
+        // Need a refresh token to even attempt recovery.
+        guard let refreshTok = DispatcharrTokenStore.shared.refreshToken(for: serverID) else {
+            return (data, response)
+        }
+
+        // Refresh the access token. If the refresh has itself
+        // expired (>24h idle), clear the store entry so the next
+        // session-warmup tick re-logs in from Keychain credentials,
+        // and surface the original 401 to the caller.
+        let newAccess: String
+        do {
+            newAccess = try await Self.refreshAccessToken(
+                baseURL: baseURL,
+                refresh: refreshTok,
+                userAgent: userAgent
+            )
+        } catch DispatcharrDirectConnectError.refreshExpired {
+            DispatcharrTokenStore.shared.clear(serverID: serverID)
+            return (data, response)
+        } catch {
+            return (data, response)
+        }
+        DispatcharrTokenStore.shared.storeRefreshedAccess(serverID: serverID, access: newAccess)
+
+        // Replay the original request with the refreshed Bearer
+        // header. Preserve all other headers (Accept, User-Agent,
+        // X-API-Key fallback if present) so we don't lose anything
+        // the original call emitted.
+        var retry = request
+        retry.setValue("Bearer \(newAccess)", forHTTPHeaderField: "Authorization")
+        return try await HTTPRouter.data(for: retry, using: session)
+    }
+
     // MARK: - Verify
     func verifyConnection() async throws -> DispatcharrServerInfo {
         // Dispatcharr doesn't currently document a /api/version endpoint in the changelog,
@@ -1233,10 +1299,13 @@ struct DispatcharrAPI {
         let session = URLSession(configuration: config)
 
         // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
+        // v1.7.x: dataWithJWTRetry transparently refreshes the JWT
+        // access token on 401 + retries once when in `.jwtSession`
+        // auth mode. No-op for `.apiKey` / `.bearer` modes.
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await HTTPRouter.data(for: request, using: session)
+            (data, response) = try await dataWithJWTRetry(for: request)
         } catch let err as URLError where err.code.rawValue == -1017 {
             // v1.6.22: NSURLError -1017 "cannot parse response"
             // means the reverse proxy in front of Dispatcharr
@@ -1317,7 +1386,8 @@ struct DispatcharrAPI {
         var request = URLRequest(url: url, timeoutInterval: 30)
         request.httpMethod = "GET"
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-        let (data, response) = try await HTTPRouter.data(for: request)
+        // v1.7.x: dataWithJWTRetry handles JWT refresh on 401.
+        let (data, response) = try await dataWithJWTRetry(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw APIError.serverError((response as? HTTPURLResponse)?.statusCode ?? 0)
         }
@@ -2470,7 +2540,15 @@ struct DispatcharrAPI {
         let urlStr = request.url?.absoluteString ?? "<unknown>"
         let start  = Date()
         do {
-            let result   = try await HTTPRouter.data(for: request, using: session)
+            // v1.7.x: route through dataWithJWTRetry instead of
+            // HTTPRouter.data directly. No-op for `.apiKey` and
+            // `.bearer` auth modes; for `.jwtSession` it transparently
+            // refreshes the JWT access token on 401 and replays the
+            // request once. Every authed Dispatcharr API call lands
+            // here (fetchAllPages, validate-and-decode wrappers,
+            // recording playback resolution, VOD pagination), so this
+            // single migration covers the entire surface.
+            let result   = try await dataWithJWTRetry(for: request)
             let status   = (result.1 as? HTTPURLResponse)?.statusCode
             let duration = Date().timeIntervalSince(start)
             DebugLogger.shared.logNetwork(method: method, url: urlStr, statusCode: status,

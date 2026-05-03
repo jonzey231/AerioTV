@@ -262,6 +262,14 @@ struct AerioApp: App {
                 // is required here. v1.6.8: now runs on iOS too,
                 // not just tvOS — see TVLANProbe header.
                 TVLANProbe.shared.reprobe()
+                // v1.7.x: Direct Connect session warmup. Refresh the
+                // JWT access token (or re-login from Keychain
+                // credentials) for every Dispatcharr Direct Connect
+                // server so foreground requests land with a fresh
+                // Bearer header instead of relying on the api_key
+                // fallback. Best-effort: errors logged but never
+                // surfaced; the fallback keeps the app functional.
+                Self.warmupDirectConnectSessions(in: sharedModelContainer.mainContext)
             case .inactive:    DebugLogger.shared.logLifecycle("Scene → inactive")
             case .background:
                 DebugLogger.shared.logLifecycle("Scene → background")
@@ -303,6 +311,71 @@ struct AerioApp: App {
                     RecordingCoordinator.shared.stopAllSessionsOnBackground()
                 }
             @unknown default:  break
+            }
+        }
+    }
+
+    // MARK: - Direct Connect session warmup
+
+    /// v1.7.x: refresh JWT access tokens for every Dispatcharr Direct
+    /// Connect server. Fired from the scene-phase `.active` transition
+    /// (covers cold launch, foreground resume, and the user picking
+    /// our app back up after multitasking elsewhere).
+    ///
+    /// Strategy per server:
+    ///   - If a refresh token is cached in `DispatcharrTokenStore`,
+    ///     try `/api/accounts/token/refresh/`. On success, swap in
+    ///     the new access token (refresh stays the same — Dispatcharr
+    ///     does not rotate it).
+    ///   - On `.refreshExpired` (24h+ idle session), clear the cache
+    ///     entry and fall through to a fresh login.
+    ///   - Fresh login uses the username + password persisted in the
+    ///     Keychain. Both must be present; missing credentials skip
+    ///     this server (the api_key fallback in `authHeaders` covers
+    ///     subsequent requests).
+    ///
+    /// All work is best-effort: failures are logged but never
+    /// surfaced. Fires in a detached Task so the scene-phase handler
+    /// returns immediately and the user doesn't see any UI lag.
+    @MainActor
+    static func warmupDirectConnectSessions(in context: ModelContext) {
+        let descriptor = FetchDescriptor<ServerConnection>(
+            predicate: #Predicate { $0.type.rawValue == "dispatcharr_api" }
+        )
+        guard let servers = try? context.fetch(descriptor), !servers.isEmpty else { return }
+
+        // Build per-server credential snapshots on main (Keychain
+        // reads are thread-safe but ServerConnection is a SwiftData
+        // @Model — pluck the values here, hand the primitives off
+        // to the detached Task below).
+        struct WarmupTarget: Sendable {
+            let id: UUID
+            let baseURL: String
+            let username: String
+            let password: String
+            let userAgent: String
+        }
+        let targets: [WarmupTarget] = servers.compactMap { server in
+            guard server.dispatcharrCredentialType == .usernamePassword else { return nil }
+            return WarmupTarget(
+                id: server.id,
+                baseURL: server.effectiveBaseURL,
+                username: server.username,
+                password: server.effectivePassword,
+                userAgent: server.effectiveUserAgent
+            )
+        }
+        guard !targets.isEmpty else { return }
+
+        Task.detached(priority: .utility) {
+            for target in targets {
+                await DispatcharrTokenStore.shared.warmup(
+                    serverID: target.id,
+                    baseURL: target.baseURL,
+                    username: target.username,
+                    password: target.password,
+                    userAgent: target.userAgent
+                )
             }
         }
     }
