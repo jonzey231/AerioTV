@@ -39,6 +39,42 @@
   `validationErrors()` enforces. Default selection is `.apiKey` to
   match every existing v1.6.x install.
 
+### Fixed
+
+- **Dispatcharr List view rows now show the currently-airing
+  program under each channel as soon as the guide loads.**
+  Pre-v1.7 the bulk EPG path (`HomeView.loadAllEPG` after
+  `/api/epg/grid/`) wrote programs into `EPGCache` keyed by
+  tvg_id but never populated `ChannelDisplayItem.currentProgram*`
+  on `ChannelStore.channels`. The List view's `liveProgram`
+  lookup reads those fields first, falling back to
+  `guideStore.programs[item.id]` second. Until the user opened
+  the Guide tab (which runs `EPGGuideView.fetchDispatcharr` and
+  populates `GuideStore.programs`), the lookup found no data
+  and List rows rendered with just the channel name. Same
+  symptom regardless of whether the user signed in via API
+  Key or Direct Connect; not a v1.7 regression. Fixed in two
+  places: (1) new `ChannelStore.applyCurrentPrograms` method
+  takes a `[channel.id: snapshot]` map and writes the title /
+  description / start / end fields onto the SwiftUI-observed
+  `channels` array with one batched @Published fire; (2) the
+  bulk EPG iteration in `HomeView.loadAllEPG` now builds that
+  map alongside the per-channel cache writes, covering all
+  three matching keys (direct tvg_id, epg_data_id bridge for
+  the 25% mismatch case, AND channel UUID for Dummy EPG
+  entries). Same three-key strategy `EPGGuideView.fetchDispatcharr`
+  has used since v1.6.x; the cold-launch bulk path now matches it.
+- **Bulk EPG path now matches Dummy EPG entries via channel
+  UUID.** Side benefit of the List-view fix above. Dispatcharr's
+  `/api/epg/grid/` emits synthetic placeholder programs for
+  channels with no real EPG data, tagged with `tvg_id ==
+  str(channel.uuid)`. The bulk path used to fall through to an
+  empty fallback for those (`filled 472 empty fallbacks` was
+  the typical log line on a 683-channel deployment). Now those
+  channels get their dummy entries cached at the reader's key
+  and surface in List view rows. The existing per-cell prefetch
+  no longer fires post-loading network calls for them either.
+
 ### Changed
 
 - **Renamed "Dispatcharr API" to "Dispatcharr Direct Connect" in

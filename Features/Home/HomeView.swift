@@ -823,6 +823,57 @@ final class ChannelStore: ObservableObject {
     /// Also writes the map through to UserDefaults so the next
     /// cold launch can `primeCategoriesFromCache()` and render the
     /// tint immediately instead of waiting on the XMLTV fetch.
+    /// v1.7: snapshot of a single currently-airing program. Used by
+    /// `applyCurrentPrograms` to enrich `ChannelDisplayItem` rows with
+    /// "now playing" data so the Live-TV List view shows the program
+    /// title under each channel without waiting on the per-cell
+    /// prefetch fan-out.
+    struct CurrentProgramSnapshot: Sendable {
+        let title: String
+        let description: String
+        let start: Date
+        let end: Date
+    }
+
+    /// v1.7: apply now-airing program data to channels. Mirrors
+    /// `applyXMLTVCategories` in shape (keyed by `ChannelDisplayItem.id`,
+    /// silent no-op when nothing changed) but writes the title /
+    /// description / start / end fields the List view's `liveProgram`
+    /// reads first. Called from `HomeView.loadAllEPG` after the bulk
+    /// `/api/epg/grid/` response is parsed, with one entry per channel
+    /// whose currently-airing program could be resolved (by tvg_id,
+    /// epg_data_id bridge, OR Dummy EPG UUID match). Same three
+    /// keys the Guide view uses.
+    ///
+    /// Non-Dispatcharr server types (M3U, Xtream Codes) keep their
+    /// existing per-source enrichment paths. This method is additive.
+    func applyCurrentPrograms(_ map: [String: CurrentProgramSnapshot]) {
+        guard !map.isEmpty else { return }
+        var changed = false
+        var updated = channels
+        for i in updated.indices {
+            guard let snap = map[updated[i].id] else { continue }
+            // Skip the @Published fire when nothing changed (warm
+            // relaunch where every channel still has yesterday's
+            // current program lined up identically). Dictionary
+            // equality on Date is exact; the EPG grid emits
+            // wall-clock-second precision so this is reliable.
+            if updated[i].currentProgram        == snap.title &&
+               updated[i].currentProgramStart   == snap.start &&
+               updated[i].currentProgramEnd     == snap.end {
+                continue
+            }
+            updated[i].currentProgram            = snap.title
+            updated[i].currentProgramDescription = snap.description.isEmpty ? nil : snap.description
+            updated[i].currentProgramStart       = snap.start
+            updated[i].currentProgramEnd         = snap.end
+            changed = true
+        }
+        if changed {
+            channels = updated
+        }
+    }
+
     func applyXMLTVCategories(_ categoriesByChannelID: [String: String]) {
         guard !categoriesByChannelID.isEmpty else { return }
         var changed = false
@@ -1278,31 +1329,130 @@ final class ChannelStore: ObservableObject {
                     // tvg_id, which doesn't match the reader's key.
                     // Bridge via `epg_data_id → EPGData.tvg_id` to
                     // copy the same programs to the reader's key.
+                    //
+                    // v1.7: also try the channel's UUID. Dispatcharr's
+                    // `/api/epg/grid/` emits synthetic "Dummy EPG"
+                    // entries for channels without real EPG data,
+                    // tagging them with `tvg_id == str(channel.uuid)`.
+                    // Pre-v1.7 the bulk path missed those, leading to
+                    // hundreds of "filled empty fallbacks" entries
+                    // that hid valid (if synthetic) program data
+                    // from the List view rows. The Guide view's
+                    // `fetchDispatcharr` path always handled this
+                    // case; the cold-launch bulk path now matches.
+                    //
                     // Falls through to an empty fallback so per-cell
                     // prefetch can't trigger post-loading network
                     // fetches for genuinely EPG-less channels.
+                    //
+                    // While iterating, also build a map of channel.id
+                    // → currently-airing program so we can populate
+                    // `ChannelDisplayItem.currentProgram*` in one
+                    // batched MainActor write. The List view's
+                    // `liveProgram` lookup reads those fields first;
+                    // pre-v1.7 they were never set on the Dispatcharr
+                    // path so List rows showed only the channel name
+                    // until the user opened the Guide tab.
                     var bridgedCount = 0
+                    var matchedViaUUID = 0
                     var filledFallbacks = 0
+                    var currentByChannelID: [String: ChannelStore.CurrentProgramSnapshot] = [:]
+
+                    /// Helper. Pluck the now-airing entry from a
+                    /// pre-sorted list (start ascending). Used three
+                    /// times below so factored into a closure.
+                    func nowAiring(in entries: [EPGEntry]) -> EPGEntry? {
+                        return entries.first(where: { entry in
+                            guard let s = entry.startTime, let e = entry.endTime else { return false }
+                            return s <= now && e > now
+                        })
+                    }
+
                     for channel in channelSnapshot {
                         let tvgID = channel.tvgID ?? ""
                         let keyPart = tvgID.isEmpty ? channel.id : tvgID
                         let cacheKey = "d_\(base)_\(keyPart)"
-                        if await EPGCache.shared.get(cacheKey) != nil {
-                            continue // already populated by the program-keyed write above
+
+                        // 1. Direct tvg_id match (the 75% path).
+                        //    Already cached by the program-keyed
+                        //    write above when keyPart matches a
+                        //    program's tvg_id. Capture now-airing
+                        //    for the List-view enrichment.
+                        if let directEntries = byTvgID[keyPart] {
+                            if let nowProg = nowAiring(in: directEntries) {
+                                currentByChannelID[channel.id] = .init(
+                                    title: nowProg.title,
+                                    description: nowProg.description ?? "",
+                                    start: nowProg.startTime ?? now,
+                                    end: nowProg.endTime ?? now
+                                )
+                            }
+                            // Already cached at this key, no copy needed.
+                            if await EPGCache.shared.get(cacheKey) != nil {
+                                continue
+                            }
                         }
-                        // Try the EPGData bridge before giving up.
+
+                        // 2. EPGData bridge (the 25% mismatch case).
                         if let epgID = channel.dispatcharrEPGDataID,
                            let epgTvgID = bridgeMap[epgID],
                            let bridgeEntries = byTvgID[epgTvgID] {
                             let sorted = bridgeEntries.sorted { ($0.startTime ?? .distantPast) < ($1.startTime ?? .distantPast) }
                             await EPGCache.shared.set(sorted, for: cacheKey)
+                            if currentByChannelID[channel.id] == nil,
+                               let nowProg = nowAiring(in: sorted) {
+                                currentByChannelID[channel.id] = .init(
+                                    title: nowProg.title,
+                                    description: nowProg.description ?? "",
+                                    start: nowProg.startTime ?? now,
+                                    end: nowProg.endTime ?? now
+                                )
+                            }
                             bridgedCount += 1
                             continue
                         }
-                        await EPGCache.shared.set([], for: cacheKey)
-                        filledFallbacks += 1
+
+                        // 3. UUID match (Dummy EPG entries). The
+                        //    bulk grid emits synthetic entries with
+                        //    tvg_id == channel.uuid for channels
+                        //    that have no real EPG data assigned.
+                        //    Match those so the List view shows
+                        //    "<channel name>" placeholder programs
+                        //    instead of an empty subtitle.
+                        if let uuid = channel.uuid?.lowercased(),
+                           let dummyEntries = byTvgID[uuid] {
+                            let sorted = dummyEntries.sorted { ($0.startTime ?? .distantPast) < ($1.startTime ?? .distantPast) }
+                            await EPGCache.shared.set(sorted, for: cacheKey)
+                            if currentByChannelID[channel.id] == nil,
+                               let nowProg = nowAiring(in: sorted) {
+                                currentByChannelID[channel.id] = .init(
+                                    title: nowProg.title,
+                                    description: nowProg.description ?? "",
+                                    start: nowProg.startTime ?? now,
+                                    end: nowProg.endTime ?? now
+                                )
+                            }
+                            matchedViaUUID += 1
+                            continue
+                        }
+
+                        // No match. Empty fallback so per-cell
+                        // prefetch doesn't fire post-loading.
+                        if await EPGCache.shared.get(cacheKey) == nil {
+                            await EPGCache.shared.set([], for: cacheKey)
+                            filledFallbacks += 1
+                        }
                     }
-                    debugLog("📺 Bulk EPG: bridged \(bridgedCount) channels via epg_data_id, filled \(filledFallbacks) empty fallbacks")
+                    debugLog("📺 Bulk EPG: bridged \(bridgedCount) channels via epg_data_id, matched \(matchedViaUUID) via Dummy EPG UUID, filled \(filledFallbacks) empty fallbacks; \(currentByChannelID.count) now-airing programs ready for List view")
+
+                    // Hop to MainActor for the @Published write.
+                    // ChannelStore lives there; SwiftUI will see one
+                    // invalidation and the List view rows pick up
+                    // the now-airing program data immediately.
+                    let currentMap = currentByChannelID
+                    await MainActor.run {
+                        ChannelStore.shared.applyCurrentPrograms(currentMap)
+                    }
                 }.value
 
                 // Refresh Top Shelf with updated program info
