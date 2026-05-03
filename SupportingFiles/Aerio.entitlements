@@ -2,8 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>aps-environment</key>
-	<string>development</string>
+	<!-- v1.6.23: removed `aps-environment = development` per the
+	     pre-public-release audit. AerioTV doesn't currently
+	     register for push notifications, and shipping a development
+	     APS environment in a Release build would silently break
+	     push registration if the feature were ever added. If push
+	     is wired up later, restore the key with `production`. -->
 	<key>com.apple.developer.networking.wifi-info</key>
 	<true/>
 	<key>com.apple.developer.ubiquity-kvstore-identifier</key>

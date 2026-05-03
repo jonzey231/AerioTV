@@ -559,6 +559,29 @@ enum RecordingStatus: String, Codable {
 /// A DVR recording — either scheduled on a Dispatcharr server or captured
 /// locally via `LocalRecordingSession`. Persisted as the single source of
 /// truth for both destinations.
+/// SwiftData mirror of a recording (local DVR capture or
+/// Dispatcharr-server recording).
+///
+/// **iCloud sync model (v1.6.23 documented):** `Recording` rows are
+/// intentionally device-local. Two reasons:
+///
+/// 1. **Local recordings** (`destination == .local`): the captured
+///    `.ts` file lives in `Documents/Recordings/<UUID>.ts` on the
+///    recording device. The file isn't transferable across devices,
+///    so syncing the metadata row would point other devices at a
+///    file they can't read.
+///
+/// 2. **Dispatcharr-server recordings** (`destination == .dispatcharrServer`):
+///    cross-device coherence already exists via
+///    `RecordingCoordinator.reconcileDispatcharrRecordings`. Every
+///    device that connects to the same Dispatcharr server fetches
+///    `/api/channels/recordings/` from the server and rebuilds its
+///    local rows from the authoritative server-side list. No iCloud
+///    sync needed; the server is the source of truth.
+///
+/// The pre-public-release audit flagged "Recording not synced" as a
+/// HIGH item; this comment exists so the architectural decision is
+/// visible inline rather than buried in CHANGELOG history.
 @Model
 final class Recording {
     var id: UUID

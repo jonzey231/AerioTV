@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- AerioTV does not collect personal data, contact a tracking
+	     domain, or use third-party SDKs. The privacy posture is:
+	     all configuration (server URL, credentials, preferences)
+	     is supplied by the user and stored locally in Keychain
+	     plus SwiftData. iCloud sync via NSUbiquitousKeyValueStore
+	     is opt-in and end-to-end encrypted by Apple. No analytics,
+	     no crash reporters, no advertising identifiers. -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+
+	<!-- Required Reason API declarations. Each entry maps a
+	     Foundation API category we rely on to one of Apple's
+	     pre-approved reason codes. -->
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<!-- UserDefaults: extensive use for app preferences
+		     (theme, EPG window, sync toggles, hidden-channel
+		     groups, server-default destinations, etc.).
+		     CA92.1 = "Access info from same app, per documentation." -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+
+		<!-- File timestamp APIs: AerioTV reads file modification
+		     dates and creation dates for local DVR recordings
+		     (storage quota math, sort by recency, age-based
+		     pruning).
+		     C617.1 = "Inside app or app group container, per documentation." -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>C617.1</string>
+			</array>
+		</dict>
+
+		<!-- Disk space APIs: DVR feature reports remaining
+		     storage and gates new local recordings on quota.
+		     85F4.1 = "Display info to the user." -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>85F4.1</string>
+			</array>
+		</dict>
+
+		<!-- System boot time / uptime: PlaybackDiagnostics uses
+		     ProcessInfo.systemUptime to measure cold-launch to
+		     first-frame timing for performance tuning. Stays
+		     on-device.
+		     35F9.1 = "Measure time on device, per documentation." -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>35F9.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

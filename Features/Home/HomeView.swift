@@ -1430,9 +1430,30 @@ final class ChannelStore: ObservableObject {
         // Accumulate all enrichment results, publish channels once at end.
         var allResults: [(String, String, String, Date?, Date?)] = []
 
+        // v1.6.23: circuit breaker for Xtream EPG enrichment, mirroring
+        // the GuideStore prefetch breaker. On Xtream servers under
+        // duress (slow get_short_epg endpoint, rate limiting, or
+        // transient outage), we'd otherwise loop through every
+        // channel making 8 concurrent failing requests per batch.
+        // After 3 consecutive empty/failed batches we abort the
+        // remaining batches and accept partial enrichment for this
+        // launch. The Live-TV "now playing" line for un-enriched
+        // channels stays empty (matches the channels-loaded-but-no-EPG
+        // state Xtream users already see today; not a regression).
+        var consecutiveEmptyBatches = 0
+        let maxConsecutiveEmpty = 3
+        var batchesProcessed = 0
+        var batchesAborted = 0
+
         // Process in batches to limit concurrency.
         for batchStart in stride(from: 0, to: snapshot.count, by: batchSize) {
             guard !Task.isCancelled else { return }
+            if consecutiveEmptyBatches >= maxConsecutiveEmpty {
+                let remaining = snapshot.count - batchStart
+                batchesAborted = (remaining + batchSize - 1) / batchSize
+                debugLog("📺 Xtream EPG enrichment: circuit breaker tripped after \(consecutiveEmptyBatches) consecutive empty batches; aborting \(batchesAborted) remaining batches (\(remaining) channels)")
+                break
+            }
             let batchEnd = min(batchStart + batchSize, snapshot.count)
             let batch = Array(snapshot[batchStart..<batchEnd])
 
@@ -1463,8 +1484,23 @@ final class ChannelStore: ObservableObject {
                 return collected
             }
 
+            batchesProcessed += 1
             allResults.append(contentsOf: results)
+            // Track consecutive-empty for the circuit breaker. An
+            // "empty" batch is one where every channel either failed
+            // to fetch (try? = nil) or the response had no
+            // currently-airing program. The first counts as server
+            // distress; the second is normal idle channels. We can't
+            // distinguish them cheaply at this layer, so we treat
+            // any 0-result batch as a soft signal.
+            if results.isEmpty {
+                consecutiveEmptyBatches += 1
+            } else {
+                consecutiveEmptyBatches = 0
+            }
         }
+
+        debugLog("📺 Xtream EPG enrichment: enriched \(allResults.count) channels across \(batchesProcessed) batches (\(batchesAborted) batches aborted by circuit breaker)")
 
         // Single publish with all accumulated results.
         guard !Task.isCancelled, !allResults.isEmpty else { return }
@@ -2539,6 +2575,14 @@ struct MainTabView: View {
     @ObservedObject private var multiviewStore = MultiviewStore.shared
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
+    /// v1.6.23 — set to `true` when the user explicitly Skips the
+    /// initial-sync cover so we don't immediately re-present it. The
+    /// cover's natural re-show triggers (`onAppear`, `allServers.count`
+    /// change) would otherwise fire right after dismissal, making the
+    /// Skip button visually do nothing (jesmannstl v1.6.22 report:
+    /// "Skip did nothing"). Resets on cold launch — the next session
+    /// re-evaluates whether the cover should appear.
+    @State private var userDismissedInitialLoading = false
     /// CFAbsoluteTime captured when the initial-sync cover is first
     /// shown. Consumed (and cleared) when the cover dismisses so the
     /// dismissal log line can report total duration. Kept as an
@@ -2799,6 +2843,15 @@ struct MainTabView: View {
         guard !showInitialEPGLoading else { return }
         guard !allServers.isEmpty else { return }
         guard channelStore.channels.isEmpty else { return }
+        // v1.6.23: don't re-present after the user explicitly Skipped.
+        // Without this gate, dismissing via the Skip button is visually
+        // a no-op when a downstream onChange (e.g. allServers.count
+        // settling after iCloud sync, or another tryShow trigger
+        // during the same session) fires immediately after.
+        guard !userDismissedInitialLoading else {
+            debugLog("🔶 Initial sync — user dismissed this session, not re-showing")
+            return
+        }
         if UserDefaults.standard.bool(forKey: "appBehaviorsSkipLoadingScreen") {
             debugLog("🔶 Initial sync — skip flag set in App Behaviors, skipping loading cover")
             return
@@ -3678,6 +3731,13 @@ struct MainTabView: View {
                         // fails with an error,
                         // `ChannelListView.errorView` handles
                         // surfacing the retry path.
+                        // v1.6.23: also set the session flag so any
+                        // downstream onChange-driven `tryShowInitial-
+                        // Loading` call (server count settling, etc.)
+                        // can't immediately re-present the cover and
+                        // make Skip look like a no-op (jesmannstl
+                        // v1.6.22 report).
+                        userDismissedInitialLoading = true
                         showInitialEPGLoading = false
                         debugLog("🔶 User dismissed initial loading screen manually")
                     }
@@ -4562,17 +4622,12 @@ private struct ChannelInfoBanner: View {
     @ViewBuilder
     private func bannerContent(for item: ChannelDisplayItem) -> some View {
         HStack(alignment: .top, spacing: 14) {
-            if let url = item.logoURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let img):
-                        img.resizable().aspectRatio(contentMode: .fit)
-                    default:
-                        Color.clear
-                    }
-                }
-                .frame(width: logoSize, height: logoSize)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            if item.logoURL != nil {
+                // v1.6.23: route through CachedLogoImage so the
+                // active server's auth headers are applied (fixes
+                // Dispatcharr-API logo 401 → blank-logo regression).
+                CachedLogoImage(url: item.logoURL, width: logoSize, height: logoSize)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
 
             VStack(alignment: .leading, spacing: 3) {
@@ -4864,24 +4919,11 @@ struct MiniPlayerBar: View {
 
             HStack(spacing: 12) {
                 // Channel logo or placeholder
-                AsyncImage(url: item.logoURL) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image.resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 40, height: 28)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    default:
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(Color.accentPrimary.opacity(0.15))
-                                .frame(width: 40, height: 28)
-                            Image(systemName: "tv.fill")
-                                .font(.system(size: 14))
-                                .foregroundColor(.accentPrimary)
-                        }
-                    }
-                }
+                // v1.6.23: route through CachedLogoImage so the
+                // active server's auth headers are applied (fixes
+                // Dispatcharr-API logo 401 → blank-logo regression).
+                CachedLogoImage(url: item.logoURL, width: 40, height: 28)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
 
                 // Channel name + current program + progress
                 TimelineView(.everyMinute) { context in

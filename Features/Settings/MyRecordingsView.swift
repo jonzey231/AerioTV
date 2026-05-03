@@ -505,7 +505,13 @@ struct MyRecordingsView: View {
         // overlaps briefly with the recording's mpv spin-up but
         // the live mpv stops decoding on `quit` command before
         // the destroy fires, so audible overlap is sub-second.
-        NowPlayingManager.shared.stop()
+        //
+        // v1.6.23 — multiview-aware fix: see VODDetailView.swift for
+        // the full rationale. `NowPlayingManager.stop()` alone leaves
+        // multiview tiles + their mpv coordinators alive; route
+        // through `PlayerSession.shared.exit()` so the tile store is
+        // reset and mode flips to `.idle`.
+        PlayerSession.shared.exit()
         playingRecording = PlayingRecording(
             id: rec.id, url: url, title: rec.programTitle, headers: [:]
         )
@@ -571,7 +577,8 @@ struct MyRecordingsView: View {
         // Same fix shape: stop the live stream before mounting the
         // recording's fullScreenCover so two mpv instances aren't
         // both producing audio.
-        NowPlayingManager.shared.stop()
+        // v1.6.23 — multiview-aware: route through PlayerSession.exit().
+        PlayerSession.shared.exit()
         playingRecording = PlayingRecording(
             id: rec.id, url: url, title: rec.programTitle, headers: headers
         )
@@ -656,6 +663,21 @@ struct MyRecordingsView: View {
 private struct RecordingRow: View {
     let recording: Recording
 
+    /// True when this row should advertise live in-progress playback.
+    /// v1.6.23 (Codex UX P2): the row is already tappable to play
+    /// (via `playIfCompleted` in the parent), but without a visible
+    /// affordance most users assume in-progress recordings are
+    /// stop-only. The pill below makes the capability discoverable.
+    /// Gated on `dispatcharrFileURL != nil` because that's the
+    /// signal the server has the new HLS DVR pipeline; older
+    /// Dispatcharr builds without the pipeline can't serve
+    /// in-progress playback so the pill stays hidden.
+    private var canWatchLive: Bool {
+        guard recording.status == .recording else { return false }
+        guard recording.destination == .dispatcharrServer else { return false }
+        return recording.dispatcharrFileURL != nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
@@ -683,14 +705,27 @@ private struct RecordingRow: View {
                 }
             }
 
-            if recording.destination == .dispatcharrServer {
-                Label("Server", systemImage: "server.rack")
-                    .font(.caption2)
-                    .foregroundColor(.accentPrimary)
-            } else {
-                Label("Local", systemImage: "internaldrive")
-                    .font(.caption2)
-                    .foregroundColor(.green)
+            HStack(spacing: 8) {
+                if recording.destination == .dispatcharrServer {
+                    Label("Server", systemImage: "server.rack")
+                        .font(.caption2)
+                        .foregroundColor(.accentPrimary)
+                } else {
+                    Label("Local", systemImage: "internaldrive")
+                        .font(.caption2)
+                        .foregroundColor(.green)
+                }
+
+                if canWatchLive {
+                    Label("Watch Live", systemImage: "play.circle.fill")
+                        .font(.caption2.bold())
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.red.opacity(0.18))
+                        .foregroundColor(.red)
+                        .clipShape(Capsule())
+                        .accessibilityHint("Tap the row to watch this recording while it captures")
+                }
             }
 
             if let reason = recording.failureReason, recording.status == .failed {

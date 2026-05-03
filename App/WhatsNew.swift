@@ -57,6 +57,24 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.6.23",
+            title: "What's new in 1.6.23",
+            bullets: [
+                "Channel logos now load on Dispatcharr-API playlists. Auth headers are applied to logo URLs so they no longer fail silently with 401 errors",
+                "Live TV stops cleanly when you start a movie, TV episode, or recording. Previously a minimized Live TV channel could keep streaming in the background, occasionally causing brief black flickers in your On Demand playback",
+                "Servers added on a second device via iCloud sync now authenticate. Credentials ride along in the iCloud sync payload as a fallback for users who don't have iCloud Keychain enabled (common on Apple TV)",
+                "Skip on the Setting Up screen now actually dismisses it. Previously the cover could re-appear right after dismissal in some sync scenarios",
+                "Live TV channel rows on iPhone now have a visible button for favorites and program info, so you don't have to long-press to discover them",
+                "In-progress Dispatcharr recordings now show a Watch Live pill, making it obvious you can play a recording while it captures",
+                "iPad channel search no longer wipes your filter when you collapse the search bar. The button stays highlighted while the filter is active",
+                "Tightened security around server-provided URLs. Image URLs from your server are now validated before fetching, redirects no longer leak credentials across hosts, and playback URLs are sanitized in diagnostic logs",
+                "Added a privacy manifest for App Review compliance",
+                "Xtream EPG enrichment now backs off when the server is slow or rate-limited instead of hammering for minutes",
+                "Onboarding form now tells you exactly what's missing instead of just greying out the Test Connection button"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.6.23")
+        ),
+        WhatsNewRelease(
             version: "1.6.22",
             title: "What's new in 1.6.22",
             bullets: [

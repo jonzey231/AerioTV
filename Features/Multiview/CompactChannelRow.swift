@@ -251,17 +251,12 @@ struct CompactChannelRow: View {
 
     @ViewBuilder
     private var logo: some View {
-        if let url = item.logoURL {
-            AsyncImage(url: url) { phase in
-                switch phase {
-                case .success(let img):
-                    img.resizable().scaledToFit()
-                default:
-                    logoPlaceholder
-                }
-            }
-            .frame(width: logoSize, height: logoSize)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        if item.logoURL != nil {
+            // v1.6.23: route through CachedLogoImage so the active
+            // server's auth headers are applied (fixes Dispatcharr-API
+            // logo 401 → placeholder regression).
+            CachedLogoImage(url: item.logoURL, width: logoSize, height: logoSize)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         } else {
             logoPlaceholder
                 .frame(width: logoSize, height: logoSize)

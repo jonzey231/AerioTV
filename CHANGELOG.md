@@ -1,6 +1,209 @@
 # Changelog
 
-## v1.6.22 - 2026-05-02
+## v1.6.23 - 2026-05-02
+
+### Security
+
+- **Stripped auth headers on cross-origin redirects.**
+  `RedirectPreservingDelegate` previously re-applied `Authorization`
+  and `X-API-Key` on every redirect, including cross-origin ones.
+  HTTP standard requires stripping auth on cross-origin to prevent
+  malicious or misconfigured servers from exfiltrating credentials
+  via HTTP 301 to attacker-controlled hosts. New `isSameOrigin`
+  check compares scheme + host + effective port; auth headers are
+  preserved only when those match. Same-origin redirects (reverse-
+  proxy canonicalization) keep working. The DEBUG audit log line
+  now notes `auth preserved` vs `AUTH STRIPPED` per redirect for
+  diagnostics.
+- **Validated server-provided image URLs against an SSRF allow-list.**
+  Logo / poster / backdrop URLs from Dispatcharr metadata used to
+  flow straight into `URL(string:)` and fetch unconditionally. A
+  malicious or compromised server could inject `http://192.168.1.1/`,
+  `http://127.0.0.1:9191/`, or `file://` URLs and use AerioTV as
+  a probe of the user's home network. New `validateAbsoluteURL`
+  in `VODService.swift` enforces: only http/https schemes; the
+  user's configured server host is allowed; TMDB CDN is allowed;
+  loopback (127/8, ::1, localhost), link-local (169.254/16,
+  fe80::/10), and RFC-1918 private ranges (10/8, 172.16/12,
+  192.168/16, fc00::/7) are rejected unless they match the
+  configured server host. Public hosts outside that list are
+  allowed (we can't enumerate every legitimate CDN, and the
+  threat model is server-side internal-network probing which the
+  loopback / private blocks already handle).
+- **Sanitized playback URL diagnostics.** The
+  `print("[MPV-DIAG] URL: ...")` site at `MPVPlayerView.swift:2510`
+  used to log the full playback URL, which for Xtream Codes
+  servers embeds username/password directly in the path
+  (`/live/<u>/<p>/<id>`). User console logs shared for support
+  could leak credentials in plain text. v1.6.23 routes the URL
+  through `DebugLogger.sanitize` before printing (existing
+  redaction regex covers Xtream path-credentials and query-param
+  forms). The mpv log-message callback path (also at
+  `MPVPlayerView.swift:2594`) gets the same treatment so HTTP
+  redirects and demuxer init lines from libmpv are sanitized
+  before reaching the console.
+- **Removed `aps-environment = development` from
+  `SupportingFiles/Aerio.entitlements`.** AerioTV doesn't currently
+  register for push notifications. Shipping a development APS
+  environment in a Release build would silently break push
+  registration if the feature were ever added. Entitlement is
+  removed entirely; restoring with `production` is the right move
+  if push is wired up later.
+- **Added `PrivacyInfo.xcprivacy`.** Declares Required Reason API
+  usage for App Review compliance: UserDefaults (CA92.1), file
+  timestamps (C617.1), disk space (85F4.1), system uptime
+  (35F9.1). Declares no tracking domains, no collected data
+  types. **Action required:** the new file needs to be added to
+  both iOS and tvOS target memberships in Xcode (drag into the
+  project navigator, check both targets). Once that's done,
+  `xcodebuild` will bundle it into the app on archive.
+
+### Changed
+
+- **Xtream EPG enrichment now has a circuit breaker.**
+  `enrichXtreamEPG` previously fanned out 8 concurrent
+  `get_short_epg` calls per batch with no abort signal. On a slow
+  or rate-limited Xtream server, this could grind through every
+  channel making failing requests for minutes. v1.6.23 mirrors
+  the GuideStore prefetch breaker pattern: after 3 consecutive
+  empty batches (where every channel either fails or returns no
+  currently-airing program), enrichment aborts the remaining
+  batches and accepts partial coverage for this launch. Logs
+  include enriched count + batches processed + batches aborted
+  so the failure mode is visible.
+- **Inline form validation feedback in onboarding.** The Add
+  Server flow used to grey out the "Test Connection" button
+  when the form was incomplete with no indication of why. New
+  `validationErrors()` method on `ServerConnectionViewModel`
+  enumerates per-field problems (missing name, malformed URL,
+  missing API key, etc.). The verify section in `AddServerView`
+  now displays the first outstanding error inline above the
+  button, with a count of additional issues if any. URLs are
+  validated for `http://` or `https://` prefix and a non-empty
+  host so common typos surface during entry rather than at
+  submit time.
+
+### Fixed
+
+- **Channel logos now load on Dispatcharr-API playlists.**
+  Logo URLs (`/api/channels/logos/<id>/cache/`) require the
+  server's `X-API-Key` (or `Authorization: ApiKey ...` per the
+  per-server auth mode added in v1.6.20), but every render site
+  used either bare `AsyncImage` or `URLSession.shared.data(from:)`
+  with no headers. Result: 401 on every fetch, blank placeholder
+  on every channel. Reproduced on a Dispatcharr 0.23.0 Docker AIO
+  deployment and on the iPad simulator (v1.6.22 field reports). Fixed
+  by adding `LogoFetcher` (auth-header injection keyed on the
+  active server's host) and routing every channel-logo fetch
+  through it: `CachedLogoImage` (channel rows + EPG guide),
+  replaced direct `AsyncImage` usage in `EPGGuideView`,
+  `HomeView` banner + mini-player chrome, `CompactChannelRow`,
+  `NowPlayingBridge.loadArtwork` (lockscreen artwork), and
+  `CarPlaySceneDelegate.makeChannelItem`. Routes through
+  `HTTPRouter` so plain-HTTP servers like
+  `http://dispatcharr.goip.de:59192` get the same NWHTTPClient
+  fallback every other API call uses.
+- **Live TV no longer keeps streaming when you start a movie,
+  TV episode, or recording.** `NowPlayingManager.shared.stop()`
+  only clears single-stream state (`playingItem`, `isMinimized`).
+  When the active session is `.multiview` (including a
+  minimized one-tile multiview, which is what powers the
+  mini-player), the `MultiviewStore` tiles and their mpv
+  coordinators stayed mounted under the VOD `fullScreenCover`
+  and kept decoding in the background. Field repro
+  (v1.6.22 / v1.6.23): a live tile kept producing frames for 3+
+  minutes after VOD started, with visible black-screen flickers
+  in the VOD playback (GPU contention from the orphan live mpv).
+  Fixed by routing `VODDetailView.resolveAndLaunch`
+  and both `MyRecordingsView` playback launchers through
+  `PlayerSession.shared.exit()` instead, which resets the tile
+  store, flips `mode = .idle`, tears down `NowPlayingBridge`,
+  and also calls `NowPlayingManager.shared.stop()` at the end
+  so the single-stream case is still handled. Safe in
+  single-stream mode: the multiview-specific branches inside
+  `exit()` are guarded by `if let audioID = store.audioTileID`.
+- **Servers added on a second device via iCloud sync now
+  authenticate.** v1.6.12 stopped writing `_password` /
+  `_apiKey` to the iCloud KVS payload on the assumption that
+  iCloud Keychain (kSecAttrSynchronizable) would carry
+  credentials cross-device. That assumption broke for any user
+  who hadn't enabled iCloud Keychain on the receiving device,
+  most commonly an Apple TV. The server metadata synced via
+  KVS, the playlist rendered, every API call returned 401, and
+  there was no UX recovery short of re-typing the API key on
+  every device. Field repro (v1.6.22): user added a Dispatcharr
+  playlist on iPad, enabled iCloud sync, opened AerioTV on
+  Apple TV. The Apple TV saw the playlist but immediately
+  showed "Connection Error: Invalid credentials". Fixed in
+  `SyncManager.serialize` by re-including `_password` /
+  `_apiKey` in the KVS dict, gated on
+  `SyncCategory.credentials.isEnabled` so users who explicitly
+  opted credentials out of sync don't get them shipped via KVS
+  either. The Keychain write in `saveCredentialsSynced` stays
+  the primary persistence; KVS is now the *transport* fallback
+  for the no-iCloud-Keychain case. Renamed
+  `purgeKVSPlaintextCredentialsIfNeeded` to
+  `republishServersWithCredentialsIfNeeded`; on a new flag
+  (`kvsCredentialRepublishDoneV1_6_23`) it forces an immediate
+  non-debounced push so the legacy credential-stripped payload
+  in KVS is overwritten with the v1.6.23 shape on first launch
+  for existing multi-device users.
+- **Skip on the Setting Up screen now actually dismisses it.**
+  Field report (v1.6.22): "Skip did nothing" on the
+  initial-launch loading cover. The Skip handler does set
+  `showInitialEPGLoading = false`, but downstream `onChange(of:
+  allServers.count)` and `.onAppear` triggers immediately
+  re-fired `tryShowInitialLoading()` which re-presented the
+  cover, so visually the dismissal was a no-op. Fixed by adding
+  a session-level `userDismissedInitialLoading` flag.
+  `tryShowInitialLoading()` early-returns when the user
+  explicitly dismissed; the flag resets on cold launch so the
+  next session re-evaluates whether the cover should appear.
+- **Recording sync model documented.** The pre-release audit
+  flagged "Recording not synced via iCloud" as a HIGH item. After
+  re-checking the architecture: Dispatcharr-server recordings
+  ARE already cross-device coherent because each device's
+  `RecordingCoordinator.reconcileDispatcharrRecordings` fetches
+  the canonical list from the server's `/api/channels/recordings/`
+  endpoint and reconciles local SwiftData rows against it. Local
+  recordings (LocalRecordingSession capturing to disk) are
+  device-bound by definition since the file lives on the
+  recording device. So no iCloud sync of Recording rows is
+  needed; the audit finding has been retired with this rationale
+  recorded in the model's comments.
+
+### UX
+
+- **Visible secondary-action button on iPhone channel rows.**
+  Codex's UX review flagged that favorites and program info were
+  reachable only through long-press, which most users never
+  discover. iPhone Live TV rows now carry a visible
+  `ellipsis.circle` button on the trailing edge that opens the
+  same actions dialog the long-press already triggered. Tap-to-
+  play is unchanged; long-press still works for power users.
+  iPad rows keep their existing visible "Schedule" capsule and
+  long-press; the wider iPad row would have crowded with another
+  affordance.
+- **Visible "Watch Live" pill on in-progress recording rows.**
+  Tap-to-play already worked for in-progress Dispatcharr
+  recordings on the new HLS DVR pipeline (v1.6.22), but the
+  capability was invisible: users assumed in-progress rows were
+  stop-only and the only path to live playback was the
+  "Watch Live" context menu item. The recording row now shows a
+  red "Watch Live" pill next to the "Server" label whenever
+  `recording.status == .recording` and the server emitted a
+  `dispatcharrFileURL` (which signals the new pipeline is
+  available). Stop / cancel / delete remain in the context menu.
+- **iPad channel search no longer destroys your query when you
+  collapse the search field.** Hiding the search button used to
+  clear `searchText`, which meant a user reclaiming chip-row
+  space lost their filter as a side effect. v1.6.23 preserves
+  the query: re-opening the field shows the previous search
+  text. The collapsed search button visually indicates an active
+  filter (filled glyph + accent color) so users can tell at a
+  glance that the list is still filtered.
+
+
 
 ### Fixed
 
@@ -23,7 +226,7 @@
   of `series.isEmpty && !isLoadingSeries` (and the movies
   equivalent) that re-fired `refreshSeries` every time SwiftUI
   rebuilt the view after a load that legitimately returned zero
-  items. The Freyguy1975 repro showed dozens of identical
+  items. The field repro showed dozens of identical
   `loadSeries: starting` / `done, 0 series` cycles burning CPU
   and HTTP requests after the orchestrator had already
   completed. The guard now compares the active server's id to
@@ -140,8 +343,8 @@
   both destinations because the recording starts immediately
   while the app is foregrounded.
 - **EPG performance on overloaded servers.** Three changes
-  driven by jesmannstl's 2,186-channel Cloudflare-tunneled
-  Dispatcharr where the bulk grid response was getting
+  driven by a 2,186-channel Cloudflare-tunneled Dispatcharr
+  deployment where the bulk grid response was getting
   truncated (`NSURLError -1017 cannot parse response`):
     - `prefetchIfNeeded` now gated on `!isLoading`; per-cell
       prefetch no longer races the bulk grid for the same
@@ -165,7 +368,7 @@
 - **Self-healing cache for stuck-sparse states.** A second-order
   bug surfaced during the XMLTV-removal investigation: when an
   EPG fetch wrote programs for only a handful of channels (8 of
-  333 in the Freyguy1975 capture), `GuideStore.saveToCache`
+  333 in a field capture), `GuideStore.saveToCache`
   persisted that partial dataset and `loadFromCache`'s 24h
   freshness check treated it as canonical on every subsequent
   launch. Pull-to-refresh worked, but no one knows to do that.

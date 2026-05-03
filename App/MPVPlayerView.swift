@@ -2500,14 +2500,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             hasStarted = false
             playbackStartTime = nil
+            // v1.6.23: route URL strings through DebugLogger.sanitize
+            // before any console / file output so Xtream credentials
+            // (`/live/<u>/<p>/<id>` and `?username=&password=` query
+            // forms) don't leak into logs that users may share for
+            // support requests.
+            let safeURL = DebugLogger.sanitize(url.absoluteString)
             logStore.append("▶️ MPV attempt \(currentIndex + 1)/\(urls.count)")
-            logStore.append("  \(url.absoluteString)")
+            logStore.append("  \(safeURL)")
             DebugLogger.shared.logPlayback(event: "Play attempt \(currentIndex + 1)/\(urls.count)",
                                            url: url.absoluteString)
 
             #if DEBUG
-            print("[MPV-DIAG] ── Starting playback ──")
-            print("[MPV-DIAG] URL: \(url.absoluteString)")
+            print("[MPV-DIAG] -- Starting playback --")
+            print("[MPV-DIAG] URL: \(safeURL)")
             print("[MPV-DIAG] isLive=\(isLive), attempt=\(currentIndex + 1)/\(urls.count)")
             #endif
 
@@ -2585,7 +2591,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             // specific tile rather than leaving us
                             // guessing which of N concurrent streams
                             // is misbehaving.
-                            print("[\(self.logTimestamp)] \(self.streamTag) [MPV-LOG] [\(prefix)] \(level): \(text)", terminator: "")
+                            // v1.6.23: route mpv text through
+                            // DebugLogger.sanitize so any URL-bearing
+                            // log line (HTTP redirects, demuxer init,
+                            // etc.) is stripped of Xtream-style
+                            // path-credentials and query-param
+                            // credentials before reaching the console.
+                            let safeText = DebugLogger.sanitize(text)
+                            print("[\(self.logTimestamp)] \(self.streamTag) [MPV-LOG] [\(prefix)] \(level): \(safeText)", terminator: "")
                             #endif
                         }
                         break

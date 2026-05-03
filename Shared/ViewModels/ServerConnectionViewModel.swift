@@ -31,15 +31,81 @@ final class ServerConnectionViewModel {
     var discoveredDispatcharrAuthMode: DispatcharrAuthHeaderMode? = nil
 
     var isFormValid: Bool {
-        guard !name.isEmpty, !baseURL.isEmpty else { return false }
+        validationErrors().isEmpty
+    }
+
+    /// v1.6.23: enumerated validation errors. Used by both the
+    /// `isFormValid` Bool gate and the inline field-error UI in
+    /// AddServerView. Returns the empty array when the form is
+    /// submittable. Errors are returned in the order they should
+    /// be displayed (Name first, then URL, then auth fields).
+    func validationErrors() -> [FieldError] {
+        var errors: [FieldError] = []
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.isEmpty {
+            errors.append(.init(field: .name, message: "Name is required."))
+        }
+        let trimmedURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedURL.isEmpty {
+            let label: String = (serverType == .m3uPlaylist) ? "Playlist URL is required." : "Server URL is required."
+            errors.append(.init(field: .baseURL, message: label))
+        } else if !looksLikeValidURL(trimmedURL) {
+            errors.append(.init(field: .baseURL, message: "URL must start with http:// or https://"))
+        }
         switch serverType {
         case .m3uPlaylist:
-            return !baseURL.isEmpty
+            // Optional EPG URL: validate format if provided, blank is OK.
+            let trimmedEPG = epgURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedEPG.isEmpty && !looksLikeValidURL(trimmedEPG) {
+                errors.append(.init(field: .epgURL, message: "EPG URL must start with http:// or https://"))
+            }
         case .xtreamCodes:
-            return !username.isEmpty && !password.isEmpty
+            if username.isEmpty {
+                errors.append(.init(field: .username, message: "Username is required."))
+            }
+            if password.isEmpty {
+                errors.append(.init(field: .password, message: "Password is required."))
+            }
         case .dispatcharrAPI:
-            return !apiKey.isEmpty
+            if apiKey.isEmpty {
+                errors.append(.init(field: .apiKey, message: "API Key is required."))
+            }
         }
+        return errors
+    }
+
+    /// Cheap URL-shape check. Avoids `URL(string:)` because Foundation
+    /// happily accepts strings like `"asdf"` (relative URL). We want
+    /// to nudge users towards a full http(s) URL during onboarding.
+    private func looksLikeValidURL(_ raw: String) -> Bool {
+        let lower = raw.lowercased()
+        guard lower.hasPrefix("http://") || lower.hasPrefix("https://") else { return false }
+        guard URL(string: raw)?.host?.isEmpty == false else { return false }
+        return true
+    }
+
+    /// Form field identity used by the validation system. v1.6.23.
+    enum FormField: String, Hashable {
+        case name
+        case baseURL
+        case username
+        case password
+        case apiKey
+        case epgURL
+    }
+
+    struct FieldError: Identifiable, Hashable {
+        let field: FormField
+        let message: String
+        var id: FormField { field }
+    }
+
+    /// Returns the message for `field` if the form currently has an
+    /// error there. Used inline by AddServerView so each AppTextField
+    /// can render its own error label without the view having to know
+    /// the validation rules.
+    func errorMessage(for field: FormField) -> String? {
+        validationErrors().first(where: { $0.field == field })?.message
     }
 
     func verifyConnection() async {

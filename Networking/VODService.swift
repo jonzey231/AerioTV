@@ -47,10 +47,125 @@ extension ServerConnection {
 
 final class VODService {
 
+    /// Hosts on the TMDB CDN that we know are safe to fetch directly
+    /// without auth. These are anonymous public endpoints.
+    private static let allowedExternalImageHosts: Set<String> = [
+        "image.tmdb.org",
+        "www.themoviedb.org",
+        "themoviedb.org"
+    ]
+
+    /// v1.6.23: validates an absolute URL string before returning it,
+    /// to defuse the SSRF risk a malicious server could exploit by
+    /// emitting URLs that point at the user's LAN or localhost. The
+    /// rule:
+    ///
+    /// - Only `http` / `https` schemes are accepted. Reject `file://`,
+    ///   `data://`, `javascript:`, etc.
+    /// - Same-host-as-server URLs are always allowed (the user's own
+    ///   Dispatcharr / Xtream box is in the trust boundary by
+    ///   definition).
+    /// - Public CDNs in `allowedExternalImageHosts` are allowed
+    ///   (TMDB image hosts).
+    /// - Loopback (127/8, ::1) and link-local (169.254/16, fe80::/10)
+    ///   are rejected even if the user's server happens to be on the
+    ///   same machine, because we already covered "same host as
+    ///   server" above.
+    /// - RFC-1918 ranges (10/8, 172.16/12, 192.168/16) are allowed
+    ///   ONLY when the host matches the user's configured server
+    ///   host. This permits LAN-only Dispatcharr deployments while
+    ///   blocking attacker-controlled servers from probing arbitrary
+    ///   LAN IPs.
+    ///
+    /// Returns nil on rejection. Caller should fall back to a
+    /// placeholder image or skip the fetch.
+    private static func validateAbsoluteURL(_ url: URL, serverHost: String?) -> URL? {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else { return nil }
+        guard let host = url.host?.lowercased() else { return nil }
+
+        // Always allow the user's own server (LAN or public, doesn't
+        // matter; same trust boundary).
+        if let serverHost = serverHost?.lowercased(), host == serverHost {
+            return url
+        }
+        // Always allow well-known public image CDNs.
+        if allowedExternalImageHosts.contains(host) {
+            return url
+        }
+        // Block loopback and link-local explicitly.
+        if isLoopbackHost(host) || isLinkLocalHost(host) {
+            return nil
+        }
+        // Block private network ranges. (RFC-1918 + IPv6 ULA.)
+        if isPrivateNetworkHost(host) {
+            return nil
+        }
+        // Public host that isn't in our explicit allow-list: permit.
+        // We can't enumerate every legitimate CDN; the threat model
+        // is server-side SSRF probing, which the loopback / private-
+        // network blocks already handle.
+        return url
+    }
+
+    private static func isLoopbackHost(_ host: String) -> Bool {
+        if host == "localhost" { return true }
+        if host == "::1" { return true }
+        if host.hasPrefix("127.") {
+            return parseIPv4Octets(host) != nil
+        }
+        return false
+    }
+
+    private static func isLinkLocalHost(_ host: String) -> Bool {
+        if host.hasPrefix("169.254.") {
+            return parseIPv4Octets(host) != nil
+        }
+        if host.hasPrefix("fe80:") || host.hasPrefix("[fe80:") {
+            return true
+        }
+        return false
+    }
+
+    private static func isPrivateNetworkHost(_ host: String) -> Bool {
+        guard let octets = parseIPv4Octets(host) else {
+            // IPv6 ULA fc00::/7
+            if host.hasPrefix("fc") || host.hasPrefix("fd") || host.hasPrefix("[fc") || host.hasPrefix("[fd") {
+                return true
+            }
+            return false
+        }
+        // 10.0.0.0/8
+        if octets[0] == 10 { return true }
+        // 172.16.0.0/12
+        if octets[0] == 172 && (16...31).contains(octets[1]) { return true }
+        // 192.168.0.0/16
+        if octets[0] == 192 && octets[1] == 168 { return true }
+        return false
+    }
+
+    private static func parseIPv4Octets(_ host: String) -> [Int]? {
+        let parts = host.split(separator: ".")
+        guard parts.count == 4 else { return nil }
+        var octets: [Int] = []
+        for part in parts {
+            guard let n = Int(part), (0...255).contains(n) else { return nil }
+            octets.append(n)
+        }
+        return octets
+    }
+
     private static func resolveURL(_ raw: String, base: String) -> URL? {
         guard !raw.isEmpty else { return nil }
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
-            return URL(string: raw)
+            // v1.6.23: server-provided absolute URL. Validate scheme
+            // and host before trusting it. The server's own host is
+            // extracted from the configured baseURL so LAN-only
+            // Dispatcharr setups (192.168.x.x) work for their own
+            // server's URLs but not for arbitrary LAN probes.
+            guard let url = URL(string: raw) else { return nil }
+            let serverHost = URL(string: base)?.host
+            return validateAbsoluteURL(url, serverHost: serverHost)
         }
         let separator = raw.hasPrefix("/") ? "" : "/"
         return URL(string: base + separator + raw)
@@ -80,11 +195,18 @@ final class VODService {
                                         size: String = "w1280") -> URL? {
         guard !raw.isEmpty else { return nil }
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
-            return URL(string: raw)
+            // v1.6.23: validate absolute URLs against the trust
+            // boundary. Same logic as `resolveURL`: only the user's
+            // own server host or a known public CDN is trusted.
+            // Loopback / link-local / RFC-1918 ranges are rejected
+            // unless they match the configured server host.
+            guard let url = URL(string: raw) else { return nil }
+            let serverHost = URL(string: base)?.host
+            return validateAbsoluteURL(url, serverHost: serverHost)
         }
         // TMDB heuristic: single-segment path with an image extension.
-        // TMDB poster/backdrop paths are flat — `/abc.jpg`, never
-        // `/some/subdir/abc.jpg`. A bare filename without leading `/`
+        // TMDB poster/backdrop paths are flat (`/abc.jpg`, never
+        // `/some/subdir/abc.jpg`). A bare filename without leading `/`
         // is also a TMDB candidate (some serializers strip the slash).
         let leading = raw.hasPrefix("/") ? String(raw.dropFirst()) : raw
         let isImageExt = leading.hasSuffix(".jpg")

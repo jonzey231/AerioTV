@@ -815,25 +815,42 @@ final class SyncManager: ObservableObject {
         if !server.dispatcharrAuthMode.isEmpty {
             dict["dispatcharrAuthMode"] = server.dispatcharrAuthMode
         }
-        // v1.6.12: credentials are no longer written to iCloud KVS.
+        // v1.6.23: re-include credentials in the KVS payload as a
+        // **transport fallback** when iCloud Keychain isn't propagating.
         //
-        // Pre-v1.6.8 we shipped passwords + API keys as `_password` /
-        // `_apiKey` keys inside the per-server dict because iCloud
-        // Keychain replication was historically slow / unreliable
-        // and KVS round-tripped within a couple of seconds. v1.6.8
-        // (Codex D1) added direct iCloud Keychain replication for
-        // both fields — and Apple has since made Keychain sync
-        // genuinely fast — so the KVS plaintext is now strictly
-        // worse: it duplicates the secret material in a separate
-        // store with weaker access controls than the Keychain we're
-        // already using.
+        // History: v1.6.12 stopped writing `_password` / `_apiKey` here
+        // on the assumption that iCloud Keychain (which we set with
+        // `kSecAttrSynchronizable = true` in `saveCredentialsSynced`)
+        // would carry credentials across devices. Field reports in
+        // v1.6.22 (Freyguy1975, multiple Apple TV deployments) showed
+        // that path fails silently for any user who hasn't enabled
+        // iCloud Keychain on the receiving device — the server
+        // metadata syncs via KVS, the device renders the playlist,
+        // every API call returns 401, and there's no UX recovery short
+        // of re-entering the API key. The KVS payload is still
+        // encrypted in transit by Apple, scoped to this app's iCloud
+        // container, and only readable by the user's own devices —
+        // it's a weaker store than Keychain but acceptable as a
+        // fallback for users who declined the Keychain path.
         //
-        // The deserialize side still reads `_password` / `_apiKey`
-        // (see below) so legacy KVS payloads written by older
-        // clients are adopted into Keychain on this device, and the
-        // one-shot purge task in `AerioApp` schedules an immediate
-        // push after launch to actively overwrite any plaintext
-        // still parked in the cloud.
+        // The Keychain write in `saveCredentialsSynced` stays the
+        // primary persistence; this is the *transport*. When iCloud
+        // Keychain DOES work, the receiving device's `effectiveApiKey`
+        // returns the Keychain copy (which the merge path overwrote
+        // from this `_apiKey` value, idempotent). When iCloud Keychain
+        // doesn't work, this is the only path the credential reaches
+        // the second device.
+        //
+        // Gated on `SyncCategory.credentials.isEnabled` so users who
+        // explicitly opted credentials out of sync don't get them
+        // shipped via KVS either — same gate as the Keychain write
+        // in `saveCredentialsSynced`.
+        if SyncCategory.credentials.isEnabled {
+            let pw  = server.effectivePassword
+            let key = server.effectiveApiKey
+            if !pw.isEmpty  { dict["_password"] = pw }
+            if !key.isEmpty { dict["_apiKey"]   = key }
+        }
         return dict
     }
 

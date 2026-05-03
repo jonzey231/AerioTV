@@ -832,15 +832,40 @@ struct ChannelListView: View {
                 // TextField only renders when the toggle is on, so
                 // the chip row keeps its original height by default.
                 if UIDevice.current.userInterfaceIdiom == .pad {
+                    // v1.6.23 (Codex UX P3): the search button used
+                    // to clear `searchText` when the user collapsed
+                    // the field, destroying their query along with
+                    // the chrome. Hiding the control and clearing
+                    // the user's intent are different actions; we
+                    // now preserve the query when the field is
+                    // hidden so re-opening restores the previous
+                    // search. The button visual flips to a "filled"
+                    // glyph when a search is active but hidden, so
+                    // users can tell at a glance that a filter is
+                    // still in effect.
+                    let hasActiveSearch = !searchText.isEmpty
+                    let buttonGlyph: String = {
+                        if iPadSearchPresented {
+                            return "magnifyingglass.circle.fill"
+                        } else if hasActiveSearch {
+                            return "magnifyingglass.circle"
+                        } else {
+                            return "magnifyingglass"
+                        }
+                    }()
                     Button {
                         withAnimation(.spring(response: 0.25)) {
                             iPadSearchPresented.toggle()
-                            if !iPadSearchPresented { searchText = "" }
+                            // Intentionally NOT clearing searchText
+                            // on collapse. Users who want to clear
+                            // the filter can do so by emptying the
+                            // field (the existing clear-X inside
+                            // the TextField, or backspace).
                         }
                     } label: {
-                        Image(systemName: iPadSearchPresented ? "magnifyingglass.circle.fill" : "magnifyingglass")
+                        Image(systemName: buttonGlyph)
                             .font(.system(size: 16, weight: .medium))
-                            .foregroundColor(iPadSearchPresented ? .appBackground : .textSecondary)
+                            .foregroundColor(iPadSearchPresented ? .appBackground : (hasActiveSearch ? .accentPrimary : .textSecondary))
                             .padding(.horizontal, 14)
                             .padding(.vertical, 7)
                             .background(
@@ -848,7 +873,11 @@ struct ChannelListView: View {
                                     .fill(iPadSearchPresented ? Color.accentPrimary : Color.elevatedBackground)
                             )
                     }
-                    .accessibilityLabel(iPadSearchPresented ? "Hide Search" : "Search Channels")
+                    .accessibilityLabel(
+                        iPadSearchPresented
+                            ? "Hide Search"
+                            : (hasActiveSearch ? "Search Channels (filter active)" : "Search Channels")
+                    )
 
                     if iPadSearchPresented {
                         TextField("Search channels", text: $searchText)
@@ -1741,12 +1770,42 @@ struct ChannelRow: View {
 
             Spacer()
 
-            // ── Expand chevron (only action button remaining) ──
+            // v1.6.23 (Codex UX P1): visible secondary-actions
+            // affordance. iPhone users were missing favorites and
+            // program info because the only path to those actions
+            // was a long-press, which most users never discover. A
+            // small ellipsis button on iPhone opens the same
+            // confirmation dialog the long-press currently
+            // triggers. The long-press shortcut is preserved for
+            // power users; tap-to-play remains the row's primary
+            // action.
+            //
+            // iPad keeps the long-press-only path: rows are wider,
+            // multitouch-aware, and the ellipsis would crowd the
+            // existing visible "Schedule" capsule.
+            if !isWide {
+                Button {
+                    let generator = UIImpactFeedbackGenerator(style: .light)
+                    generator.impactOccurred()
+                    showCardMenu = true
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 18, weight: .regular))
+                        .foregroundColor(.textTertiary)
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("More actions for \(item.name)")
+                .accessibilityHint("Open favorites, program info, and other actions")
+            }
+
+            // -- Expand chevron --
             if item.currentProgram != nil || fetchUpcoming != nil {
                 Button {
                     withAnimation(.spring(response: 0.25)) { isExpanded.toggle() }
                     // Skip the network fetch when GuideStore already has
-                // programmes for this channel — the expanded panel
+                // programmes for this channel: the expanded panel
                 // now prefers GuideStore, so the fetch would be
                 // redundant work. Still fires for Xtream + cold-
                 // launch-before-XMLTV cases (GuideStore empty).
@@ -2729,8 +2788,57 @@ private final class LogoCache: @unchecked Sendable {
     func store(_ img: UIImage, for key: String) { cache.setObject(img, forKey: key as NSString) }
 }
 
+/// v1.6.23 — auth-aware logo fetcher. Dispatcharr-API channel logos
+/// live behind `/api/channels/logos/<id>/cache/`, which requires the
+/// server's `X-API-Key` (or `Authorization: ApiKey ...` / `Bearer`
+/// per the per-server auth mode added in v1.6.20). The previous
+/// implementation used a bare `URLSession.shared.data(from: url)`
+/// with no headers, so every Dispatcharr-API logo fetch returned
+/// 401/403, the image bytes were unparseable, and every channel
+/// rendered the placeholder icon (jexhammer + Archie iPad sim repro,
+/// v1.6.23 reports). The fix: detect URLs that match the active
+/// server's host and inject `server.authHeaders`. Public CDN URLs
+/// (TMDB, EPG-side logos baked into the M3U) don't match the host
+/// and pass through unauthenticated, preserving today's behaviour.
+enum LogoFetcher {
+    /// Returns the auth headers to apply when fetching `url`, or
+    /// `nil` when no server matches (CDN passthrough).
+    @MainActor
+    static func headers(for url: URL) -> [String: String]? {
+        guard let host = url.host?.lowercased() else { return nil }
+        guard let server = ChannelStore.shared.activeServer else { return nil }
+        let candidates = [server.effectiveBaseURL, server.normalizedBaseURL, server.normalizedLocalURL]
+        for raw in candidates {
+            guard let candidateHost = URL(string: raw)?.host?.lowercased() else { continue }
+            if candidateHost == host { return server.authHeaders }
+        }
+        return nil
+    }
+
+    /// Fetch logo bytes with the right auth headers (if any).
+    ///
+    /// Uses `HTTPRouter` (not bare URLSession) so plain-HTTP servers
+    /// like jexhammer's `http://dispatcharr.goip.de:59192` (which
+    /// URLSession refuses with -1022 ATS) fall back to `NWHTTPClient`
+    /// just like every other API call. Without that fallback, logos
+    /// 404 silently for any user whose Dispatcharr lives on a
+    /// non-IP-literal HTTP host (HSTS-preloaded TLDs, custom domains
+    /// without TLS).
+    static func fetch(_ url: URL) async throws -> Data {
+        let headers = await MainActor.run { Self.headers(for: url) }
+        var request = URLRequest(url: url)
+        if let headers = headers {
+            for (key, value) in headers {
+                request.setValue(value, forHTTPHeaderField: key)
+            }
+        }
+        let (data, _) = try await HTTPRouter.data(for: request)
+        return data
+    }
+}
+
 /// Drop-in replacement for AsyncImage that caches logos in memory.
-private struct CachedLogoImage: View {
+struct CachedLogoImage: View {
     let url: URL?
     let width: CGFloat
     let height: CGFloat
@@ -2760,7 +2868,7 @@ private struct CachedLogoImage: View {
                 return
             }
             do {
-                let (data, _) = try await URLSession.shared.data(from: url)
+                let data = try await LogoFetcher.fetch(url)
                 if let img = UIImage(data: data) {
                     LogoCache.shared.store(img, for: key)
                     uiImage = img

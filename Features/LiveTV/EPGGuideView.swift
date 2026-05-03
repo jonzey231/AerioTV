@@ -2371,16 +2371,12 @@ private struct GuideChannelButton: View {
                 .frame(minWidth: 38, alignment: .trailing)
 
             VStack(spacing: 4) {
-                if let logo = channel.logoURL {
-                    AsyncImage(url: logo) { phase in
-                        switch phase {
-                        case .success(let img):
-                            img.resizable().aspectRatio(contentMode: .fit)
-                                .frame(width: 72, height: 48)
-                        default:
-                            guidePlaceholder
-                        }
-                    }
+                // v1.6.23: route through CachedLogoImage so the
+                // active server's auth headers (X-API-Key, etc) are
+                // applied. Bare AsyncImage hits 401 on Dispatcharr-API
+                // mode and falls back to the placeholder.
+                if channel.logoURL != nil {
+                    CachedLogoImage(url: channel.logoURL, width: 72, height: 48)
                 } else {
                     guidePlaceholder
                 }
@@ -2395,16 +2391,9 @@ private struct GuideChannelButton: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         #else
         VStack(spacing: 4) {
-            if let logo = channel.logoURL {
-                AsyncImage(url: logo) { phase in
-                    switch phase {
-                    case .success(let img):
-                        img.resizable().aspectRatio(contentMode: .fit)
-                            .frame(width: 40, height: 28)
-                    default:
-                        guidePlaceholder
-                    }
-                }
+            // v1.6.23: same auth-aware fix as the tvOS branch above.
+            if channel.logoURL != nil {
+                CachedLogoImage(url: channel.logoURL, width: 40, height: 28)
             } else {
                 guidePlaceholder
             }

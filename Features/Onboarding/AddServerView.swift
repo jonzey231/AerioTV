@@ -718,6 +718,36 @@ struct AddServerView: View {
 
     private var verifySection: some View {
         VStack(spacing: 12) {
+            // v1.6.23: surface validation errors inline so the user
+            // can tell exactly what's missing instead of staring at
+            // a greyed-out "Test Connection" button. Shows the first
+            // outstanding error with the field name and remediation.
+            // When the form is fully valid this block disappears
+            // (verificationError below covers post-tap failures).
+            if !viewModel.isFormValid && !viewModel.isVerifying {
+                let errors = viewModel.validationErrors()
+                if let first = errors.first {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundColor(.textSecondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(first.message)
+                                .font(.bodySmall)
+                                .foregroundColor(.textPrimary)
+                            if errors.count > 1 {
+                                Text("\(errors.count - 1) more field(s) need attention.")
+                                    .font(.labelSmall)
+                                    .foregroundColor(.textTertiary)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(12)
+                    .background(Color.elevatedBackground)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
+            }
+
             PrimaryButton(
                 viewModel.isVerifying ? "Verifying..." : "Test Connection",
                 icon: viewModel.verificationSuccess ? "checkmark.circle.fill" : "network",

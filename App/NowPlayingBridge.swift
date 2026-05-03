@@ -233,7 +233,12 @@ final class NowPlayingBridge {
         guard let url else { return }
         artworkTask = Task { [weak self] in
             do {
-                let (data, _) = try await URLSession.shared.data(from: url)
+                // v1.6.23: route through LogoFetcher so the active
+                // server's auth headers are applied — Dispatcharr-API
+                // logos live behind /api/channels/logos/<id>/cache/
+                // which 401s without X-API-Key, leaving the lockscreen
+                // artwork blank for every Dispatcharr-API channel.
+                let data = try await LogoFetcher.fetch(url)
                 guard !Task.isCancelled else { return }
                 #if canImport(UIKit)
                 guard let original = UIImage(data: data) else { return }

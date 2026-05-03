@@ -2572,15 +2572,48 @@ actor AsyncSemaphore {
 /// of failure.
 final class RedirectPreservingDelegate: NSObject, URLSessionTaskDelegate {
 
-    /// Header names we ALWAYS re-apply to redirected requests. Order
-    /// is irrelevant — they're applied unconditionally.
-    private static let preservedHeaders: [String] = [
+    /// Headers re-applied across same-origin redirects. Strictly
+    /// auth-bearing headers (`Authorization`, `X-API-Key`) are
+    /// stripped on cross-origin redirects per HTTP standard;
+    /// non-credential headers (`Accept`, `Content-Type`,
+    /// `User-Agent`) are safe to forward regardless.
+    private static let credentialHeaders: Set<String> = [
         "X-API-Key",
-        "Authorization",
+        "Authorization"
+    ]
+    private static let nonCredentialHeaders: [String] = [
         "Accept",
         "Content-Type",
         "User-Agent"
     ]
+
+    /// True when redirect target's host (and scheme + port) matches
+    /// the original request's, accounting for nil values on either
+    /// side. v1.6.23: gate credential reapplication on this check
+    /// so a malicious or misconfigured server can't issue HTTP 301
+    /// to attacker.example.com and harvest the user's API key in
+    /// plain text. Same-origin redirects (reverse-proxy
+    /// canonicalization, http -> https upgrade by an explicit
+    /// scheme bump on the same host) keep working.
+    private static func isSameOrigin(_ a: URL?, _ b: URL?) -> Bool {
+        guard let a = a, let b = b else { return false }
+        guard let aHost = a.host?.lowercased(),
+              let bHost = b.host?.lowercased(),
+              aHost == bHost else { return false }
+        guard a.scheme?.lowercased() == b.scheme?.lowercased() else { return false }
+        // Compare effective ports (default port if unset).
+        let aPort = a.port ?? defaultPort(forScheme: a.scheme)
+        let bPort = b.port ?? defaultPort(forScheme: b.scheme)
+        return aPort == bPort
+    }
+
+    private static func defaultPort(forScheme scheme: String?) -> Int? {
+        switch scheme?.lowercased() {
+        case "http": return 80
+        case "https": return 443
+        default: return nil
+        }
+    }
 
     func urlSession(_ session: URLSession,
                     task: URLSessionTask,
@@ -2589,18 +2622,35 @@ final class RedirectPreservingDelegate: NSObject, URLSessionTaskDelegate {
                     completionHandler: @escaping (URLRequest?) -> Void) {
         var modified = request
         if let original = task.originalRequest {
-            for name in Self.preservedHeaders {
+            let sameOrigin = Self.isSameOrigin(original.url, request.url)
+            // Always forward non-credential headers.
+            for name in Self.nonCredentialHeaders {
                 if let value = original.value(forHTTPHeaderField: name) {
                     modified.setValue(value, forHTTPHeaderField: name)
+                }
+            }
+            // Auth headers ONLY on same-origin redirects.
+            if sameOrigin {
+                for name in Self.credentialHeaders {
+                    if let value = original.value(forHTTPHeaderField: name) {
+                        modified.setValue(value, forHTTPHeaderField: name)
+                    }
+                }
+            } else {
+                // Defense in depth: explicitly strip any auth
+                // header URLSession may have copied automatically.
+                for name in Self.credentialHeaders {
+                    modified.setValue(nil, forHTTPHeaderField: name)
                 }
             }
             #if DEBUG
             // One-line audit so a misbehaving reverse-proxy redirect
             // shows up in the debug log without needing a packet
-            // capture.
+            // capture. Note whether auth was preserved or stripped.
             let from = original.url?.absoluteString ?? "<unknown>"
             let to   = request.url?.absoluteString ?? "<unknown>"
-            debugLog("DispatcharrAPI redirect: \(response.statusCode) \(from) → \(to) (re-applied \(Self.preservedHeaders.count) headers)")
+            let authNote = sameOrigin ? "auth preserved (same-origin)" : "AUTH STRIPPED (cross-origin)"
+            debugLog("DispatcharrAPI redirect: \(response.statusCode) \(from) -> \(to) (\(authNote))")
             #endif
         }
         completionHandler(modified)

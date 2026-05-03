@@ -1102,12 +1102,27 @@ struct RootView: View {
                 // both write to iCloud Keychain on every save going
                 // forward.
                 migrateCredentialsToICloudKeychainIfNeeded()
-                // v1.6.12: drain any legacy plaintext credentials
-                // still parked in iCloud KVS by overwriting the
-                // cloud payload with a credential-free push. Runs
-                // once per device, idempotent (gated by a separate
-                // UserDefaults flag).
-                purgeKVSPlaintextCredentialsIfNeeded()
+                // v1.6.23: re-publish servers to iCloud KVS so the
+                // payload includes credentials again. v1.6.12 stopped
+                // emitting `_password` / `_apiKey` to KVS on the theory
+                // that iCloud Keychain (kSecAttrSynchronizable) would
+                // carry credentials cross-device. That assumption broke
+                // for users who hadn't enabled iCloud Keychain on their
+                // Apple TV / second device — the server config synced,
+                // but every API call returned 401 (Freyguy1975 v1.6.22
+                // report). v1.6.23's `serialize` re-includes the
+                // credentials; this republish forces an immediate
+                // overwrite of the legacy credential-stripped payload
+                // sitting in KVS so existing multi-device users
+                // immediately benefit.
+                //
+                // Function name kept for diff continuity but it now
+                // republishes-with-credentials rather than purging-
+                // credentials. The previous purge ran on a different
+                // flag so this republish fires for both already-purged
+                // installs and for upgrade installs that never ran the
+                // v1.6.12 purge.
+                republishServersWithCredentialsIfNeeded()
                 // v1.6.20: silently auto-detect the Dispatcharr
                 // auth header shape for any verified server still
                 // missing one. Closes the v1.6.19→v1.6.20 upgrade
@@ -1294,58 +1309,53 @@ struct RootView: View {
         }
     }
 
-    /// One-shot launch task that scrubs legacy plaintext credentials
-    /// out of iCloud KVS on first upgraded launch.
+    /// One-shot launch task that re-publishes servers to iCloud KVS
+    /// so the payload includes credentials again on v1.6.23+.
     ///
-    /// Pre-v1.6.12 clients pushed `_password` and `_apiKey` strings
-    /// into the per-server dict in the KVS payload — see the
-    /// docstring on `SyncManager.serialize` for the historical
-    /// rationale. v1.6.12 stopped writing those keys, but any
-    /// payload already in the cloud (pushed by an older device or by
-    /// this device before the upgrade) still carries them until a
-    /// fresh push overwrites it. Natural pushes are debounced and
-    /// only fire on server-list changes, so a user who doesn't touch
-    /// their Settings → Servers list could leave plaintext sitting
-    /// in KVS for an arbitrary amount of time.
+    /// Background: pre-v1.6.12 clients pushed `_password` / `_apiKey`
+    /// in the KVS per-server dict. v1.6.12 stopped emitting those keys
+    /// on the theory that iCloud Keychain (kSecAttrSynchronizable)
+    /// would carry credentials cross-device. That assumption broke for
+    /// users who hadn't enabled iCloud Keychain on a second device
+    /// (most common: Apple TV with iCloud Keychain disabled). The
+    /// server metadata synced via KVS, the playlist rendered, every
+    /// API call returned 401 — and there was no UX recovery short of
+    /// re-typing the API key on every device. Field reports starting
+    /// in v1.6.22 (Freyguy1975, multiple Apple TV deployments) made it
+    /// clear the Keychain-only path is unreliable in practice.
     ///
-    /// This task forces an immediate (non-debounced) push from this
-    /// device, which writes a credential-free payload (because
-    /// `serialize` no longer emits the secret keys) and overwrites
-    /// whatever is currently in the cloud. After one successful run
-    /// the `kvsCredentialPurgeDoneV1` UserDefaults flag prevents
-    /// re-runs.
+    /// v1.6.23 restored the KVS credential carry in `serialize`. This
+    /// task forces an immediate non-debounced push so the legacy
+    /// credential-stripped payload that's been sitting in KVS since
+    /// v1.6.12 gets overwritten with the v1.6.23 shape. After one
+    /// successful run the `kvsCredentialRepublishDoneV1_6_23` flag
+    /// prevents re-runs.
     ///
-    /// Safe to run when iCloud Sync is disabled — we early-out and
-    /// just set the flag, since with Sync off we never write to KVS
-    /// anyway and any plaintext sitting up there can't reach this
-    /// device. If the user later enables Sync, the next natural push
-    /// (which fires on the toggle) will write the credential-free
-    /// payload.
-    private func purgeKVSPlaintextCredentialsIfNeeded() {
-        let flagKey = "kvsCredentialPurgeDoneV1"
+    /// Safe when iCloud Sync is disabled — we early-out, since with
+    /// Sync off we never write to KVS. If the user later enables Sync,
+    /// the next natural push (fired on the toggle) carries the new
+    /// credential-bearing shape.
+    private func republishServersWithCredentialsIfNeeded() {
+        let flagKey = "kvsCredentialRepublishDoneV1_6_23"
         if UserDefaults.standard.bool(forKey: flagKey) { return }
 
         guard SyncManager.shared.isSyncEnabled else {
             UserDefaults.standard.set(true, forKey: flagKey)
             return
         }
-        // No servers means nothing to push — the cloud KVS will be
-        // overwritten with an empty array by the regular push flow
-        // the moment the user adds their first server.
         guard !servers.isEmpty else {
             UserDefaults.standard.set(true, forKey: flagKey)
             return
         }
 
-        // Force a non-debounced push so the cloud KVS gets a
-        // credential-free payload immediately. `pushServers` calls
-        // `serialize` on each server, which (post-v1.6.12) omits
-        // `_password` / `_apiKey` — the new payload supersedes the
-        // legacy one in KVS.
+        // Force a non-debounced push so the cloud KVS gets the new
+        // credential-bearing payload immediately. `pushServers` calls
+        // the v1.6.23 `serialize`, which re-emits `_password` /
+        // `_apiKey` (gated on `SyncCategory.credentials.isEnabled`).
         SyncManager.shared.pushServers(servers, immediate: true)
         UserDefaults.standard.set(true, forKey: flagKey)
         DebugLogger.shared.log(
-            "KVS credential purge: scheduled immediate credential-free push for \(servers.count) server(s)",
+            "KVS credential republish: scheduled immediate push for \(servers.count) server(s)",
             category: "Sync", level: .info)
     }
 

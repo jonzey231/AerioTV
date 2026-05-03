@@ -102,7 +102,10 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         if let logoURL = channel.logoURL {
             Task {
                 guard !Task.isCancelled else { return }
-                if let (data, _) = try? await URLSession.shared.data(from: logoURL),
+                // v1.6.23: route through LogoFetcher so the active
+                // server's auth headers are applied — fixes blank
+                // CarPlay channel logos on Dispatcharr-API mode.
+                if let data = try? await LogoFetcher.fetch(logoURL),
                    let image = UIImage(data: data) {
                     guard !Task.isCancelled else { return }
                     let maxSize = CPListItem.maximumImageSize

@@ -662,7 +662,22 @@ struct VODDetailView: View {
         // produces audio — two simultaneous streams. Same root
         // cause as the recording-playback fix in MyRecordingsView
         // (v1.6.18 user report from NicolaiVdS, Apple TV).
-        NowPlayingManager.shared.stop()
+        //
+        // v1.6.23 — `NowPlayingManager.stop()` only clears
+        // single-stream state (`playingItem`, `isMinimized`); when the
+        // active session is `.multiview`, the `MultiviewStore` tiles
+        // and their mpv coordinators stay mounted under the VOD
+        // fullScreenCover, decode in the background, and contend with
+        // the VOD on the GPU (jesmannstl, v1.6.23: live tile=666 KRCG
+        // kept producing frames for 3+ minutes after VOD started, plus
+        // visible VOD black-screen flickers). Route through
+        // `PlayerSession.shared.exit()` instead — that resets the tile
+        // store, flips `mode = .idle`, tears down `NowPlayingBridge`,
+        // and also calls `NowPlayingManager.shared.stop()` at the end
+        // so the single-stream case is still handled. Safe in
+        // single-stream mode: the multiview-specific branches inside
+        // `exit()` are guarded by `if let audioID = store.audioTileID`.
+        PlayerSession.shared.exit()
         playingURL = IdentifiableURL(url: resolvedURL)
         isPlaying = true
     }
