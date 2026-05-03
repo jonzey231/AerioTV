@@ -15,6 +15,24 @@ final class ServerConnectionViewModel {
     var localURL: String = ""     // LAN URL (e.g. http://192.168.1.10:9191)
     var localEPGURL: String = ""  // Local EPG URL for M3U when on LAN
 
+    /// v1.7 Direct Connect — when `serverType == .dispatcharrAPI`, which
+    /// credential mode the user is configuring. Defaults to `.apiKey`
+    /// so the legacy Add Server flow is unchanged for users picking
+    /// Dispatcharr without engaging the new picker. Switching to
+    /// `.usernamePassword` reveals Username/Password fields and hides
+    /// the Admin API Key field; on Test Connection success, the API
+    /// key is fetched from `/api/accounts/users/me/` and persisted
+    /// alongside the credentials so long-lived connections (mpv,
+    /// logo fetches) keep working.
+    var dispatcharrCredentialType: DispatcharrCredentialType = .apiKey
+
+    /// v1.7: a freshly-issued JWT pair from the Direct Connect login
+    /// during Test Connection. Held here transiently so the Save
+    /// step can stash both tokens into `DispatcharrTokenStore.shared`
+    /// keyed by the new server's UUID. Cleared on each new
+    /// verification attempt.
+    var pendingJWTPair: DispatcharrJWTPair? = nil
+
     var isVerifying: Bool = false
     var verificationSuccess: Bool = false
     var verificationError: String? = nil
@@ -67,8 +85,23 @@ final class ServerConnectionViewModel {
                 errors.append(.init(field: .password, message: "Password is required."))
             }
         case .dispatcharrAPI:
-            if apiKey.isEmpty {
-                errors.append(.init(field: .apiKey, message: "API Key is required."))
+            // v1.7 Direct Connect: validation is mode-dependent. API Key
+            // mode keeps the historical "Admin API Key required" rule;
+            // Username & Password mode requires both credential fields
+            // instead. The User-facing copy mirrors what the picker
+            // shows so error messages line up with the visible inputs.
+            switch dispatcharrCredentialType {
+            case .apiKey:
+                if apiKey.isEmpty {
+                    errors.append(.init(field: .apiKey, message: "API Key is required."))
+                }
+            case .usernamePassword:
+                if username.isEmpty {
+                    errors.append(.init(field: .username, message: "Username is required."))
+                }
+                if password.isEmpty {
+                    errors.append(.init(field: .password, message: "Password is required."))
+                }
             }
         }
         return errors
@@ -196,22 +229,82 @@ final class ServerConnectionViewModel {
             }
 
         case .dispatcharrAPI:
-            try await withATSSchemeUpgrade(originalURL: normalizedURL) { url in
-                // Default authMode `.xapikey` — v1.6.16+ behavior.
-                // verifyConnection auto-falls-back to `.both` and
-                // `.bearer` on HTTP 401, returning the working shape
-                // in `info.discoveredAuthMode` so the caller can
-                // persist it on the SwiftData model.
-                let api = DispatcharrAPI(baseURL: url, auth: .apiKey(self.apiKey))
-                let info = try await api.verifyConnection()
-                // Prefer a friendly name if provided; otherwise show version.
-                if let name = info.serverName, !name.isEmpty {
-                    self.verifiedServerName = name
-                } else {
-                    self.verifiedServerName = "v\(info.version ?? "unknown")"
+            switch dispatcharrCredentialType {
+            case .apiKey:
+                try await withATSSchemeUpgrade(originalURL: normalizedURL) { url in
+                    // Default authMode `.xapikey` — v1.6.16+ behavior.
+                    // verifyConnection auto-falls-back to `.both` and
+                    // `.bearer` on HTTP 401, returning the working shape
+                    // in `info.discoveredAuthMode` so the caller can
+                    // persist it on the SwiftData model.
+                    let api = DispatcharrAPI(baseURL: url, auth: .apiKey(self.apiKey))
+                    let info = try await api.verifyConnection()
+                    // Prefer a friendly name if provided; otherwise show version.
+                    if let name = info.serverName, !name.isEmpty {
+                        self.verifiedServerName = name
+                    } else {
+                        self.verifiedServerName = "v\(info.version ?? "unknown")"
+                    }
+                    self.discoveredDispatcharrAuthMode = info.discoveredAuthMode
+                    self.verificationSuccess = true
                 }
-                self.discoveredDispatcharrAuthMode = info.discoveredAuthMode
-                self.verificationSuccess = true
+
+            case .usernamePassword:
+                // v1.7 Direct Connect Test Connection flow:
+                //   1. POST /api/accounts/token/ with the entered credentials.
+                //   2. GET /api/accounts/users/me/ with the returned access
+                //      token. Read the user's API key out of the response.
+                //   3. Set `self.apiKey` so the rest of Aerio (mpv stream
+                //      headers, logo fetcher, recording playback) keeps
+                //      working with a durable credential. The JWT pair is
+                //      stashed in `pendingJWTPair` for the Save step to
+                //      hand off into `DispatcharrTokenStore.shared`.
+                //   4. Run the existing API-key verifyConnection so we
+                //      auto-discover the same dispatcharrAuthMode shape
+                //      the legacy flow does. This keeps every downstream
+                //      code path (header emission, redirect handling,
+                //      VOD episode visibility) on a known-good shape
+                //      regardless of which credential mode the user
+                //      picked at the picker.
+                try await withATSSchemeUpgrade(originalURL: normalizedURL) { url in
+                    // Login throws DispatcharrDirectConnectError on auth /
+                    // protocol failures; let it propagate so the verify
+                    // wrapper surfaces its localizedDescription verbatim
+                    // (e.g. "Invalid username or password" instead of
+                    // the legacy API-key copy).
+                    let pair = try await DispatcharrAPI.login(
+                        baseURL: url,
+                        username: self.username,
+                        password: self.password
+                    )
+                    self.pendingJWTPair = pair
+
+                    // Fetch the authenticated user's record. Use the bearer
+                    // auth slot directly — we haven't persisted a server yet,
+                    // so there's no UUID to key the JWT session against, and
+                    // re-routing through `.jwtSession` would force us to wire
+                    // up a placeholder UUID just for this single call.
+                    let bearerAPI = DispatcharrAPI(baseURL: url, auth: .bearer(pair.access))
+                    let user = try await bearerAPI.fetchCurrentUser()
+                    self.apiKey = user.apiKey
+
+                    // Now run the standard API-key verify so we get the
+                    // same `discoveredDispatcharrAuthMode` discovery the
+                    // legacy path runs. The api_key we just fetched is
+                    // canonical for this user, so this can't fail with
+                    // a credential error — only with a transport error
+                    // or an unrecognised-server-shape error, which are
+                    // worth surfacing.
+                    let api = DispatcharrAPI(baseURL: url, auth: .apiKey(user.apiKey))
+                    let info = try await api.verifyConnection()
+                    if let name = info.serverName, !name.isEmpty {
+                        self.verifiedServerName = name
+                    } else {
+                        self.verifiedServerName = "v\(info.version ?? "unknown") (\(user.username))"
+                    }
+                    self.discoveredDispatcharrAuthMode = info.discoveredAuthMode
+                    self.verificationSuccess = true
+                }
             }
         }
     }
@@ -338,6 +431,28 @@ final class ServerConnectionViewModel {
         if let mode = discoveredDispatcharrAuthMode {
             server.dispatcharrAuthMode = mode.rawValue
         }
+        // v1.7 Direct Connect: persist the credential type on the
+        // SwiftData record. For `.apiKey` we leave the raw value at
+        // the model default ("") so legacy clients (older AerioTV
+        // builds receiving this server via iCloud sync) treat it as
+        // a regular Dispatcharr API server. For `.usernamePassword`
+        // we explicitly write the raw value so the v1.7+ session-
+        // warmup path knows to refresh JWTs for this server.
+        if serverType == .dispatcharrAPI && dispatcharrCredentialType == .usernamePassword {
+            server.dispatcharrCredentialTypeRaw = DispatcharrCredentialType.usernamePassword.rawValue
+        }
+        // Hand the freshly-issued JWT pair (if any) into the live
+        // token store keyed by the new server's UUID so the very
+        // next API call can use Bearer auth without waiting for the
+        // session-warmup task to fire. The pair is held transiently
+        // on the ViewModel and only relevant for this Save.
+        if let pair = pendingJWTPair {
+            DispatcharrTokenStore.shared.store(
+                serverID: server.id,
+                access: pair.access,
+                refresh: pair.refresh
+            )
+        }
         return server
     }
 
@@ -356,6 +471,8 @@ final class ServerConnectionViewModel {
         verificationError = nil
         verifiedServerName = nil
         discoveredDispatcharrAuthMode = nil
+        dispatcharrCredentialType = .apiKey
+        pendingJWTPair = nil
     }
 
     private var normalizedURL: String {

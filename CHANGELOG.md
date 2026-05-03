@@ -1,5 +1,118 @@
 # Changelog
 
+## v1.7.0 - 2026-05-03
+
+### Added
+
+- **Dispatcharr Direct Connect.** New sign-in mode for Dispatcharr
+  servers: enter your admin username and password instead of pasting
+  a 32-character API key. Equivalent to how Teamarr and Enhanced
+  Channel Manager authenticate, and the same auth flow the
+  Dispatcharr web UI uses. The Apple-TV typing-burden was the driver
+  (a 32-char API key on the Siri Remote on-screen keyboard is
+  genuinely painful), but it's a quality-of-life win on every
+  platform. Endpoint contract verified against Dispatcharr 0.23.0
+  testbench (both LAN HTTP and public HTTPS hostnames):
+    - `POST /api/accounts/token/` body `{ username, password }`
+      returns `{ access, refresh }` JWT pair. Access TTL 30 min,
+      refresh TTL 24 hour. Refresh response only emits a new access
+      token (refresh is NOT rotated), which sidesteps concurrent-
+      refresh races entirely.
+    - `GET /api/accounts/users/me/` with `Authorization: Bearer
+      <access>` returns the user object including the `api_key`
+      field. Aerio reads it during Test Connection and persists it
+      into the same Keychain slot the legacy API-key flow uses, so
+      every downstream consumer (mpv stream playback, logo fetcher,
+      recording playback, the v1.6.20 dispatcharrAuthMode
+      auto-discovery) keeps working with a durable credential and
+      doesn't have to refresh-token mid-stream.
+    - `POST /api/accounts/token/refresh/` body `{ refresh }` returns
+      `{ access }`.
+- **AddServerView credential picker.** When the user selects
+  Dispatcharr as the server type, a segmented control reveals two
+  options: "Username & Password" (Direct Connect, the new path) and
+  "API Key" (the legacy path, still available for power users who
+  rotate credentials per-device). The picker writes
+  `ServerConnectionViewModel.dispatcharrCredentialType`; the type's
+  selected value gates which fields render below (Username + Password
+  vs Admin API Key) and which validation rules
+  `validationErrors()` enforces. Default selection is `.apiKey` to
+  match every existing v1.6.x install.
+
+### Changed
+
+- **Renamed "Dispatcharr API" to "Dispatcharr Direct Connect" in
+  user-facing copy.** Settings, the type picker, and onboarding
+  reflect the new name. The SwiftData enum case stays
+  `dispatcharrAPI` / raw `"dispatcharr_api"` for migration
+  stability. Only the user-facing string changed.
+- **`ServerConnection.authHeaders` is now gated on api_key presence,
+  not credential type.** Subtle invariant change with a back-compat
+  motive: every existing user has an api_key in their Keychain and
+  `dispatcharrCredentialTypeRaw == ""` (resolves to `.apiKey`), so
+  they emit exactly the same headers as before v1.7. New Direct
+  Connect users also have an api_key in Keychain because the login
+  flow fetches it from `/api/accounts/users/me/` during Test
+  Connection. The JWT path layers `Authorization: Bearer <jwt>` on
+  top via the per-request `headers(for:)` lookup; Dispatcharr
+  prefers Bearer when both are sent. Net effect: legacy users see
+  zero behavior change; Direct Connect users get JWT auth when the
+  token store is populated and seamless X-API-Key fallback when
+  it's not.
+
+### Internal
+
+- New `Networking/DispatcharrDirectConnect.swift` houses the JWT
+  plumbing: `DispatcharrTokenStore` (NSLock-guarded
+  process-scoped cache keyed by server UUID), `DispatcharrUser`
+  decodable, `DispatcharrJWTPair` decodable, and extensions on
+  `DispatcharrAPI` for `login`, `refreshAccessToken`, and
+  `fetchCurrentUser`. Kept separate from `StreamingAPIs.swift`
+  (already on the god-files watchlist) so the new feature doesn't
+  inflate that file further.
+- Added `Auth.jwtSession(serverID: UUID)` case to
+  `DispatcharrAPI.Auth`. The case looks up the current access
+  token from `DispatcharrTokenStore.shared` at every header
+  emission rather than holding a stale value. `headers(for:)` and
+  `verifyConnection`'s candidate-mode iterator both handle the
+  new case.
+- `ServerConnection` gains `dispatcharrCredentialTypeRaw: String =
+  ""` (SwiftData migration-safe; empty default resolves to
+  `.apiKey` via the `dispatcharrCredentialType` accessor).
+- `SyncManager.serialize/deserialize` round-trip the new field
+  via the `dispatcharrCredentialType` KVS key. Empty value
+  (legacy default) is omitted from the dict so older clients see
+  no unfamiliar key. `mergeRemoteServers` in `AerioApp.swift`
+  copies the field on both update and insert paths.
+- `ServerConnectionViewModel` gains `dispatcharrCredentialType`
+  and `pendingJWTPair` properties. The Direct Connect verify
+  branch in `runVerifyAttempt` calls login, then fetches the
+  user object and writes the api_key into the ViewModel so the
+  Save handler picks it up for Keychain persistence, then runs
+  the standard API-key verifyConnection so the
+  `dispatcharrAuthMode` auto-discovery still happens.
+  `buildServerConnection` writes the credential-type raw onto the
+  new `ServerConnection` and hands the JWT pair to the token
+  store keyed by the new server's UUID.
+
+### Back-compat invariants (verified)
+
+- Existing API-key servers continue working **unchanged**: identical
+  auth headers, identical Test Connection behaviour, identical
+  iCloud sync shape (the new `dispatcharrCredentialType` KVS key is
+  omitted when its raw is empty).
+- Older AerioTV builds receiving a v1.7-synced Direct Connect
+  server via iCloud see the server appear with the api_key from
+  `/api/accounts/users/me/` already populated in the Keychain
+  payload (the v1.6.23 KVS plaintext fallback covers
+  iCloud-Keychain-disabled devices). They treat it as a regular
+  Dispatcharr API server and connect successfully.
+- New Direct Connect servers also have an api_key in Keychain so
+  downstream consumers (mpv, logos, recording playback) keep
+  working even if the JWT layer is unavailable for any reason
+  (cold launch before token store is populated, network blip
+  during refresh, etc.).
+
 ## v1.6.23 - 2026-05-02
 
 ### Security

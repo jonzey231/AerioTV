@@ -815,6 +815,19 @@ final class SyncManager: ObservableObject {
         if !server.dispatcharrAuthMode.isEmpty {
             dict["dispatcharrAuthMode"] = server.dispatcharrAuthMode
         }
+        // v1.7 Direct Connect: cross-device persistence of the
+        // credential type. Empty (= "" = .apiKey, the legacy default)
+        // is omitted so older clients don't see an unfamiliar key
+        // and stay perfectly back-compat. Only ".usernamePassword"
+        // values ride along on the wire — and a v1.6.x client
+        // receiving this key just ignores it during deserialize and
+        // treats the server as a regular Dispatcharr API server,
+        // which still works because we ALSO sync the API key (fetched
+        // from /api/accounts/users/me/ at login time) into the
+        // Keychain via the existing apiKey_<id> pattern.
+        if !server.dispatcharrCredentialTypeRaw.isEmpty {
+            dict["dispatcharrCredentialType"] = server.dispatcharrCredentialTypeRaw
+        }
         // v1.6.23: re-include credentials in the KVS payload as a
         // **transport fallback** when iCloud Keychain isn't propagating.
         //
@@ -887,7 +900,11 @@ final class SyncManager: ObservableObject {
             homeSSID:      dict["homeSSID"]    as? String ?? "",
             password:      dict["_password"]   as? String ?? "",
             apiKey:        dict["_apiKey"]     as? String ?? "",
-            dispatcharrAuthMode: dict["dispatcharrAuthMode"] as? String ?? ""
+            dispatcharrAuthMode: dict["dispatcharrAuthMode"] as? String ?? "",
+            // v1.7: empty string from older clients defaults to
+            // .apiKey via `dispatcharrCredentialType` accessor on the
+            // SwiftData model. No data loss for legacy senders.
+            dispatcharrCredentialTypeRaw: dict["dispatcharrCredentialType"] as? String ?? ""
         )
     }
 
@@ -1244,6 +1261,18 @@ struct SyncedServer: Sendable {
     /// discovery. Empty string = inherit the back-compat default
     /// (`.both`) on the receiving device.
     let dispatcharrAuthMode: String
+    /// v1.7: per-server Dispatcharr credential type, raw string
+    /// (`""` or `"api_key"` resolves to API Key mode, the legacy
+    /// behaviour; `"username_password"` resolves to Direct Connect
+    /// mode). Synced so a user who set up Direct Connect on one
+    /// device gets the matching mode on every other device on the
+    /// same Apple ID. The credentials themselves (username +
+    /// password) ride along via the existing
+    /// `password_<id>` Keychain entry pattern; iCloud Keychain
+    /// replicates them out-of-band, with the KVS plaintext fallback
+    /// added in v1.6.23 covering devices that don't have iCloud
+    /// Keychain enabled.
+    let dispatcharrCredentialTypeRaw: String
 }
 
 // MARK: - Notification Names

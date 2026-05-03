@@ -24,7 +24,7 @@ settings:
     SWIFT_VERSION: "6.0"
     ENABLE_BITCODE: "NO"
     SUPPORTS_MACCATALYST: "YES"
-    MARKETING_VERSION: "1.6.23"
+    MARKETING_VERSION: "1.7.0"
     CURRENT_PROJECT_VERSION: "1"
     ENABLE_USER_SCRIPT_SANDBOXING: "NO"
     # Leave blank so a fork can sign under its own team without
@@ -58,7 +58,7 @@ targets:
       properties:
         CFBundleDisplayName: AerioTV
         CFBundleIdentifier: app.molinete.aerio
-        CFBundleShortVersionString: "1.6.23"
+        CFBundleShortVersionString: "1.7.0"
         CFBundleVersion: "1"
         UILaunchScreen:
           UIColorName: ""
@@ -97,7 +97,7 @@ targets:
       properties:
         CFBundleDisplayName: AerioTopShelf
         CFBundleIdentifier: app.molinete.aerio.TopShelf
-        CFBundleShortVersionString: "1.6.23"
+        CFBundleShortVersionString: "1.7.0"
         CFBundleVersion: "1"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.tv-top-shelf

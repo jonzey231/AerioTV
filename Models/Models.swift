@@ -27,6 +27,32 @@ enum DispatcharrAuthHeaderMode: String, Codable {
     case bearer
 }
 
+/// v1.7 — which credential the user provided when adding a Dispatcharr
+/// Direct Connect server.
+///
+///  - `.apiKey`: the user pasted a personal API key from Dispatcharr's
+///    Settings → Users → Edit User → API & XC tab. This is the historical
+///    Aerio behaviour. Auth headers follow `dispatcharrHeaderMode`
+///    (X-API-Key, dual, or bearer-with-the-API-key) and never expire.
+///  - `.usernamePassword`: the user logged in with their Dispatcharr admin
+///    username + password (or any user account). Aerio exchanges the
+///    credentials for a JWT pair against `/api/accounts/token/`, caches
+///    the access + refresh tokens per server in memory, and sends
+///    `Authorization: Bearer <access>` on every API request. The 30 min
+///    access TTL is refreshed silently against `/api/accounts/token/refresh/`
+///    on 401; if the 24h refresh has also expired, Aerio re-logs in from
+///    the Keychain-stored credentials. This is the equivalent of the
+///    Dispatcharr web UI's session — same auth flow Teamarr and Enhanced
+///    Channel Manager use.
+///
+/// Stored as raw string on `ServerConnection` for SwiftData stability.
+/// Empty string defaults to `.apiKey` so every server that existed before
+/// v1.7 keeps its current behaviour without any migration work.
+enum DispatcharrCredentialType: String, Codable {
+    case apiKey            = "api_key"
+    case usernamePassword  = "username_password"
+}
+
 // MARK: - Server Type Enum
 enum ServerType: String, Codable, CaseIterable {
     case dispatcharrAPI = "dispatcharr_api"
@@ -37,7 +63,13 @@ enum ServerType: String, Codable, CaseIterable {
         switch self {
         case .m3uPlaylist: return "M3U + EPG"
         case .xtreamCodes: return "Xtream Codes"
-        case .dispatcharrAPI: return "Dispatcharr API"
+        // v1.7: renamed from "Dispatcharr API" — Direct Connect is a clearer
+        // mental model now that we support both API-key auth AND admin
+        // username+password (the same credentials you use on the Dispatcharr
+        // web UI). The SwiftData enum case stays `dispatcharrAPI` /
+        // `"dispatcharr_api"` for migration safety; only the user-facing
+        // string changed.
+        case .dispatcharrAPI: return "Dispatcharr Direct Connect"
         }
     }
 
@@ -61,7 +93,7 @@ enum ServerType: String, Codable, CaseIterable {
         switch self {
         case .m3uPlaylist: return "Any M3U playlist URL — works with Dispatcharr, any IPTV provider"
         case .xtreamCodes: return "Xtream Codes API — live TV, VOD movies & series"
-        case .dispatcharrAPI: return "Dispatcharr native API — connect with a personal API key"
+        case .dispatcharrAPI: return "Connect to Dispatcharr with your admin login or a personal API key"
         }
     }
 
@@ -154,6 +186,14 @@ final class ServerConnection {
     /// stability; `dispatcharrHeaderMode` returns the typed enum.
     /// Possible values: `""`, `"xapikey"`, `"both"`, `"bearer"`.
     var dispatcharrAuthMode: String = ""
+
+    /// v1.7: which credential mode the user picked for this Dispatcharr
+    /// server. Empty string = legacy default (`.apiKey`) so every server
+    /// that existed before v1.7 keeps working without migration. New
+    /// users get to choose API Key or Username & Password on the Add
+    /// Server screen. See `DispatcharrCredentialType` for full doc.
+    /// Possible values: `""` (= apiKey), `"api_key"`, `"username_password"`.
+    var dispatcharrCredentialTypeRaw: String = ""
 
     init(
         name: String,
@@ -270,21 +310,61 @@ final class ServerConnection {
         DispatcharrAuthHeaderMode(rawValue: dispatcharrAuthMode) ?? .both
     }
 
+    /// v1.7: which credential mode this Dispatcharr server uses. Empty
+    /// raw value (the SwiftData default for servers added before v1.7)
+    /// resolves to `.apiKey` so legacy behaviour is preserved.
+    var dispatcharrCredentialType: DispatcharrCredentialType {
+        DispatcharrCredentialType(rawValue: dispatcharrCredentialTypeRaw) ?? .apiKey
+    }
+
     /// Auth headers for API requests. Dispatcharr servers honor the
     /// per-server `dispatcharrHeaderMode` (X-API-Key only, dual, or
-    /// bearer — auto-detected during Test Connection so different
-    /// Dispatcharr builds with different header requirements all
-    /// work). User-Agent is always included so the device shows up
-    /// in the admin Stats panel. All other types just include Accept.
-    /// Centralised here to avoid duplication.
+    /// bearer-with-API-key, auto-detected during Test Connection so
+    /// different Dispatcharr builds with different header requirements
+    /// all work). User-Agent is always included so the device shows
+    /// up in the admin Stats panel. All other server types just
+    /// include Accept. Centralised here to avoid duplication.
+    ///
+    /// **v1.7 back-compat invariant:** these headers are gated on the
+    /// presence of `effectiveApiKey`, **not** on `dispatcharrCredential-
+    /// Type`. Reasoning: every existing user has an `apiKey` in the
+    /// Keychain and `dispatcharrCredentialTypeRaw == ""` (resolves to
+    /// `.apiKey`), so they emit exactly the same headers as before
+    /// v1.7. New Direct Connect users (`usernamePassword` mode) also
+    /// have an api_key in Keychain because the login flow fetches it
+    /// from `/api/accounts/users/me/` during Test Connection and
+    /// persists it — we deliberately do this so long-lived
+    /// connections (mpv stream playback, logo fetches, recording
+    /// playback) keep working with a durable credential and don't
+    /// have to refresh-token mid-stream.
+    ///
+    /// **JWT layering:** when an active JWT access token is also
+    /// present (Direct Connect mode, post-login), the
+    /// `DispatcharrAPI.headers(for:)` path layers `Authorization:
+    /// Bearer <jwt>` ON TOP of these headers, replacing the
+    /// `Authorization: ApiKey ...` value where applicable. Dispatcharr
+    /// prefers the Bearer header when both are sent. So in practice:
+    ///   - API-key-only users: X-API-Key (and/or `Authorization:
+    ///     ApiKey`) per `dispatcharrHeaderMode`. Unchanged from v1.6.
+    ///   - Direct Connect users with live JWT: `Authorization: Bearer
+    ///     <jwt>` + `X-API-Key`. Server uses Bearer.
+    ///   - Direct Connect users between sessions (JWT not refreshed
+    ///     yet): X-API-Key (and/or `Authorization: ApiKey`) per
+    ///     `dispatcharrHeaderMode`. Same as legacy. Auto-recovers
+    ///     once JWT refresh completes.
     var authHeaders: [String: String] {
         switch type {
         case .dispatcharrAPI:
-            let key = effectiveApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             var h: [String: String] = [
                 "Accept": "*/*",
                 "User-Agent": effectiveUserAgent
             ]
+            let key = effectiveApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Empty key (e.g. brand-new Direct Connect server before
+            // Test Connection completes its api_key fetch) returns
+            // just Accept + UA so the calling layer can layer JWT
+            // Bearer on top. Otherwise emit the configured shape.
+            guard !key.isEmpty else { return h }
             switch dispatcharrHeaderMode {
             case .xapikey:
                 h["X-API-Key"] = key

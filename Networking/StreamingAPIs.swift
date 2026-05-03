@@ -623,8 +623,21 @@ struct XtreamSeriesItem: Decodable, Identifiable {
 // MARK: - Dispatcharr Native API
 struct DispatcharrAPI {
     enum Auth {
+        /// Bearer-with-API-key — the "bearer" shape inside
+        /// `DispatcharrAuthHeaderMode.bearer`. Sends
+        /// `Authorization: Bearer <api-key>`. Auth value is fixed
+        /// for the lifetime of the API instance.
         case bearer(String)
+        /// X-API-Key (or `ApiKey ...`, per `authMode`). Auth value
+        /// is fixed for the lifetime of the API instance.
         case apiKey(String)
+        /// v1.7 Direct Connect — looks up a live JWT access token
+        /// from `DispatcharrTokenStore.shared` keyed by server ID at
+        /// every request. Tokens are short-lived (30 min access, 24h
+        /// refresh) and rotate as they expire, which is why the API
+        /// instance can't hold the value directly. Retry-on-401 with
+        /// silent refresh is wired in `dataWithJWTRetry`.
+        case jwtSession(serverID: UUID)
     }
 
     let baseURL: String
@@ -776,6 +789,15 @@ struct DispatcharrAPI {
                 // don't speak ApiKey at all.
                 h["Authorization"] = "Bearer \(key)"
             }
+        case .jwtSession(let serverID):
+            // v1.7 Direct Connect — read the current access token from
+            // the store. If unset (e.g. cold launch before initial
+            // login completes), we still emit Accept + UA so the
+            // request shape is otherwise correct; the eventual 401
+            // triggers `dataWithJWTRetry` to log in and replay.
+            if let access = DispatcharrTokenStore.shared.accessToken(for: serverID) {
+                h["Authorization"] = "Bearer \(access)"
+            }
         }
         return h
     }
@@ -820,6 +842,11 @@ struct DispatcharrAPI {
                     if !modes.contains(m) { modes.append(m) }
                 }
                 return modes
+            case .jwtSession:
+                // v1.7 Direct Connect: Bearer-only header shape, no
+                // X-API-Key fallback. The JWT IS the credential, so
+                // there's nothing to iterate against.
+                return [.bearer]
             }
         }()
 

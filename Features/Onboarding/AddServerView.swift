@@ -264,10 +264,32 @@ struct AddServerView: View {
                             urlProtocolBadge(url: viewModel.baseURL).padding(8)
                         }
                     }
-                AppTextField("Admin API Key", placeholder: "••••••••••••••••",
-                             text: $viewModel.apiKey, icon: "key.fill", isSecure: true)
-                infoBox(icon: "info.circle.fill",
-                        message: "Use a Dispatcharr Admin API Key (System → Users → Edit User → API & XC). This enables native Dispatcharr endpoints for Live TV, Guide, Movies, and TV Shows.")
+
+                // v1.7 Direct Connect — credential mode picker. Default
+                // matches viewModel.dispatcharrCredentialType so legacy
+                // .apiKey selection is the initial state for new
+                // installs (matching v1.6.x behaviour).
+                Picker("Sign-in method", selection: $viewModel.dispatcharrCredentialType) {
+                    Text("Username & Password").tag(DispatcharrCredentialType.usernamePassword)
+                    Text("API Key").tag(DispatcharrCredentialType.apiKey)
+                }
+                .pickerStyle(.segmented)
+                .padding(.vertical, 4)
+
+                switch viewModel.dispatcharrCredentialType {
+                case .usernamePassword:
+                    AppTextField("Username", placeholder: "Dispatcharr admin username",
+                                 text: $viewModel.username, icon: "person.fill")
+                    AppTextField("Password", placeholder: "Dispatcharr admin password",
+                                 text: $viewModel.password, icon: "lock.fill", isSecure: true)
+                    infoBox(icon: "info.circle.fill",
+                            message: "Sign in with the same admin login you use on the Dispatcharr web UI. AerioTV exchanges your credentials for a session token over /api/accounts/token/. Your password is stored in the Keychain on this device only.")
+                case .apiKey:
+                    AppTextField("Admin API Key", placeholder: "••••••••••••••••",
+                                 text: $viewModel.apiKey, icon: "key.fill", isSecure: true)
+                    infoBox(icon: "info.circle.fill",
+                            message: "Use a Dispatcharr Admin API Key (System → Users → Edit User → API & XC). This enables native Dispatcharr endpoints for Live TV, Guide, Movies, and TV Shows.")
+                }
 
                 advancedXMLTVSection
             }

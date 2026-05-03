@@ -8,9 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		000A4A7BFF25A66945137BB3 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
-		A133DDDD4444DDDD4444DDDD /* MPMediaItemArtworkShim.m in Sources */ = {isa = PBXBuildFile; fileRef = A111BBBB2222BBBB2222BBBB /* MPMediaItemArtworkShim.m */; };
 		07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */; };
-		F11A12EB07CB46158E23B73E /* ProgramInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */; };
 		0823BE6E3373A83D3FEBC32F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
 		0A23BE6E3373A83D3FEBC001 /* ManageGroupsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1DD47CBF4B1FE912B0A001 /* ManageGroupsSheet.swift */; };
 		1083DB8B620ABAC3ECAB3823 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 875B0901B53C33B024AF597F /* Models.swift */; };
@@ -18,11 +16,11 @@
 		10D8764EE31D09E18D0C2CFC /* ServerSyncView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F01 /* ServerSyncView.swift */; };
 		11120119C5A64353490041AC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5806A5B948B604B451A5F5C7 /* Assets.xcassets */; };
 		115F4DEA73DE0C5C49817C04 /* RecordProgramSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */; };
-		B997EA931623455C8A931F29 /* ProgramInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */; };
 		134BBEA37092BE9ED06DE967 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */; };
 		1868ADFE12C568F8FC5FED53 /* StreamingAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* StreamingAPIs.swift */; };
 		19AE345D39FB441F217ABCE7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
 		1A29B8D23EC903A18C3B3E89 /* TVServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 628C021FBBB1C5C00F6640EA /* TVServices.framework */; };
+		1B56BE6F7111A4EF6DD7E11B /* DispatcharrDirectConnect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 876ADA5C12D5B9BAC39C9F22 /* DispatcharrDirectConnect.swift */; };
 		1D11DF914E50BF1810089A1E /* XtreamSeriesAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */; };
 		1EB4A645E88DDFE6F211ADA4 /* Pods-Aerio_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Aerio_iOS-acknowledgements.markdown */; };
 		1FF8FD4B1DD11EAE3F154767 /* MoviesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */; };
@@ -30,34 +28,12 @@
 		23CF3BDA1A62692EC1141F06 /* AerioTopShelf.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 980F01E6377A91F10236C4D5 /* AerioTopShelf.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2527936283FB11BD5201E1DA /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
 		27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
-		B1C2D3E4F5A67890ACE00001 /* AudioSessionRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */; };
-		B1C2D3E4F5A67890ACE0A002 /* RemoteInputLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */; };
-		B1C2D3E4F5A67890ACE00004 /* IdleTimerRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */; };
-		B1C2D3E4F5A67890ACE00007 /* PlayerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */; };
-		B1C2D3E4F5A67890ACE0000A /* MultiviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */; };
-		B1C2D3E4F5A67890ACE0000D /* MultiviewStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */; };
-		B1C2D3E4F5A67890ACE00011 /* MultiviewGridMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */; };
-		B1C2D3E4F5A67890ACE00014 /* MultiviewLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */; };
-		B1C2D3E4F5A67890ACE00017 /* MultiviewTransportBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */; };
-		B1C2D3E4F5A67890ACE0001A /* MultiviewTileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */; };
-		B1C2D3E4F5A67890ACE0001D /* MultiviewContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */; };
-		B1C2D3E4F5A67890ACE00020 /* RecentChannelsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */; };
-		B1C2D3E4F5A67890ACE00023 /* CompactChannelRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */; };
-		WHATSNEW00000000000ACE001 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
-		WHATSNEW00000000000ACE002 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
-		B1C2D3E4F5A67890ACE00026 /* AddToMultiviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */; };
-		B1C2D3E4F5A67890ACE00029 /* MultiviewCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */; };
-		B1C2D3E4F5A67890ACE0002C /* ProcessMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */; };
-		B1C2D3E4F5A67890ACE0002F /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00031 /* PlaybackDiagnostics.swift */; };
-		B1C2D3E4F5A67890ACE00032 /* PlaybackChromeOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */; };
-		B1C2D3E4F5A67890ACE00B01 /* CategoryColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */; };
-		A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		294AE2B45D4A82E38B1D09C4 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
 		29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */; };
+		2B3C4D5E6F708901ACE70010 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
+		2B3C4D5E6F708901ACE70011 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
 		2B56157F30BF5B5840F399B1 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		2B56157F30BF5B5840F399C1 /* SyncCategoriesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */; };
-		B1AABBCC2DD3EE4FF5006001 /* MultiviewSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */; };
-		B1AABBCC2DD3EE4FF5006002 /* MultiviewSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */; };
 		2DD98124C6F98D06EFED419A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C5D08BD1430E78C26390734 /* SettingsView.swift */; };
 		30FA1CA916C8DDE2001C592F /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 875B0901B53C33B024AF597F /* Models.swift */; };
 		315EA1921B10CD36DE7A8A1F /* Pods-Aerio_iOS-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8EEF8CE5358378E2CF3F4012 /* Pods-Aerio_iOS-Info.plist */; };
@@ -68,6 +44,8 @@
 		38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		38A0E8B8ABBD862D5012AC52 /* SyncCategoriesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */; };
 		3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
+		3C4D5E6F70891012ACE70020 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
+		3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
 		483F98D5B841C7C3E8491885 /* Pods_Aerio_tvOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 24C772C96083DF7C60C170B6 /* Pods_Aerio_tvOS.framework */; };
 		5585996EF79BB170CAD2D6F3 /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */; };
 		565A7DFCEC12544455827DB3 /* ReminderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 265A7DFCEC12544455827DB3 /* ReminderManager.swift */; };
@@ -107,26 +85,6 @@
 		87062C2D2515CB8999B9C4E6 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5806A5B948B604B451A5F5C7 /* Assets.xcassets */; };
 		8AC25DFB7121C1AEBCE36729 /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */; };
 		8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
-		B1C2D3E4F5A67890ACE00002 /* AudioSessionRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */; };
-		B1C2D3E4F5A67890ACE0A003 /* RemoteInputLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */; };
-		B1C2D3E4F5A67890ACE00005 /* IdleTimerRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */; };
-		B1C2D3E4F5A67890ACE00008 /* PlayerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */; };
-		B1C2D3E4F5A67890ACE0000B /* MultiviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */; };
-		B1C2D3E4F5A67890ACE0000E /* MultiviewStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */; };
-		B1C2D3E4F5A67890ACE00012 /* MultiviewGridMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */; };
-		B1C2D3E4F5A67890ACE00015 /* MultiviewLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */; };
-		B1C2D3E4F5A67890ACE00018 /* MultiviewTransportBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */; };
-		B1C2D3E4F5A67890ACE0001B /* MultiviewTileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */; };
-		B1C2D3E4F5A67890ACE0001E /* MultiviewContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */; };
-		B1C2D3E4F5A67890ACE00021 /* RecentChannelsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */; };
-		B1C2D3E4F5A67890ACE00024 /* CompactChannelRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */; };
-		B1C2D3E4F5A67890ACE00027 /* AddToMultiviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */; };
-		B1C2D3E4F5A67890ACE0002A /* MultiviewCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */; };
-		B1C2D3E4F5A67890ACE0002D /* ProcessMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */; };
-		B1C2D3E4F5A67890ACE00030 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00031 /* PlaybackDiagnostics.swift */; };
-		B1C2D3E4F5A67890ACE00033 /* PlaybackChromeOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */; };
-		B1C2D3E4F5A67890ACE00B02 /* CategoryColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */; };
-		A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		8CF1E8A8912F0A98110ABF07 /* Pods-Aerio_iOS-acknowledgements.plist in Resources */ = {isa = PBXBuildFile; fileRef = 5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */; };
 		8D2CF5152AE5713290F75C94 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
 		8F5A030376AB114E38DAE4AD /* ReminderBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */; };
@@ -134,6 +92,9 @@
 		98B0C60D6099DEF55810D175 /* StreamingAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* StreamingAPIs.swift */; };
 		9D874ED59E97CB1D868F596D /* VODModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */; };
 		9F9A37C29E5E186E323737C0 /* ChannelListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94C2469FCAE37105952DCC28 /* ChannelListView.swift */; };
+		A133DDDD4444DDDD4444DDDD /* MPMediaItemArtworkShim.m in Sources */ = {isa = PBXBuildFile; fileRef = A111BBBB2222BBBB2222BBBB /* MPMediaItemArtworkShim.m */; };
+		A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
+		A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		A2B3C4D5E6F7A80901CD3456 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
 		A41AA69146981E08D85F8439 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
 		A4A40B2ADBF625F5928EF0C1 /* Pods-Aerio_iOS-dummy.m in Sources */ = {isa = PBXBuildFile; fileRef = 46BC9C3B09ACE5A89FC5C0E9 /* Pods-Aerio_iOS-dummy.m */; };
@@ -145,10 +106,51 @@
 		AE465B6890F7B1F65AB0A6F4 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A660E9D8B5D23C804B590C79 /* Foundation.framework */; };
 		B0B4EE0F74D4863E74833446 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */; };
 		B0C3B7E4FC02D61295E8FEA5 /* AppearanceSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */; };
+		B1AABBCC2DD3EE4FF5006001 /* MultiviewSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */; };
+		B1AABBCC2DD3EE4FF5006002 /* MultiviewSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */; };
+		B1C2D3E4F5A67890ACE00001 /* AudioSessionRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */; };
+		B1C2D3E4F5A67890ACE00002 /* AudioSessionRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */; };
+		B1C2D3E4F5A67890ACE00004 /* IdleTimerRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */; };
+		B1C2D3E4F5A67890ACE00005 /* IdleTimerRefCount.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */; };
+		B1C2D3E4F5A67890ACE00007 /* PlayerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */; };
+		B1C2D3E4F5A67890ACE00008 /* PlayerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */; };
+		B1C2D3E4F5A67890ACE0000A /* MultiviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */; };
+		B1C2D3E4F5A67890ACE0000B /* MultiviewTile.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */; };
+		B1C2D3E4F5A67890ACE0000D /* MultiviewStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */; };
+		B1C2D3E4F5A67890ACE0000E /* MultiviewStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */; };
+		B1C2D3E4F5A67890ACE00011 /* MultiviewGridMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */; };
+		B1C2D3E4F5A67890ACE00012 /* MultiviewGridMath.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */; };
+		B1C2D3E4F5A67890ACE00014 /* MultiviewLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */; };
+		B1C2D3E4F5A67890ACE00015 /* MultiviewLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */; };
+		B1C2D3E4F5A67890ACE00017 /* MultiviewTransportBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */; };
+		B1C2D3E4F5A67890ACE00018 /* MultiviewTransportBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */; };
+		B1C2D3E4F5A67890ACE0001A /* MultiviewTileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */; };
+		B1C2D3E4F5A67890ACE0001B /* MultiviewTileView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */; };
+		B1C2D3E4F5A67890ACE0001D /* MultiviewContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */; };
+		B1C2D3E4F5A67890ACE0001E /* MultiviewContainerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */; };
+		B1C2D3E4F5A67890ACE00020 /* RecentChannelsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */; };
+		B1C2D3E4F5A67890ACE00021 /* RecentChannelsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */; };
+		B1C2D3E4F5A67890ACE00023 /* CompactChannelRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */; };
+		B1C2D3E4F5A67890ACE00024 /* CompactChannelRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */; };
+		B1C2D3E4F5A67890ACE00026 /* AddToMultiviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */; };
+		B1C2D3E4F5A67890ACE00027 /* AddToMultiviewSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */; };
+		B1C2D3E4F5A67890ACE00029 /* MultiviewCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */; };
+		B1C2D3E4F5A67890ACE0002A /* MultiviewCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */; };
+		B1C2D3E4F5A67890ACE0002C /* ProcessMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */; };
+		B1C2D3E4F5A67890ACE0002D /* ProcessMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */; };
+		B1C2D3E4F5A67890ACE0002F /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00031 /* PlaybackDiagnostics.swift */; };
+		B1C2D3E4F5A67890ACE00030 /* PlaybackDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00031 /* PlaybackDiagnostics.swift */; };
+		B1C2D3E4F5A67890ACE00032 /* PlaybackChromeOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */; };
+		B1C2D3E4F5A67890ACE00033 /* PlaybackChromeOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */; };
+		B1C2D3E4F5A67890ACE00B01 /* CategoryColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */; };
+		B1C2D3E4F5A67890ACE00B02 /* CategoryColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */; };
+		B1C2D3E4F5A67890ACE0A002 /* RemoteInputLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */; };
+		B1C2D3E4F5A67890ACE0A003 /* RemoteInputLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */; };
 		B5AE22380A5D13659655A5CD /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F4EE98C1564A7E3A5DD86B /* SearchView.swift */; };
 		B743C668A35FABC8A1BECB16 /* VODModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */; };
 		B747D3E4B7695FAF8CD9C557 /* Pods-Aerio_iOS-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8EEF8CE5358378E2CF3F4012 /* Pods-Aerio_iOS-Info.plist */; };
 		B76CD4D353AB0D45EEF9F480 /* Typography.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11C8C5B56FBF497EF66CA96 /* Typography.swift */; };
+		B997EA931623455C8A931F29 /* ProgramInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */; };
 		BA33A33C572E086E61AA73AB /* VODService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C548BC428D32F3966A46C27 /* VODService.swift */; };
 		BC00C290CFD296C79CD18EB6 /* Pods-Aerio_iOS-frameworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */; };
 		BDD64B832F76FD240055F82C /* MPVKit-GPL in Frameworks */ = {isa = PBXBuildFile; productRef = BDD64B822F76FD240055F82C /* MPVKit-GPL */; };
@@ -161,6 +163,7 @@
 		CD1234567890ABCDEF123456 /* NowPlayingBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */; };
 		CF38B25676730E71C9AD497A /* AerioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* AerioApp.swift */; };
 		D0C107746AE8D043B81554D2 /* ServerConnectionViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */; };
+		D361421CBA05BF602FCEAE80 /* DispatcharrDirectConnect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 876ADA5C12D5B9BAC39C9F22 /* DispatcharrDirectConnect.swift */; };
 		D50E5DFBD9787AC5568AD17A /* LocalRecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */; };
 		D707545F75A250B3657868F5 /* VODService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C548BC428D32F3966A46C27 /* VODService.swift */; };
 		D9B2C4CC2563512B2741AF83 /* TVShowsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */; };
@@ -173,6 +176,7 @@
 		EE1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */; };
 		EFE8847CEB70D953DD4D2BFB /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */; };
 		F00D3696D62D7C9EF6E05244 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */; };
+		F11A12EB07CB46158E23B73E /* ProgramInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */; };
 		F1B2C3D4E5F6A70890BC2345 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
 		FA1AC2C2B4E0577B5456A002 /* ManageGroupsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1DD47CBF4B1FE912B0A001 /* ManageGroupsSheet.swift */; };
 		FD1AC2C2B4E0577B5456999F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
@@ -180,10 +184,8 @@
 		FF1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */; };
 		MPV0000000000000000000002 /* MPVPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MPV0000000000000000000001 /* MPVPlayerView.swift */; };
 		MPV0000000000000000000003 /* MPVPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MPV0000000000000000000001 /* MPVPlayerView.swift */; };
-		2B3C4D5E6F708901ACE70010 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
-		2B3C4D5E6F708901ACE70011 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
-		3C4D5E6F70891012ACE70020 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
-		3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
+		WHATSNEW00000000000ACE001 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
+		WHATSNEW00000000000ACE002 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -212,10 +214,6 @@
 
 /* Begin PBXFileReference section */
 		00F4EE98C1564A7E3A5DD86B /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
-		A1ECC0FF1ED1ABF1ED1ABF11 /* Aerio.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Aerio.xcconfig; path = Config/Aerio.xcconfig; sourceTree = "<group>"; };
-		A100AAAA1111AAAA1111AAAA /* MPMediaItemArtworkShim.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MPMediaItemArtworkShim.h; sourceTree = "<group>"; };
-		A111BBBB2222BBBB2222BBBB /* MPMediaItemArtworkShim.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MPMediaItemArtworkShim.m; sourceTree = "<group>"; };
-		A122CCCC3333CCCC3333CCCC /* Aerio-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Aerio-Bridging-Header.h"; sourceTree = "<group>"; };
 		03AB1BA15FC7FAB4754ECE75 /* Pods-Aerio_iOS-frameworks-Debug-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Debug-output-files.xcfilelist"; sourceTree = "<group>"; };
 		050594609247DACBBD411AAE /* Pods-Aerio_tvOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_tvOS.release.xcconfig"; path = "Target Support Files/Pods-Aerio_tvOS/Pods-Aerio_tvOS.release.xcconfig"; sourceTree = "<group>"; };
 		08B4D4146C07D85405524861 /* AerioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AerioApp.swift; sourceTree = "<group>"; };
@@ -223,8 +221,9 @@
 		0EEF62484815637B5043D834 /* Pods-Aerio_tvOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_tvOS.debug.xcconfig"; path = "Target Support Files/Pods-Aerio_tvOS/Pods-Aerio_tvOS.debug.xcconfig"; sourceTree = "<group>"; };
 		0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DVRSettingsView.swift; sourceTree = "<group>"; };
 		0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SyncCategoriesSettingsView.swift; sourceTree = "<group>"; };
-		A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewSettingsView.swift; sourceTree = "<group>"; };
 		1603AF9E4D31DB8BDC708C06 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWHTTPClient.swift; sourceTree = "<group>"; };
+		1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPRouter.swift; sourceTree = "<group>"; };
 		20C769771A1085A303FFC0F0 /* VODDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODDetailView.swift; sourceTree = "<group>"; };
 		24C772C96083DF7C60C170B6 /* Pods_Aerio_tvOS.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_Aerio_tvOS.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		265A7DFCEC12544455827DB3 /* ReminderManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReminderManager.swift; sourceTree = "<group>"; };
@@ -258,10 +257,10 @@
 		7CE1F656E39A506614FF4497 /* MobileVLCKit.debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = MobileVLCKit.debug.xcconfig; sourceTree = "<group>"; };
 		7D1DD47CBF4B1FE912B0AF08 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecordProgramSheet.swift; sourceTree = "<group>"; };
-		E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProgramInfoView.swift; sourceTree = "<group>"; };
 		8087BB36936B80A3234428C4 /* COPYING.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = COPYING.txt; sourceTree = "<group>"; };
 		828A599894F381F7A78BFDF8 /* MobileVLCKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = MobileVLCKit.xcframework; sourceTree = "<group>"; };
 		875B0901B53C33B024AF597F /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		876ADA5C12D5B9BAC39C9F22 /* DispatcharrDirectConnect.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DispatcharrDirectConnect.swift; sourceTree = "<group>"; };
 		880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = AerioSplash.mp4; sourceTree = "<group>"; };
 		888E14C889CF064825B5A29E /* AerioTopShelf.entitlements */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.entitlements; name = AerioTopShelf.entitlements; path = TopShelfExtension/AerioTopShelf.entitlements; sourceTree = "<group>"; };
 		8CBF1B5E89BE18F8E73482B9 /* OnDemandView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OnDemandView.swift; sourceTree = "<group>"; };
@@ -275,13 +274,38 @@
 		9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaServerAPIs.swift; sourceTree = "<group>"; };
 		9F04B5935392FB0CFA0E58A0 /* MobileVLCKit.release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = MobileVLCKit.release.xcconfig; sourceTree = "<group>"; };
 		A06F3C638088282A3C63BDA9 /* Pods-Aerio_iOS.release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Pods-Aerio_iOS.release.xcconfig"; sourceTree = "<group>"; };
+		A100AAAA1111AAAA1111AAAA /* MPMediaItemArtworkShim.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = MPMediaItemArtworkShim.h; sourceTree = "<group>"; };
+		A111BBBB2222BBBB2222BBBB /* MPMediaItemArtworkShim.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = MPMediaItemArtworkShim.m; sourceTree = "<group>"; };
+		A122CCCC3333CCCC3333CCCC /* Aerio-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Aerio-Bridging-Header.h"; sourceTree = "<group>"; };
 		A1AB8E6203108C63D4696924 /* Aerio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aerio.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TVPressGesture.swift; sourceTree = "<group>"; };
+		A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewSettingsView.swift; sourceTree = "<group>"; };
+		A1ECC0FF1ED1ABF1ED1ABF11 /* Aerio.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Aerio.xcconfig; path = Config/Aerio.xcconfig; sourceTree = "<group>"; };
 		A2FD31E5C3E95D9CF2F53F4E /* Aerio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aerio.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3F72C1B8E4D9A6200BC5D91 /* Aerio.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Aerio.entitlements; sourceTree = "<group>"; };
 		A660E9D8B5D23C804B590C79 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		AA1234567890ABCDEF123456 /* DebugLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogger.swift; sourceTree = "<group>"; };
 		AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingBridge.swift; sourceTree = "<group>"; };
 		B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LocalRecordingSession.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSessionRefCount.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = IdleTimerRefCount.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlayerSession.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewTile.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewStore.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewGridMath.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewLayoutView.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewTransportBar.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewTileView.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewContainerView.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecentChannelsStore.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CompactChannelRow.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AddToMultiviewSheet.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewCommands.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessMetrics.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00031 /* PlaybackDiagnostics.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlaybackDiagnostics.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlaybackChromeOverlay.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CategoryColor.swift; sourceTree = "<group>"; };
+		B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemoteInputLogger.swift; sourceTree = "<group>"; };
 		B3B1522EE96446B1A667FDEB /* Pods-Aerio_iOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_iOS.debug.xcconfig"; path = "Target Support Files/Pods-Aerio_iOS/Pods-Aerio_iOS.debug.xcconfig"; sourceTree = "<group>"; };
 		B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistImportViews.swift; sourceTree = "<group>"; };
 		BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeveloperSettingsView.swift; sourceTree = "<group>"; };
@@ -303,37 +327,16 @@
 		E11C8C5B56FBF497EF66CA96 /* Typography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Typography.swift; sourceTree = "<group>"; };
 		E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EPGGuideView.swift; sourceTree = "<group>"; };
 		E71FA151241E7264059B0E3A /* Pods-Aerio_iOS-frameworks-Debug-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Debug-input-files.xcfilelist"; sourceTree = "<group>"; };
+		E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProgramInfoView.swift; sourceTree = "<group>"; };
 		EA33B18A62A3411B6425B661 /* PlaylistModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistModels.swift; sourceTree = "<group>"; };
 		EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecordingCoordinator.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSessionRefCount.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemoteInputLogger.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = IdleTimerRefCount.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlayerSession.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewTile.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewStore.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewGridMath.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewLayoutView.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewTransportBar.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewTileView.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewContainerView.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00022 /* RecentChannelsStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecentChannelsStore.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CompactChannelRow.swift; sourceTree = "<group>"; };
-		WHATSNEW00000000000ACE000 /* WhatsNew.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AddToMultiviewSheet.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewCommands.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE0002E /* ProcessMetrics.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProcessMetrics.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00031 /* PlaybackDiagnostics.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlaybackDiagnostics.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PlaybackChromeOverlay.swift; sourceTree = "<group>"; };
-		B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CategoryColor.swift; sourceTree = "<group>"; };
-		A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TVPressGesture.swift; sourceTree = "<group>"; };
 		F249D5C39D90BC11107F3420 /* Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist"; sourceTree = "<group>"; };
 		F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConnectionViewModel.swift; sourceTree = "<group>"; };
 		F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ReminderBannerView.swift; path = Shared/ReminderBannerView.swift; sourceTree = SOURCE_ROOT; };
 		MPV0000000000000000000001 /* MPVPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MPVPlayerView.swift; sourceTree = "<group>"; };
 		TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */ = {isa = PBXFileReference; lastKnownFileType = wrapper.workspace; path = Aerio.xcworkspace; sourceTree = "<group>"; };
 		TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
-		1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWHTTPClient.swift; sourceTree = "<group>"; };
-		1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPRouter.swift; sourceTree = "<group>"; };
+		WHATSNEW00000000000ACE000 /* WhatsNew.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -388,6 +391,7 @@
 				6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */,
 				1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */,
 				1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */,
+				876ADA5C12D5B9BAC39C9F22 /* DispatcharrDirectConnect.swift */,
 			);
 			path = Networking;
 			sourceTree = "<group>";
@@ -547,6 +551,16 @@
 			path = Search;
 			sourceTree = "<group>";
 		};
+		A144EEEE5555EEEE5555EEEE /* AerioObjC */ = {
+			isa = PBXGroup;
+			children = (
+				A100AAAA1111AAAA1111AAAA /* MPMediaItemArtworkShim.h */,
+				A111BBBB2222BBBB2222BBBB /* MPMediaItemArtworkShim.m */,
+				A122CCCC3333CCCC3333CCCC /* Aerio-Bridging-Header.h */,
+			);
+			path = AerioObjC;
+			sourceTree = "<group>";
+		};
 		AB79E18D174F276F5183F063 /* Components */ = {
 			isa = PBXGroup;
 			children = (
@@ -554,6 +568,24 @@
 				7A1DD47CBF4B1FE912B0A001 /* ManageGroupsSheet.swift */,
 			);
 			path = Components;
+			sourceTree = "<group>";
+		};
+		B1C2D3E4F5A67890ACE00010 /* Multiview */ = {
+			isa = PBXGroup;
+			children = (
+				B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */,
+				B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */,
+				B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */,
+				B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */,
+				B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */,
+				B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */,
+				B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */,
+				B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */,
+				B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */,
+				B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */,
+				B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */,
+			);
+			path = Multiview;
 			sourceTree = "<group>";
 		};
 		B3AFC4A7E97E377CD9A5B995 /* tvOS */ = {
@@ -638,16 +670,6 @@
 			path = SupportingFiles;
 			sourceTree = "<group>";
 		};
-		A144EEEE5555EEEE5555EEEE /* AerioObjC */ = {
-			isa = PBXGroup;
-			children = (
-				A100AAAA1111AAAA1111AAAA /* MPMediaItemArtworkShim.h */,
-				A111BBBB2222BBBB2222BBBB /* MPMediaItemArtworkShim.m */,
-				A122CCCC3333CCCC3333CCCC /* Aerio-Bridging-Header.h */,
-			);
-			path = AerioObjC;
-			sourceTree = "<group>";
-		};
 		D35434453E2FAF35DC5DD5BE /* Products */ = {
 			isa = PBXGroup;
 			children = (
@@ -664,24 +686,6 @@
 				5957CC8A6CC0000B14ED47C5 /* HomeView.swift */,
 			);
 			path = Home;
-			sourceTree = "<group>";
-		};
-		B1C2D3E4F5A67890ACE00010 /* Multiview */ = {
-			isa = PBXGroup;
-			children = (
-				B1C2D3E4F5A67890ACE0000C /* MultiviewTile.swift */,
-				B1C2D3E4F5A67890ACE0000F /* MultiviewStore.swift */,
-				B1C2D3E4F5A67890ACE00013 /* MultiviewGridMath.swift */,
-				B1C2D3E4F5A67890ACE00016 /* MultiviewLayoutView.swift */,
-				B1C2D3E4F5A67890ACE00019 /* MultiviewTransportBar.swift */,
-				B1C2D3E4F5A67890ACE0001C /* MultiviewTileView.swift */,
-				B1C2D3E4F5A67890ACE0001F /* MultiviewContainerView.swift */,
-				B1C2D3E4F5A67890ACE00025 /* CompactChannelRow.swift */,
-				B1C2D3E4F5A67890ACE00028 /* AddToMultiviewSheet.swift */,
-				B1C2D3E4F5A67890ACE0002B /* MultiviewCommands.swift */,
-				B1C2D3E4F5A67890ACE00034 /* PlaybackChromeOverlay.swift */,
-			);
-			path = Multiview;
 			sourceTree = "<group>";
 		};
 		D7ACC20911B79B2CA659255A /* TopShelfExtension */ = {
@@ -1002,6 +1006,7 @@
 				07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */,
 				F11A12EB07CB46158E23B73E /* ProgramInfoView.swift in Sources */,
 				6308BAE1E16965A379092AE8 /* OnDemandView.swift in Sources */,
+				D361421CBA05BF602FCEAE80 /* DispatcharrDirectConnect.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1084,6 +1089,7 @@
 				115F4DEA73DE0C5C49817C04 /* RecordProgramSheet.swift in Sources */,
 				B997EA931623455C8A931F29 /* ProgramInfoView.swift in Sources */,
 				C9E919E28B95CE15179BBCBD /* OnDemandView.swift in Sources */,
+				1B56BE6F7111A4EF6DD7E11B /* DispatcharrDirectConnect.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1123,7 +1129,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.6.23;
+				MARKETING_VERSION = 1.7.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio.TopShelf";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1177,7 +1183,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.6.23;
+				MARKETING_VERSION = 1.7.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio";
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1204,7 +1210,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.6.23;
+				MARKETING_VERSION = 1.7.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio.TopShelf";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1274,7 +1280,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.6.23;
+				MARKETING_VERSION = 1.7.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1306,7 +1312,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.6.23;
+				MARKETING_VERSION = 1.7.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio";
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1377,7 +1383,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.6.23;
+				MARKETING_VERSION = 1.7.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

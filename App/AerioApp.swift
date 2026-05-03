@@ -1548,6 +1548,14 @@ struct RootView: View {
                     if !remote.dispatcharrAuthMode.isEmpty {
                         local.dispatcharrAuthMode = remote.dispatcharrAuthMode
                     }
+                    // v1.7: adopt remote's credential type. Empty
+                    // remote value (legacy v1.6.x sender) leaves the
+                    // local field alone — for an existing API-key
+                    // server that's exactly right, since the local
+                    // raw is also "" and resolves to .apiKey.
+                    if !remote.dispatcharrCredentialTypeRaw.isEmpty {
+                        local.dispatcharrCredentialTypeRaw = remote.dispatcharrCredentialTypeRaw
+                    }
                     // Queue credential writes for after the merge
                     if !remote.password.isEmpty {
                         pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))
@@ -1587,6 +1595,12 @@ struct RootView: View {
                 // model default of `""` which `dispatcharrHeaderMode`
                 // resolves to `.both` for back-compat.
                 newServer.dispatcharrAuthMode = remote.dispatcharrAuthMode
+                // v1.7: inherit the credential type so a server set
+                // up via Direct Connect on the source device also
+                // logs in via Direct Connect on this device. Empty
+                // remote value falls through to "" which resolves to
+                // `.apiKey` (the legacy default).
+                newServer.dispatcharrCredentialTypeRaw = remote.dispatcharrCredentialTypeRaw
                 // Queue credential writes for after the merge
                 if !remote.password.isEmpty {
                     pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))
