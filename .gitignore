@@ -17,8 +17,10 @@ xcuserdata/
 
 # CocoaPods artifacts (Podfile.lock is kept so builds are reproducible)
 
-# Archives & IPAs
+# Archives & IPAs — these belong as GitHub Release assets only,
+# never committed to the repo. `git add -f` is explicitly disallowed.
 *.ipa
+IPAs/
 *.dSYM.zip
 *.dSYM
 
