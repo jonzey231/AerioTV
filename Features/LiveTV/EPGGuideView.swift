@@ -96,10 +96,19 @@ final class GuideStore: ObservableObject {
     /// torture playlist; running them serially doubles the cold-
     /// install wait. When the second caller arrives while the
     /// first is still parsing, it awaits the first's `.value`
-    /// instead of starting a duplicate download. Different URLs
-    /// (e.g. an explicit per-server override vs. the derived
-    /// `/output/epg`) don't coalesce — only exact URL matches.
-    private var inFlightXMLTVTask: (url: URL, task: Task<Bool, Never>)? = nil
+    /// instead of starting a duplicate download. Coalescing also
+    /// has to respect the non-URL semantics introduced later:
+    /// `replaceExisting` changes whether the fetched window
+    /// replaces the old slice, and `categoryServerID` scopes where
+    /// the resulting tint metadata is published. Callers only join
+    /// when all three match.
+    private struct InFlightXMLTVKey: Equatable {
+        let url: URL
+        let categoryServerID: String
+        let replaceExisting: Bool
+    }
+
+    private var inFlightXMLTVTask: (key: InFlightXMLTVKey, task: Task<Bool, Never>)? = nil
 
     /// Signature of the last seedEPGCache run — "serverID|channelCount|programCount".
     /// Warm relaunch fires `seedEPGCache` three times with identical
@@ -803,7 +812,7 @@ final class GuideStore: ObservableObject {
             }
 
             shouldCommitBatch = true
-            return // Grid endpoint succeeded — no need for fallback
+            return true // Grid endpoint succeeded — no need for fallback
         } catch {
             #if DEBUG
             debugLog("📺 Dispatcharr: EPG grid failed (\(error)), falling back to current+bulk approach")
@@ -860,8 +869,9 @@ final class GuideStore: ObservableObject {
             }
         }
 
-        shouldCommitBatch = didFetchFallback
-        return didFetchFallback
+        let didRefresh = didLoadXMLTVOverride || didFetchFallback
+        shouldCommitBatch = didRefresh
+        return didRefresh
     }
 
     // MARK: - Xtream Codes
@@ -903,7 +913,16 @@ final class GuideStore: ObservableObject {
                     let result: ([GuideProgram], Bool) = await withTaskGroup(of: ([GuideProgram], Bool).self) { inner in
                         inner.addTask {
                             let response = try? await api.getEPG(streamID: ch.id, limit: 12)
-                            let progs = (response?.epgListings ?? []).compactMap { item in
+                            // Aerio integration fix: PR #13's tuple wrapping
+                            // (the inner.addTask now returns `(progs, ok)`)
+                            // breaks Swift's type inference on the
+                            // compactMap below — the closure has both
+                            // `return nil` and `return GuideProgram(...)`
+                            // branches, and the outer tuple makes
+                            // `ElementOfResult` ambiguous between
+                            // `GuideProgram` and `GuideProgram?`. Explicit
+                            // closure return type annotation pins it.
+                            let progs: [GuideProgram] = (response?.epgListings ?? []).compactMap { item -> GuideProgram? in
                                 guard let start = Self.parseXtreamDate(item.start),
                                       let end = Self.parseXtreamDate(item.end),
                                       end > windowStart && start < windowEnd else { return nil }
@@ -1062,12 +1081,17 @@ final class GuideStore: ObservableObject {
                                     headers: [String: String] = [:],
                                     categoryServerID: String,
                                     replaceExisting: Bool = false) async -> Bool {
+        let inFlightKey = InFlightXMLTVKey(
+            url: url,
+            categoryServerID: categoryServerID,
+            replaceExisting: replaceExisting
+        )
         // In-flight coalescing — see `inFlightXMLTVTask` doc. On
         // cold install two call sites hit this method with the
         // same URL back-to-back; without dedupe we pay the XMLTV
         // download + parse twice (~3 min each on the 98k-program
         // torture playlist).
-        if let inFlight = inFlightXMLTVTask, inFlight.url == url {
+        if let inFlight = inFlightXMLTVTask, inFlight.key == inFlightKey {
             debugLog("📺 GuideStore.fetchXMLTVFromURL: joining in-flight parse (url=\(url.host ?? "?"))")
             return await inFlight.task.value
         }
@@ -1084,12 +1108,13 @@ final class GuideStore: ObservableObject {
                                            categoryServerID: categoryServerID,
                                            replaceExisting: replaceExisting)
         }
-        inFlightXMLTVTask = (url: url, task: fetchTask)
+        inFlightXMLTVTask = (key: inFlightKey, task: fetchTask)
         let success = await fetchTask.value
         // Only clear if we're still the registered in-flight task
-        // for this URL. A different URL starting later would have
-        // overwritten the entry; don't stomp it.
-        if inFlightXMLTVTask?.url == url {
+        // for this full request shape. A different XMLTV request
+        // starting later would have overwritten the entry; don't
+        // stomp it.
+        if inFlightXMLTVTask?.key == inFlightKey {
             inFlightXMLTVTask = nil
         }
         return success
