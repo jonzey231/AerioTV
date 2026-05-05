@@ -769,12 +769,20 @@ final class ChannelStore: ObservableObject {
 
     /// Called by pull-to-refresh — always re-fetches channels AND EPG.
     /// This is async so the pull-to-refresh spinner stays visible until done.
+    /// Callers that need the refreshed guide persisted to SwiftData should
+    /// follow this with `GuideStore.shared.saveToCache(...)`.
     func forceRefresh(servers: [ServerConnection]) async {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else { return }
         activeServer = server
+        currentChannelServerID = server.id
         loadTask?.cancel()
         epgEnrichTask?.cancel()
         await load(server: server)
+
+        guard !Task.isCancelled, !channels.isEmpty else { return }
+
+        await GuideStore.shared.fetchUpcoming(channels: channels, servers: servers)
+        await GuideStore.shared.seedEPGCache(channels: channels, server: server)
     }
 
     /// UserDefaults key for the cached channel→category map. Cached
