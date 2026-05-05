@@ -1675,6 +1675,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Make our GL context current on the render thread
             EAGLContext.setCurrent(eaglContext)
 
+            // The update callback can fire for redraw/config changes too. Ask
+            // libmpv what actually needs doing and skip no-op wakeups.
+            let updateFlags = mpv_render_context_update(mpvGL)
+            guard (updateFlags & UInt64(MPV_RENDER_UPDATE_FRAME)) != 0 else { return }
+
             // Tell mpv to render into our FBO (GPU handles color conversion, scaling, OSD).
             // withUnsafeMutablePointer ensures the data pointers outlive the render call.
             var fboData = mpv_opengl_fbo(fbo: Int32(fbo), w: Int32(w), h: Int32(h), internal_format: 0)
@@ -1758,10 +1763,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // surprise pause they didn't ask for.
             var enqueued = false
             if layerStatus == .failed {
-                if isInBackground && !autoPausedOnBackground, let mpvHandle = mpv {
+                if isInBackground && !autoPausedOnBackground {
                     autoPausedOnBackground = true
-                    var pauseFlag: Int32 = 1
-                    mpv_set_property(mpvHandle, "pause", MPV_FORMAT_FLAG, &pauseFlag)
+                    mpvQueue.async { [weak self] in
+                        guard let self, let mpvHandle = self.mpv, !self.isShuttingDown else { return }
+                        var pauseFlag: Int32 = 1
+                        mpv_set_property(mpvHandle, "pause", MPV_FORMAT_FLAG, &pauseFlag)
+                    }
                     #if DEBUG
                     print("[MPV-BG] Background: sampleBufferRenderer FAILED — auto-paused mpv to stop wasted decode work")
                     #endif
@@ -1836,7 +1844,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             lastEnqueueTime = enqueueTime
-            mpv_render_context_report_swap(mpvGL)
         }
 
         func stop() {
@@ -2500,6 +2507,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             hasStarted = false
             playbackStartTime = nil
+            // `loadfile replace` reuses the same mpv core, so any runtime
+            // hwdec downgrade from the previous stream must be cleared before
+            // the next file starts.
+            hwdecFallbackApplied = false
+            #if !targetEnvironment(simulator)
+            mpv_set_property_string(mpv, "hwdec", "videotoolbox")
+            #endif
             // v1.6.23: route URL strings through DebugLogger.sanitize
             // before any console / file output so Xtream credentials
             // (`/live/<u>/<p>/<id>` and `?username=&password=` query
