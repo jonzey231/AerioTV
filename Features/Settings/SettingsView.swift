@@ -1780,9 +1780,6 @@ struct ServerDetailView: View {
         //      different server's payload. For non-active purges we
         //      just clear the cache and let the next activation
         //      refetch normally.
-        //   3. Persists the freshly-fetched guide back to SwiftData
-        //      so the next launch sees the rebuilt cache instead of
-        //      the just-purged empty store.
         .alert("Refresh EPG Data?", isPresented: $showPurgeConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Refresh", role: .destructive) {
@@ -1794,8 +1791,7 @@ struct ServerDetailView: View {
                         modelContext: modelContext
                     )
                     if server.isActive {
-                        await ChannelStore.shared.forceRefresh(servers: Array(servers))
-                        GuideStore.shared.saveToCache(modelContext: modelContext, serverID: server.id.uuidString)
+                        await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
                     }
                     isPurgingEPG = false
                 }
@@ -4110,4 +4106,3 @@ extension View {
     }
 }
 #endif
-

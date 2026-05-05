@@ -114,15 +114,41 @@ final class GuideStore: ObservableObject {
     /// on the same @MainActor won't race.
     private var lastSeedEPGCacheSignature: String? = nil
 
-    private func beginBatch() {
+    private func beginBatch(basePrograms: [String: [GuideProgram]]? = nil) {
         _isBatching = true
-        _pendingPrograms = programs
+        _pendingPrograms = basePrograms ?? programs
     }
 
     private func endBatch() {
         _isBatching = false
         programs = _pendingPrograms
         _pendingPrograms = [:]
+    }
+
+    private func cancelBatch() {
+        _isBatching = false
+        _pendingPrograms = [:]
+    }
+
+    private func replacingWindowBase(
+        for channels: [ChannelDisplayItem],
+        windowStart: Date,
+        windowEnd: Date
+    ) -> [String: [GuideProgram]] {
+        let channelIDs = Set(channels.map(\.id))
+        guard !channelIDs.isEmpty else { return programs }
+
+        var result = programs
+        for channelID in channelIDs {
+            guard var existing = result[channelID] else { continue }
+            existing.removeAll { $0.end > windowStart && $0.start < windowEnd }
+            if existing.isEmpty {
+                result.removeValue(forKey: channelID)
+            } else {
+                result[channelID] = existing
+            }
+        }
+        return result
     }
 
     /// Phase 0 — load persisted EPG from SwiftData. Returns true if cache was fresh enough.
@@ -471,10 +497,15 @@ final class GuideStore: ObservableObject {
 
     /// Phase 2 — async: fetch upcoming programs to fill in the timeline beyond "now playing."
     /// Loads an initial batch quickly, then backfills remaining channels at lower priority.
-    func fetchUpcoming(channels: [ChannelDisplayItem], servers: [ServerConnection]) async {
+    @discardableResult
+    func fetchUpcoming(
+        channels: [ChannelDisplayItem],
+        servers: [ServerConnection],
+        replaceExisting: Bool = false
+    ) async -> Bool {
         guard !isLoading else {
             debugLog("📺 GuideStore.fetchUpcoming: already loading, skipping")
-            return
+            return false
         }
         isLoading = true
         // Previously the only `isLoading = false` assignment was on
@@ -497,24 +528,35 @@ final class GuideStore: ObservableObject {
 
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else {
             debugLog("📺 GuideStore.fetchUpcoming: no server found")
-            return  // `defer` above resets isLoading
+            return false  // `defer` above resets isLoading
         }
         debugLog("📺 GuideStore.fetchUpcoming: server=\(server.name), type=\(server.type), channels=\(channels.count)")
 
+        let didRefresh: Bool
         switch server.type {
         case .dispatcharrAPI:
             // Dispatcharr: bulk fetch ALL programs at once (no batching needed).
             // getCurrentPrograms + getBulkUpcomingPrograms handles everything.
-            await fetchDispatcharr(server: server, channels: channels,
-                                   windowStart: windowStart, windowEnd: windowEnd)
+            didRefresh = await fetchDispatcharr(
+                server: server,
+                channels: channels,
+                windowStart: windowStart,
+                windowEnd: windowEnd,
+                replaceExisting: replaceExisting
+            )
         case .xtreamCodes:
             // Xtream: still need per-channel fetching with batches
             let initialBatchSize = 40
             let initialChannels = Array(channels.prefix(initialBatchSize))
             let remainingChannels = channels.count > initialBatchSize ? Array(channels.suffix(from: initialBatchSize)) : []
 
-            await fetchXtream(server: server, channels: initialChannels,
-                              windowStart: windowStart, windowEnd: windowEnd)
+            var didReceiveAnyResponse = await fetchXtream(
+                server: server,
+                channels: initialChannels,
+                windowStart: windowStart,
+                windowEnd: windowEnd,
+                replaceExisting: replaceExisting
+            )
 
             // Phase 2: backfill remaining Xtream channels
             if !remainingChannels.isEmpty {
@@ -522,25 +564,39 @@ final class GuideStore: ObservableObject {
                 for batchStart in stride(from: 0, to: remainingChannels.count, by: batchSize) {
                     let batchEnd = min(batchStart + batchSize, remainingChannels.count)
                     let batch = Array(remainingChannels[batchStart..<batchEnd])
-                    await fetchXtream(server: server, channels: batch,
-                                      windowStart: windowStart, windowEnd: windowEnd)
+                    let batchDidRespond = await fetchXtream(
+                        server: server,
+                        channels: batch,
+                        windowStart: windowStart,
+                        windowEnd: windowEnd,
+                        replaceExisting: replaceExisting
+                    )
+                    didReceiveAnyResponse = didReceiveAnyResponse || batchDidRespond
                     await Task.yield()
                 }
             }
+            didRefresh = didReceiveAnyResponse
         case .m3uPlaylist:
-            await fetchXMLTV(server: server, channels: channels,
-                             windowStart: windowStart, windowEnd: windowEnd)
+            didRefresh = await fetchXMLTV(
+                server: server,
+                channels: channels,
+                windowStart: windowStart,
+                windowEnd: windowEnd,
+                replaceExisting: replaceExisting
+            )
         }
 
         // Log final state
         let totalPrograms = programs.values.reduce(0) { $0 + $1.count }
         let channelsWithMultiple = programs.values.filter { $0.count > 1 }.count
         debugLog("📺 GuideStore done: \(totalPrograms) programs across \(programs.count) channels, \(channelsWithMultiple) channels have >1 program")
+        return didRefresh
     }
 
     // MARK: - Dispatcharr
     private func fetchDispatcharr(server: ServerConnection, channels: [ChannelDisplayItem],
-                                   windowStart: Date, windowEnd: Date) async {
+                                   windowStart: Date, windowEnd: Date,
+                                   replaceExisting: Bool = false) async -> Bool {
         // v1.6.22: use Dispatcharr's REST API exclusively. The
         // previous `{baseURL}/output/epg` XMLTV path was attractive
         // because it included `<category>` tags, but it's:
@@ -562,8 +618,6 @@ final class GuideStore: ObservableObject {
         // lazily backfilled per visible cell via /api/epg/programs/<id>/
         // in a future pass if the visual loss matters.
 
-        beginBatch()
-        defer { endBatch() }
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                   auth: .apiKey(server.effectiveApiKey),
                                   userAgent: server.effectiveUserAgent,
@@ -577,14 +631,35 @@ final class GuideStore: ObservableObject {
         // the bulk grid omits. We layer the XMLTV merge on top of
         // the REST grid below so categories enrich the same dict.
         let explicitXMLTV = server.dispatcharrXMLTVURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        var didLoadXMLTVOverride = false
         if !explicitXMLTV.isEmpty, let xmltvURL = URL(string: explicitXMLTV) {
             debugLog("📺 [EPG source=dispatcharr-api grid + xmltv-override] server=\(server.name) override=\(xmltvURL.host ?? "?")")
-            await fetchXMLTVFromURL(url: xmltvURL, channels: channels,
-                                     windowStart: windowStart, windowEnd: windowEnd,
-                                     headers: api.streamAuthHeaders)
+            didLoadXMLTVOverride = await fetchXMLTVFromURL(
+                url: xmltvURL,
+                channels: channels,
+                windowStart: windowStart,
+                windowEnd: windowEnd,
+                headers: api.streamAuthHeaders,
+                replaceExisting: replaceExisting
+            )
             // Fall through to bulk grid below: the merge dedupes by
             // (channel, time) so the REST data fills any gaps the
             // override XMLTV missed.
+        }
+
+        let batchBasePrograms: [String: [GuideProgram]]? = {
+            guard replaceExisting else { return nil }
+            guard !didLoadXMLTVOverride else { return programs }
+            return replacingWindowBase(for: channels, windowStart: windowStart, windowEnd: windowEnd)
+        }()
+        beginBatch(basePrograms: batchBasePrograms)
+        var shouldCommitBatch = false
+        defer {
+            if shouldCommitBatch {
+                endBatch()
+            } else {
+                cancelBatch()
+            }
         }
 
         // v1.6.22: fetch the EPGData lookup so we can bridge
@@ -724,6 +799,7 @@ final class GuideStore: ObservableObject {
                                                         uuidToChannelID: uuidToChannelID)
             }
 
+            shouldCommitBatch = true
             return // Grid endpoint succeeded — no need for fallback
         } catch {
             #if DEBUG
@@ -733,7 +809,9 @@ final class GuideStore: ObservableObject {
 
         // Fallback: getCurrentPrograms + getBulkUpcomingPrograms (for older Dispatcharr versions
         // that may not have the /api/epg/grid/ endpoint)
+        var didFetchFallback = false
         if let current = try? await api.getCurrentPrograms() {
+            didFetchFallback = true
             for prog in current {
                 guard let start = prog.startTime?.toDate(),
                       let end = prog.endTime?.toDate(),
@@ -757,6 +835,7 @@ final class GuideStore: ObservableObject {
 
         // Bulk fetch upcoming programs as supplement
         if let allPrograms = try? await api.getBulkUpcomingPrograms(maxPages: 10) {
+            didFetchFallback = true
             for prog in allPrograms {
                 guard let start = prog.startTime?.toDate(),
                       let end = prog.endTime?.toDate(),
@@ -777,35 +856,51 @@ final class GuideStore: ObservableObject {
                 mergeProgram(gp, for: cid)
             }
         }
+
+        shouldCommitBatch = didFetchFallback
+        return didFetchFallback
     }
 
     // MARK: - Xtream Codes
     private func fetchXtream(server: ServerConnection, channels: [ChannelDisplayItem],
-                              windowStart: Date, windowEnd: Date) async {
-        beginBatch()
-        defer { endBatch() }
+                              windowStart: Date, windowEnd: Date,
+                              replaceExisting: Bool = false) async -> Bool {
+        let batchBasePrograms = replaceExisting
+            ? replacingWindowBase(for: channels, windowStart: windowStart, windowEnd: windowEnd)
+            : nil
+        beginBatch(basePrograms: batchBasePrograms)
+        var shouldCommitBatch = false
+        defer {
+            if shouldCommitBatch {
+                endBatch()
+            } else {
+                cancelBatch()
+            }
+        }
         let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL,
                                   username: server.username,
                                   password: server.effectivePassword)
 
         // Fetch with limited concurrency (max 3 concurrent) and 15s timeout per request
-        await withTaskGroup(of: (String, [GuideProgram]).self) { group in
+        let didReceiveAnyResponse = await withTaskGroup(of: (String, [GuideProgram], Bool).self) { group in
             let maxConcurrent = 3
             var launched = 0
+            var didReceiveAnyResponse = false
 
             for ch in channels {
                 if launched >= maxConcurrent {
-                    if let (channelID, progs) = await group.next() {
+                    if let (channelID, progs, didRespond) = await group.next() {
+                        didReceiveAnyResponse = didReceiveAnyResponse || didRespond
                         for p in progs { mergeProgram(p, for: channelID) }
                     }
                 }
                 launched += 1
 
                 group.addTask { [api] in
-                    let progs: [GuideProgram] = await withTaskGroup(of: [GuideProgram].self) { inner in
+                    let result: ([GuideProgram], Bool) = await withTaskGroup(of: ([GuideProgram], Bool).self) { inner in
                         inner.addTask {
                             let response = try? await api.getEPG(streamID: ch.id, limit: 12)
-                            return (response?.epgListings ?? []).compactMap { item in
+                            let progs = (response?.epgListings ?? []).compactMap { item in
                                 guard let start = Self.parseXtreamDate(item.start),
                                       let end = Self.parseXtreamDate(item.end),
                                       end > windowStart && start < windowEnd else { return nil }
@@ -813,23 +908,30 @@ final class GuideStore: ObservableObject {
                                                     description: item.description,
                                                     start: start, end: end, category: "")
                             }
+                            return (progs, response != nil)
                         }
                         inner.addTask {
                             try? await Task.sleep(nanoseconds: 15_000_000_000)
-                            return []
+                            return ([], false)
                         }
-                        let result = await inner.next() ?? []
+                        let result = await inner.next() ?? ([], false)
                         inner.cancelAll()
                         return result
                     }
-                    return (ch.id, progs)
+                    return (ch.id, result.0, result.1)
                 }
             }
 
-            for await (channelID, progs) in group {
+            for await (channelID, progs, didRespond) in group {
+                didReceiveAnyResponse = didReceiveAnyResponse || didRespond
                 for p in progs { mergeProgram(p, for: channelID) }
             }
+
+            return didReceiveAnyResponse
         }
+
+        shouldCommitBatch = didReceiveAnyResponse
+        return didReceiveAnyResponse
     }
 
     // MARK: - Dispatcharr Category Enrichment (v1.6.22)
@@ -901,11 +1003,17 @@ final class GuideStore: ObservableObject {
 
     // MARK: - M3U + XMLTV
     private func fetchXMLTV(server: ServerConnection, channels: [ChannelDisplayItem],
-                             windowStart: Date, windowEnd: Date) async {
+                             windowStart: Date, windowEnd: Date,
+                             replaceExisting: Bool = false) async -> Bool {
         let epgURLStr = server.effectiveEPGURL
-        guard !epgURLStr.isEmpty, let epgURL = URL(string: epgURLStr) else { return }
-        await fetchXMLTVFromURL(url: epgURL, channels: channels,
-                                 windowStart: windowStart, windowEnd: windowEnd)
+        guard !epgURLStr.isEmpty, let epgURL = URL(string: epgURLStr) else { return false }
+        return await fetchXMLTVFromURL(
+            url: epgURL,
+            channels: channels,
+            windowStart: windowStart,
+            windowEnd: windowEnd,
+            replaceExisting: replaceExisting
+        )
     }
 
     /// Core XMLTV fetch/parse path. Accepts a pre-resolved URL so callers
@@ -946,7 +1054,8 @@ final class GuideStore: ObservableObject {
     @discardableResult
     func fetchXMLTVFromURL(url: URL, channels: [ChannelDisplayItem],
                                     windowStart: Date, windowEnd: Date,
-                                    headers: [String: String] = [:]) async -> Bool {
+                                    headers: [String: String] = [:],
+                                    replaceExisting: Bool = false) async -> Bool {
         // In-flight coalescing — see `inFlightXMLTVTask` doc. On
         // cold install two call sites hit this method with the
         // same URL back-to-back; without dedupe we pay the XMLTV
@@ -965,7 +1074,8 @@ final class GuideStore: ObservableObject {
         let fetchTask = Task<Bool, Never> { [self] in
             return await performXMLTVFetch(url: url, channels: channels,
                                            windowStart: windowStart, windowEnd: windowEnd,
-                                           headers: headers)
+                                           headers: headers,
+                                           replaceExisting: replaceExisting)
         }
         inFlightXMLTVTask = (url: url, task: fetchTask)
         let success = await fetchTask.value
@@ -1019,7 +1129,8 @@ final class GuideStore: ObservableObject {
     /// instead of leaving the Guide grid empty.
     private func performXMLTVFetch(url: URL, channels: [ChannelDisplayItem],
                                    windowStart: Date, windowEnd: Date,
-                                   headers: [String: String]) async -> Bool {
+                                   headers: [String: String],
+                                   replaceExisting: Bool) async -> Bool {
         // v1.6.22: log the actual error instead of swallowing it via
         // `try?`. The previous "XMLTV fetch/parse failed for <host>"
         // line told us nothing about WHY (auth? timeout? parse error?),
@@ -1073,7 +1184,9 @@ final class GuideStore: ObservableObject {
         // task below mutates its own local copy; the first write
         // triggers the deep copy, off-main. `self.programs` itself
         // stays untouched until the final assignment.
-        let snapshot = programs
+        let snapshot = replaceExisting
+            ? replacingWindowBase(for: channels, windowStart: windowStart, windowEnd: windowEnd)
+            : programs
 
         // Run the 98k-iteration merge off the MainActor.
         let result = await Task.detached(priority: .userInitiated) { () -> XMLTVMergeResult in
