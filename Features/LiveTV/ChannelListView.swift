@@ -28,6 +28,7 @@ struct ChannelListView: View {
     @EnvironmentObject private var nowPlaying: NowPlayingManager
     @EnvironmentObject private var favoritesStore: FavoritesStore
     @EnvironmentObject private var channelStore: ChannelStore
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     @Query private var servers: [ServerConnection]
@@ -478,7 +479,7 @@ struct ChannelListView: View {
                 icon: "tv",
                 title: "No Channels",
                 message: "No channels found on the active server.",
-                action: { Task { await channelStore.forceRefresh(servers: servers) } },
+                action: { Task { await channelStore.forceRefresh(servers: servers, modelContext: modelContext) } },
                 actionTitle: "Refresh"
             )
         } else if showGuideView {
@@ -735,7 +736,7 @@ struct ChannelListView: View {
             }
             .refreshable {
                 await EPGCache.shared.invalidateAll()
-                await channelStore.forceRefresh(servers: servers)
+                await channelStore.forceRefresh(servers: servers, modelContext: modelContext)
             }
             // iPhone-only: collapse the chrome (filter pills) when the
             // list scrolls past 80pt; expand again near the top (< 20pt).
@@ -950,7 +951,7 @@ struct ChannelListView: View {
                 .foregroundColor(.textSecondary)
                 .multilineTextAlignment(.center)
             PrimaryButton("Try Again") {
-                Task { await channelStore.forceRefresh(servers: servers) }
+                Task { await channelStore.forceRefresh(servers: servers, modelContext: modelContext) }
             }
             .frame(maxWidth: 200)
         }
