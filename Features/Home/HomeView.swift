@@ -794,26 +794,26 @@ final class ChannelStore: ObservableObject {
         }
     }
 
-    /// UserDefaults key for the cached channel→category map. Cached
-    /// on every successful XMLTV categories pass so subsequent app
-    /// launches can render the "Tint Channel Cards" gradient
-    /// immediately, before the (multi-second) XMLTV fetch+parse has
-    /// even started. Without this cache, users saw channel cards
-    /// pop in tintless on every launch and the color faded in
-    /// ~5–10 seconds later — which is what the #22 feedback
-    /// ("gradients took way too long to load") called out.
-    private static let cachedCategoriesKey = "cachedChannelCategories.v1"
+    /// UserDefaults key prefix for the cached channel→category map.
+    /// Scoped per server so switching playlists can't briefly reuse
+    /// tint data learned from a different server that happens to
+    /// share the same channel ids.
+    private static let cachedCategoriesKeyPrefix = "cachedChannelCategories.v1"
 
     /// Snapshot of the last-known channel→category map. Written by
     /// `applyXMLTVCategories` after a fresh pass lands, read by
-    /// `primeCategoriesFromCache()` on the next cold load so the
-    /// tint renders on the first frame instead of 5–10 s later.
-    private static func loadCachedCategories() -> [String: String] {
-        UserDefaults.standard.dictionary(forKey: cachedCategoriesKey) as? [String: String] ?? [:]
+    /// `primeCategoriesFromCache(serverID:)` on the next cold load so
+    /// the tint renders on the first frame instead of 5–10 s later.
+    private static func cachedCategoriesKey(for serverID: String) -> String {
+        "\(cachedCategoriesKeyPrefix).\(serverID)"
     }
 
-    private static func saveCachedCategories(_ map: [String: String]) {
-        UserDefaults.standard.set(map, forKey: cachedCategoriesKey)
+    private static func loadCachedCategories(for serverID: String) -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: cachedCategoriesKey(for: serverID)) as? [String: String] ?? [:]
+    }
+
+    private static func saveCachedCategories(_ map: [String: String], for serverID: String) {
+        UserDefaults.standard.set(map, forKey: cachedCategoriesKey(for: serverID))
     }
 
     /// Apply whatever category data we have cached from the last
@@ -822,10 +822,10 @@ final class ChannelStore: ObservableObject {
     /// overwrites with current data — this just means the user
     /// doesn't stare at an uncolored card while the XMLTV parse
     /// churns. Call from the channel-load success path.
-    func primeCategoriesFromCache() {
-        let cached = Self.loadCachedCategories()
+    func primeCategoriesFromCache(serverID: String) {
+        let cached = Self.loadCachedCategories(for: serverID)
         guard !cached.isEmpty else { return }
-        applyXMLTVCategories(cached)
+        applyXMLTVCategories(cached, serverID: serverID)
     }
 
     /// Called by `GuideStore` when an XMLTV parse surfaces category
@@ -891,30 +891,35 @@ final class ChannelStore: ObservableObject {
         }
     }
 
-    func applyXMLTVCategories(_ categoriesByChannelID: [String: String]) {
+    func applyXMLTVCategories(_ categoriesByChannelID: [String: String], serverID: String) {
         guard !categoriesByChannelID.isEmpty else { return }
-        var changed = false
-        var updated = channels
-        for i in updated.indices {
-            if let cat = categoriesByChannelID[updated[i].id],
-               updated[i].currentProgramCategory != cat {
-                updated[i].currentProgramCategory = cat
-                changed = true
+        let shouldApplyToCurrentChannels =
+            currentChannelServerID?.uuidString == serverID || activeServer?.id.uuidString == serverID
+
+        if shouldApplyToCurrentChannels {
+            var changed = false
+            var updated = channels
+            for i in updated.indices {
+                if let cat = categoriesByChannelID[updated[i].id],
+                   updated[i].currentProgramCategory != cat {
+                    updated[i].currentProgramCategory = cat
+                    changed = true
+                }
             }
-        }
-        if changed {
-            channels = updated
+            if changed {
+                channels = updated
+            }
         }
         // Persist so the next app launch can prime the tint from
         // cache on the first frame. Merging into the existing cache
         // rather than replacing means a partial XMLTV pass (e.g.,
         // parser errored halfway) doesn't wipe previously-known
         // categories for channels it didn't cover.
-        var merged = Self.loadCachedCategories()
+        var merged = Self.loadCachedCategories(for: serverID)
         for (id, cat) in categoriesByChannelID {
             merged[id] = cat
         }
-        Self.saveCachedCategories(merged)
+        Self.saveCachedCategories(merged, for: serverID)
     }
 
     /// Returns the URL AerioTV should pull XMLTV from for a
@@ -966,13 +971,15 @@ final class ChannelStore: ObservableObject {
         // the call site sync-clean.
         let snapshot = channels
         guard let activeServer = activeServer else { return }
+        let categoryServerID = activeServer.id.uuidString
 
         await GuideStore.shared.fetchXMLTVFromURL(
             url: url,
             channels: snapshot,
             windowStart: windowStart,
             windowEnd: windowEnd,
-            headers: headers
+            headers: headers,
+            categoryServerID: categoryServerID
         )
         // Propagate into EPGCache so List-view `fetchUpcoming`
         // (which reads EPGCache) picks up category-enriched
@@ -1080,7 +1087,7 @@ final class ChannelStore: ObservableObject {
                 // instead of fading in 5–10 seconds later when the
                 // live XMLTV parse wraps. The fresh XMLTV pass in
                 // `loadAllEPG` still overwrites with current data.
-                primeCategoriesFromCache()
+                primeCategoriesFromCache(serverID: serverID.uuidString)
                 TopShelfDataManager.syncTopChannels(channels: items)
                 DebugLogger.shared.logChannelLoad(
                     serverType: type.rawValue,
@@ -1254,6 +1261,7 @@ final class ChannelStore: ObservableObject {
         // a SwiftData model; reading a property after an `await`
         // suspension risks a thread-context violation.
         let dispatcharrXMLTVOverride = server.dispatcharrXMLTVURL
+        let categoryServerID = server.id.uuidString
         // v1.6.20: snapshot the auto-detected auth header mode + UA
         // so the off-main-thread API constructor uses the per-server
         // shape instead of the default `.xapikey`.
@@ -1535,7 +1543,7 @@ final class ChannelStore: ObservableObject {
                     }
                     debugLog("📺 Category enrichment: \(byChan.count)/\(currentByChannelID.count) channels got categories")
                     await MainActor.run {
-                        ChannelStore.shared.applyXMLTVCategories(byChan)
+                        ChannelStore.shared.applyXMLTVCategories(byChan, serverID: categoryServerID)
                     }
 
                     // v1.7: propagate the channel's category to ALL

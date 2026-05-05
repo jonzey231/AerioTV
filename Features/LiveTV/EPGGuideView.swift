@@ -622,6 +622,7 @@ final class GuideStore: ObservableObject {
                                   auth: .apiKey(server.effectiveApiKey),
                                   userAgent: server.effectiveUserAgent,
                                   authMode: server.dispatcharrHeaderMode)
+        let categoryServerID = server.id.uuidString
         debugLog("📺 [EPG source=dispatcharr-api grid] server=\(server.name)")
 
         // v1.6.22: honor user-provided XMLTV override URL if set.
@@ -640,6 +641,7 @@ final class GuideStore: ObservableObject {
                 windowStart: windowStart,
                 windowEnd: windowEnd,
                 headers: api.streamAuthHeaders,
+                categoryServerID: categoryServerID,
                 replaceExisting: replaceExisting
             )
             // Fall through to bulk grid below: the merge dedupes by
@@ -796,7 +798,8 @@ final class GuideStore: ObservableObject {
                 await self.enrichDispatcharrCategories(gridPrograms: gridPrograms,
                                                         api: api,
                                                         tvgIDToChannelID: tvgIDToChannelID,
-                                                        uuidToChannelID: uuidToChannelID)
+                                                        uuidToChannelID: uuidToChannelID,
+                                                        serverID: categoryServerID)
             }
 
             shouldCommitBatch = true
@@ -948,7 +951,8 @@ final class GuideStore: ObservableObject {
         gridPrograms: [DispatcharrCurrentProgram],
         api: DispatcharrAPI,
         tvgIDToChannelID: [String: String],
-        uuidToChannelID: [String: String]
+        uuidToChannelID: [String: String],
+        serverID: String
     ) async {
         let now = Date()
         var currentByChannelID: [String: Int] = [:]
@@ -998,7 +1002,7 @@ final class GuideStore: ObservableObject {
         self.programs = updated
 
         // Apply to Live-TV channel-card stripe.
-        ChannelStore.shared.applyXMLTVCategories(byChannel)
+        ChannelStore.shared.applyXMLTVCategories(byChannel, serverID: serverID)
     }
 
     // MARK: - M3U + XMLTV
@@ -1012,6 +1016,7 @@ final class GuideStore: ObservableObject {
             channels: channels,
             windowStart: windowStart,
             windowEnd: windowEnd,
+            categoryServerID: server.id.uuidString,
             replaceExisting: replaceExisting
         )
     }
@@ -1055,6 +1060,7 @@ final class GuideStore: ObservableObject {
     func fetchXMLTVFromURL(url: URL, channels: [ChannelDisplayItem],
                                     windowStart: Date, windowEnd: Date,
                                     headers: [String: String] = [:],
+                                    categoryServerID: String,
                                     replaceExisting: Bool = false) async -> Bool {
         // In-flight coalescing — see `inFlightXMLTVTask` doc. On
         // cold install two call sites hit this method with the
@@ -1075,6 +1081,7 @@ final class GuideStore: ObservableObject {
             return await performXMLTVFetch(url: url, channels: channels,
                                            windowStart: windowStart, windowEnd: windowEnd,
                                            headers: headers,
+                                           categoryServerID: categoryServerID,
                                            replaceExisting: replaceExisting)
         }
         inFlightXMLTVTask = (url: url, task: fetchTask)
@@ -1130,6 +1137,7 @@ final class GuideStore: ObservableObject {
     private func performXMLTVFetch(url: URL, channels: [ChannelDisplayItem],
                                    windowStart: Date, windowEnd: Date,
                                    headers: [String: String],
+                                   categoryServerID: String,
                                    replaceExisting: Bool) async -> Bool {
         // v1.6.22: log the actual error instead of swallowing it via
         // `try?`. The previous "XMLTV fetch/parse failed for <host>"
@@ -1252,7 +1260,7 @@ final class GuideStore: ObservableObject {
         debugLog("📺 XMLTV \(hostLabel): \(result.matched) programs matched, \(result.missed) skipped (no channel)")
         // Back-fill ChannelStore so Tint Channel Cards reflects
         // the XMLTV categories on every channel row.
-        ChannelStore.shared.applyXMLTVCategories(result.currentCategoriesByChannelID)
+        ChannelStore.shared.applyXMLTVCategories(result.currentCategoriesByChannelID, serverID: categoryServerID)
         return true
     }
 
