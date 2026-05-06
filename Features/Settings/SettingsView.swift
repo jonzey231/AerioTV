@@ -269,6 +269,13 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
+                        NavigationLink(destination: AppBehaviorsSettingsView()) {
+                            SettingsRow(icon: "switch.2", iconColor: .accentPrimary,
+                                        title: "App Behaviors", subtitle: "Launch flow, remote behavior")
+                        }
+                        #if os(iOS)
+                        .buttonStyle(PressableButtonStyle())
+                        #endif
                         NavigationLink(destination: MultiviewSettingsView()) {
                             SettingsRow(icon: "rectangle.split.2x2.fill", iconColor: .accentPrimary,
                                         title: "Multiview", subtitle: "Audio focus, tile spacing & corners")
@@ -527,6 +534,7 @@ struct SettingsView: View {
             .navigationDestination(for: String.self) { route in
                 switch route {
                 case "appearance":      AppearanceSettingsView()
+                case "app-behaviors":   AppBehaviorsSettingsView()
                 case "multiview":       MultiviewSettingsView()
                 case "network":         NetworkSettingsView()
                 case "dvr-settings": DVRSettingsView()
@@ -858,6 +866,10 @@ struct SettingsView: View {
                     TVSettingsNavButton(label: "Appearance", icon: "paintbrush.fill",
                                         iconColor: .accentPrimary, subtitle: "Theme, scale & category colors") {
                         navPath.append("appearance")
+                    }
+                    TVSettingsNavButton(label: "App Behaviors", icon: "switch.2",
+                                        iconColor: .accentPrimary, subtitle: "Launch flow, remote behavior") {
+                        navPath.append("app-behaviors")
                     }
                     TVSettingsNavButton(label: "Multiview", icon: "rectangle.split.2x2.fill",
                                         iconColor: .accentPrimary, subtitle: "Audio focus, tile spacing & corners") {

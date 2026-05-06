@@ -359,6 +359,10 @@ struct PlayerView: View {
     @State private var didCopyErrorDetails = false
     @State private var isAudioOnly = false
 
+    // The "Apple TV up/down channel-flip" toggle (v1.7.x) lives on
+    // `PlayerRootView` because that's where `.onMoveCommand` is
+    // mounted. PlayerView itself doesn't read the value.
+
     var body: some View {
         PlayerRootView(
             urls: urls, title: title, headers: headers,
@@ -419,6 +423,15 @@ private struct PlayerRootView: View {
     @State private var controlsHideTask: Task<Void, Never>?
     @State private var dragOffset: CGFloat = 0
     // Resume prompt removed — no DVR.
+
+    /// v1.7.x: gates the Apple TV up/down d-pad channel-flip on
+    /// single-stream live playback. Default ON to preserve the
+    /// behaviour shipped since v1.6.15. Surfaced in Settings →
+    /// App Behaviors → Apple TV Remote. Mirrored on `PlayerView`
+    /// for parity (each struct's @AppStorage shares the same
+    /// UserDefaults backing store, so they stay in sync).
+    @AppStorage("appBehaviorsAppleTVChannelFlip")
+    private var appleTVChannelFlip = true
 
     // Sleep timer
     @State private var sleepTimerEnd: Date?
@@ -600,7 +613,13 @@ private struct PlayerRootView: View {
                             // info row), NOT flip channels behind
                             // their back. Pressing Menu/Back again
                             // hides chrome and re-enables flip.
-                            if isLive, !showControls,
+                            //
+                            // v1.7.x: also gated on the Settings →
+                            // App Behaviors toggle. Users who hit
+                            // accidental D-pad presses can disable
+                            // the flip without losing other remote
+                            // behaviours.
+                            if appleTVChannelFlip, isLive, !showControls,
                                direction == .up || direction == .down {
                                 NowPlayingManager.shared.changeChannel(
                                     direction: direction == .up ? +1 : -1

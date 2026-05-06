@@ -148,6 +148,14 @@ struct MultiviewContainerView: View {
     /// "padded" layout introduced in v1.6.8.
     private var tileSpacing: CGFloat { paddingEnabled ? 8 : 0 }
 
+    /// v1.7.x: gates the Apple TV up/down d-pad channel-flip on
+    /// single-tile (N=1) playback in the unified-multiview path.
+    /// Default ON. Surfaced in Settings → App Behaviors → Apple TV
+    /// Remote and shared with `PlayerView` via the same storage
+    /// key so the user has one canonical preference.
+    @AppStorage("appBehaviorsAppleTVChannelFlip")
+    private var appleTVChannelFlip = true
+
     var body: some View {
         // N=1 treatment — "this is effectively PlayerView" — is
         // gated on the unified-playback feature flag. Without the
@@ -711,10 +719,17 @@ struct MultiviewContainerView: View {
             //      Options / Record / Add Stream pills below the tile,
             //      not flip channels behind their back. Pressing
             //      Menu/Back again hides chrome and re-enables flip.
+            //   4. v1.7.x: user-toggleable via Settings → App
+            //      Behaviors → Apple TV Remote. Default ON to
+            //      preserve the post-v1.6.15 behaviour; users who
+            //      hit accidental D-pad presses during playback
+            //      can disable the flip without losing other
+            //      remote behaviours.
             //   Up = next channel (higher number), Down = previous —
             //   matches the IPTV remote idiom (inverse of guide-list
             //   scroll direction).
-            if store.tiles.count == 1,
+            if appleTVChannelFlip,
+               store.tiles.count == 1,
                !nowPlaying.isMinimized,
                !chromeState.isVisible {
                 if direction == .up {

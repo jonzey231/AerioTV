@@ -43,29 +43,18 @@ struct AppearanceSettingsView: View {
     @AppStorage(CategoryColor.enabledKey) private var enableCategoryColors = true
     @AppStorage("tintChannelCards")       private var tintChannelCards = false
 
-    // MARK: - App Behaviors (v1.6.13, GH #8)
+    // MARK: - App Behaviors (moved)
     //
-    // Two launch-flow toggles surfaced together because they're both
-    // about "what happens when the app first comes up":
-    //
-    // - `skipLoadingScreen`: dismiss the "Setting Up" cover
-    //   immediately on launch and let channels / EPG / VOD hydrate
-    //   in the background instead of behind a blocking modal. The
-    //   cost is brief UI stutter or empty-state flicker during the
-    //   first ~30 s while data streams in. Default OFF — the cover
-    //   is the safe path.
-    // - `autoResumeLastChannel`: pick up where the user left off.
-    //   When the app launches, hydrate the last-played channel into
-    //   the corner mini-player (iPad / tvOS) so the user lands on
-    //   the Guide with their last channel already warming up;
-    //   Play/Pause expands. Hidden on iPhone — corner mini there is
-    //   too small to be useful, and iPhone keeps its bottom-sheet
-    //   MiniPlayerBar paradigm. Default OFF.
-    @AppStorage("appBehaviorsSkipLoadingScreen")
-    private var skipLoadingScreen = false
-
-    @AppStorage("appBehaviorsAutoResumeLastChannel")
-    private var autoResumeLastChannel = false
+    // The "App Behaviors" subsection (Skip Loading Screen, Resume
+    // Last Channel) lived inline here from v1.6.13 through v1.7.x.
+    // It's now a top-level Settings entry. See
+    // `AppBehaviorsSettingsView.swift`. The keys
+    // (`appBehaviorsSkipLoadingScreen`,
+    // `appBehaviorsAutoResumeLastChannel`) are unchanged so existing
+    // users carry their preferences forward without any migration.
+    // v1.7.x also added an "Up / Down channel flip" toggle alongside
+    // them; that's the reason for the promotion (Appearance was
+    // never the right home for d-pad behaviour).
 
     /// Summary text for the "Add more categories" disclosure row —
     /// shows "Off", "3 extra", "Custom", or "5 extra + Custom" so
@@ -136,28 +125,8 @@ struct AppearanceSettingsView: View {
                     }
                 }
 
-                // App Behaviors (v1.6.13, GH #8) — same toggles as
-                // iOS, both shown on tvOS (no idiom gating because
-                // tvOS is always "iPad-class" for these features —
-                // corner mini-player exists, last-channel resume is
-                // useful on a 10-foot UI).
-                tvAppearanceSection("App Behaviors") {
-                    TVSettingsToggleRow(
-                        icon: "bolt.horizontal",
-                        iconColor: theme.accent,
-                        title: "Skip Loading Screen",
-                        subtitle: "Land on Live TV instantly; data hydrates in the background",
-                        isOn: $skipLoadingScreen
-                    ) { _ in }
-
-                    TVSettingsToggleRow(
-                        icon: "play.tv",
-                        iconColor: theme.accent,
-                        title: "Resume Last Channel",
-                        subtitle: "Auto-start the last-played channel in the corner mini-player on launch",
-                        isOn: $autoResumeLastChannel
-                    ) { _ in }
-                }
+                // App Behaviors moved to its own top-level Settings
+                // entry in v1.7.x. See `AppBehaviorsSettingsView`.
 
                 // Color Theme
                 tvAppearanceSection("Color Theme") {
@@ -393,49 +362,8 @@ struct AppearanceSettingsView: View {
                     .listSectionSeparator(.hidden)
                 }
 
-                // MARK: App Behaviors (v1.6.13, GH #8)
-                //
-                // Launch-flow toggles. Auto-resume is iPad-only on
-                // iOS — corner mini-player is too small to be useful
-                // on iPhone, and the iPhone keeps the bottom
-                // MiniPlayerBar paradigm rather than a corner box.
-                Section {
-                    Toggle(isOn: $skipLoadingScreen) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Skip loading screen")
-                                .font(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Text("Land on Live TV instantly; data hydrates in the background")
-                                .font(.labelSmall)
-                                .foregroundColor(.textTertiary)
-                        }
-                    }
-                    .tint(theme.accent)
-                    .listRowBackground(Color.cardBackground)
-
-                    if UIDevice.current.userInterfaceIdiom == .pad {
-                        Toggle(isOn: $autoResumeLastChannel) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Resume last channel")
-                                    .font(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Text("Auto-start the last-played channel in the corner mini-player on launch")
-                                    .font(.labelSmall)
-                                    .foregroundColor(.textTertiary)
-                            }
-                        }
-                        .tint(theme.accent)
-                        .listRowBackground(Color.cardBackground)
-                    }
-                } header: {
-                    Text("App Behaviors").sectionHeaderStyle()
-                } footer: {
-                    Text(UIDevice.current.userInterfaceIdiom == .pad
-                         ? "Skipping the loading screen may cause brief UI stutter while data loads. Resume picks up the last channel you watched in the corner mini-player; press Play/Pause to expand."
-                         : "Skipping the loading screen may cause brief UI stutter while data loads.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-                .listSectionSeparator(.hidden)
+                // App Behaviors moved to its own top-level Settings
+                // entry in v1.7.x. See `AppBehaviorsSettingsView`.
 
                 // MARK: Display Scale — per-view sliders (#21)
                 //

@@ -46,6 +46,7 @@
 		3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
 		3C4D5E6F70891012ACE70020 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
 		3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
+		48336325ACADA131557D4C58 /* AppBehaviorsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */; };
 		483F98D5B841C7C3E8491885 /* Pods_Aerio_tvOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 24C772C96083DF7C60C170B6 /* Pods_Aerio_tvOS.framework */; };
 		5585996EF79BB170CAD2D6F3 /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */; };
 		565A7DFCEC12544455827DB3 /* ReminderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 265A7DFCEC12544455827DB3 /* ReminderManager.swift */; };
@@ -155,6 +156,7 @@
 		BC00C290CFD296C79CD18EB6 /* Pods-Aerio_iOS-frameworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */; };
 		BDD64B832F76FD240055F82C /* MPVKit-GPL in Frameworks */ = {isa = PBXBuildFile; productRef = BDD64B822F76FD240055F82C /* MPVKit-GPL */; };
 		BDD64B872F76FD890055F82C /* MPVKit-GPL in Frameworks */ = {isa = PBXBuildFile; productRef = BDD64B862F76FD890055F82C /* MPVKit-GPL */; };
+		BEEFBC48135CF7E02F81D4D4 /* AppBehaviorsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */; };
 		C02E4BB60A5E960696E8839B /* Pods-Aerio_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Aerio_iOS-acknowledgements.markdown */; };
 		C9B3A9A8801BC79552C8D496 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */; };
 		C9E28AF097D00D2A282673A5 /* AerioSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */; };
@@ -333,6 +335,7 @@
 		F249D5C39D90BC11107F3420 /* Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist"; sourceTree = "<group>"; };
 		F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConnectionViewModel.swift; sourceTree = "<group>"; };
 		F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ReminderBannerView.swift; path = Shared/ReminderBannerView.swift; sourceTree = SOURCE_ROOT; };
+		FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppBehaviorsSettingsView.swift; sourceTree = "<group>"; };
 		MPV0000000000000000000001 /* MPVPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MPVPlayerView.swift; sourceTree = "<group>"; };
 		TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */ = {isa = PBXFileReference; lastKnownFileType = wrapper.workspace; path = Aerio.xcworkspace; sourceTree = "<group>"; };
 		TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
@@ -631,6 +634,7 @@
 				0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */,
 				D60A8F073408CAFD075C499C /* MyRecordingsView.swift */,
 				A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */,
+				FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */,
 			);
 			path = Settings;
 			sourceTree = "<group>";
@@ -1007,6 +1011,7 @@
 				F11A12EB07CB46158E23B73E /* ProgramInfoView.swift in Sources */,
 				6308BAE1E16965A379092AE8 /* OnDemandView.swift in Sources */,
 				D361421CBA05BF602FCEAE80 /* DispatcharrDirectConnect.swift in Sources */,
+				48336325ACADA131557D4C58 /* AppBehaviorsSettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1090,6 +1095,7 @@
 				B997EA931623455C8A931F29 /* ProgramInfoView.swift in Sources */,
 				C9E919E28B95CE15179BBCBD /* OnDemandView.swift in Sources */,
 				1B56BE6F7111A4EF6DD7E11B /* DispatcharrDirectConnect.swift in Sources */,
+				BEEFBC48135CF7E02F81D4D4 /* AppBehaviorsSettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
