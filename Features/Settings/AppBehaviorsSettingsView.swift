@@ -36,13 +36,23 @@ struct AppBehaviorsSettingsView: View {
 
     /// v1.7.x: gate the Apple TV up/down d-pad channel-flip on
     /// single-stream live playback. Default ON to preserve the
-    /// behaviour that's shipped since v1.6.15. Some users prefer
-    /// up/down to do nothing during playback (e.g. accidental flips
-    /// from a cat walking on the couch); turning this off makes the
-    /// remote behave like a media-playback remote with no surprise
-    /// channel changes. Read by both `PlayerView` and
-    /// `MultiviewContainerView` on tvOS. iOS swipe-to-flip is a
-    /// separate path and unaffected by this toggle.
+    /// behaviour shipped since v1.6.15 (tvOS) / v1.6.18 (iOS).
+    /// Covers both input paths via the same storage key:
+    ///   - Apple TV Siri Remote up/down d-pad
+    ///     (PlayerView.onMoveCommand,
+    ///     MultiviewContainerView.onMoveCommand at N=1).
+    ///   - iPhone / iPad swipe up/down on the chrome-visible
+    ///     player (PlayerView's DragGesture `.onEnded` branch).
+    /// Some users prefer the gesture to do nothing during playback
+    /// (cat-on-couch flips on tvOS, thumb-bumps on iPhone). When
+    /// off, both input paths no-op for channel switching while
+    /// leaving every other behaviour (chrome reveal, Options pill
+    /// nav, minimize swipe-down) intact.
+    ///
+    /// Storage-key name kept as `appBehaviorsAppleTVChannelFlip`
+    /// for back-compat with v1.7.x's first ship that only covered
+    /// the Apple TV path. The toggle's user-facing copy was
+    /// rewritten in v1.7.x to include iOS gestures.
     @AppStorage("appBehaviorsAppleTVChannelFlip")
     private var appleTVChannelFlip = true
 
@@ -108,20 +118,20 @@ struct AppBehaviorsSettingsView: View {
             }
             .listSectionSeparator(.hidden)
 
-            // MARK: Apple TV Remote Behavior
+            // MARK: Channel Flip Gesture
             //
-            // Surfaced on iOS too so iCloud sync gives the user one
-            // canonical place to manage the preference. Their Apple
-            // TV inherits the value via the existing UserDefaults
-            // KVS sync path (storage key is on the SyncManager
-            // allowlist, see below).
+            // Single toggle that gates both input paths (Apple TV
+            // d-pad + iPhone/iPad swipe) on the same storage key.
+            // Surfaced on every platform so the user has one
+            // canonical preference no matter which device they're
+            // configuring from.
             Section {
                 Toggle(isOn: $appleTVChannelFlip) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Up / Down channel flip")
+                        Text("Up / Down channel change")
                             .font(.bodyMedium)
                             .foregroundColor(.textPrimary)
-                        Text("On Apple TV, press up to go to the next channel and down to go to the previous. Live single-stream playback only.")
+                        Text("On iPhone & iPad, swipe up on the player for the next channel, swipe down for the previous. On Apple TV, press up or down on the Siri Remote. Live single-stream playback only.")
                             .font(.labelSmall)
                             .foregroundColor(.textTertiary)
                     }
@@ -129,9 +139,9 @@ struct AppBehaviorsSettingsView: View {
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
             } header: {
-                Text("Apple TV Remote").sectionHeaderStyle()
+                Text("Channel Flip Gesture").sectionHeaderStyle()
             } footer: {
-                Text("Turn off if accidental D-pad presses are flipping channels during playback. Doesn't affect iPhone or iPad swipe gestures.")
+                Text("Turn off if accidental swipes or D-pad presses are flipping channels during playback.")
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
@@ -165,16 +175,16 @@ struct AppBehaviorsSettingsView: View {
                     ) { _ in }
                 }
 
-                tvSection("Apple TV Remote") {
+                tvSection("Channel Flip Gesture") {
                     TVSettingsToggleRow(
                         icon: "arrow.up.and.down",
                         iconColor: theme.accent,
-                        title: "Up / Down Channel Flip",
-                        subtitle: "Press up for next channel, down for previous. Live single-stream playback only.",
+                        title: "Up / Down Channel Change",
+                        subtitle: "Press up on the Siri Remote for the next channel, down for the previous. Live single-stream playback only.",
                         isOn: $appleTVChannelFlip
                     ) { _ in }
 
-                    Text("Turn off if accidental D-pad presses are flipping channels during playback.")
+                    Text("Turn off if accidental D-pad presses are flipping channels during playback. iPhone & iPad use the matching swipe-up / swipe-down gesture on the same toggle.")
                         .font(.system(size: 22))
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 20)

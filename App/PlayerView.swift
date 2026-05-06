@@ -696,7 +696,12 @@ private struct PlayerRootView: View {
                     // = previous (-1). Strong vertical bias keeps
                     // iPad split-view drag-from-edge from being
                     // misread as a channel flip.
-                    if showControls, isLive {
+                    // v1.7.x: also gated on the Settings → App
+                    // Behaviors → "Up / Down channel change" toggle.
+                    // iOS swipe + tvOS d-pad share the same storage
+                    // key; users who turn the feature off don't get
+                    // accidental flips from either input path.
+                    if appleTVChannelFlip, showControls, isLive {
                         let dy = value.translation.height
                         let dx = abs(value.translation.width)
                         if abs(dy) > 40, abs(dy) > dx * 1.5 {

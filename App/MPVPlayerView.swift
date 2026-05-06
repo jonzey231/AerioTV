@@ -317,24 +317,17 @@ class MPVPlayerViewController: UIViewController {
 
         // AVSampleBufferDisplayLayer for vsync-synchronized presentation (both platforms).
         //
-        // v1.7.x: video gravity is mode-aware.
-        // - Single-stream playback (`tileID == nil`): `.resizeAspect`
-        //   so a 16:9 video in a 4:3 sole-tile rect letterboxes
-        //   cleanly with black bars top + bottom. This is the
-        //   convention every iOS video app follows; cropping
-        //   single-stream content would feel wrong.
-        // - Multiview tiles (`tileID != nil`): `.resizeAspectFill` so
-        //   a 16:9 video in a portrait-ish 3-tile right-column rect
-        //   fills the rect by cropping the left + right edges.
-        //   Pre-fix the multiview tiles letterboxed too, producing
-        //   ~128px black bars top + bottom of each small tile that
-        //   read as a visible "gap" between stacked tiles
-        //   (user-reported on iPad N=3 layout, 2026-05-03). For
-        //   sports/news content the side-cropping is invisible
-        //   because action stays roughly centered.
-        sampleBufferLayer.videoGravity = (coordinator?.tileID == nil)
-            ? .resizeAspect
-            : .resizeAspectFill
+        // `.resizeAspect` keeps the source aspect ratio, letterboxing
+        // when the tile rect is taller or wider than the video. This
+        // is the convention every iOS video app follows. v1.7.x
+        // briefly tried `.resizeAspectFill` for multiview tiles to
+        // close the visible black gap between stacked tiles in the
+        // N=3 right column, but that over-zoomed the content on
+        // every layout (single-stream too) which was a worse
+        // regression than the gap. Reverted; the gap will be
+        // addressed at the layout-rect level (`MultiviewGridMath`)
+        // in a future pass instead.
+        sampleBufferLayer.videoGravity = .resizeAspect
         sampleBufferLayer.frame = view.bounds
         view.layer.addSublayer(sampleBufferLayer)
 
