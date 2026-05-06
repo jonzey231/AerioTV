@@ -858,13 +858,22 @@ final class ChannelStore: ObservableObject {
             // current program lined up identically). Dictionary
             // equality on Date is exact; the EPG grid emits
             // wall-clock-second precision so this is reliable.
-            if updated[i].currentProgram        == snap.title &&
-               updated[i].currentProgramStart   == snap.start &&
-               updated[i].currentProgramEnd     == snap.end {
+            // v1.7.x (Round 1 review): description is also part of
+            // the comparison. Pre-fix the skip-no-fire branch
+            // ignored description, so a description-only change
+            // (rare but possible: enrichment fan-out lands a richer
+            // program detail after the initial bulk parse with
+            // empty description) silently dropped. Now any field
+            // change triggers the rewrite.
+            let snapDescription = snap.description.isEmpty ? nil : snap.description
+            if updated[i].currentProgram            == snap.title &&
+               updated[i].currentProgramDescription == snapDescription &&
+               updated[i].currentProgramStart       == snap.start &&
+               updated[i].currentProgramEnd         == snap.end {
                 continue
             }
             updated[i].currentProgram            = snap.title
-            updated[i].currentProgramDescription = snap.description.isEmpty ? nil : snap.description
+            updated[i].currentProgramDescription = snapDescription
             updated[i].currentProgramStart       = snap.start
             updated[i].currentProgramEnd         = snap.end
             changed = true

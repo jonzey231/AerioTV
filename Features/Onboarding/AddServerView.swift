@@ -792,6 +792,21 @@ struct AddServerView: View {
                                 .font(.bodySmall)
                                 .foregroundColor(.textSecondary)
                         }
+                        // v1.7.x (Round 1 review): for Direct Connect
+                        // signups, surface that the api_key was
+                        // fetched silently. The user knows where the
+                        // cached api_key in Edit Server later came
+                        // from, and can audit the fact that AerioTV
+                        // is persisting both their credentials and a
+                        // server-side identifier on this device.
+                        if viewModel.serverType == .dispatcharrAPI
+                            && viewModel.dispatcharrCredentialType == .usernamePassword
+                            && !viewModel.apiKey.isEmpty {
+                            Text("API key cached locally for streaming, logos, and recordings.")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                                .padding(.top, 2)
+                        }
                     }
                     Spacer()
                 }

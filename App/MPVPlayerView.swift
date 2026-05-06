@@ -948,8 +948,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// `/file/` endpoint. Drives the longer retry budget +
         /// backoff above. Detected by URL path (no need for the
         /// caller to thread an `isRecording` flag through).
+        ///
+        /// v1.7.x: looks at the URL we're actively playing
+        /// (`urls[currentIndex]`) rather than `urls.first`. All
+        /// current callers pass single-URL playlists, but a
+        /// future failover-aware caller could pass a multi-URL
+        /// list with the recording at index 1+; the first form
+        /// would silently misclassify and apply the live-stream
+        /// retry budget instead.
         private var isRecordingURL: Bool {
-            guard let url = urls.first else { return false }
+            guard urls.indices.contains(currentIndex) else { return false }
+            let url = urls[currentIndex]
             return url.path.contains("/recordings/") && url.path.hasSuffix("/file/")
         }
         private var isShuttingDown = false

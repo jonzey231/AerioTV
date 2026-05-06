@@ -2016,23 +2016,53 @@ struct EditServerSheet: View {
     @State private var sessionRefreshMessage: String? = nil
     @State private var sessionRefreshSucceeded: Bool = false
 
-    /// v1.7.x: binds the credential-mode segmented picker. Wraps
-    /// `dispatcharrCredentialTypeRaw` so SwiftUI sees a typed enum
-    /// while the SwiftData column stays as a raw string. Switching
-    /// modes does NOT clear the cached api_key — the API Key field
-    /// in API-Key mode shows whatever was cached, and switching back
-    /// to Username & Password preserves it for downstream consumers.
+    /// v1.7.x (Round 1 review): credential mode is staged in
+    /// SwiftUI state instead of writing through to SwiftData
+    /// immediately. Pre-fix the picker used a Binding that wrote
+    /// `server.dispatcharrCredentialTypeRaw` directly, so flipping
+    /// the picker and then tapping Cancel still persisted the new
+    /// mode — leaving servers in a half-configured state if the
+    /// user explored the picker without intending to commit.
+    /// `nil` means "user hasn't touched the picker"; non-nil means
+    /// "staged change pending Save". Persisted in `commitEdits()`.
+    @State private var pendingCredentialType: DispatcharrCredentialType? = nil
+
+    /// v1.7.x: read view of the credential mode that respects any
+    /// staged change. Body switches on this so revealing the
+    /// alternate fields is immediate while the model write is
+    /// deferred to Save.
+    private var effectiveCredentialType: DispatcharrCredentialType {
+        pendingCredentialType ?? server.dispatcharrCredentialType
+    }
+
+    /// v1.7.x: binds the credential-mode segmented picker. Stages
+    /// the pick into `pendingCredentialType`; the actual SwiftData
+    /// write happens in `commitEdits()` if the user taps Save.
+    /// Tapping Cancel discards the staged value because it's
+    /// SwiftUI @State, not bound to the model.
     private var directConnectModeBinding: Binding<DispatcharrCredentialType> {
         Binding(
-            get: { server.dispatcharrCredentialType },
+            get: { effectiveCredentialType },
             set: { newValue in
-                server.dispatcharrCredentialTypeRaw = (newValue == .apiKey) ? "" : newValue.rawValue
+                pendingCredentialType = newValue
                 // Clear the refresh-session message when the user
                 // pivots so a stale "Refreshed at 12:34" pill
                 // doesn't linger on the wrong mode.
                 sessionRefreshMessage = nil
             }
         )
+    }
+
+    /// v1.7.x: apply staged credential-mode change to the model.
+    /// Called from the Save action of the edit sheet. Keeps the
+    /// SwiftData write in one place so the no-op default (`""`
+    /// raw) is preserved when the user picks `.apiKey` (forward-
+    /// compat with older AerioTV builds receiving this server via
+    /// iCloud sync — they ignore unknown KVS keys).
+    private func commitCredentialModeIfStaged() {
+        guard let pending = pendingCredentialType else { return }
+        server.dispatcharrCredentialTypeRaw = (pending == .apiKey) ? "" : pending.rawValue
+        pendingCredentialType = nil
     }
 
     /// v1.7.x: render the cached api_key as `i_•••••cudvh13H1A`
@@ -2087,16 +2117,25 @@ struct EditServerSheet: View {
             // Re-fetch the user record so we pick up any rotated
             // api_key. Update the SwiftData record + Keychain so
             // every downstream consumer sees the fresh value.
+            // v1.7.x (Round 1 review): differentiate the success
+            // message based on whether the api_key actually
+            // changed. Pre-fix the message was the same regardless,
+            // which made the button feel like a no-op even when it
+            // actively rescued a stale-Keychain situation.
             let bearerAPI = DispatcharrAPI(baseURL: baseURL, auth: .bearer(pair.access))
+            var apiKeyRotated = false
             if let user = try? await bearerAPI.fetchCurrentUser(),
                !user.apiKey.isEmpty,
                user.apiKey != server.effectiveApiKey {
                 server.apiKey = user.apiKey
                 SyncManager.shared.saveCredentialsSynced(for: server)
+                apiKeyRotated = true
             }
 
             sessionRefreshSucceeded = true
-            sessionRefreshMessage = "Session refreshed."
+            sessionRefreshMessage = apiKeyRotated
+                ? "Session refreshed. Cached API key updated."
+                : "Session refreshed. API key unchanged."
         } catch let error as DispatcharrDirectConnectError {
             sessionRefreshSucceeded = false
             sessionRefreshMessage = error.errorDescription ?? "Refresh failed."
@@ -2128,6 +2167,12 @@ struct EditServerSheet: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Save") {
+                        // v1.7.x (Round 1 review): commit any
+                        // staged credential-mode change before
+                        // persisting credentials. Cancel skips
+                        // this step, so toggling the picker and
+                        // backing out leaves the model unchanged.
+                        commitCredentialModeIfStaged()
                         SyncManager.shared.saveCredentialsSynced(for: server)
                         dismiss()
                     }
@@ -2182,7 +2227,7 @@ struct EditServerSheet: View {
                     .pickerStyle(.segmented)
                     .listRowBackground(Color.cardBackground)
 
-                    switch server.dispatcharrCredentialType {
+                    switch effectiveCredentialType {
                     case .usernamePassword:
                         TextField("Username", text: $server.username)
                             .autocorrectionDisabled()
@@ -2223,7 +2268,7 @@ struct EditServerSheet: View {
                     // server-side rotation case where an admin
                     // rolled the key and Aerio's cached copy is
                     // stale).
-                    if server.dispatcharrCredentialType == .usernamePassword {
+                    if effectiveCredentialType == .usernamePassword {
                         Button {
                             Task { await refreshDirectConnectSession() }
                         } label: {
@@ -2247,6 +2292,15 @@ struct EditServerSheet: View {
                             Text(msg)
                                 .font(.labelSmall)
                                 .foregroundColor(sessionRefreshSucceeded ? .statusOnline : .statusLive)
+                                .listRowBackground(Color.cardBackground)
+                        } else {
+                            // v1.7.x (Round 1 review): caption
+                            // explaining when to tap. Pre-fix the
+                            // button was unlabeled and most users
+                            // would never know what it did.
+                            Text("Use if streaming or logos suddenly fail. Re-fetches the API key from your Dispatcharr account.")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
                                 .listRowBackground(Color.cardBackground)
                         }
                     }
@@ -2427,7 +2481,7 @@ struct EditServerSheet: View {
                             .pickerStyle(.segmented)
                             .padding(.vertical, 8)
 
-                            switch server.dispatcharrCredentialType {
+                            switch effectiveCredentialType {
                             case .usernamePassword:
                                 tvEditField("Username", text: $server.username)
                                 tvEditField("Password", text: $server.password, isSecure: true)
@@ -2722,6 +2776,11 @@ struct EditServerPage: View {
                     HStack {
                         Spacer()
                         Button {
+                            // v1.7.x (Round 1 review): commit any
+                            // staged credential-mode change before
+                            // persisting credentials. tvOS edit
+                            // surface mirrors iOS Save behavior.
+                            commitCredentialModeIfStaged()
                             SyncManager.shared.saveCredentialsSynced(for: server)
                             dismiss()
                         } label: {
