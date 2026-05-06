@@ -25,7 +25,7 @@ extension XtreamCodesAPI {
         ]
         guard let url = components.url else { throw APIError.invalidURL }
 
-        let (data, response) = try await XtreamSeriesInfoSession.session.data(from: url)
+        let (data, response) = try await HTTPRouter.data(from: url, using: XtreamSeriesInfoSession.session)
 
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         switch http.statusCode {
