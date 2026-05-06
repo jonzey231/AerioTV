@@ -3,6 +3,14 @@ import Foundation
 // MARK: - Xtream Codes Series Detail Extension
 // Adds getSeriesInfo() and associated response models.
 
+private enum XtreamSeriesInfoSession {
+    static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 20
+        return URLSession(configuration: config)
+    }()
+}
+
 extension XtreamCodesAPI {
     /// Fetch full series detail including seasons and episodes.
     func getSeriesInfo(seriesID: String) async throws -> XtreamSeriesDetail {
@@ -17,10 +25,7 @@ extension XtreamCodesAPI {
         ]
         guard let url = components.url else { throw APIError.invalidURL }
 
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 20
-        let sess = URLSession(configuration: config)
-        let (data, response) = try await sess.data(from: url)
+        let (data, response) = try await XtreamSeriesInfoSession.session.data(from: url)
 
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         switch http.statusCode {
