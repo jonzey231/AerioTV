@@ -48,7 +48,21 @@ struct AddToMultiviewSheet: View {
     /// same single-keystroke "narrow to Sports / News / Movies" flow
     /// they're used to from the main channel list, without having to
     /// type into the search field.
-    @State private var selectedGroup: String = "All"
+    ///
+    /// v1.7.x: persisted across picker presentations and across app
+    /// launches. Freyguy1975 (Discord 2026-05-03) flagged that
+    /// re-tapping the category every time you re-open the picker to
+    /// add another stream from the same group was tedious — common
+    /// with multi-game watch parties (e.g. building a 4-tile baseball
+    /// grid from a "Baseball"-filtered list). Storage key is
+    /// local-only; the value is intentionally NOT added to
+    /// `SyncManager`'s sync allowlist because picker UX is per-
+    /// device (different screen sizes, different multiview habits).
+    /// Stale-value handling lives in `applyFilters(_:)` below: if
+    /// the persisted group is no longer in `groupChips` (server
+    /// change, group hidden, playlist edit) it falls back to "All".
+    @AppStorage("multiviewPickerLastGroup")
+    private var selectedGroup: String = "All"
 
     /// User-hidden groups loaded from the same `UserDefaults` key
     /// `ChannelListView` uses (`hiddenChannelGroups`). The picker
@@ -104,6 +118,16 @@ struct AddToMultiviewSheet: View {
                 }
             }
             .onAppear { loadHiddenGroups() }
+            // v1.7.x: re-validate the persisted filter when channels
+            // finish loading (Dispatcharr cold start can deliver
+            // groups several seconds after the picker mounts) or
+            // when the user switches active server while the picker
+            // is open. Without this, a persisted "Sports" filter on
+            // server A would render an empty list when server B is
+            // active and has no "Sports" group.
+            .onChange(of: channelStore.orderedGroups) { _, _ in
+                validateSelectedGroup()
+            }
             .modifier(SharedSheetModifiers(
                 pendingWarningItem: $pendingWarningItem,
                 toastMessage: $toastMessage,
@@ -252,6 +276,12 @@ struct AddToMultiviewSheet: View {
         }
         .onExitCommand { isPresented = false }
         .onAppear { loadHiddenGroups() }
+        // v1.7.x: re-validate persisted filter when channels load
+        // async or active-server changes mid-presentation. See iOS
+        // body's matching modifier for the full rationale.
+        .onChange(of: channelStore.orderedGroups) { _, _ in
+            validateSelectedGroup()
+        }
         .modifier(SharedSheetModifiers(
             pendingWarningItem: $pendingWarningItem,
             toastMessage: $toastMessage,
@@ -450,9 +480,29 @@ struct AddToMultiviewSheet: View {
     /// now hidden (because the user hid it elsewhere between picker
     /// presentations), snap back to "All" so the filter doesn't get
     /// stuck pointing at an invisible chip.
+    ///
+    /// v1.7.x: now that `selectedGroup` is `@AppStorage`-backed, the
+    /// stale-value cases multiply: persisted group might (a) be
+    /// hidden, (b) belong to a server the user has since switched
+    /// away from, or (c) have been edited out of the playlist
+    /// upstream. `validateSelectedGroup()` covers all three by
+    /// falling back to "All" whenever the persisted value isn't
+    /// in the current `groupChips`. Called here AND from
+    /// `.onChange(of: channelStore.orderedGroups)` so we catch the
+    /// "channels loaded async after picker presented" case too.
     private func loadHiddenGroups() {
         hiddenGroups = HiddenGroupsStore.load(forKey: "hiddenChannelGroups")
-        if selectedGroup != "All" && hiddenGroups.contains(selectedGroup) {
+        validateSelectedGroup()
+    }
+
+    /// v1.7.x: drop `selectedGroup` back to "All" if the persisted
+    /// value is no longer represented in `groupChips`. Idempotent;
+    /// safe to call from any view-update context. The `@AppStorage`
+    /// write only fires when the value actually changes (SwiftUI
+    /// optimization), so this won't ping-pong.
+    private func validateSelectedGroup() {
+        guard selectedGroup != "All" else { return }
+        if !groupChips.contains(selectedGroup) {
             selectedGroup = "All"
         }
     }
