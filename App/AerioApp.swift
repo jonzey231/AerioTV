@@ -339,10 +339,20 @@ struct AerioApp: App {
     /// returns immediately and the user doesn't see any UI lag.
     @MainActor
     static func warmupDirectConnectSessions(in context: ModelContext) {
-        let descriptor = FetchDescriptor<ServerConnection>(
-            predicate: #Predicate { $0.type.rawValue == "dispatcharr_api" }
-        )
-        guard let servers = try? context.fetch(descriptor), !servers.isEmpty else { return }
+        // v1.7.x crash fix: previously this used a `#Predicate`
+        // expression against `$0.type.rawValue`, but SwiftData's
+        // predicate validator can't introspect a `String`-raw enum
+        // through `.rawValue` and crashes at fetch time with
+        // "Failed to validate \ServerConnection.type.rawValue
+        // because rawValue is not a member of ServerType".
+        // Workaround: fetch every server and filter in Swift.
+        // The cost is negligible (a typical user has 1-3 servers)
+        // and the resulting code is straightforward.
+        let descriptor = FetchDescriptor<ServerConnection>()
+        guard let allServers = try? context.fetch(descriptor),
+              !allServers.isEmpty else { return }
+        let servers = allServers.filter { $0.type == .dispatcharrAPI }
+        guard !servers.isEmpty else { return }
 
         // Build per-server credential snapshots on main (Keychain
         // reads are thread-safe but ServerConnection is a SwiftData
