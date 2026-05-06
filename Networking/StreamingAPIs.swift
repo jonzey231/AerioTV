@@ -100,6 +100,12 @@ struct XtreamCodesAPI {
         config.timeoutIntervalForResource = 300
         return URLSession(configuration: config)
     }()
+    private static let largeLibrarySession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 180
+        return URLSession(configuration: config)
+    }()
     private var session: URLSession { Self.session }
 
     /// Reusable decoder. v1.6.22: previously every decode call
@@ -147,13 +153,8 @@ struct XtreamCodesAPI {
         var params: [String: String] = ["action": "get_vod_streams"]
         if let id = categoryID { params["category_id"] = id }
         let url = try buildURL(path: "/player_api.php", params: params)
-        // VOD libraries can be very large — use a dedicated session with generous timeouts
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 180
-        let vodSession = URLSession(configuration: config)
         // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
-        let (data, response) = try await HTTPRouter.data(from: url, using: vodSession)
+        let (data, response) = try await HTTPRouter.data(from: url, using: Self.largeLibrarySession)
         try validate(response: response)
         // Some panels return false/null/object for empty or unavailable VOD — treat as empty
         if let items = try? decode([XtreamVODItem].self, from: data) { return items }
@@ -184,13 +185,8 @@ struct XtreamCodesAPI {
         var params: [String: String] = ["action": "get_series"]
         if let id = categoryID { params["category_id"] = id }
         let url = try buildURL(path: "/player_api.php", params: params)
-        // Series libraries can be very large — use a dedicated session with generous timeouts
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 180
-        let seriesSession = URLSession(configuration: config)
         // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
-        let (data, response) = try await HTTPRouter.data(from: url, using: seriesSession)
+        let (data, response) = try await HTTPRouter.data(from: url, using: Self.largeLibrarySession)
         try validate(response: response)
         // Some panels return false/null/object for empty or unavailable series — treat as empty
         if let items = try? decode([XtreamSeriesItem].self, from: data) { return items }
@@ -705,6 +701,14 @@ struct DispatcharrAPI {
         // through the semaphore.
         config.timeoutIntervalForRequest = 60
         config.timeoutIntervalForResource = 600
+        return URLSession(configuration: config,
+                          delegate: redirectDelegate,
+                          delegateQueue: nil)
+    }()
+    private static let bulkEPGSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 60
         return URLSession(configuration: config,
                           delegate: redirectDelegate,
                           delegateQueue: nil)
@@ -1506,11 +1510,6 @@ struct DispatcharrAPI {
     // Fetches ALL programs from /api/epg/programs/ in a time window using large pages.
     // This replaces 40+ per-channel requests with ~3–5 paginated requests.
     func getBulkUpcomingPrograms(maxPages: Int = 10) async throws -> [DispatcharrCurrentProgram] {
-        let epgConfig = URLSessionConfiguration.default
-        epgConfig.timeoutIntervalForRequest = 15
-        epgConfig.timeoutIntervalForResource = 60
-        let epgSession = URLSession(configuration: epgConfig)
-
         // Fetch all programs with a large page size — no per-channel filter.
         // The server returns programs sorted by start_time by default.
         var allItems: [DispatcharrCurrentProgram] = []
@@ -1522,7 +1521,7 @@ struct DispatcharrAPI {
             var request = URLRequest(url: url)
             headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
             // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
-            let (data, response) = try await HTTPRouter.data(for: request, using: epgSession)
+            let (data, response) = try await HTTPRouter.data(for: request, using: Self.bulkEPGSession)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { break }
 
             if let list = try? Self.jsonDecoder.decode([DispatcharrCurrentProgram].self, from: data) {
@@ -3626,4 +3625,3 @@ struct DispatcharrChannelGroup: Decodable, Identifiable {
         case channelCount = "channel_count"
     }
 }
-

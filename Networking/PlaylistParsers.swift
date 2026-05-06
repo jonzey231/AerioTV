@@ -117,6 +117,12 @@ struct ParsedEPGProgram {
 // MARK: - XMLTV Parser (class required for NSObject/XMLParserDelegate)
 final class XMLTVParser: NSObject, XMLParserDelegate {
 
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        return URLSession(configuration: config)
+    }()
+
     private var programmes: [ParsedEPGProgram] = []
     private var currentChannelID = ""
     private var currentTitle = ""
@@ -168,9 +174,6 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
     /// gap. Empty dict for M3U / public XMLTV URLs preserves the
     /// previous behaviour.
     static func fetchAndParse(url: URL, headers: [String: String] = [:]) async throws -> [ParsedEPGProgram] {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
-        let session = URLSession(configuration: config)
         var request = URLRequest(url: url)
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
         let (data, response) = try await session.data(for: request)

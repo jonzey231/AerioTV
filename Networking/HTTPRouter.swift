@@ -47,6 +47,9 @@ import Foundation
 /// rules without per-call awareness.
 enum HTTPRouter {
 
+    private static let defaultRequestTimeout = URLSessionConfiguration.default.timeoutIntervalForRequest
+    private static let defaultResourceTimeout = URLSessionConfiguration.default.timeoutIntervalForResource
+
     // MARK: - Public API
 
     static func data(from url: URL,
@@ -54,7 +57,8 @@ enum HTTPRouter {
         // Hard route: HSTS-preloaded TLD plain HTTP — URLSession will
         // always refuse, so go straight to NWConnection.
         if shouldUseNWConnection(for: url) {
-            return try await NWHTTPClient.data(from: url)
+            return try await NWHTTPClient.data(from: url,
+                                               timeout: effectiveNWTimeout(using: session))
         }
         // Soft route: URLSession first; if it fails with a transport
         // error that NWConnection might handle differently, try
@@ -69,7 +73,8 @@ enum HTTPRouter {
         } catch let error as NSError where shouldFallbackToNWConnection(error: error) {
             debugLog("HTTPRouter: URLSession failed for \(url.absoluteString) (code=\(error.code) \(error.localizedDescription)) → NWConnection fallback")
             do {
-                return try await NWHTTPClient.data(from: url)
+                return try await NWHTTPClient.data(from: url,
+                                                   timeout: effectiveNWTimeout(using: session))
             } catch {
                 // NWConnection ALSO failed. Throw the URLSession error;
                 // it's typically more localized / actionable.
@@ -82,7 +87,8 @@ enum HTTPRouter {
     static func data(for request: URLRequest,
                      using session: URLSession = .shared) async throws -> (Data, URLResponse) {
         if let url = request.url, shouldUseNWConnection(for: url) {
-            return try await NWHTTPClient.data(for: request)
+            return try await NWHTTPClient.data(for: request,
+                                               timeout: effectiveNWTimeout(for: request, using: session))
         }
         do {
             return try await session.data(for: request)
@@ -90,12 +96,42 @@ enum HTTPRouter {
             let urlStr = request.url?.absoluteString ?? "<unknown>"
             debugLog("HTTPRouter: URLSession failed for \(urlStr) (code=\(error.code) \(error.localizedDescription)) → NWConnection fallback")
             do {
-                return try await NWHTTPClient.data(for: request)
+                return try await NWHTTPClient.data(for: request,
+                                                   timeout: effectiveNWTimeout(for: request, using: session))
             } catch {
                 debugLog("HTTPRouter: NWConnection fallback ALSO failed: \(error)")
                 throw error
             }
         }
+    }
+
+    private static func effectiveNWTimeout(using session: URLSession) -> TimeInterval {
+        effectiveNWTimeout(for: nil, using: session)
+    }
+
+    private static func effectiveNWTimeout(for request: URLRequest?,
+                                           using session: URLSession) -> TimeInterval {
+        var candidates: [TimeInterval] = []
+
+        if let request,
+           request.timeoutInterval > 0,
+           request.timeoutInterval != defaultRequestTimeout {
+            candidates.append(request.timeoutInterval)
+        }
+
+        let sessionRequestTimeout = session.configuration.timeoutIntervalForRequest
+        if sessionRequestTimeout > 0,
+           sessionRequestTimeout != defaultRequestTimeout {
+            candidates.append(sessionRequestTimeout)
+        }
+
+        let sessionResourceTimeout = session.configuration.timeoutIntervalForResource
+        if sessionResourceTimeout > 0,
+           sessionResourceTimeout != defaultResourceTimeout {
+            candidates.append(sessionResourceTimeout)
+        }
+
+        return candidates.max() ?? NWHTTPClient.defaultTimeout
     }
 
     // MARK: - Routing decision
