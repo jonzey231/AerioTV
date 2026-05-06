@@ -1512,41 +1512,66 @@ final class ChannelStore: ObservableObject {
                     let pids = Array(currentByChannelID.values)
                     debugLog("📺 Category enrichment: \(pids.count) currently-airing programs across \(currentByChannelID.count) channels; fetching /api/epg/programs/<id>/")
                     let cats = await dAPIForEnrich.enrichCategories(programIDs: pids)
+
+                    // v1.7.x Phase 3: capture title alongside category
+                    // so propagation can match by exact title rather
+                    // than tinting channel-wide. Look up titles by
+                    // program_id from the bulk grid snapshot.
+                    var titlesByPID: [Int: String] = [:]
+                    for p in progSnap {
+                        if let pid = p.programID, !p.title.isEmpty {
+                            titlesByPID[pid] = p.title
+                        }
+                    }
                     var byChan: [String: String] = [:]
+                    var enrichedByChannel: [String: (category: String, title: String)] = [:]
                     for (cid, pid) in currentByChannelID {
-                        if let c = cats[pid] { byChan[cid] = c }
+                        guard let c = cats[pid] else { continue }
+                        byChan[cid] = c
+                        let title = titlesByPID[pid] ?? ""
+                        enrichedByChannel[cid] = (c, title)
                     }
                     debugLog("📺 Category enrichment: \(byChan.count)/\(currentByChannelID.count) channels got categories")
                     await MainActor.run {
                         ChannelStore.shared.applyXMLTVCategories(byChan)
                     }
 
-                    // v1.7: propagate the channel's category to ALL
-                    // EPGCache entries for that channel so the List
-                    // view's expanded schedule panel renders per-
-                    // program color tints. Heuristic: a channel's
-                    // content is largely the same genre, so treating
-                    // ESPN HD's now-airing "Sports" as the category
-                    // for every future SportsCenter / NHL Hockey /
-                    // College Basketball entry is correct >90% of
-                    // the time. For variety channels (HBO etc.)
-                    // this over-tints, but Dispatcharr's
-                    // /api/epg/grid/ strips per-program categories
-                    // and per-program detail fetches would be 7000+
-                    // HTTP calls (cost-prohibitive). When XMLTV is
-                    // available (M3U servers, opt-in Custom XMLTV
-                    // URL on Dispatcharr), the per-program cache
-                    // already carries categories from the parser
-                    // and this loop becomes a no-op (overwriting
-                    // with the same value). v1.6.x and earlier did
-                    // not run this propagation, leaving the
-                    // expanded panel rendering as plain text on
-                    // Dispatcharr-API mode.
+                    // v1.7.x Phase 3: title-matched category
+                    // propagation. v1.7.0 ran a channel-wide sweep
+                    // (every entry in a channel's EPGCache got the
+                    // now-airing category) which was correct >90% of
+                    // the time on sports / news / weather channels
+                    // but over-tinted variety channels (HBO etc.) by
+                    // applying the wrong genre to every program.
+                    // v1.7.x narrows the sweep: only entries whose
+                    // title EXACTLY matches the enriched program's
+                    // now-airing title are tinted. Recurring shows
+                    // (SportsCenter ×6/day on ESPN HD, Anderson
+                    // Cooper 360 ×2/day on CNN) still get full
+                    // coverage; one-off entries (NHL Hockey at
+                    // 4-6AM, a movie premiere) stay neutral until
+                    // we have their own category. Honest partial
+                    // coverage > confident wrong tinting.
+                    //
+                    // The category-stripe at the channel-card level
+                    // (driven by `applyXMLTVCategories` above) still
+                    // reflects the now-airing category since that's
+                    // about what's playing right now, not the whole
+                    // schedule.
+                    //
+                    // Cost: same number of EPGCache reads + writes
+                    // as before (one read per enriched channel, one
+                    // write only when at least one entry matches).
+                    // The `.map` walks every entry but the title
+                    // comparison is cheap (String == String, no
+                    // allocations).
                     let baseSnap = base
                     let chSnap = chSnapForEnrich
                     var rewritten = 0
-                    for (cid, category) in byChan {
-                        guard !category.isEmpty,
+                    var entriesTinted = 0
+                    for (cid, info) in enrichedByChannel {
+                        guard !info.category.isEmpty,
+                              !info.title.isEmpty,
                               let channel = chSnap.first(where: { $0.id == cid })
                         else { continue }
                         let tvgID = channel.tvgID ?? ""
@@ -1554,23 +1579,28 @@ final class ChannelStore: ObservableObject {
                         let cacheKey = "d_\(baseSnap)_\(keyPart)"
                         guard let entries = await EPGCache.shared.get(cacheKey),
                               !entries.isEmpty else { continue }
-                        // Skip rewrite when the cache already has the
-                        // right category (M3U / XMLTV path is the
-                        // common case here). Compare the first entry
-                        // since they're all rewritten with the same
-                        // value when we do touch them.
-                        if entries.first?.category == category { continue }
-                        let updated = entries.map {
-                            EPGEntry(title: $0.title,
-                                     description: $0.description,
-                                     startTime: $0.startTime,
-                                     endTime:   $0.endTime,
-                                     category:  category)
+                        // Walk entries; tint only exact title matches
+                        // that don't already carry the right category
+                        // (idempotent on warm relaunch).
+                        var localTinted = 0
+                        let updated = entries.map { entry -> EPGEntry in
+                            guard entry.title == info.title,
+                                  entry.category != info.category else {
+                                return entry
+                            }
+                            localTinted += 1
+                            return EPGEntry(title: entry.title,
+                                            description: entry.description,
+                                            startTime: entry.startTime,
+                                            endTime: entry.endTime,
+                                            category: info.category)
                         }
+                        guard localTinted > 0 else { continue }
                         await EPGCache.shared.set(updated, for: cacheKey)
                         rewritten += 1
+                        entriesTinted += localTinted
                     }
-                    debugLog("📺 Category propagation: rewrote EPGCache entries for \(rewritten) channels with the now-airing category")
+                    debugLog("📺 Category propagation: tinted \(entriesTinted) title-matched entries across \(rewritten) channels (title-match heuristic; one-off programs stay neutral)")
                 }
             } catch {
                 debugLog("📺 Bulk EPG failed: \(error.localizedDescription); falling back to lazy loading")
