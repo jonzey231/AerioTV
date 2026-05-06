@@ -1416,7 +1416,7 @@ final class ChannelStore: ObservableObject {
                             if let nowProg = nowAiring(in: directEntries) {
                                 currentByChannelID[channel.id] = .init(
                                     title: nowProg.title,
-                                    description: nowProg.description ?? "",
+                                    description: nowProg.description,
                                     start: nowProg.startTime ?? now,
                                     end: nowProg.endTime ?? now
                                 )
@@ -1437,7 +1437,7 @@ final class ChannelStore: ObservableObject {
                                let nowProg = nowAiring(in: sorted) {
                                 currentByChannelID[channel.id] = .init(
                                     title: nowProg.title,
-                                    description: nowProg.description ?? "",
+                                    description: nowProg.description,
                                     start: nowProg.startTime ?? now,
                                     end: nowProg.endTime ?? now
                                 )
@@ -1461,7 +1461,7 @@ final class ChannelStore: ObservableObject {
                                let nowProg = nowAiring(in: sorted) {
                                 currentByChannelID[channel.id] = .init(
                                     title: nowProg.title,
-                                    description: nowProg.description ?? "",
+                                    description: nowProg.description,
                                     start: nowProg.startTime ?? now,
                                     end: nowProg.endTime ?? now
                                 )

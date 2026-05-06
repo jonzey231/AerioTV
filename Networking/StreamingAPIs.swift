@@ -1292,16 +1292,17 @@ struct DispatcharrAPI {
         request.timeoutInterval = 180
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
 
-        // Use a dedicated session with generous timeout for this large response
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 180
-        config.timeoutIntervalForResource = 600
-        let session = URLSession(configuration: config)
-
         // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
         // v1.7.x: dataWithJWTRetry transparently refreshes the JWT
         // access token on 401 + retries once when in `.jwtSession`
-        // auth mode. No-op for `.apiKey` / `.bearer` modes.
+        // auth mode. No-op for `.apiKey` / `.bearer` modes. The
+        // dedicated 180s/600s session that previously lived here
+        // (added v1.6.21 for slow Dispatcharr deployments) was
+        // redundant after the dataWithJWTRetry migration: the
+        // request's own `timeoutInterval = 180` (set above) covers
+        // the per-request budget, and `Self.session` already has
+        // `timeoutIntervalForResource = 600`. Removed the unused
+        // local session in v1.7.x.
         let data: Data
         let response: URLResponse
         do {
