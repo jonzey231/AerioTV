@@ -2711,6 +2711,95 @@ struct EditServerPage: View {
     /// whichever theme was active when the page was first pushed.
     @ObservedObject private var theme = ThemeManager.shared
 
+    // v1.7.x: Direct Connect mode picker + Refresh Session button
+    // state. Mirrors EditServerSheet's iOS Form path so Apple TV
+    // users can switch credential modes after server creation
+    // without going to a different device. See `EditServerSheet`
+    // for the per-property doc.
+    @State private var pendingCredentialType: DispatcharrCredentialType? = nil
+    @State private var isRefreshingSession: Bool = false
+    @State private var sessionRefreshMessage: String? = nil
+    @State private var sessionRefreshSucceeded: Bool = false
+
+    private var effectiveCredentialType: DispatcharrCredentialType {
+        pendingCredentialType ?? server.dispatcharrCredentialType
+    }
+
+    private var directConnectModeBinding: Binding<DispatcharrCredentialType> {
+        Binding(
+            get: { effectiveCredentialType },
+            set: { newValue in
+                pendingCredentialType = newValue
+                sessionRefreshMessage = nil
+            }
+        )
+    }
+
+    private func commitCredentialModeIfStaged() {
+        guard let pending = pendingCredentialType else { return }
+        server.dispatcharrCredentialTypeRaw = (pending == .apiKey) ? "" : pending.rawValue
+        pendingCredentialType = nil
+    }
+
+    private func maskedAPIKey(_ key: String) -> String {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 12 else { return String(repeating: "•", count: trimmed.count) }
+        let prefix = trimmed.prefix(2)
+        let suffix = trimmed.suffix(8)
+        return "\(prefix)\(String(repeating: "•", count: 6))\(suffix)"
+    }
+
+    @MainActor
+    private func refreshDirectConnectSession() async {
+        let username = server.username
+        let password = server.effectivePassword
+        let baseURL  = server.effectiveBaseURL
+        let userAgent = server.effectiveUserAgent
+        let serverID = server.id
+        guard !username.isEmpty, !password.isEmpty else {
+            sessionRefreshMessage = "Username and password required."
+            sessionRefreshSucceeded = false
+            return
+        }
+
+        isRefreshingSession = true
+        sessionRefreshMessage = nil
+        defer { isRefreshingSession = false }
+
+        do {
+            let pair = try await DispatcharrAPI.login(
+                baseURL: baseURL,
+                username: username,
+                password: password,
+                userAgent: userAgent
+            )
+            DispatcharrTokenStore.shared.store(
+                serverID: serverID,
+                access: pair.access,
+                refresh: pair.refresh
+            )
+            let bearerAPI = DispatcharrAPI(baseURL: baseURL, auth: .bearer(pair.access))
+            var apiKeyRotated = false
+            if let user = try? await bearerAPI.fetchCurrentUser(),
+               !user.apiKey.isEmpty,
+               user.apiKey != server.effectiveApiKey {
+                server.apiKey = user.apiKey
+                SyncManager.shared.saveCredentialsSynced(for: server)
+                apiKeyRotated = true
+            }
+            sessionRefreshSucceeded = true
+            sessionRefreshMessage = apiKeyRotated
+                ? "Session refreshed. Cached API key updated."
+                : "Session refreshed. API key unchanged."
+        } catch let error as DispatcharrDirectConnectError {
+            sessionRefreshSucceeded = false
+            sessionRefreshMessage = error.errorDescription ?? "Refresh failed."
+        } catch {
+            sessionRefreshSucceeded = false
+            sessionRefreshMessage = error.localizedDescription
+        }
+    }
+
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
@@ -2731,7 +2820,67 @@ struct EditServerPage: View {
                     } else if server.type == .dispatcharrAPI {
                         Group {
                             tvSection("Authentication") {
-                                tvField("Admin API Key", text: $server.apiKey, isSecure: true)
+                                // v1.7.x: credential mode picker on
+                                // tvOS Edit Server. The Apple TV
+                                // typing-burden is the primary reason
+                                // Direct Connect exists; the edit
+                                // screen needs to support switching
+                                // modes here too so users don't have
+                                // to go to a different device.
+                                Picker("Sign-in method", selection: directConnectModeBinding) {
+                                    Text("Username & Password").tag(DispatcharrCredentialType.usernamePassword)
+                                    Text("API Key").tag(DispatcharrCredentialType.apiKey)
+                                }
+                                .pickerStyle(.segmented)
+                                .padding(.vertical, 8)
+
+                                switch effectiveCredentialType {
+                                case .usernamePassword:
+                                    tvField("Username", text: $server.username)
+                                    tvField("Password", text: $server.password, isSecure: true)
+                                    if !server.effectiveApiKey.isEmpty {
+                                        HStack {
+                                            Text("API Key (cached)")
+                                                .font(.system(size: 28, weight: .medium))
+                                                .foregroundColor(.textSecondary)
+                                            Spacer()
+                                            Text(maskedAPIKey(server.effectiveApiKey))
+                                                .font(.system(size: 22, design: .monospaced))
+                                                .foregroundColor(.textTertiary)
+                                        }
+                                        .padding(.vertical, 4)
+                                    }
+                                    Button {
+                                        Task { await refreshDirectConnectSession() }
+                                    } label: {
+                                        HStack(spacing: 8) {
+                                            if isRefreshingSession {
+                                                ProgressView().scaleEffect(0.8)
+                                            } else {
+                                                Image(systemName: "arrow.clockwise")
+                                            }
+                                            Text(isRefreshingSession ? "Refreshing…" : "Refresh Session")
+                                        }
+                                        .font(.system(size: 26, weight: .semibold))
+                                    }
+                                    .disabled(server.username.isEmpty
+                                              || server.effectivePassword.isEmpty
+                                              || isRefreshingSession)
+                                    .padding(.top, 6)
+                                    if let msg = sessionRefreshMessage {
+                                        Text(msg)
+                                            .font(.system(size: 22))
+                                            .foregroundColor(sessionRefreshSucceeded ? .statusOnline : .statusLive)
+                                            .padding(.top, 2)
+                                    } else {
+                                        Text("Use if streaming or logos suddenly fail. Re-fetches the API key from your Dispatcharr account.")
+                                            .font(.system(size: 22))
+                                            .foregroundColor(.textTertiary)
+                                            .padding(.top, 2)
+                                    }
+                                case .apiKey:
+                                    tvField("Admin API Key", text: $server.apiKey, isSecure: true)
+                                }
                             }
                             tvSection("EPG Source") {
                                 tvField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)

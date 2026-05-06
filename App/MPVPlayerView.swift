@@ -316,7 +316,25 @@ class MPVPlayerViewController: UIViewController {
         view.layer.isOpaque = true
 
         // AVSampleBufferDisplayLayer for vsync-synchronized presentation (both platforms).
-        sampleBufferLayer.videoGravity = .resizeAspect
+        //
+        // v1.7.x: video gravity is mode-aware.
+        // - Single-stream playback (`tileID == nil`): `.resizeAspect`
+        //   so a 16:9 video in a 4:3 sole-tile rect letterboxes
+        //   cleanly with black bars top + bottom. This is the
+        //   convention every iOS video app follows; cropping
+        //   single-stream content would feel wrong.
+        // - Multiview tiles (`tileID != nil`): `.resizeAspectFill` so
+        //   a 16:9 video in a portrait-ish 3-tile right-column rect
+        //   fills the rect by cropping the left + right edges.
+        //   Pre-fix the multiview tiles letterboxed too, producing
+        //   ~128px black bars top + bottom of each small tile that
+        //   read as a visible "gap" between stacked tiles
+        //   (user-reported on iPad N=3 layout, 2026-05-03). For
+        //   sports/news content the side-cropping is invisible
+        //   because action stays roughly centered.
+        sampleBufferLayer.videoGravity = (coordinator?.tileID == nil)
+            ? .resizeAspect
+            : .resizeAspectFill
         sampleBufferLayer.frame = view.bounds
         view.layer.addSublayer(sampleBufferLayer)
 
@@ -735,37 +753,55 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 "[MV-Audio] mpv audio=\(isActive ? "on" : "off") tile=\(tileID ?? "single")",
                 category: "MPV-STREAM", level: .info
             )
-            // Two-layer silence for non-audio tiles:
-            //   - `aid=no`  : disable audio track entirely. mpv
-            //                 stops decoding audio and closes the
-            //                 AudioUnit. This is the fix for
-            //                 "Audio device underrun" spam across
-            //                 N concurrent muted tiles — each
-            //                 muted tile was still opening its own
-            //                 AO and fighting the shared
-            //                 AVAudioSession, producing periodic
-            //                 underruns that cascaded into 2-7s
-            //                 video stalls.
-            //   - `mute=yes`: belt-and-suspenders in case the aid
-            //                 change races an in-flight audio
-            //                 packet. Keeping both ensures the
-            //                 user never hears a non-audio tile
-            //                 even during the 50ms switchover.
+            // v1.7.x: silencing strategy is now N-aware. Two
+            // strategies, picked by current tile count:
             //
-            // On audio-focus ACQUIRE we do the inverse: aid=auto
-            // (re-runs mpv's track selection so the preferred
-            // audio track plays) + mute=no.
+            // **mute-only** (`mute=yes`, audio decoder stays alive)
+            //   Used when `tiles.count <= 4`. Audio packets keep
+            //   decoding continuously on every tile, just muted at
+            //   output. When the user switches audio focus the new
+            //   tile's audio is already at the right PTS — `mute=no`
+            //   resumes audio instantly at the current video
+            //   position, no fast-forward, no AudioUnit re-init.
+            //   This is the Apple-TV typical-multiview path
+            //   (N=2-4); cost is N AudioUnits running silently
+            //   (cheap on tvOS hardware).
             //
-            // v1.6.12: each `mpv_set_property*` call is now gated on
-            // a per-property cache (`lastWrittenAID` /
-            // `lastWrittenMute`) so even if the outer
-            // `lastAppliedAudioFocus` guard somehow lets a duplicate
-            // through (Coordinator rebuild edge case, SwiftUI
-            // re-entrancy), we never re-write the same value to mpv
-            // — re-writing `aid=auto` re-runs track selection and
-            // tears down + re-opens the AudioUnit, which is the
-            // audible "bonk" users heard during tile rearrange.
-            let targetAID  = isActive ? "auto" : "no"
+            // **silence + decoder-off** (`aid=no` + `mute=yes`)
+            //   Used when `tiles.count >= 5`. Disables the audio
+            //   track entirely — mpv stops decoding audio and
+            //   closes the AudioUnit. This is the v1.6.12 fix for
+            //   "Audio device underrun" spam across many
+            //   concurrent muted tiles, each fighting the shared
+            //   AVAudioSession with its own AudioUnit. The cost is
+            //   the audio-focus switch incurs a re-init delay
+            //   (~100-300ms AudioUnit open) plus mpv replays the
+            //   demuxer's audio cache to catch up to current video
+            //   PTS, producing a brief visible video fast-forward.
+            //   Acceptable when N>=5 because the alternative is
+            //   underrun-cascade video stalls; not acceptable at
+            //   typical N where the user notices the lag.
+            //
+            // On audio-focus ACQUIRE either strategy clears its
+            // suppressors:
+            //   - mute-only: `mute=no` (audio already in sync).
+            //   - silence + decoder-off: `aid=auto` re-runs track
+            //     selection + opens AudioUnit, then `mute=no`.
+            //
+            // The per-property cache (`lastWrittenAID` /
+            // `lastWrittenMute`) keeps duplicate writes from tearing
+            // down + reopening the AudioUnit on benign Coordinator
+            // re-entrancy. v1.6.12 patch.
+            let useDecoderOffStrategy = MultiviewStore.shared.tiles.count >= 5
+            let targetAID: String
+            if useDecoderOffStrategy {
+                targetAID = isActive ? "auto" : "no"
+            } else {
+                // mute-only path: keep audio decoder alive on every
+                // tile so output toggles are instant. Set aid=auto
+                // unconditionally; mute toggles do the silencing.
+                targetAID = "auto"
+            }
             let targetMute: Int32 = isActive ? 0 : 1
             mpvQueue.async { [weak self] in
                 guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
