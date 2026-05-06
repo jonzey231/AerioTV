@@ -1002,6 +1002,24 @@ final class GuideStore: ObservableObject {
         // `programs[cid]` so Guide-grid cells tint. Single
         // @Published mutation at end (COW snapshot + reassign) keeps
         // SwiftUI invalidations to one even with many channels.
+        //
+        // v1.7.x: also propagate the now-airing category to every
+        // future program of the same channel whose title matches.
+        // Mirrors the title-matched heuristic Phase 3 already
+        // applies to `EPGCache` entries (HomeView.loadAllEPG): a
+        // recurring show like SportsCenter on ESPN HD or Fox 8
+        // News on FOX 8 keeps its tint on the 1 AM / 6 AM / etc.
+        // re-airings, while one-off programs (NHL Hockey, Big
+        // Bang Theory) stay neutral until we have their own
+        // category. Without this, PR #13's pull-to-refresh path
+        // (which routes through fetchUpcoming → fetchDispatcharr
+        // → enrichDispatcharrCategories) populates
+        // `GuideStore.programs` for the Live-TV List expanded
+        // panel; and since `futurePrograms` prefers
+        // `guideStore.programs[item.id]` over EPGCache, the
+        // expanded rows lost the title-matched tints my Phase 3
+        // had applied to EPGCache. Replicating the same propagation
+        // here keeps both data sources visually identical.
         var updated = self.programs
         for (cid, cats) in byChannel {
             guard var progs = updated[cid] else { continue }
@@ -1010,12 +1028,33 @@ final class GuideStore: ObservableObject {
             // fresh one with the same fields plus the enriched
             // category and swap it in.
             let old = progs[idx]
+            let nowTitle = old.title
             progs[idx] = GuideProgram(channelID: old.channelID,
                                        title: old.title,
                                        description: old.description,
                                        start: old.start,
                                        end: old.end,
                                        category: cats)
+
+            // Title-matched propagation across the rest of the
+            // channel's programs. Skip the now-airing index (just
+            // updated above) and any program that already carries
+            // a non-empty category (idempotent on warm relaunch +
+            // respects categories from XMLTV-merge if that ran
+            // first).
+            if !nowTitle.isEmpty {
+                for j in progs.indices where j != idx {
+                    let p = progs[j]
+                    guard p.title == nowTitle, p.category.isEmpty else { continue }
+                    progs[j] = GuideProgram(channelID: p.channelID,
+                                             title: p.title,
+                                             description: p.description,
+                                             start: p.start,
+                                             end: p.end,
+                                             category: cats)
+                }
+            }
+
             updated[cid] = progs
         }
         self.programs = updated
