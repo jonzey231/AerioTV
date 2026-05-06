@@ -46,13 +46,43 @@ enum MPVLibraryWarmup {
     /// Trigger libmpv process-wide init on a background queue.
     /// Safe to call from any thread, as many times as you want —
     /// only the first call does anything.
+    ///
+    /// v1.7.x Phase 5: deferred and de-prioritized to reduce
+    /// cold-launch main-thread contention. Pre-v1.7.x the warmup
+    /// fired immediately on `RootView.onAppear` at
+    /// `.userInitiated` priority. The phase-2 EAGL block (~2.4s
+    /// on iPhone 17 Pro Max) competed with SwiftUI's first paint
+    /// for the GPU driver mutex, surfacing as a ~1.6s ping#2
+    /// watchdog hang while the system spent its launch budget
+    /// on EAGLContext setup instead of getting the channel list
+    /// on screen. Two changes here:
+    ///
+    ///   1. **800ms deferred start.** SwiftUI's first paint and
+    ///      the initial SwiftData fetches both complete inside
+    ///      ~500-800ms on real hardware. Starting the warmup
+    ///      after that window means main has the GPU to itself
+    ///      during the visible launch sequence.
+    ///   2. **`.utility` priority** (was `.userInitiated`). Lower
+    ///      CPU priority so any later main-thread work that fires
+    ///      during the warmup (channel fetch JSON decode, etc.)
+    ///      pre-empts the warmup instead of waiting behind it.
+    ///
+    /// Net cost: warmup completes ~800ms later (e.g. 3.2s instead
+    /// of 2.4s on iPhone 17 Pro Max). Net benefit: the visible
+    /// "channel list loading" sequence is no longer a juddery
+    /// 1.5s hang. First-channel-tap fast path is preserved
+    /// because `waitUntilComplete(timeout: 5.0)` still
+    /// synchronizes Coordinator.setupMPV to the warmup, and the
+    /// user can't tap a channel within 800ms of cold launch
+    /// anyway (channel list isn't even rendered yet).
     static func warmUp() {
         guard !hasStarted else { return }
         hasStarted = true
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            doWarmUp()
-        }
+        DispatchQueue.global(qos: .utility)
+            .asyncAfter(deadline: .now() + 0.8) {
+                doWarmUp()
+            }
     }
 
     /// `true` once the background warm-up has completed. Diagnostics
@@ -898,7 +928,30 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// 503 again). Reset on every playback-restart (successful
         /// start of a new stream).
         private var loadFailureRetryCount = 0
-        private let maxLoadFailureRetries = 3
+
+        /// v1.7.x Phase 4: retry budget is URL-aware. Live streams
+        /// keep the historical 3 retries (~7s total budget — fits
+        /// transient 503/network blips). Recording URLs get 5
+        /// retries (~93s total budget) since in-progress recordings
+        /// can be locked or queued behind a server warmup window.
+        private var maxLoadFailureRetries: Int { isRecordingURL ? 5 : 3 }
+
+        /// v1.7.x Phase 4: per-attempt delay multiplier. Live keeps
+        /// 1× (1s, 2s, 4s base). Recording uses 3× (3s, 6s, 12s,
+        /// 24s, 48s) so the server has room to recover from the
+        /// kind of overload that produces fail-fail-fail-then-
+        /// succeed patterns on parallel VOD load + recording open.
+        private var loadFailureBackoffMultiplier: Double { isRecordingURL ? 3.0 : 1.0 }
+
+        /// True when the current playback URL points at a
+        /// Dispatcharr in-progress / completed recording's
+        /// `/file/` endpoint. Drives the longer retry budget +
+        /// backoff above. Detected by URL path (no need for the
+        /// caller to thread an `isRecording` flag through).
+        private var isRecordingURL: Bool {
+            guard let url = urls.first else { return false }
+            return url.path.contains("/recordings/") && url.path.hasSuffix("/file/")
+        }
         private var isShuttingDown = false
         private var hwdecFallbackApplied = false  // Prevents repeated fallback attempts for 10-bit streams
 
@@ -2920,26 +2973,45 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // permanently even though the stream was fine — proven
                 // by the fact that expanding a failed tile to
                 // full-screen (a single request) always worked. We
-                // retry up to 3 times with exponential backoff plus
+                // retry up to N times with exponential backoff plus
                 // random jitter so 9 tiles hitting 503 at the same
                 // moment don't all retry at the same wall-clock tick
                 // and trigger the same thundering-herd problem again.
+                //
+                // v1.7.x Phase 4: retry policy is URL-aware.
+                // Live streams keep the original 3-retry policy at
+                // 1s / 2s / 4s. Recording URLs (`/api/channels/
+                // recordings/<id>/file/`) get a longer policy:
+                // 5 retries at 3s / 6s / 12s / 24s / 48s. Reasoning:
+                // in-progress recordings on Dispatcharr can be
+                // momentarily unavailable while the recording file
+                // is being initialized server-side or while the
+                // server is overloaded by parallel VOD pagination
+                // (jesmannstl + Archie repro on v1.6.23: recording
+                // 61 NBA Basketball failed 3x at 00:25:58–00:26:07,
+                // then succeeded cleanly at 00:27:40 once the bulk
+                // VOD load finished). A live-stream-tuned 7s total
+                // retry budget gave up too quickly. The longer
+                // backoff lets the server stabilize without forcing
+                // the user to manually re-tap the row.
                 let isLoadingFailed = endFile.error == MPV_ERROR_LOADING_FAILED.rawValue
                 if isLoadingFailed && loadFailureRetryCount < maxLoadFailureRetries {
                     loadFailureRetryCount += 1
                     let retryNum = loadFailureRetryCount
                     let maxR = maxLoadFailureRetries
-                    // Exponential backoff: 1s, 2s, 4s. Add 0–600ms of
-                    // random jitter per tile so concurrent retries
-                    // don't line up on the same wall-clock moment.
-                    let baseDelay = pow(2.0, Double(retryNum - 1))
+                    // Exponential backoff. Live: 1s, 2s, 4s. Recording:
+                    // 3s, 6s, 12s, 24s, 48s. Add 0–600ms of random
+                    // jitter per tile so concurrent retries don't
+                    // line up on the same wall-clock moment.
+                    let baseDelay = pow(2.0, Double(retryNum - 1)) * loadFailureBackoffMultiplier
                     let jitter = Double.random(in: 0...0.6)
                     let delay = baseDelay + jitter
+                    let retryKind = isRecordingURL ? "recording" : "stream"
                     logStore.append(
-                        "⏳ MPV: load failed (503?) — retry \(retryNum)/\(maxR) in \(String(format: "%.1f", delay))s"
+                        "⏳ MPV: \(retryKind) load failed — retry \(retryNum)/\(maxR) in \(String(format: "%.1f", delay))s"
                     )
                     #if DEBUG
-                    print("[MPV-DIAG] \(streamTag) LOADING_FAILED — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s")
+                    print("[MPV-DIAG] \(streamTag) LOADING_FAILED — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
                     #endif
                     let retryURL = urls[currentIndex]
                     DispatchQueue.global(qos: .userInitiated)
