@@ -2819,16 +2819,33 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         print("[MPV-DIAG] Event: shutdown")
                         #endif
                         self.stopStreamInfoTimer()
-                        // Use atomic takes throughout — idempotent whether stop()
-                        // already ran or not. If stop() owned shutdown and freed
-                        // these first, every take returns nil and this is a no-op.
-                        // If mpv shut down unexpectedly (without stop()), this path
-                        // performs the full cleanup.
-                        mpv_set_wakeup_callback(mpv, nil, nil)
+                        // Claim shutdown ownership atomically using the same gate
+                        // as stop(). Exactly one of the two paths ever executes the
+                        // teardown body:
+                        //
+                        //   Normal flow: stop() claims first → isShuttingDown=true →
+                        //   markShuttingDownAndSnapshotMPV() returns nil here → we
+                        //   just exit the event loop. stop()'s asyncAfter on mpvQueue
+                        //   handles the final mpv_terminate_destroy.
+                        //
+                        //   Unexpected shutdown: mpv aborts without stop() running →
+                        //   we claim ownership here → perform full cleanup below.
+                        //
+                        //   Race (stop + unexpected shutdown simultaneously): whichever
+                        //   caller's markShuttingDownAndSnapshotMPV() returns non-nil
+                        //   first is the sole owner; the other sees nil and skips.
+                        //   This prevents stop() from calling mpvCommand("quit") on a
+                        //   handle that the shutdown path has already destroyed.
+                        guard let ownedHandle = self.markShuttingDownAndSnapshotMPV() else {
+                            return  // stop() owns teardown; just exit the event loop
+                        }
+                        mpv_set_wakeup_callback(ownedHandle, nil, nil)
                         if let retain = self.takeWakeupRetain() {
                             retain.release()
                         }
                         self.teardownRenderResourcesOnRenderQueue()
+                        // takeMPVHandle nils state.mpv so the asyncAfter in any
+                        // concurrent stop() becomes a no-op.
                         if let handle = self.takeMPVHandle() {
                             mpv_terminate_destroy(handle)
                         }
