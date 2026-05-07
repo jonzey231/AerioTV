@@ -1000,7 +1000,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         private func markAutoPausedOnBackgroundIfNeeded() -> Bool {
             withPlaybackStateLock { state in
-                guard state.isInBackground, !state.autoPausedOnBackground else { return false }
+                guard !state.autoPausedOnBackground else { return false }
                 state.autoPausedOnBackground = true
                 return true
             }
