@@ -641,13 +641,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var lastWrittenAID: String?
         private var lastWrittenMute: Int32?
 
-        /// Set true when `didEnterBackground` paused mpv because the
-        /// user hadn't opted into any background-audio mode (no PiP,
-        /// no Audio-Only, no AirPlay). `willEnterForeground` consults
-        /// this to know whether it owns the `pause=0` write, without
+        /// Set true when this coordinator auto-paused mpv while the
+        /// app was backgrounded, either from the explicit
+        /// `didEnterBackground` policy path or from the render-layer
+        /// `.failed` safeguard. `willEnterForeground` consults this
+        /// to know whether it owns the `pause=0` write, without
         /// clobbering a user-initiated pause from the play/pause
         /// button.
-        fileprivate var autoPausedOnBackground: Bool = false
+        fileprivate var autoPausedOnBackground: Bool {
+            get { withPlaybackStateLock { $0.autoPausedOnBackground } }
+            set { withPlaybackStateLock { $0.autoPausedOnBackground = newValue } }
+        }
 
         /// True when this coordinator's VC has a pre-built
         /// `AVPictureInPictureController` with
@@ -676,7 +680,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// to decide whether to auto-pause mpv when the sample-buffer
         /// layer enters `.failed` status — see the screen-lock fix
         /// in that function for the full rationale.
-        fileprivate var isInBackground: Bool = false
+        fileprivate var isInBackground: Bool {
+            get { withPlaybackStateLock { $0.isInBackground } }
+            set { withPlaybackStateLock { $0.isInBackground = newValue } }
+        }
 
         /// Weak reference to the `AVPictureInPictureController`
         /// built for this coordinator's VC. Used for diagnostic
@@ -797,7 +804,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
             let targetMute: Int32 = isActive ? 0 : 1
             mpvQueue.async { [weak self] in
-                guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                guard let self, let mpv = self.activeMPVHandle() else { return }
                 if self.lastWrittenAID != targetAID {
                     mpv_set_property_string(mpv, "aid", targetAID)
                     self.lastWrittenAID = targetAID
@@ -895,7 +902,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     #endif
                     logStore.append("↻ MPV: unpause live → snap to live edge")
                     mpvQueue.async { [weak self] in
-                        guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                        guard let self, let mpv = self.activeMPVHandle() else { return }
                         self.mpvCommand(mpv, ["loadfile", url.absoluteString, "replace"])
                     }
                 }
@@ -908,17 +915,85 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// must already have applied its own last-value debounce.
         private func setMPVFlag(property: String, value: Bool) {
             mpvQueue.async { [weak self] in
-                guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                guard let self, let mpv = self.activeMPVHandle() else { return }
                 var flag: Int32 = value ? 1 : 0
                 mpv_set_property(mpv, property, MPV_FORMAT_FLAG, &flag)
             }
         }
 
         // mpv handles
-        private var mpv: OpaquePointer?
+        private struct PlaybackState {
+            var mpv: OpaquePointer?
+            var isShuttingDown = false
+            var hwdecFallbackApplied = false
+            var isInBackground = false
+            var autoPausedOnBackground = false
+        }
+        private var playbackState = PlaybackState()
+        private var playbackStateLock = os_unfair_lock()
+        private var mpv: OpaquePointer? {
+            get { withPlaybackStateLock { $0.mpv } }
+            set { withPlaybackStateLock { $0.mpv = newValue } }
+        }
         private var mpvGL: OpaquePointer?  // mpv_render_context (OpenGL render API)
         private let mpvQueue = DispatchQueue(label: "com.aerio.mpv", qos: .userInteractive)
         private var wakeupRetain: Unmanaged<Coordinator>?  // Balances passRetained in setupMPV
+
+        private func withPlaybackStateLock<T>(_ body: (inout PlaybackState) -> T) -> T {
+            os_unfair_lock_lock(&playbackStateLock)
+            defer { os_unfair_lock_unlock(&playbackStateLock) }
+            return body(&playbackState)
+        }
+
+        private func activeMPVHandle() -> OpaquePointer? {
+            withPlaybackStateLock { state in
+                guard !state.isShuttingDown else { return nil }
+                return state.mpv
+            }
+        }
+
+        private func markShuttingDownAndSnapshotMPV() -> OpaquePointer? {
+            withPlaybackStateLock { state in
+                state.isShuttingDown = true
+                return state.mpv
+            }
+        }
+
+        private func takeMPVHandle() -> OpaquePointer? {
+            withPlaybackStateLock { state in
+                let handle = state.mpv
+                state.mpv = nil
+                return handle
+            }
+        }
+
+        private func resetHwdecFallbackApplied() {
+            withPlaybackStateLock { $0.hwdecFallbackApplied = false }
+        }
+
+        private func claimHwdecFallbackIfNeeded() -> Bool {
+            withPlaybackStateLock { state in
+                guard !state.hwdecFallbackApplied else { return false }
+                state.hwdecFallbackApplied = true
+                return true
+            }
+        }
+
+        private func markAutoPausedOnBackgroundIfNeeded() -> Bool {
+            withPlaybackStateLock { state in
+                guard state.isInBackground, !state.autoPausedOnBackground else { return false }
+                state.autoPausedOnBackground = true
+                return true
+            }
+        }
+
+        private func takeAutoPausedOnBackground() -> Bool {
+            withPlaybackStateLock { state in
+                let wasAutoPaused = state.autoPausedOnBackground
+                state.autoPausedOnBackground = false
+                return wasAutoPaused
+            }
+        }
 
         // OpenGL ES render — GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy)
         private let renderQueue = DispatchQueue(label: "com.aerio.mpv.render", qos: .userInteractive)
@@ -990,9 +1065,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let url = urls[currentIndex]
             return url.path.contains("/recordings/") && url.path.hasSuffix("/file/")
         }
-        private var isShuttingDown = false
-        private var hwdecFallbackApplied = false  // Prevents repeated fallback attempts for 10-bit streams
-
+        private var isShuttingDown: Bool {
+            get { withPlaybackStateLock { $0.isShuttingDown } }
+            set { withPlaybackStateLock { $0.isShuttingDown = newValue } }
+        }
         // Diagnostics
         private var diagStartTime: Date?
         private var prevDroppedFrames: Int64 = 0
@@ -1055,7 +1131,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // Toggle play/pause
             progressStore.togglePauseAction = { [weak self] in
-                guard let self, let mpv = self.mpv else { return }
+                guard let self, let mpv = self.activeMPVHandle() else { return }
                 var flag: Int = 0
                 mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
                 var newFlag: Int = flag == 0 ? 1 : 0
@@ -1064,28 +1140,28 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // Seek closure — VOD only. Guards against seek-after-EOF.
             progressStore.seekAction = { [weak self] targetMs in
-                guard let self, !self.isLive, !self.playbackEnded, let mpv = self.mpv else { return }
+                guard let self, !self.isLive, !self.playbackEnded, let mpv = self.activeMPVHandle() else { return }
                 let secs = String(format: "%.3f", Double(targetMs) / 1000.0)
                 self.mpvCommand(mpv, ["seek", secs, "absolute"])
             }
 
             // Playback speed
             progressStore.setSpeedAction = { [weak self] speed in
-                guard let self, let mpv = self.mpv else { return }
+                guard let self, let mpv = self.activeMPVHandle() else { return }
                 mpv_set_property_string(mpv, "speed", String(format: "%.2f", speed))
                 DispatchQueue.main.async { self.progressStore.speed = speed }
             }
 
             // Audio track selection (0 = auto)
             progressStore.setAudioTrackAction = { [weak self] trackID in
-                guard let self, let mpv = self.mpv else { return }
+                guard let self, let mpv = self.activeMPVHandle() else { return }
                 mpv_set_property_string(mpv, "aid", trackID == 0 ? "auto" : "\(trackID)")
                 DispatchQueue.main.async { self.progressStore.currentAudioTrackID = trackID }
             }
 
             // Subtitle track selection (0 = off)
             progressStore.setSubtitleTrackAction = { [weak self] trackID in
-                guard let self, let mpv = self.mpv else { return }
+                guard let self, let mpv = self.activeMPVHandle() else { return }
                 mpv_set_property_string(mpv, "sid", trackID == 0 ? "no" : "\(trackID)")
                 DispatchQueue.main.async { self.progressStore.currentSubtitleTrackID = trackID }
             }
@@ -1247,7 +1323,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // always pass `nil` so the lockscreen shows the live
             // indicator instead of a bogus scrubber.
             var dur: Double? = nil
-            if !isLive, let mpv {
+            if !isLive, let mpv = activeMPVHandle() {
                 var duration: Double = 0
                 if mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &duration) >= 0, duration > 0 {
                     dur = duration
@@ -1270,7 +1346,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 onPlay:  { ps.togglePauseAction?() },
                 onPause: { ps.togglePauseAction?() },
                 onSeek: live ? nil : { [weak self] time in
-                    guard let self, let mpv = self.mpv else { return }
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
                     let secs = String(format: "%.3f", time)
                     self.mpvCommand(mpv, ["seek", secs, "absolute"])
                 }
@@ -1283,7 +1359,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }
 
         @objc private func didEnterBackground() {
-            guard let mpv else { return }
+            guard let mpv = activeMPVHandle() else { return }
             #if os(iOS)
             // v1.6.8: track background state so `renderAndPresent`
             // can decide whether to auto-pause mpv when the sample-
@@ -1396,16 +1472,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //     `autoPausedOnBackground` tells the foreground handler to
             //     undo the pause without clobbering a user-initiated one.
             mpv_set_property_string(mpv, "vid", "no")
-            autoPausedOnBackground = true
+            _ = markAutoPausedOnBackgroundIfNeeded()
             mpvQueue.async { [weak self] in
-                guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                guard let self, let mpv = self.activeMPVHandle() else { return }
                 var flag: Int32 = 1
                 mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
             }
         }
 
         @objc private func willEnterForeground() {
-            guard let mpv else { return }
+            guard let mpv = activeMPVHandle() else { return }
             // v1.6.8: clear the background flag immediately so any
             // in-flight render callback that fires after this point
             // doesn't redundantly auto-pause. The actual pause/resume
@@ -1465,10 +1541,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Undo the defensive pause applied in branch (4), but only if
             // we applied it — never clobber a user-initiated pause. Goes
             // through mpvQueue to match the background-entry write.
-            if autoPausedOnBackground {
-                autoPausedOnBackground = false
+            if takeAutoPausedOnBackground() {
                 mpvQueue.async { [weak self] in
-                    guard let self, let mpv = self.mpv, !self.isShuttingDown else { return }
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
                     var flag: Int32 = 0
                     mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
                 }
@@ -1499,7 +1574,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // If AirPlay just connected and we're in the background with vid disabled, re-enable
             #if os(iOS)
-            if hasAirPlay, reason == .newDeviceAvailable, let mpv = self.mpv {
+            if hasAirPlay, reason == .newDeviceAvailable, let mpv = self.activeMPVHandle() {
                 let vid = mpv_get_property_string(mpv, "vid")
                 let vidStr = vid.flatMap { String(cString: $0) }
                 mpv_free(vid)
@@ -1668,7 +1743,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // needs a small downscale. The threshold is ~40M pixels/sec.
                 if isLive {
                     var fps: Double = 30
-                    if let mpv = self.mpv {
+                    if let mpv = self.activeMPVHandle() {
                         var fpsVal: Double = 0
                         mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fpsVal)
                         if fpsVal > 0 { fps = fpsVal; detectedFps = fpsVal }
@@ -1857,10 +1932,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // surprise pause they didn't ask for.
             var enqueued = false
             if layerStatus == .failed {
-                if isInBackground && !autoPausedOnBackground {
-                    autoPausedOnBackground = true
+                if markAutoPausedOnBackgroundIfNeeded() {
                     mpvQueue.async { [weak self] in
-                        guard let self, let mpvHandle = self.mpv, !self.isShuttingDown else { return }
+                        guard let self, let mpvHandle = self.activeMPVHandle() else { return }
                         var pauseFlag: Int32 = 1
                         mpv_set_property(mpvHandle, "pause", MPV_FORMAT_FLAG, &pauseFlag)
                     }
@@ -1941,12 +2015,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }
 
         func stop() {
-            isShuttingDown = true
+            let mpvToStop = markShuttingDownAndSnapshotMPV()
             stopStreamInfoTimer()
             DebugLogger.shared.logPlayback(event: "Stop",
                                            url: urls[safe: currentIndex]?.absoluteString)
 
-            if let mpv {
+            if let mpv = mpvToStop {
                 // Remove wakeup callback before quit to prevent use-after-free
                 mpv_set_wakeup_callback(mpv, nil, nil)
                 // Release retain balance — take-and-nil to prevent double-release
@@ -1979,9 +2053,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
                 // Give mpv a moment to shut down, then force destroy if needed
                 mpvQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                    if let m = self?.mpv {
+                    if let m = self?.takeMPVHandle() {
                         mpv_terminate_destroy(m)
-                        self?.mpv = nil
                     }
                 }
             }
@@ -2597,14 +2670,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // MARK: - Playback
 
         private func play(url: URL) {
-            guard let mpv else { return }
+            guard let mpv = activeMPVHandle() else { return }
 
             hasStarted = false
             playbackStartTime = nil
             // `loadfile replace` reuses the same mpv core, so any runtime
             // hwdec downgrade from the previous stream must be cleared before
             // the next file starts.
-            hwdecFallbackApplied = false
+            resetHwdecFallbackApplied()
             #if !targetEnvironment(simulator)
             mpv_set_property_string(mpv, "hwdec", "videotoolbox")
             #endif
@@ -2632,7 +2705,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         private func readEvents() {
             mpvQueue.async { [weak self] in
-                guard let self, let mpv = self.mpv else { return }
+                guard let self, let mpv = self.activeMPVHandle() else { return }
 
                 while true {
                     let event = mpv_wait_event(mpv, 0)
@@ -2660,8 +2733,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             // 10-bit HEVC: OpenGL ES can't map the VideoToolbox texture.
                             // Fall back to videotoolbox-copy (GPU decode → CPU copy → GL upload).
                             // This is slower than zero-copy but still hardware-decoded.
-                            if text.contains("Initializing texture for hardware decoding failed") && !self.hwdecFallbackApplied {
-                                self.hwdecFallbackApplied = true
+                            if text.contains("Initializing texture for hardware decoding failed") && self.claimHwdecFallbackIfNeeded() {
                                 print("[MPV-DIAG] ⚠️ GL interop failed (likely 10-bit HEVC) — falling back to videotoolbox-copy")
                                 mpv_set_property_string(mpv, "hwdec", "videotoolbox-copy")
                                 // Seek to current position to force reinit with the new hwdec
@@ -2726,15 +2798,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                 self.mpvGL = nil
                                 mpv_render_context_free(gl)
                             }
-                            mpv_terminate_destroy(mpv)
-                            self.mpv = nil
+                            if let handle = self.takeMPVHandle() {
+                                mpv_terminate_destroy(handle)
+                            }
                         }
                         return  // Exit event loop
 
                     case MPV_EVENT_PLAYBACK_RESTART:
                         // Now that initial buffer is filled, disable cache-pause for live
                         // so playback doesn't stall on brief network dips.
-                        if self.isLive, let mpv = self.mpv {
+                        if self.isLive, let mpv = self.activeMPVHandle() {
                             mpv_set_property_string(mpv, "cache-pause", "no")
                         }
                         // Clear the load-failure retry budget now that
@@ -2749,7 +2822,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // Update render buffer to match video's native dimensions.
                         // iOS: correct PiP aspect ratio. tvOS: avoid oversized buffer
                         // (e.g., 720p stream was rendering into 1920×1080 — 2.25x wasted pixels).
-                        if let mpv = self.mpv {
+                        if let mpv = self.activeMPVHandle() {
                             var dw: Int64 = 0; var dh: Int64 = 0
                             mpv_get_property(mpv, "dwidth", MPV_FORMAT_INT64, &dw)
                             mpv_get_property(mpv, "dheight", MPV_FORMAT_INT64, &dh)
@@ -2766,7 +2839,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             }
                         }
                         // Auto-resume VOD from saved position (once per session)
-                        if !self.isLive, !self.hasAttemptedResume, self.mpv != nil {
+                        if !self.isLive, !self.hasAttemptedResume, self.activeMPVHandle() != nil {
                             self.hasAttemptedResume = true
                             let seekAction = self.progressStore.seekAction
                             let explicitMs = self.progressStore.explicitResumeMs
@@ -2793,7 +2866,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             }
                         }
                         // Populate stream info for the UI overlay
-                        if let mpv = self.mpv {
+                        if let mpv = self.activeMPVHandle() {
                             let info = self.populateStreamInfo(mpv)
                             self.startStreamInfoTimer()
 
@@ -2925,7 +2998,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     // Verify still playing — route through mpvQueue to avoid race with stop()
                     let capturedDur = dur  // Bind to let for Sendable compliance
                     mpvQ.async { [weak self] in
-                        guard let self, let mpv = self.mpv, !self.isShuttingDown else {
+                        guard let self, let mpv = self.activeMPVHandle() else {
                             #if DEBUG
                             print("[NowPlaying-Gate] mpvQ fire: self/mpv nil or shutting down")
                             #endif
@@ -2971,7 +3044,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                 onPlay:  { ps2.togglePauseAction?() },
                                 onPause: { ps2.togglePauseAction?() },
                                 onSeek: live ? nil : { [weak self] time in
-                                    guard let self, let mpv = self.mpv else { return }
+                                    guard let self, let mpv = self.activeMPVHandle() else { return }
                                     let secs = String(format: "%.3f", time)
                                     self.mpvCommand(mpv, ["seek", secs, "absolute"])
                                 }
@@ -3224,7 +3297,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         logStore.append("ℹ️ MPV state: buffering")
                         #if DEBUG
                         var cacheDur: Double = 0
-                        if let mpv = self.mpv {
+                        if let mpv = self.activeMPVHandle() {
                             mpv_get_property(mpv, "demuxer-cache-duration", MPV_FORMAT_DOUBLE, &cacheDur)
                         }
                         print("[MPV-DIAG]   ↳ Buffering started (event #\(bufferEventCount)), cache_at_stall=\(String(format: "%.2f", cacheDur))s, underruns_so_far=\(self.audioUnderrunCount)")
@@ -3641,7 +3714,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Skips the mpv property reads when the overlay is hidden to avoid
         /// lock contention with the render thread.
         private func refreshVolatileStreamInfo() {
-            guard let mpv = self.mpv,
+            guard let mpv = self.activeMPVHandle(),
                   progressStore.isStreamInfoVisible else { return }
             var cacheDur: Double = 0; var avsync: Double = 0
             var drops: Int64 = 0; var bitrate: Double = 0; var fps: Double = 0
