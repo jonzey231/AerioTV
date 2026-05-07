@@ -924,6 +924,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // mpv handles
         private struct PlaybackState {
             var mpv: OpaquePointer?
+            var wakeupRetain: Unmanaged<Coordinator>?  // Balances passRetained in setupMPV
             var isShuttingDown = false
             var hwdecFallbackApplied = false
             var isInBackground = false
@@ -935,9 +936,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             get { withPlaybackStateLock { $0.mpv } }
             set { withPlaybackStateLock { $0.mpv = newValue } }
         }
-        private var mpvGL: OpaquePointer?  // mpv_render_context (OpenGL render API)
+        private var wakeupRetain: Unmanaged<Coordinator>? {
+            get { withPlaybackStateLock { $0.wakeupRetain } }
+            set { withPlaybackStateLock { $0.wakeupRetain = newValue } }
+        }
+        private var mpvGL: OpaquePointer?  // mpv_render_context — owned by renderQueue
         private let mpvQueue = DispatchQueue(label: "com.aerio.mpv", qos: .userInteractive)
-        private var wakeupRetain: Unmanaged<Coordinator>?  // Balances passRetained in setupMPV
 
         private func withPlaybackStateLock<T>(_ body: (inout PlaybackState) -> T) -> T {
             os_unfair_lock_lock(&playbackStateLock)
@@ -952,8 +956,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
+        /// Atomically marks shutdown and returns the mpv handle. Idempotent —
+        /// returns nil on every call after the first so concurrent callers
+        /// (e.g. stop() racing an unexpected MPV_EVENT_SHUTDOWN) can never
+        /// both capture the handle.
         private func markShuttingDownAndSnapshotMPV() -> OpaquePointer? {
             withPlaybackStateLock { state in
+                guard !state.isShuttingDown else { return nil }
                 state.isShuttingDown = true
                 return state.mpv
             }
@@ -964,6 +973,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let handle = state.mpv
                 state.mpv = nil
                 return handle
+            }
+        }
+
+        /// Atomically takes the wakeup retain. Used by both stop() and
+        /// MPV_EVENT_SHUTDOWN so only one path ever calls retain.release().
+        private func takeWakeupRetain() -> Unmanaged<Coordinator>? {
+            withPlaybackStateLock { state in
+                let r = state.wakeupRetain
+                state.wakeupRetain = nil
+                return r
             }
         }
 
@@ -992,6 +1011,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let wasAutoPaused = state.autoPausedOnBackground
                 state.autoPausedOnBackground = false
                 return wasAutoPaused
+            }
+        }
+
+        /// Drains renderQueue, clears libmpv's update callback, and frees all
+        /// render-thread-owned GL resources. Safe to call multiple times: once
+        /// the first caller nils the resources, subsequent calls become no-ops.
+        private func teardownRenderResourcesOnRenderQueue() {
+            // renderQueue -> mpvQueue is async-only, so this sync is deadlock-free
+            // from both stop() (main thread) and MPV_EVENT_SHUTDOWN (mpvQueue).
+            renderQueue.sync { [self] in
+                if let gl = mpvGL {
+                    mpv_render_context_set_update_callback(gl, nil, nil)
+                }
+
+                if let ctx = eaglContext {
+                    EAGLContext.setCurrent(ctx)
+                    if fbo != 0 { glDeleteFramebuffers(1, &fbo); fbo = 0 }
+                    renderTexture = nil
+                    renderPixelBuffer = nil
+                    if let cache = textureCache { CVOpenGLESTextureCacheFlush(cache, 0) }
+                    EAGLContext.setCurrent(nil)
+                }
+
+                textureCache = nil
+                eaglContext = nil
+
+                if let gl = mpvGL {
+                    mpvGL = nil
+                    mpv_render_context_free(gl)
+                }
             }
         }
 
@@ -2021,37 +2070,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                            url: urls[safe: currentIndex]?.absoluteString)
 
             if let mpv = mpvToStop {
-                // Remove wakeup callback before quit to prevent use-after-free
+                // Kill the wakeup callback immediately so no further readEvents()
+                // hops land on mpvQueue after we begin dismantling state.
                 mpv_set_wakeup_callback(mpv, nil, nil)
-                // Release retain balance — take-and-nil to prevent double-release
-                // if MPV_EVENT_SHUTDOWN also fires
-                if let retain = wakeupRetain {
-                    wakeupRetain = nil
+                if let retain = takeWakeupRetain() {
                     retain.release()
                 }
 
-                // Free OpenGL resources before destroying render context
-                if let ctx = eaglContext {
-                    EAGLContext.setCurrent(ctx)
-                    if fbo != 0 { glDeleteFramebuffers(1, &fbo); fbo = 0 }
-                    renderTexture = nil
-                    renderPixelBuffer = nil
-                    if let cache = textureCache { CVOpenGLESTextureCacheFlush(cache, 0) }
-                    textureCache = nil
-                    EAGLContext.setCurrent(nil)
-                    eaglContext = nil
-                }
+                teardownRenderResourcesOnRenderQueue()
 
-                // Free render context before destroying mpv
-                if let gl = mpvGL {
-                    mpvGL = nil
-                    mpv_render_context_free(gl)
-                }
-
-                // Send quit command — mpv will fire MPV_EVENT_SHUTDOWN
+                // Send quit — mpv will fire MPV_EVENT_SHUTDOWN on mpvQueue.
                 mpvCommand(mpv, ["quit"])
 
-                // Give mpv a moment to shut down, then force destroy if needed
+                // Give mpv a moment to shut down cleanly, then force-destroy.
                 mpvQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     if let m = self?.takeMPVHandle() {
                         mpv_terminate_destroy(m)
@@ -2788,19 +2819,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         print("[MPV-DIAG] Event: shutdown")
                         #endif
                         self.stopStreamInfoTimer()
-                        if !self.isShuttingDown {
-                            mpv_set_wakeup_callback(mpv, nil, nil)
-                            if let retain = self.wakeupRetain {
-                                self.wakeupRetain = nil
-                                retain.release()
-                            }
-                            if let gl = self.mpvGL {
-                                self.mpvGL = nil
-                                mpv_render_context_free(gl)
-                            }
-                            if let handle = self.takeMPVHandle() {
-                                mpv_terminate_destroy(handle)
-                            }
+                        // Use atomic takes throughout — idempotent whether stop()
+                        // already ran or not. If stop() owned shutdown and freed
+                        // these first, every take returns nil and this is a no-op.
+                        // If mpv shut down unexpectedly (without stop()), this path
+                        // performs the full cleanup.
+                        mpv_set_wakeup_callback(mpv, nil, nil)
+                        if let retain = self.takeWakeupRetain() {
+                            retain.release()
+                        }
+                        self.teardownRenderResourcesOnRenderQueue()
+                        if let handle = self.takeMPVHandle() {
+                            mpv_terminate_destroy(handle)
                         }
                         return  // Exit event loop
 
