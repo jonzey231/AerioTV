@@ -1981,7 +1981,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // surprise pause they didn't ask for.
             var enqueued = false
             if layerStatus == .failed {
-                if markAutoPausedOnBackgroundIfNeeded() {
+                if isInBackground && markAutoPausedOnBackgroundIfNeeded() {
                     mpvQueue.async { [weak self] in
                         guard let self, let mpvHandle = self.activeMPVHandle() else { return }
                         var pauseFlag: Int32 = 1
