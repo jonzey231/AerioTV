@@ -2075,19 +2075,38 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         func scheduleRender() {
             // v1.7.x Issue A: log silences in the mpv update-callback
             // stream. Normal callback cadence on a smooth stream is
-            // ~16-33ms (matches the frame interval). Anything > 100ms
-            // means libmpv's internal pipeline stalled — decoder
-            // waiting for input, demuxer paused for cache, render-
-            // context blocked. Threshold is generous (100ms vs the
-            // ~33ms expected) so we only log real anomalies, not
-            // normal jitter. The first gap of a session is suppressed
+            // ~16-33ms (matches the frame interval), with up to ~5ms
+            // jitter observed in test runs. Thresholds are tiered so
+            // we can tell subtle hiccups apart from severe stalls
+            // without making one noisy or the other invisible:
+            //
+            //   mild     50-100ms — subtle, may be perceptible as a
+            //                       brief frame hold; likely
+            //                       responsible for the "black
+            //                       flashes" Archie reports that
+            //                       didn't trip the previous 100ms
+            //                       gate.
+            //   moderate 100-300ms — definite stall, user-visible.
+            //   severe   300ms+   — multi-second stalls (e.g., the
+            //                       initial demux warmup or the
+            //                       videotoolbox-copy fallback
+            //                       chain).
+            //
+            // Each line means libmpv's internal pipeline stalled
+            // (decoder waiting for input, demuxer paused for cache,
+            // render-context blocked) — not our render or present
+            // path. The first gap of a session is suppressed
             // (lastScheduleRenderTime starts at 0).
             let now = CFAbsoluteTimeGetCurrent()
             if lastScheduleRenderTime > 0 {
                 let gapMs = (now - lastScheduleRenderTime) * 1000.0
-                if gapMs > 100 {
+                if gapMs > 50 {
+                    let severity: String
+                    if gapMs > 300 { severity = "SEVERE" }
+                    else if gapMs > 100 { severity = "moderate" }
+                    else { severity = "mild" }
                     #if DEBUG
-                    print("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms (libmpv internal stall — decoder/demuxer/render-context, not our render path)")
+                    print("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms \(severity) (libmpv internal stall — decoder/demuxer/render-context, not our render path)")
                     #endif
                 }
             }
