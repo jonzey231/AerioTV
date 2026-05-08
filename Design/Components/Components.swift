@@ -200,6 +200,15 @@ struct AppTextField: View {
 
     @FocusState private var isFocused: Bool
 
+    /// v1.7.x: when `isSecure` is true, this drives a trailing
+    /// eye-toggle button that flips between `SecureField` and
+    /// `TextField`. Lets users verify they typed the password
+    /// correctly — especially valuable on Apple TV where the Siri
+    /// Remote keyboard makes typos easy. Defaults to hidden so
+    /// dots are still the at-rest state; security posture is
+    /// unchanged unless the user explicitly taps reveal.
+    @State private var passwordVisible: Bool = false
+
     init(_ title: String,
          placeholder: String,
          text: Binding<String>,
@@ -234,7 +243,7 @@ struct AppTextField: View {
                 }
 
                 Group {
-                    if isSecure {
+                    if isSecure && !passwordVisible {
                         SecureField(placeholder, text: $text)
                     } else {
                         TextField(placeholder, text: $text)
@@ -269,6 +278,29 @@ struct AppTextField: View {
                 .textInputAutocapitalization(autocapitalization)
                 .autocorrectionDisabled(!autocorrection)
                 .focused($isFocused)
+
+                // v1.7.x: trailing reveal/hide button for secure
+                // fields. Only renders when `isSecure` is true so
+                // non-password fields stay flush. Tap toggles
+                // `passwordVisible`, which swaps the inner field
+                // between SecureField and TextField. Stays empty
+                // on tvOS focus engine because tvOS users tap the
+                // field directly — adding a sibling button would
+                // confuse the focus engine without corresponding
+                // value (Siri Remote keyboard reveal is server-side).
+                if isSecure {
+                    Button {
+                        passwordVisible.toggle()
+                    } label: {
+                        Image(systemName: passwordVisible ? "eye.slash" : "eye")
+                            .font(.system(size: 16))
+                            .foregroundColor(.textTertiary)
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(passwordVisible ? "Hide password" : "Show password")
+                }
             }
             .padding(.horizontal, 16)
             .frame(height: 52)

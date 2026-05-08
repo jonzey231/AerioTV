@@ -287,7 +287,13 @@ enum DispatcharrDirectConnectError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidCredentials:
-            return "Invalid username or password. Check your Dispatcharr admin credentials."
+            // v1.7.x: spell out the Dashboard-vs-XC distinction.
+            // Field reports show users typing their XC API password
+            // here (it's the more familiar one — they use it in
+            // Xtream Codes URLs all the time) and assuming AerioTV
+            // is broken when it 401s. Calling out the exact admin
+            // path turns the error into a self-resolving signal.
+            return "Invalid username or password. AerioTV uses your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password."
         case .unexpectedLoginResponse:
             return "Server returned an unexpected response shape during login. Verify the URL points at a Dispatcharr 0.23.0 or newer instance."
         case .refreshExpired:
@@ -314,7 +320,15 @@ extension DispatcharrAPI {
                       username: String,
                       password: String,
                       userAgent: String = DeviceInfo.defaultUserAgent) async throws -> DispatcharrJWTPair {
+        // v1.7.x diagnostic: log every login attempt + outcome so a
+        // user with "can't sign in" reports can capture the exact
+        // failure mode in Console.app. Does NOT log the password
+        // value — that would be a privacy regression. Username is
+        // logged because it's useful for "wrong account picked"
+        // self-diagnosis and isn't a secret.
+        debugLog("📺 Direct Connect login: attempting POST /api/accounts/token/ baseURL=\(baseURL.prefix(60)) username='\(username)' usernameLen=\(username.count) passwordLen=\(password.count)")
         guard let url = URL(string: "\(normalizedBase(baseURL))/api/accounts/token/") else {
+            debugLog("📺 Direct Connect login FAIL: malformed URL after normalization")
             throw DispatcharrDirectConnectError.transport("Malformed login URL")
         }
         var request = URLRequest(url: url)
@@ -329,14 +343,23 @@ extension DispatcharrAPI {
         do {
             (data, response) = try await HTTPRouter.data(for: request)
         } catch {
+            debugLog("📺 Direct Connect login FAIL: transport error — \(error.localizedDescription)")
             throw DispatcharrDirectConnectError.transport(error.localizedDescription)
         }
 
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        debugLog("📺 Direct Connect login: HTTP \(status), bodyBytes=\(data.count)")
         if status == 401 || status == 403 {
+            // Echo a small body excerpt so users with custom
+            // Dispatcharr deployments (proxy auth, custom error
+            // shapes) can see what the server actually returned.
+            let snippet = String(data: data.prefix(160), encoding: .utf8) ?? "<non-utf8>"
+            debugLog("📺 Direct Connect login FAIL: invalid credentials, body=\(snippet)")
             throw DispatcharrDirectConnectError.invalidCredentials
         }
         guard status == 200 else {
+            let snippet = String(data: data.prefix(160), encoding: .utf8) ?? "<non-utf8>"
+            debugLog("📺 Direct Connect login FAIL: HTTP \(status), body=\(snippet)")
             throw DispatcharrDirectConnectError.transport("HTTP \(status) on login")
         }
 
@@ -344,8 +367,12 @@ extension DispatcharrAPI {
         // host might 200 with HTML. Decode strictly and error out if
         // the response isn't the expected JWT pair.
         do {
-            return try JSONDecoder().decode(DispatcharrJWTPair.self, from: data)
+            let pair = try JSONDecoder().decode(DispatcharrJWTPair.self, from: data)
+            debugLog("📺 Direct Connect login OK: access.len=\(pair.access.count), refresh.len=\(pair.refresh.count)")
+            return pair
         } catch {
+            let snippet = String(data: data.prefix(160), encoding: .utf8) ?? "<non-utf8>"
+            debugLog("📺 Direct Connect login FAIL: 200 OK but decode failed — \(error.localizedDescription); body=\(snippet)")
             throw DispatcharrDirectConnectError.unexpectedLoginResponse
         }
     }
@@ -453,5 +480,110 @@ extension DispatcharrAPI {
         var url = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         while url.hasSuffix("/") { url = String(url.dropLast()) }
         return url
+    }
+
+    // MARK: - Silent api_key Re-Bootstrap (v1.7.x Save Credentials)
+
+    /// Silent re-auth path for `.apiKey` 401s. When a Dispatcharr
+    /// admin rotates a user's API key (or the key is revoked some
+    /// other way), AerioTV's saved api_key in Keychain is suddenly
+    /// rejected by the server. Without this helper the user would
+    /// see channel-list refresh failures and have to manually
+    /// re-enter the new key.
+    ///
+    /// With this helper, every api_key 401 from a server in
+    /// `Username & Password` mode triggers a transparent recovery:
+    ///
+    ///   1. Read the saved username (passed by caller) + Keychain
+    ///      password (`password_<serverID>`).
+    ///   2. POST `/api/accounts/token/` to log in fresh — Dispatcharr
+    ///      revoked the api_key but the credentials themselves are
+    ///      still valid.
+    ///   3. Cache the resulting JWT pair in `DispatcharrTokenStore`
+    ///      so subsequent `.jwtSession` paths skip a round trip.
+    ///   4. Use the fresh JWT to GET `/api/accounts/users/me/` and
+    ///      extract the new `api_key` field.
+    ///   5. Persist the new api_key to BOTH local and synchronizable
+    ///      Keychain slots so other devices on iCloud Keychain
+    ///      pick it up the next time they launch.
+    ///   6. Return the new api_key so the caller can replay the
+    ///      original 401-failed request with fresh headers.
+    ///
+    /// Mirrors the pattern Teamarr (`teamarr/dispatcharr/auth.py`
+    /// `_authenticate`) and Enhanced Channel Manager
+    /// (`backend/dispatcharr_client.py` `_request`) use for their
+    /// server-to-server connections to Dispatcharr: store the admin
+    /// credentials, re-login from them whenever a token expires.
+    ///
+    /// Returns `nil` on any failure (no creds in Keychain, login
+    /// rejected, users/me decode error, etc.). Callers fall back to
+    /// surfacing the original 401 so the existing error path stays
+    /// intact — silent recovery is a best-effort upgrade, not a
+    /// guarantee.
+    ///
+    /// - Parameters:
+    ///   - serverID: `ServerConnection.id` for keying the Keychain
+    ///     password lookup AND the resulting api_key write-back.
+    ///   - baseURL: the server's `effectiveBaseURL` snapshot.
+    ///   - username: the saved Dispatcharr admin username.
+    ///   - userAgent: the server's `effectiveUserAgent` snapshot
+    ///     so Dispatcharr's admin Stats panel attributes the
+    ///     re-login to the right device.
+    /// - Returns: the freshly-extracted api_key, or `nil` on any
+    ///   failure. Caller should fall back to surfacing the 401.
+    static func silentRebootstrapApiKey(
+        serverID: UUID,
+        baseURL: String,
+        username: String,
+        userAgent: String
+    ) async -> String? {
+        guard !username.isEmpty else {
+            debugLog("📺 silentRebootstrapApiKey: SKIP empty username (server=\(serverID.uuidString.prefix(8)))")
+            return nil
+        }
+        let pwKey = "password_\(serverID.uuidString)"
+        // Match `ServerConnection.resolvedCredential` lookup order:
+        // synchronizable first when iCloud sync is on, otherwise
+        // local-first. Falling through both keeps the recovery path
+        // working regardless of the user's iCloud state.
+        let password = KeychainHelper.load(key: pwKey, synchronizable: true)
+            ?? KeychainHelper.load(key: pwKey)
+            ?? ""
+        guard !password.isEmpty else {
+            debugLog("📺 silentRebootstrapApiKey: SKIP no password in Keychain (server=\(serverID.uuidString.prefix(8))) — server is in API Key mode without saved credentials")
+            return nil
+        }
+        do {
+            let pair = try await login(
+                baseURL: baseURL,
+                username: username,
+                password: password,
+                userAgent: userAgent
+            )
+            DispatcharrTokenStore.shared.store(
+                serverID: serverID,
+                access: pair.access,
+                refresh: pair.refresh
+            )
+            // Use the just-issued bearer to fetch the new api_key.
+            let bearerAPI = DispatcharrAPI(
+                baseURL: baseURL,
+                auth: .bearer(pair.access),
+                userAgent: userAgent
+            )
+            let user = try await bearerAPI.fetchCurrentUser()
+            // Persist to both Keychain slots. Idempotent if iCloud
+            // Keychain is off (the synchronizable write just lands
+            // locally as if it were the regular slot, which Apple
+            // documents as benign).
+            let apiKeyKey = "apiKey_\(serverID.uuidString)"
+            KeychainHelper.save(user.apiKey, for: apiKeyKey)
+            KeychainHelper.save(user.apiKey, for: apiKeyKey, synchronizable: true)
+            debugLog("📺 silentRebootstrapApiKey: SUCCESS — fresh api_key persisted for server \(serverID.uuidString.prefix(8))")
+            return user.apiKey
+        } catch {
+            debugLog("📺 silentRebootstrapApiKey: FAIL — \(error.localizedDescription) (server=\(serverID.uuidString.prefix(8)))")
+            return nil
+        }
     }
 }

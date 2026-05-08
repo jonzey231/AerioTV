@@ -93,7 +93,7 @@ enum ServerType: String, Codable, CaseIterable {
         switch self {
         case .m3uPlaylist: return "Any M3U playlist URL — works with Dispatcharr, any IPTV provider"
         case .xtreamCodes: return "Xtream Codes API — live TV, VOD movies & series"
-        case .dispatcharrAPI: return "Connect to Dispatcharr with your admin login or a personal API key"
+        case .dispatcharrAPI: return "Connect to Dispatcharr with your admin login or a personal API key (*AerioTV is not officially affiliated with the Dispatcharr project)"
         }
     }
 
@@ -573,10 +573,23 @@ final class EPGProgram {
     var serverID: String
     /// When this entry was fetched from the network (for staleness checks).
     var fetchedAt: Date
+    /// v1.7.x: Dispatcharr's per-program primary key. Persists across
+    /// launches so `ProgramInfoView`'s lazy `/api/epg/programs/<id>/`
+    /// fetch survives cold starts where the orchestrator decides the
+    /// cache is fresh enough to skip re-fetching the grid. Without
+    /// this, every `<24h-old` cache load came back with `programID =
+    /// nil` for every program, leaving the modal unable to retrieve
+    /// categories that the bulk grid endpoint deliberately strips.
+    /// Default `nil` for SwiftData lightweight migration: existing
+    /// cached rows (from builds before this field shipped) survive
+    /// the upgrade as nils and get repopulated on the next bulk
+    /// grid fetch.
+    var programID: Int? = nil
 
     init(channelID: String, title: String, description: String = "",
          startTime: Date, endTime: Date, category: String = "", posterURL: String = "",
-         serverID: String = "", fetchedAt: Date = Date()) {
+         serverID: String = "", fetchedAt: Date = Date(),
+         programID: Int? = nil) {
         self.id = UUID()
         self.channelID = channelID
         self.title = title
@@ -587,6 +600,7 @@ final class EPGProgram {
         self.posterURL = posterURL
         self.serverID = serverID
         self.fetchedAt = fetchedAt
+        self.programID = programID
     }
 
     var isLive: Bool {

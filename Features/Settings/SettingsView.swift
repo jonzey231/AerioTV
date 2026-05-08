@@ -2247,6 +2247,17 @@ struct EditServerSheet: View {
                             .listRowBackground(Color.cardBackground)
                         SecureField("Password", text: $server.password)
                             .listRowBackground(Color.cardBackground)
+                        // v1.7.x: same Dashboard-vs-XC password hint
+                        // as the Add Server flow. Surface here too so
+                        // existing servers being switched to
+                        // Username & Password (or whose user just
+                        // rotated their UI password) see the same
+                        // guidance without having to retrace through
+                        // onboarding.
+                        Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                            .listRowBackground(Color.cardBackground)
                         // Show the cached API key (read-only) so the
                         // user can see it was fetched from
                         // /api/accounts/users/me/ and is keeping
@@ -2497,6 +2508,13 @@ struct EditServerSheet: View {
                             case .usernamePassword:
                                 tvEditField("Username", text: $server.username)
                                 tvEditField("Password", text: $server.password, isSecure: true)
+                                // v1.7.x: Dashboard-vs-XC password
+                                // hint mirrored on tvOS Edit Server
+                                // (the .formStyle path).
+                                Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
+                                    .font(.system(size: 22))
+                                    .foregroundColor(.textTertiary)
+                                    .padding(.top, 4)
                                 if !server.effectiveApiKey.isEmpty {
                                     HStack {
                                         Text("API Key (cached)")
@@ -2850,6 +2868,13 @@ struct EditServerPage: View {
                                 case .usernamePassword:
                                     tvField("Username", text: $server.username)
                                     tvField("Password", text: $server.password, isSecure: true)
+                                    // v1.7.x: Dashboard-vs-XC password
+                                    // hint mirrored on tvOS Edit Server
+                                    // (the legacy ScrollView+VStack path).
+                                    Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
+                                        .font(.system(size: 22))
+                                        .foregroundColor(.textTertiary)
+                                        .padding(.top, 4)
                                     if !server.effectiveApiKey.isEmpty {
                                         HStack {
                                             Text("API Key (cached)")

@@ -757,18 +757,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // strategies, picked by current tile count:
             //
             // **mute-only** (`mute=yes`, audio decoder stays alive)
-            //   Used when `tiles.count <= 4`. Audio packets keep
+            //   Used when `tiles.count <= 6`. Audio packets keep
             //   decoding continuously on every tile, just muted at
             //   output. When the user switches audio focus the new
             //   tile's audio is already at the right PTS — `mute=no`
             //   resumes audio instantly at the current video
             //   position, no fast-forward, no AudioUnit re-init.
-            //   This is the Apple-TV typical-multiview path
-            //   (N=2-4); cost is N AudioUnits running silently
-            //   (cheap on tvOS hardware).
+            //   This is the Apple-TV typical-multiview path; cost
+            //   is N AudioUnits running silently (cheap on tvOS
+            //   hardware — Apple TV 4K A15 handles 6 muted decoders
+            //   without underruns in field testing).
             //
             // **silence + decoder-off** (`aid=no` + `mute=yes`)
-            //   Used when `tiles.count >= 5`. Disables the audio
+            //   Used when `tiles.count >= 7`. Disables the audio
             //   track entirely — mpv stops decoding audio and
             //   closes the AudioUnit. This is the v1.6.12 fix for
             //   "Audio device underrun" spam across many
@@ -778,9 +779,23 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //   (~100-300ms AudioUnit open) plus mpv replays the
             //   demuxer's audio cache to catch up to current video
             //   PTS, producing a brief visible video fast-forward.
-            //   Acceptable when N>=5 because the alternative is
+            //   Acceptable when N>=7 because the alternative is
             //   underrun-cascade video stalls; not acceptable at
             //   typical N where the user notices the lag.
+            //
+            // **History on the threshold:** v1.7.x originally set
+            // the boundary at N>=5 (decoder-off strategy active for
+            // N=5+ tiles). User testing on Apple TV 4K with N=6
+            // (Archie, 2026-05-08) showed the decoder-off
+            // fast-forward fires sporadically and is the dominant
+            // audio-switch annoyance at that tile count, while the
+            // mute-only path's underrun risk turned out not to
+            // materialize on A15-class hardware up through N=6.
+            // Bumped the boundary to N>=7 so typical multiview
+            // sessions (most users sit at 4-6 tiles) get the
+            // instant audio-switch UX. N>=7 retains the safety net
+            // for edge cases where users run heavier configurations
+            // on older / iPad-class devices that DO underrun.
             //
             // On audio-focus ACQUIRE either strategy clears its
             // suppressors:
@@ -792,7 +807,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // `lastWrittenMute`) keeps duplicate writes from tearing
             // down + reopening the AudioUnit on benign Coordinator
             // re-entrancy. v1.6.12 patch.
-            let useDecoderOffStrategy = MultiviewStore.shared.tiles.count >= 5
+            let useDecoderOffStrategy = MultiviewStore.shared.tiles.count >= 7
             let targetAID: String
             if useDecoderOffStrategy {
                 targetAID = isActive ? "auto" : "no"

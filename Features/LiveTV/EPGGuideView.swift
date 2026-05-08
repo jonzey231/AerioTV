@@ -13,10 +13,33 @@ struct GuideProgram: Identifiable, Equatable {
     let end: Date
     let category: String
 
+    /// v1.7.x: Dispatcharr's `ProgramData.id` (server-side primary key)
+    /// when the program came from `/api/epg/grid/`. Used by ProgramInfoView
+    /// to lazy-load `<category>` data via `/api/epg/programs/<id>/` for
+    /// programs that the bulk grid intentionally strips categories from.
+    /// Nil for programs sourced from XMLTV streams or Xtream Codes (those
+    /// paths already carry categories inline, no detail call needed).
+    let programID: Int?
+
     /// Computed: the program is currently airing.
     var isLive: Bool {
         let now = Date()
         return start <= now && end > now
+    }
+
+    /// Convenience initializer that defaults `programID` to nil so the
+    /// dozen+ existing call sites (XMLTV merge, Xtream, dummy fillers,
+    /// etc.) don't need to change. Dispatcharr-specific construction
+    /// sites pass an explicit `programID:` to enable lazy category load.
+    init(channelID: String, title: String, description: String,
+         start: Date, end: Date, category: String, programID: Int? = nil) {
+        self.channelID = channelID
+        self.title = title
+        self.description = description
+        self.start = start
+        self.end = end
+        self.category = category
+        self.programID = programID
     }
 }
 
@@ -263,10 +286,16 @@ final class GuideStore: ObservableObject {
                 }
                 var dict: [String: [GuideProgram]] = [:]
                 for ep in cachedRows {
+                    // v1.7.x: thread `programID` so a fresh-cache cold
+                    // launch on Dispatcharr can still drive the
+                    // ProgramInfoView lazy-load. Pre-v1.7.x rows have
+                    // `programID = nil` (lightweight migration); those
+                    // get repopulated on the next bulk grid refresh.
                     let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
                                           description: ep.programDescription,
                                           start: ep.startTime, end: ep.endTime,
-                                          category: ep.category)
+                                          category: ep.category,
+                                          programID: ep.programID)
                     dict[ep.channelID, default: []].append(gp)
                 }
                 let newestFetch = cachedRows.map(\.fetchedAt).max() ?? .distantPast
@@ -446,10 +475,13 @@ final class GuideStore: ObservableObject {
             var count = 0
             for (channelID, progs) in snapshot {
                 for gp in progs {
+                    // v1.7.x: persist `programID` so cold-launch
+                    // Program Info lazy-load survives the cache hit.
                     let ep = EPGProgram(channelID: channelID, title: gp.title,
                                         description: gp.description,
                                         startTime: gp.start, endTime: gp.end,
-                                        category: gp.category, serverID: serverID)
+                                        category: gp.category, serverID: serverID,
+                                        programID: gp.programID)
                     bgContext.insert(ep)
                     count += 1
                 }
@@ -630,7 +662,10 @@ final class GuideStore: ObservableObject {
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                   auth: .apiKey(server.effectiveApiKey),
                                   userAgent: server.effectiveUserAgent,
-                                  authMode: server.dispatcharrHeaderMode)
+                                  authMode: server.dispatcharrHeaderMode,
+                                  serverID: server.id,
+                                  savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                      ? server.username : nil)
         let categoryServerID = server.id.uuidString
         debugLog("📺 [EPG source=dispatcharr-api grid] server=\(server.name)")
 
@@ -779,8 +814,15 @@ final class GuideStore: ObservableObject {
                 guard let cid = channelID else { continue }
                 matched += 1
                 let desc = prog.description.isEmpty ? prog.subTitle : prog.description
+                // v1.7.x: thread `programID` so ProgramInfoView can
+                // lazy-load `<category>` via /api/epg/programs/<id>/
+                // when the user opens the modal. The bulk grid strips
+                // categories server-side, so without this the modal
+                // shows zero pills for any program that wasn't part
+                // of the now-airing enrichment fan-out.
                 let gp = GuideProgram(channelID: cid, title: prog.title,
-                                      description: desc, start: start, end: end, category: "")
+                                      description: desc, start: start, end: end,
+                                      category: "", programID: prog.programID)
                 mergeProgram(gp, for: cid)
             }
             #if DEBUG
@@ -840,7 +882,8 @@ final class GuideStore: ObservableObject {
                 guard let cid = channelID else { continue }
                 let desc = prog.description.isEmpty ? prog.subTitle : prog.description
                 let gp = GuideProgram(channelID: cid, title: prog.title,
-                                      description: desc, start: start, end: end, category: "")
+                                      description: desc, start: start, end: end,
+                                      category: "", programID: prog.programID)
                 mergeProgram(gp, for: cid)
             }
         }
@@ -864,7 +907,8 @@ final class GuideStore: ObservableObject {
                 guard let cid = channelID else { continue }
                 let desc = prog.description.isEmpty ? prog.subTitle : prog.description
                 let gp = GuideProgram(channelID: cid, title: prog.title,
-                                      description: desc, start: start, end: end, category: "")
+                                      description: desc, start: start, end: end,
+                                      category: "", programID: prog.programID)
                 mergeProgram(gp, for: cid)
             }
         }
@@ -989,7 +1033,18 @@ final class GuideStore: ObservableObject {
                 programIDByChannelID[cid] = pid
             }
         }
-        guard !currentByChannelID.isEmpty else { return }
+        guard !currentByChannelID.isEmpty else {
+            // v1.7.x diagnostic: surface why enrichment skipped so a
+            // user with empty pills can capture the exact condition.
+            // Three failure modes worth distinguishing:
+            //   • gridPrograms empty (grid endpoint returned nothing)
+            //   • gridPrograms had entries but none had a non-nil
+            //     programID (Dummy EPG / string-id rows only)
+            //   • programIDs were present but none mapped to a channel
+            //     via tvgID/uuid lookup (mapping miss)
+            debugLog("📺 enrich SKIP: gridPrograms=\(gridPrograms.count) tvgMap=\(tvgIDToChannelID.count) uuidMap=\(uuidToChannelID.count); no currently-airing program matched all guards")
+            return
+        }
         debugLog("📺 Dispatcharr category enrichment: \(currentByChannelID.count) currently-airing programs; fetching /api/epg/programs/<id>/ at cap-of-4")
         let cats = await api.enrichCategories(programIDs: Array(currentByChannelID.values))
         var byChannel: [String: String] = [:]
@@ -997,6 +1052,12 @@ final class GuideStore: ObservableObject {
             if let c = cats[pid] { byChannel[cid] = c }
         }
         debugLog("📺 Dispatcharr category enrichment: \(byChannel.count)/\(currentByChannelID.count) channels got categories")
+        // v1.7.x diagnostic: print a sample of what came back. If this
+        // line says `sample=` with an empty suffix or `nil`, Dispatcharr
+        // is returning empty categories arrays — the data simply isn't
+        // there (XMLTV source dropped it, Dummy EPG, etc.).
+        let sample = byChannel.first.map { "\($0.key.prefix(16))→\($0.value)" } ?? "<none>"
+        debugLog("📺 enrich sample: \(sample)")
 
         // Write categories to the matching airing GuideProgram in
         // `programs[cid]` so Guide-grid cells tint. Single
@@ -1034,7 +1095,8 @@ final class GuideStore: ObservableObject {
                                        description: old.description,
                                        start: old.start,
                                        end: old.end,
-                                       category: cats)
+                                       category: cats,
+                                       programID: old.programID)
 
             // Title-matched propagation across the rest of the
             // channel's programs. Skip the now-airing index (just
@@ -1051,7 +1113,8 @@ final class GuideStore: ObservableObject {
                                              description: p.description,
                                              start: p.start,
                                              end: p.end,
-                                             category: cats)
+                                             category: cats,
+                                             programID: p.programID)
                 }
             }
 
@@ -1510,6 +1573,11 @@ final class GuideStore: ObservableObject {
         let serverType = server.type
         let baseURL = server.effectiveBaseURL
         let apiKey = server.effectiveApiKey
+        // v1.7.x: capture identity + saved-username for silent
+        // api_key re-bootstrap on 401.
+        let dispatcharrServerID = server.id
+        let dispatcharrSavedUsername: String? =
+            server.dispatcharrCredentialType == .usernamePassword ? server.username : nil
         // v1.6.20: per-server auth shape capture for the off-main API client.
         let authMode = server.dispatcharrHeaderMode
         let userAgent = server.effectiveUserAgent
@@ -1565,7 +1633,9 @@ final class GuideStore: ObservableObject {
                     switch serverType {
                     case .dispatcharrAPI:
                         let api = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
-                                                 userAgent: userAgent, authMode: authMode)
+                                                 userAgent: userAgent, authMode: authMode,
+                                                 serverID: dispatcharrServerID,
+                                                 savedUsername: dispatcharrSavedUsername)
                         let hasTvgID = tvgID != nil && !tvgID!.isEmpty
                         let chID = Int(channelID)
                         guard hasTvgID || chID != nil else { return ([], false) }
@@ -1580,7 +1650,8 @@ final class GuideStore: ObservableObject {
                                       end > windowStart && start < windowEnd else { return nil }
                                 let desc = prog.description.isEmpty ? prog.subTitle : prog.description
                                 return GuideProgram(channelID: channelID, title: prog.title,
-                                                    description: desc, start: start, end: end, category: "")
+                                                    description: desc, start: start, end: end,
+                                                    category: "", programID: prog.programID)
                             }
                             return (programs, false)
                         } catch {
@@ -1740,13 +1811,52 @@ final class GuideStore: ObservableObject {
             let progDuration = prog.end.timeIntervalSince(prog.start)
             return progDuration > 0 && overlap > 0 && overlap / progDuration > 0.8
         }) {
-            // Duplicate found — always replace if the new version
-            // has a longer description (e.g., seedFromChannels
-            // created a placeholder without description, then
-            // fetchUpcoming returned the same program with a
-            // description).
-            if prog.description.count > list[idx].description.count {
-                list[idx] = prog
+            // Duplicate found. Build a merged GuideProgram so we
+            // never drop a useful piece of metadata that one source
+            // had and another didn't. Fields handled:
+            //
+            //   - description: take the longer one. seedFromChannels
+            //     creates placeholders without description; later
+            //     fetchUpcoming returns the same slot with a real
+            //     `<desc>`. Keep the richer text.
+            //   - category: prefer existing if non-empty. The
+            //     bulk grid endpoint deliberately returns
+            //     category="" for every program (Dispatcharr's
+            //     hand-rolled serializer strips it). Without this
+            //     guard, the second-pass grid call would clobber
+            //     categories that `enrichDispatcharrCategories`
+            //     wrote in a prior pass.
+            //   - programID: prefer existing if set, else take
+            //     new. v1.7.x: pre-v1.7.x SwiftData caches loaded
+            //     with `programID = nil`. When the background
+            //     fetchUpcoming brings a fresh grid response with
+            //     real programIDs, the prior code path would skip
+            //     the merge entirely (because the cached
+            //     description was the same length or longer), and
+            //     the new programID was dropped on the floor.
+            //     Result: ProgramInfoView's lazy-load couldn't
+            //     fire for non-now-airing programs, leaving them
+            //     pill-less on cold-launch upgrades. Capturing
+            //     the programID here closes that gap.
+            let existing = list[idx]
+            let mergedDescription = prog.description.count > existing.description.count
+                ? prog.description
+                : existing.description
+            let mergedCategory = existing.category.isEmpty ? prog.category : existing.category
+            let mergedProgramID = existing.programID ?? prog.programID
+            let needsUpdate = mergedDescription != existing.description
+                || mergedCategory != existing.category
+                || mergedProgramID != existing.programID
+            if needsUpdate {
+                list[idx] = GuideProgram(
+                    channelID: existing.channelID,
+                    title: existing.title,
+                    description: mergedDescription,
+                    start: existing.start,
+                    end: existing.end,
+                    category: mergedCategory,
+                    programID: mergedProgramID
+                )
                 dict[channelID] = list
             }
             return
@@ -2827,7 +2937,8 @@ private struct GuideProgramButton: View {
                             start: prog.start,
                             end: prog.end,
                             description: prog.description,
-                            category: prog.category
+                            category: prog.category,
+                            programID: prog.programID
                         )
                     )
                 }
@@ -2989,7 +3100,8 @@ private struct GuideProgramButton: View {
                                 start: prog.start,
                                 end: prog.end,
                                 description: prog.description,
-                                category: prog.category
+                                category: prog.category,
+                                programID: prog.programID
                             )
                         )
                     }

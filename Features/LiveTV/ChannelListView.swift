@@ -1114,11 +1114,17 @@ struct ChannelListView: View {
             // v1.6.20: per-server auth shape capture.
             let authMode = server.dispatcharrHeaderMode
             let userAgent = server.effectiveUserAgent
+            // v1.7.x: capture identity + saved-username for the
+            // silent api_key re-bootstrap path.
+            let serverID = server.id
+            let savedUsername: String? = server.dispatcharrCredentialType == .usernamePassword
+                ? server.username : nil
             let cacheKey = "d_\(baseURL)_\(tvgID.isEmpty ? item.id : tvgID)"
             return {
                 if let cached = await EPGCache.shared.get(cacheKey) { return cached }
                 let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
-                                          userAgent: userAgent, authMode: authMode)
+                                          userAgent: userAgent, authMode: authMode,
+                                          serverID: serverID, savedUsername: savedUsername)
                 do {
                     let identifier = tvgID.isEmpty ? "channelID=\(channelID ?? 0)" : "tvgID=\(tvgID)"
                     debugLog("📺 EPG fetch: \(identifier)")
@@ -1129,10 +1135,14 @@ struct ChannelListView: View {
                     debugLog("📺 EPG result: \(identifier) → \(programs.count) upcoming programs")
                     let entries = programs.map {
                         let desc = $0.description.isEmpty ? $0.subTitle : $0.description
+                        // v1.7.x: thread Dispatcharr `programID` so the
+                        // expanded panel's Program Info modal can
+                        // lazy-load categories the bulk grid strips.
                         return EPGEntry(title: $0.title,
                                         description: desc,
                                         startTime: $0.startTime?.toDate(),
-                                        endTime:   $0.endTime?.toDate())
+                                        endTime:   $0.endTime?.toDate(),
+                                        programID: $0.programID)
                     }
                     await EPGCache.shared.set(entries, for: cacheKey)
                     return entries
@@ -1285,13 +1295,23 @@ struct EPGEntry: Identifiable, Equatable {
     /// `GuideStore.programs` (via `seedEPGCache`) so they stay in
     /// sync rather than each re-deriving category from scratch.
     let category: String
+    /// v1.7.x: Dispatcharr's `ProgramData.id` when known. Threaded
+    /// through to `ProgramInfoView` so the modal can lazy-load
+    /// `<category>` data via `/api/epg/programs/<id>/` whenever the
+    /// row's `category` is empty (which happens for every non-airing
+    /// Dispatcharr program because the bulk `/api/epg/grid/` endpoint
+    /// strips category data server-side). Nil for XMLTV / Xtream
+    /// sources whose feeds already include categories inline.
+    let programID: Int?
 
-    init(title: String, description: String = "", startTime: Date?, endTime: Date?, category: String = "") {
+    init(title: String, description: String = "", startTime: Date?,
+         endTime: Date?, category: String = "", programID: Int? = nil) {
         self.title = title
         self.description = description
         self.startTime = startTime
         self.endTime = endTime
         self.category = category
+        self.programID = programID
     }
 }
 
@@ -1869,6 +1889,13 @@ struct ChannelRow: View {
                let start = item.currentProgramStart,
                let end = item.currentProgramEnd {
                 Button("Program Info") {
+                    // v1.7.x: pull programID from GuideStore if we
+                    // have it cached — lets the modal lazy-load any
+                    // category data the bulk enrichment hadn't reached
+                    // yet (rare for now-airing, common for all others).
+                    let pid = guideStore.programs[item.id]?
+                        .first(where: { $0.start <= Date() && $0.end > Date() })?
+                        .programID
                     activeSheet = .programInfo(
                         ProgramInfoTarget(
                             channelName: item.name,
@@ -1876,7 +1903,8 @@ struct ChannelRow: View {
                             start: start,
                             end: end,
                             description: item.currentProgramDescription ?? "",
-                            category: item.currentProgramCategory ?? ""
+                            category: item.currentProgramCategory ?? "",
+                            programID: pid
                         )
                     )
                 }
@@ -1947,9 +1975,15 @@ struct ChannelRow: View {
                 .filter { $0.end > now }
                 .sorted { $0.start < $1.start }
                 .map {
+                    // v1.7.x: thread `programID` so the resulting
+                    // ProgramInfoTarget can lazy-load `<category>`
+                    // via /api/epg/programs/<id>/ when the modal
+                    // opens with an empty category — the bulk grid
+                    // strips category data, so non-now-airing
+                    // programs land here with category: "".
                     EPGEntry(title: $0.title, description: $0.description,
                              startTime: $0.start, endTime: $0.end,
-                             category: $0.category)
+                             category: $0.category, programID: $0.programID)
                 }
         }
         return upcomingPrograms.filter { entry in
@@ -2027,7 +2061,8 @@ struct ChannelRow: View {
                                 start: start,
                                 end: end,
                                 description: entry.description,
-                                category: entry.category
+                                category: entry.category,
+                                programID: entry.programID
                             )
                         )
                     }
@@ -2286,7 +2321,8 @@ struct ChannelRow: View {
                                     start: start,
                                     end: end,
                                     description: entry.description,
-                                    category: entry.category
+                                    category: entry.category,
+                                    programID: entry.programID
                                 )
                             )
                         }

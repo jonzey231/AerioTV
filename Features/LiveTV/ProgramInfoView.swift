@@ -31,8 +31,28 @@ struct ProgramInfoTarget: Identifiable, Equatable {
     /// palette.
     let category: String
 
+    /// v1.7.x: Dispatcharr's per-program primary key, used by
+    /// `ProgramInfoView` to lazy-load category data from
+    /// `/api/epg/programs/<id>/` when the bulk `/api/epg/grid/`
+    /// response stripped it (which it does for every program except
+    /// the now-airing one we already enriched). Nil for XMLTV /
+    /// Xtream / M3U sources whose bulk feed already carries categories
+    /// inline; lazy-load is a no-op in those cases.
+    let programID: Int?
+
     var id: String {
         "\(title)-\(start.timeIntervalSinceReferenceDate)-\(end.timeIntervalSinceReferenceDate)"
+    }
+
+    init(channelName: String, title: String, start: Date, end: Date,
+         description: String, category: String, programID: Int? = nil) {
+        self.channelName = channelName
+        self.title = title
+        self.start = start
+        self.end = end
+        self.description = description
+        self.category = category
+        self.programID = programID
     }
 }
 
@@ -58,6 +78,30 @@ struct ProgramInfoTarget: Identifiable, Equatable {
 struct ProgramInfoView: View {
     let target: ProgramInfoTarget
     @Environment(\.dismiss) private var dismiss
+
+    /// v1.7.x: lazy-loaded category result for Dispatcharr programs
+    /// whose `target.category` arrived empty. The bulk
+    /// `/api/epg/grid/` endpoint deliberately strips `<category>`
+    /// data server-side, so only the now-airing program per channel
+    /// (which `enrichDispatcharrCategories` proactively fetches) lands
+    /// here with a non-empty `target.category`. For everything else,
+    /// we fire a single `/api/epg/programs/<id>/` request when the
+    /// modal appears and update the pills as it returns. ~40ms on a
+    /// healthy server, so the user perceives "pills appear right
+    /// after the sheet slides in" rather than an obvious loading
+    /// spinner.
+    @State private var loadedCategory: String? = nil
+    @State private var isLoadingCategory: Bool = false
+
+    /// Display category — prefers the loaded value over the target's
+    /// initial value so a successful detail fetch wins. Empty string
+    /// when neither source has data; the pills sections then hide
+    /// entirely (matches the pre-v1.7.x behaviour for unenriched
+    /// XMLTV / Xtream programs whose feed has no category tags).
+    private var effectiveCategory: String {
+        if let loaded = loadedCategory, !loaded.isEmpty { return loaded }
+        return target.category
+    }
 
     // Shared between platforms: a formatter for the start/end time
     // row. 12-hour on iOS (user locale), short style on tvOS.
@@ -115,9 +159,11 @@ struct ProgramInfoView: View {
 
     /// Split raw category string on XMLTV's common separators. Empty
     /// tokens (double-commas, trailing separators) are filtered out.
+    /// Reads `effectiveCategory` so a Dispatcharr lazy-load result
+    /// flows into the pill rendering as soon as it lands.
     private var categoryTokens: [String] {
         let separators = CharacterSet(charactersIn: ",/;")
-        return target.category
+        return effectiveCategory
             .components(separatedBy: separators)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
@@ -173,6 +219,7 @@ struct ProgramInfoView: View {
     var body: some View {
         #if os(tvOS)
         tvBody
+            .task(id: target.id) { await loadCategoryIfNeeded() }
         #else
         NavigationStack {
             iOSForm
@@ -197,7 +244,92 @@ struct ProgramInfoView: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .presentationBackground(Color.appBackground)
+        .task(id: target.id) { await loadCategoryIfNeeded() }
         #endif
+    }
+
+    // MARK: - Lazy Category Load (Dispatcharr only)
+    //
+    // Fires when the modal appears with an empty `target.category`
+    // and a non-nil `programID`. Hits `/api/epg/programs/<id>/` to
+    // pull the rich detail Dispatcharr's bulk grid strips, then
+    // populates `loadedCategory` so the pill sections re-render.
+    //
+    // Silently no-ops when:
+    //   • `target.category` is already populated (now-airing program
+    //     enriched at guide-load time, or any XMLTV / Xtream source
+    //     that includes categories inline). One less network call.
+    //   • `target.programID` is nil (XMLTV / Xtream / M3U sources
+    //     that don't carry Dispatcharr's per-program primary key).
+    //   • `ChannelStore.shared.activeServer` is missing or isn't a
+    //     `dispatcharrAPI` server. Defensive — the modal is only
+    //     reached via channel rows whose server is by definition
+    //     the active one, but a server switch mid-presentation
+    //     shouldn't crash the lookup.
+    //   • The fetch fails (timeout, 401, decode error). Pills just
+    //     don't appear — same outcome as if the program genuinely
+    //     had no categories. No banner, no error state. The user
+    //     can dismiss + reopen to retry.
+    @MainActor
+    private func loadCategoryIfNeeded() async {
+        // v1.7.x diagnostic: log every guard outcome and the API
+        // result so a user with empty Program Info pills can capture
+        // exactly which step is breaking. Each branch tags its reason
+        // so the log greps cleanly.
+        let pidStr = target.programID.map(String.init) ?? "nil"
+        debugLog("📺 ProgramInfo lazy-load entry: title='\(target.title.prefix(40))' category.empty=\(target.category.isEmpty) programID=\(pidStr)")
+        guard target.category.isEmpty else {
+            debugLog("📺 ProgramInfo lazy-load SKIP: category already populated ('\(target.category.prefix(60))')")
+            return
+        }
+        guard loadedCategory == nil else {
+            debugLog("📺 ProgramInfo lazy-load SKIP: already loaded this session")
+            return
+        }
+        guard let pid = target.programID else {
+            debugLog("📺 ProgramInfo lazy-load SKIP: programID is nil (target wasn't built from a Dispatcharr-grid program — XMLTV/Xtream/dummy source, or the construction site didn't thread programID)")
+            return
+        }
+        guard let server = ChannelStore.shared.activeServer else {
+            debugLog("📺 ProgramInfo lazy-load SKIP: ChannelStore.activeServer is nil")
+            return
+        }
+        guard server.type == .dispatcharrAPI else {
+            debugLog("📺 ProgramInfo lazy-load SKIP: activeServer.type=\(server.type) (not dispatcharrAPI)")
+            return
+        }
+        let baseURL = server.effectiveBaseURL
+        let apiKey = server.effectiveApiKey
+        guard !baseURL.isEmpty, !apiKey.isEmpty else {
+            debugLog("📺 ProgramInfo lazy-load SKIP: baseURL.empty=\(baseURL.isEmpty) apiKey.empty=\(apiKey.isEmpty)")
+            return
+        }
+        isLoadingCategory = true
+        defer { isLoadingCategory = false }
+        // v1.7.x: pass serverID + savedUsername so a 401 from a
+        // rotated api_key triggers silent re-bootstrap rather than
+        // leaving the modal pill-less.
+        let api = DispatcharrAPI(baseURL: baseURL,
+                                  auth: .apiKey(apiKey),
+                                  userAgent: server.effectiveUserAgent,
+                                  authMode: server.dispatcharrHeaderMode,
+                                  serverID: server.id,
+                                  savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                      ? server.username : nil)
+        do {
+            let detail = try await api.getProgramDetail(id: pid)
+            let cats = detail.categories.joined(separator: ",")
+            debugLog("📺 ProgramInfo lazy-load OK: pid=\(pid) returned \(detail.categories.count) categories: '\(cats.prefix(80))'")
+            // Only assign if we got something — avoids triggering a
+            // pointless re-render on empty results, and leaves the
+            // door open for a future retry path.
+            if !cats.isEmpty {
+                loadedCategory = cats
+            }
+        } catch {
+            debugLog("📺 ProgramInfo lazy-load FAIL: pid=\(pid) error=\(error.localizedDescription)")
+            // Swallow — the modal stays usable without pills.
+        }
     }
 
     // MARK: - iOS Layout

@@ -282,13 +282,32 @@ struct AddServerView: View {
                                  text: $viewModel.username, icon: "person.fill")
                     AppTextField("Password", placeholder: "Dispatcharr admin password",
                                  text: $viewModel.password, icon: "lock.fill", isSecure: true)
-                    infoBox(icon: "info.circle.fill",
-                            message: "Sign in with the same admin login you use on the Dispatcharr web UI. AerioTV exchanges your credentials for a session token over /api/accounts/token/. Your password is stored in the Keychain on this device only.")
+                    // v1.7.x: surface Dispatcharr's UI-vs-XC password
+                    // distinction inline so the user catches it before
+                    // tapping Test Connection. Field-archie, May 2026:
+                    // multiple users typed their XC password here,
+                    // got "No active account found", and assumed
+                    // AerioTV was broken. The two passwords live in
+                    // separate tabs of the Dispatcharr admin user
+                    // editor (Account vs API & XC) and are usually
+                    // not the same value, so it's worth making the
+                    // distinction loud at the input itself rather
+                    // than only in the failure error.
+                    Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                        .padding(.top, -2)
+                    // v1.7.x: explicit framing of what saving credentials
+                    // unlocks — the silent auto-refresh path that mirrors
+                    // how Enhanced Channel Manager and Teamarr handle
+                    // their server-to-server connection to Dispatcharr.
+                    infoBox(icon: "checkmark.shield.fill",
+                            message: "Save credentials and refresh automatically. AerioTV signs in with these credentials, then keeps your session alive in the background. If your Dispatcharr admin rotates your API key, AerioTV silently re-authenticates without prompting you. Stored in your iOS Keychain (and iCloud Keychain when iCloud sync is on, so your other AerioTV devices stay signed in too).")
                 case .apiKey:
                     AppTextField("Admin API Key", placeholder: "••••••••••••••••",
                                  text: $viewModel.apiKey, icon: "key.fill", isSecure: true)
                     infoBox(icon: "info.circle.fill",
-                            message: "Use a Dispatcharr Admin API Key (System → Users → Edit User → API & XC). This enables native Dispatcharr endpoints for Live TV, Guide, Movies, and TV Shows.")
+                            message: "Use a Dispatcharr Admin API Key (System → Users → Edit User → API & XC). This enables native Dispatcharr endpoints for Live TV, Guide, Movies, and TV Shows. If your admin rotates the key, you'll need to re-enter it here. For hands-off auto-refresh, switch to Username & Password.")
                 }
 
                 advancedXMLTVSection

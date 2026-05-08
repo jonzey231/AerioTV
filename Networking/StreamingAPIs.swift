@@ -655,14 +655,36 @@ struct DispatcharrAPI {
     /// this field — that path is unambiguous.
     let authMode: DispatcharrAuthHeaderMode
 
+    /// v1.7.x: identifies which `ServerConnection` this API instance
+    /// belongs to, so `dataWithJWTRetry` can drive the silent api_key
+    /// re-bootstrap path (Save Credentials Option 1). Optional because
+    /// static helpers like `login()` and `refreshAccessToken()` don't
+    /// have a server context, and pre-v1.7.x call sites that pass auth
+    /// directly from a primitive api_key string keep working unchanged.
+    let serverID: UUID?
+
+    /// v1.7.x: saved Dispatcharr admin username for silent re-auth
+    /// when the api_key 401s. Sourced from `ServerConnection.username`
+    /// at construction time. Only populated for `.apiKey` instances
+    /// whose owning server is in Username & Password mode (saved
+    /// credentials present); empty / nil for API-Key-only servers
+    /// disables the silent rebootstrap path so we never call
+    /// `/api/accounts/token/` against a server whose user never
+    /// agreed to credential-based auth.
+    let savedUsername: String?
+
     init(baseURL: String,
          auth: Auth,
          userAgent: String = DeviceInfo.defaultUserAgent,
-         authMode: DispatcharrAuthHeaderMode = .xapikey) {
+         authMode: DispatcharrAuthHeaderMode = .xapikey,
+         serverID: UUID? = nil,
+         savedUsername: String? = nil) {
         self.baseURL = baseURL
         self.auth = auth
         self.userAgent = userAgent
         self.authMode = authMode
+        self.serverID = serverID
+        self.savedUsername = savedUsername
     }
 
 
@@ -831,45 +853,97 @@ struct DispatcharrAPI {
     func dataWithJWTRetry(for request: URLRequest) async throws -> (Data, URLResponse) {
         let (data, response) = try await HTTPRouter.data(for: request, using: session)
 
-        // Fast path: not JWT mode, or not 401. Return verbatim.
-        guard case .jwtSession(let serverID) = auth,
-              let http = response as? HTTPURLResponse,
-              http.statusCode == 401
-        else {
+        // Fast path: not 401. Return verbatim. Both .jwtSession and
+        // .apiKey share the same 401-recovery dispatch table below.
+        guard let http = response as? HTTPURLResponse,
+              http.statusCode == 401 else {
             return (data, response)
         }
 
-        // Need a refresh token to even attempt recovery.
-        guard let refreshTok = DispatcharrTokenStore.shared.refreshToken(for: serverID) else {
-            return (data, response)
-        }
+        switch auth {
+        case .jwtSession(let serverID):
+            // Need a refresh token to even attempt recovery.
+            guard let refreshTok = DispatcharrTokenStore.shared.refreshToken(for: serverID) else {
+                return (data, response)
+            }
 
-        // Refresh the access token. If the refresh has itself
-        // expired (>24h idle), clear the store entry so the next
-        // session-warmup tick re-logs in from Keychain credentials,
-        // and surface the original 401 to the caller.
-        let newAccess: String
-        do {
-            newAccess = try await Self.refreshAccessToken(
+            // Refresh the access token. If the refresh has itself
+            // expired (>24h idle), clear the store entry so the next
+            // session-warmup tick re-logs in from Keychain credentials,
+            // and surface the original 401 to the caller.
+            let newAccess: String
+            do {
+                newAccess = try await Self.refreshAccessToken(
+                    baseURL: baseURL,
+                    refresh: refreshTok,
+                    userAgent: userAgent
+                )
+            } catch DispatcharrDirectConnectError.refreshExpired {
+                DispatcharrTokenStore.shared.clear(serverID: serverID)
+                return (data, response)
+            } catch {
+                return (data, response)
+            }
+            DispatcharrTokenStore.shared.storeRefreshedAccess(serverID: serverID, access: newAccess)
+
+            // Replay the original request with the refreshed Bearer
+            // header. Preserve all other headers (Accept, User-Agent,
+            // X-API-Key fallback if present) so we don't lose anything
+            // the original call emitted.
+            var retry = request
+            retry.setValue("Bearer \(newAccess)", forHTTPHeaderField: "Authorization")
+            return try await HTTPRouter.data(for: retry, using: session)
+
+        case .apiKey:
+            // v1.7.x: silent api_key re-bootstrap. Only fires when:
+            //   1. The instance was built with a serverID (production
+            //      callers via ServerConnection — static helpers like
+            //      login() never have one).
+            //   2. The server has a saved username (i.e. it was
+            //      onboarded in Username & Password mode and creds
+            //      are sitting in Keychain).
+            //
+            // Both gates need to pass before we attempt re-auth, so
+            // pure API-Key-mode users never see a `/api/accounts/token/`
+            // call against a server whose user didn't agree to
+            // credential-based auth. Surfaces the original 401 on
+            // any failure so existing error-handling paths stay
+            // intact.
+            guard let sid = serverID,
+                  let username = savedUsername,
+                  !username.isEmpty else {
+                return (data, response)
+            }
+            guard let newKey = await Self.silentRebootstrapApiKey(
+                serverID: sid,
                 baseURL: baseURL,
-                refresh: refreshTok,
+                username: username,
                 userAgent: userAgent
-            )
-        } catch DispatcharrDirectConnectError.refreshExpired {
-            DispatcharrTokenStore.shared.clear(serverID: serverID)
-            return (data, response)
-        } catch {
+            ) else {
+                return (data, response)
+            }
+            // Replay with the fresh api_key in whichever header
+            // shape the server's auto-detected `authMode` expects.
+            // Mirrors `headers(for:)` so the retry ends up
+            // byte-identical to a fresh call after a normal
+            // settings-driven api_key swap.
+            var retry = request
+            switch authMode {
+            case .xapikey:
+                retry.setValue(newKey, forHTTPHeaderField: "X-API-Key")
+            case .both:
+                retry.setValue("ApiKey \(newKey)", forHTTPHeaderField: "Authorization")
+                retry.setValue(newKey, forHTTPHeaderField: "X-API-Key")
+            case .bearer:
+                retry.setValue("Bearer \(newKey)", forHTTPHeaderField: "Authorization")
+            }
+            return try await HTTPRouter.data(for: retry, using: session)
+
+        case .bearer:
+            // Fixed-bearer mode (Test Connection / one-shot probe).
+            // No persistence to refresh against — surface the 401.
             return (data, response)
         }
-        DispatcharrTokenStore.shared.storeRefreshedAccess(serverID: serverID, access: newAccess)
-
-        // Replay the original request with the refreshed Bearer
-        // header. Preserve all other headers (Accept, User-Agent,
-        // X-API-Key fallback if present) so we don't lose anything
-        // the original call emitted.
-        var retry = request
-        retry.setValue("Bearer \(newAccess)", forHTTPHeaderField: "Authorization")
-        return try await HTTPRouter.data(for: retry, using: session)
     }
 
     // MARK: - Verify

@@ -901,20 +901,28 @@ final class ChannelStore: ObservableObject {
     }
 
     func applyXMLTVCategories(_ categoriesByChannelID: [String: String], serverID: String) {
-        guard !categoriesByChannelID.isEmpty else { return }
+        guard !categoriesByChannelID.isEmpty else {
+            debugLog("📺 applyXMLTVCategories: SKIP — empty categories dict (serverID=\(serverID.prefix(8)))")
+            return
+        }
         let shouldApplyToCurrentChannels =
             currentChannelServerID?.uuidString == serverID || activeServer?.id.uuidString == serverID
+        debugLog("📺 applyXMLTVCategories: serverID=\(serverID.prefix(8)) currentSrv=\(currentChannelServerID?.uuidString.prefix(8) ?? "nil") activeSrv=\(activeServer?.id.uuidString.prefix(8) ?? "nil") shouldApply=\(shouldApplyToCurrentChannels) catCount=\(categoriesByChannelID.count)")
 
         if shouldApplyToCurrentChannels {
             var changed = false
+            var matched = 0
             var updated = channels
             for i in updated.indices {
-                if let cat = categoriesByChannelID[updated[i].id],
-                   updated[i].currentProgramCategory != cat {
-                    updated[i].currentProgramCategory = cat
-                    changed = true
+                if let cat = categoriesByChannelID[updated[i].id] {
+                    matched += 1
+                    if updated[i].currentProgramCategory != cat {
+                        updated[i].currentProgramCategory = cat
+                        changed = true
+                    }
                 }
             }
+            debugLog("📺 applyXMLTVCategories: matched \(matched)/\(categoriesByChannelID.count) by ch.id, changed=\(changed) (channels.count=\(channels.count))")
             if changed {
                 channels = updated
             }
@@ -1838,8 +1846,13 @@ final class ChannelStore: ObservableObject {
         case .xtreamCodes:
             return try await fetchXtream(baseURL: baseURL, username: username, password: password)
         case .dispatcharrAPI:
+            // v1.7.x: thread serverID + username so Dispatcharr's
+            // API instance can drive silent api_key re-bootstrap on
+            // 401 (Save Credentials Option 1).
             return try await fetchDispatcharr(baseURL: baseURL, apiKey: apiKey,
-                                              authMode: authMode, userAgent: userAgent)
+                                              authMode: authMode, userAgent: userAgent,
+                                              serverID: serverID,
+                                              savedUsername: username)
         }
     }
 
@@ -1953,10 +1966,18 @@ final class ChannelStore: ObservableObject {
 
     private func fetchDispatcharr(baseURL: String, apiKey: String,
                                   authMode: DispatcharrAuthHeaderMode = .xapikey,
-                                  userAgent: String = DeviceInfo.defaultUserAgent) async throws -> ([ChannelDisplayItem], [String]) {
+                                  userAgent: String = DeviceInfo.defaultUserAgent,
+                                  serverID: UUID? = nil,
+                                  savedUsername: String? = nil) async throws -> ([ChannelDisplayItem], [String]) {
         debugLog("🔷 ChannelStore.fetchDispatcharr: starting")
+        // v1.7.x: silent api_key re-bootstrap is gated on a non-nil
+        // serverID + savedUsername. Empty username (server is in
+        // API Key mode without saved credentials) → re-bootstrap is
+        // a no-op and 401s surface to the caller as before.
         let dAPI = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
-                                  userAgent: userAgent, authMode: authMode)
+                                  userAgent: userAgent, authMode: authMode,
+                                  serverID: serverID,
+                                  savedUsername: (savedUsername?.isEmpty ?? true) ? nil : savedUsername)
         let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
 
         // Fire channels + groups concurrently. Current-programs was
@@ -4261,6 +4282,55 @@ struct MainTabView: View {
                 // the entries it needs.
                 await guideStore.seedEPGCache(channels: channelStore.channels, server: activeServer)
                 channelStore.isEPGLoading = false
+
+                // v1.7.x: even when the cache is fresh, fire a
+                // non-blocking grid refresh on Dispatcharr so the
+                // now-airing program slice gets re-enriched with
+                // categories and `programID`s. Two reasons this
+                // matters even with a fresh-cache hit:
+                //   1. The bulk `/api/epg/grid/` endpoint strips
+                //      categories server-side. The cache hit gives
+                //      us program structure (title, time, desc) but
+                //      whatever categories were there came from
+                //      enrichment in a PRIOR session — they're now
+                //      stale for any program the user opens
+                //      Program Info on.
+                //   2. Cached rows from pre-v1.7.x builds were
+                //      persisted before the `programID` column
+                //      existed, so loadFromCache returns programs
+                //      with `programID = nil`. ProgramInfoView's
+                //      lazy-load needs that ID to call
+                //      `/api/epg/programs/<id>/`; without it, the
+                //      modal renders zero pills regardless of how
+                //      good the cache is. Re-running fetchUpcoming
+                //      repopulates `programID` on every program in
+                //      the live window from the fresh grid response.
+                // Fire-and-forget: completes in 5–30s in the
+                // background, depending on EPG size. The user sees
+                // the cached guide instantly; categories tint in
+                // progressively as enrichment results land.
+                if let activeServer, activeServer.type == .dispatcharrAPI {
+                    debugLog("🟢 [Orchestrator] phase 2 EPG: firing background fetchUpcoming on Dispatcharr (cache fresh — refresh categories + repopulate programIDs)")
+                    // GuideStore.fetchUpcoming is @MainActor-isolated
+                    // (it mutates @Published `programs` and writes
+                    // through ChannelStore.shared), so the background
+                    // refresh runs on main with non-blocking awaits
+                    // for the actual network I/O. `Task { }` (not
+                    // `Task.detached`) keeps the body MainActor-bound
+                    // and sidesteps the Sendable wrap on the SwiftData
+                    // `ServerConnection` array we'd otherwise have to
+                    // marshal across an actor boundary.
+                    let bgStart = Date()
+                    Task { @MainActor [allServers] in
+                        let didRefresh = await guideStore.fetchUpcoming(
+                            channels: channelStore.channels,
+                            servers: allServers,
+                            replaceExisting: false
+                        )
+                        let elapsed = Int(Date().timeIntervalSince(bgStart))
+                        debugLog("🟢 [Orchestrator] background fetchUpcoming COMPLETE — didRefresh=\(didRefresh), elapsed=\(elapsed)s (cache-fresh refresh)")
+                    }
+                }
             } else {
                 let coveragePct = Int(coverageRatio * 100)
                 if cacheIsFresh && hasFuturePrograms && !cacheCoverageOK {
