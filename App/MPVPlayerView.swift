@@ -1102,6 +1102,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// render-thread-owned GL resources. Safe to call multiple times: once
         /// the first caller nils the resources, subsequent calls become no-ops.
         private func teardownRenderResourcesOnRenderQueue() {
+            // v1.7.x Issue A round 4: tear down the IOSurface re-attach
+            // watchdog first. The display link is main-thread; since
+            // teardownRenderResourcesOnRenderQueue can be called from
+            // either main (via stop()) or mpvQueue (via MPV_EVENT_
+            // SHUTDOWN), we dispatch to main to invalidate. assumed
+            // safe — invalidate is idempotent and the lock-protected
+            // buffer release inside stopWatchdog is also idempotent.
+            Task { @MainActor [weak self] in
+                self?.stopWatchdog()
+            }
             // renderQueue -> mpvQueue is async-only, so this sync is deadlock-free
             // from both stop() (main thread) and MPV_EVENT_SHUTDOWN (mpvQueue).
             renderQueue.sync { [self] in
@@ -1299,6 +1309,49 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // fires, we know the layer is presenting nothing for the
         // rebuild gap.
         private var fboDestroyedAt: CFAbsoluteTime = 0
+
+        // v1.7.x Issue A round 4: CoreAnimation IOSurface re-attach
+        // watchdog. Three pieces of research (AVSBDL/HDR, libmpv,
+        // other iOS players, all 2026-05-08) converged on the same
+        // root cause: AVSampleBufferDisplayLayer is a CALayer subclass
+        // that publishes its current frame as an IOSurface attached
+        // to the layer tree. When our enqueue stops feeding fresh
+        // PTS values long enough (which happens during the 60-100ms
+        // libmpv render stalls confirmed in the logs), CoreAnimation's
+        // change-detection optimizer can drop the surface attachment
+        // for one VSync. With HDR content (BT.2020 / p010), the EDR
+        // composition path falls back to backgroundColor (black) for
+        // that VSync instead of holding a clamped SDR copy of the
+        // last frame, producing exactly the user-visible single-frame
+        // black flashes Archie reproduced and verified via 60fps
+        // screen capture (avg=0, std=0 single VSyncs).
+        //
+        // The fix is the standard "feed the layer at display refresh"
+        // pattern used by moonlight-ios PR #482 and WebKit's MSE
+        // backend (Bug 181623). A CADisplayLink ticks at the display
+        // refresh rate; on each tick, if the layer hasn't received a
+        // fresh enqueue in `watchdogStaleThreshold` seconds, we
+        // re-enqueue the most recent CMSampleBuffer with a fresh
+        // host-time PTS. That forces CoreAnimation to attach the
+        // IOSurface as a new contents reference every VSync,
+        // defeating the change-detection optimizer that drops the
+        // attachment during gaps. The IOSurface backing is already
+        // valid; we're just kicking the compositor.
+        //
+        // Architecturally-correct fix (v1.8 candidate, NOT shipping
+        // here): migrate the display path to AVSampleBufferVideo
+        // Renderer + AVSampleBufferRenderSynchronizer (iOS 17+,
+        // documented at developer.apple.com). That's how AVPlayer
+        // avoids this symptom natively. Significant rewrite, deferred.
+        private var displayLinkWatchdog: CADisplayLink?
+        private var watchdogLock = os_unfair_lock_s()
+        private var lastEnqueuedSampleBuffer: CMSampleBuffer?
+        private let watchdogStaleThreshold: CFTimeInterval = 0.030  // 30ms
+        // Cumulative count of watchdog-driven re-enqueues, exposed
+        // in FRAME SUMMARY so we can see how often the watchdog
+        // saved a flash. Field-only diagnostic; non-zero means the
+        // watchdog is doing real work.
+        private var watchdogReenqueueCount: Int64 = 0
 
         // v1.7.x Issue A round 2: localize mid-stream black flashes.
         // Archie 2026-05-08 native-UHD test showed late=3 frames
@@ -1853,6 +1906,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         func setupRenderer(layer: CALayer) {
             self.sampleBufferLayer = layer.sublayers?.compactMap { $0 as? AVSampleBufferDisplayLayer }.first
             kickstartIfNeeded()
+            // v1.7.x Issue A round 4: arm the IOSurface re-attach
+            // watchdog now that the layer reference is in place.
+            // See the watchdog-state declaration block for the full
+            // rationale and source list.
+            startWatchdogIfNeeded()
         }
 
         /// Dispatch `start()` on the render queue exactly once.
@@ -2093,6 +2151,130 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #endif
         }
 
+        // MARK: - CoreAnimation IOSurface re-attach watchdog (v1.7.x Issue A)
+
+        /// Start the display-refresh watchdog. Called once after the
+        /// sample buffer layer is in place; idempotent (subsequent
+        /// calls are no-ops). The display link runs at the display's
+        /// preferred refresh rate (60Hz on iPhone, 120Hz on ProMotion)
+        /// and is added to .common run-loop modes so it keeps firing
+        /// during scroll gestures and other tracked-mode work.
+        @MainActor
+        func startWatchdogIfNeeded() {
+            guard displayLinkWatchdog == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(handleWatchdogTick(_:)))
+            // ProMotion-friendly: prefer 60Hz, allow 30-120 range so
+            // iOS picks the display-aligned cadence. The 30Hz floor
+            // guarantees we still tick between mpv frames during
+            // libmpv stalls.
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 60)
+            link.add(to: .main, forMode: .common)
+            displayLinkWatchdog = link
+        }
+
+        /// Tear down the watchdog. Called from the same main-thread
+        /// teardown path that releases the layer. Safe to call
+        /// multiple times.
+        @MainActor
+        func stopWatchdog() {
+            displayLinkWatchdog?.invalidate()
+            displayLinkWatchdog = nil
+            os_unfair_lock_lock(&watchdogLock)
+            lastEnqueuedSampleBuffer = nil
+            os_unfair_lock_unlock(&watchdogLock)
+        }
+
+        /// Display-link tick. Runs on the main thread.
+        ///
+        /// Read `lastEnqueueTime` (touched from renderQueue but
+        /// CFAbsoluteTime is a Double — torn reads are at worst a
+        /// single tick of false positive/negative on Apple silicon,
+        /// not a correctness issue). If the layer hasn't received a
+        /// fresh enqueue in `watchdogStaleThreshold` seconds, copy
+        /// the most recently enqueued sample buffer with a fresh
+        /// host-time PTS and re-enqueue it. The IOSurface backing
+        /// stays the same; we're forcing CoreAnimation to attach it
+        /// as a fresh contents reference for this VSync.
+        ///
+        /// Skipped when the layer is .failed (existing background-
+        /// pause path handles recovery) or not ready for more media
+        /// data (would just be rejected). Watchdog stays silent on
+        /// those paths.
+        @MainActor
+        @objc private func handleWatchdogTick(_ link: CADisplayLink) {
+            let now = CACurrentMediaTime()
+            let lastEnq = lastEnqueueTime
+            let staleAge = now - lastEnq
+            guard staleAge >= watchdogStaleThreshold else { return }
+            guard let layer = sampleBufferLayer else { return }
+            let renderer = layer.sampleBufferRenderer
+            guard renderer.status != .failed,
+                  renderer.isReadyForMoreMediaData else { return }
+
+            // Pull the cached buffer under the lock. Don't hold the
+            // lock through the CMSampleBuffer copy — it's quick but
+            // not free.
+            os_unfair_lock_lock(&watchdogLock)
+            let cached = lastEnqueuedSampleBuffer
+            os_unfair_lock_unlock(&watchdogLock)
+            guard let cached else { return }
+
+            // Re-stamp with current host time. AVSBDL will reject a
+            // sample whose PTS exactly matches a previously-enqueued
+            // sample's PTS, so we must produce a strictly later PTS
+            // every tick.
+            let freshPTS = CMClockGetTime(CMClockGetHostTimeClock())
+            guard let restamped = Self.makeImmediateDisplayCopy(of: cached, at: freshPTS) else { return }
+            renderer.enqueue(restamped)
+
+            watchdogReenqueueCount &+= 1
+            #if DEBUG
+            // Log first re-enqueue + every 60th so we get a clear
+            // signal that the watchdog is firing without flooding
+            // the console during a sustained stall.
+            if watchdogReenqueueCount == 1 || watchdogReenqueueCount % 60 == 0 {
+                let staleMs = staleAge * 1000.0
+                print("[AVSBDL-WATCHDOG] \(streamTag) re-enqueue #\(watchdogReenqueueCount) (stale=\(String(format: "%.0f", staleMs))ms)")
+            }
+            #endif
+        }
+
+        /// Build a CMSampleBuffer that points at the same IOSurface
+        /// as `source` but with a new presentation timestamp and the
+        /// kCMSampleAttachmentKey_DisplayImmediately attachment set.
+        /// CMSampleBufferCreateCopyWithNewTiming preserves the format
+        /// description and image buffer reference, so the GPU
+        /// resources are reused — no extra upload, no extra alloc on
+        /// the GPU side. The DisplayImmediately attachment tells
+        /// AVSBDL to present the frame ASAP rather than scheduling
+        /// it against any internal clock.
+        private static func makeImmediateDisplayCopy(of source: CMSampleBuffer, at pts: CMTime) -> CMSampleBuffer? {
+            var newTiming = CMSampleTimingInfo(
+                duration: .invalid,
+                presentationTimeStamp: pts,
+                decodeTimeStamp: .invalid
+            )
+            var copy: CMSampleBuffer?
+            let status = CMSampleBufferCreateCopyWithNewTiming(
+                allocator: kCFAllocatorDefault,
+                sampleBuffer: source,
+                sampleTimingEntryCount: 1,
+                sampleTimingArray: &newTiming,
+                sampleBufferOut: &copy
+            )
+            guard status == noErr, let buffer = copy else { return nil }
+
+            // Stamp DisplayImmediately on every sample. The attachment
+            // array always has at least one entry per sample for non-
+            // empty CMSampleBuffers; our render-side buffers are
+            // single-sample so we just set it on index 0.
+            if let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: true) as? [Any],
+               let dict = attachments.first as? NSMutableDictionary {
+                dict[kCMSampleAttachmentKey_DisplayImmediately as String] = kCFBooleanTrue
+            }
+            return buffer
+        }
+
         // MARK: - Background OpenGL ES Render + Display via AVSampleBufferDisplayLayer
 
         /// Called from mpv's update callback — schedules render on background thread.
@@ -2328,6 +2510,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 nonisolated(unsafe) let sb = sampleBuffer
                 sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
                 enqueued = true
+                // v1.7.x Issue A round 4: cache the latest enqueued
+                // buffer for the IOSurface re-attach watchdog. Stored
+                // under watchdogLock so the main-thread display-link
+                // tick can read it safely.
+                os_unfair_lock_lock(&watchdogLock)
+                lastEnqueuedSampleBuffer = sb
+                os_unfair_lock_unlock(&watchdogLock)
                 // v1.7.x: clear the failed-count once we successfully
                 // enqueue a frame, so a transient blip doesn't carry
                 // the count forward into a future event.
@@ -2432,7 +2621,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let variance = frameIntervals.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / Double(frameIntervals.count)
                     return sqrt(variance)
                 }()
-                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
+                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
 
             lastEnqueueTime = enqueueTime
