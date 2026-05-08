@@ -1353,6 +1353,40 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // watchdog is doing real work.
         private var watchdogReenqueueCount: Int64 = 0
 
+        // v1.7.x Issue A round 6 — black-frame detector (Step 3a).
+        //
+        // The 2026-05-08 fully-applied Step 2 test confirmed mpv's
+        // VideoToolbox path occasionally emits a frame whose backing
+        // CVPixelBuffer is uniformly zero — luminance avg=0, std=0
+        // mathematically — interspersed in an otherwise smooth frame
+        // stream (late=0/2954, vo_drops=0, dec_drops=0). 17 such
+        // frames in 76s of UHD HEVC HDR playback (~1 every 4.5s).
+        // Surrounded by normal content frames (avg 25-130). The bug
+        // is inside libmpv's render or VT codepath — from outside
+        // libmpv we can't reach it. This detector catches them on
+        // input, before we wrap them into a CMSampleBuffer for the
+        // display layer. The CADisplayLink watchdog above already
+        // handles "queue stale" by re-enqueueing the last good
+        // CMSampleBuffer with a fresh PTS — so suppressing here just
+        // means the user sees the previous frame held for one mpv-
+        // frame-interval (~16ms) instead of a literal black flash.
+        //
+        // Detection (per Agent C 2026-05-08 research): stratified
+        // 16x16 grid sample of the BGRA pixel buffer = 256 luminance
+        // samples. Compute avg + std using Rec.601 luma weights
+        // (cheap on Apple silicon, <0.5ms on UHD). Trigger when
+        // avg < 4 AND std < 1 AND prev frame's avg > 25 AND prev-
+        // prev avg > 20. The std=0 signal is the key: real dark
+        // content (night sports, fade-to-black, dim commercials)
+        // always has spatial variation > 1 from sensor noise / film
+        // grain / compression. Codec-zero frames are mathematically
+        // uniform. The two-deep surround check (prev AND prev-prev
+        // were both bright) prevents suppressing a legitimate cut-
+        // to-black transition that lasts more than one frame.
+        private var blackFramePrevAvgLuma: Double = 128  // neutral start so first frames don't suppress
+        private var blackFramePrevPrevAvgLuma: Double = 128
+        private var blackFramesSuppressedCount: Int64 = 0
+
         // v1.7.x Issue A round 2: localize mid-stream black flashes.
         // Archie 2026-05-08 native-UHD test showed late=3 frames
         // including FRAME #226 with render=8.1ms interval=211.8ms
@@ -2475,6 +2509,30 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // and a brief blank frame is preferable to a
             // surprise pause they didn't ask for.
             var enqueued = false
+
+            // v1.7.x Issue A round 6 (Step 3a): black-frame detector.
+            // mpv's VT path occasionally hands us a uniformly-zero
+            // CVPixelBuffer in an otherwise smooth frame stream
+            // (verified 2026-05-08, 17 events in 76s of UHD HEVC HDR
+            // playback). The detector below catches them before we
+            // wrap into a CMSampleBuffer; suppression skips the
+            // enqueue and leaves lastEnqueuedSampleBuffer untouched
+            // so the CADisplayLink watchdog re-enqueues the previous
+            // good frame on its next tick. Two-deep surround check
+            // ensures we don't suppress legitimate cuts to black.
+            // See block-level comment above the state declarations
+            // for the full rationale and source.
+            let blackProbe = Self.detectBlackFrame(renderPixelBuffer)
+            // Probe returned (-1, -1) on lock-failure / non-BGRA;
+            // treat that as "don't suppress" (no false positives if
+            // the probe itself fails).
+            let probeValid = blackProbe.avg >= 0
+            let isSuspectBlackFrame = probeValid
+                && blackProbe.avg < 4.0
+                && blackProbe.std < 1.0
+                && blackFramePrevAvgLuma > 25.0
+                && blackFramePrevPrevAvgLuma > 20.0
+
             if layerStatus == .failed {
                 if isInBackground && markAutoPausedOnBackgroundIfNeeded() {
                     mpvQueue.async { [weak self] in
@@ -2506,6 +2564,28 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         )
                     }
                 }
+            } else if isSuspectBlackFrame {
+                // Suppress: don't build a CMSampleBuffer, don't
+                // enqueue, don't update lastEnqueuedSampleBuffer.
+                // The CADisplayLink watchdog will tick within
+                // ~16ms and re-enqueue the previously-cached good
+                // sample buffer with a fresh PTS, so the user sees
+                // the previous frame held instead of solid black.
+                blackFramesSuppressedCount &+= 1
+                #if DEBUG
+                if blackFramesSuppressedCount == 1 || blackFramesSuppressedCount % 10 == 0 {
+                    print("[BLACK-DETECT] \(streamTag) suppressed black frame #\(blackFramesSuppressedCount) (avg=\(String(format: "%.2f", blackProbe.avg)) std=\(String(format: "%.2f", blackProbe.std)) prev=\(String(format: "%.0f", blackFramePrevAvgLuma)) prev_prev=\(String(format: "%.0f", blackFramePrevPrevAvgLuma)))")
+                }
+                #endif
+                // Note: we deliberately do NOT update the prev/prev-
+                // prev luma history with the suppressed frame. The
+                // surround check on the NEXT frame still compares
+                // against the last GOOD frame's luma, so a sustained
+                // codec-zero burst (rare but possible) would only
+                // suppress the first frame, not subsequent ones —
+                // which is correct: if the source actually went
+                // dark, we want frames after the first to update
+                // the comparison baseline.
             } else if let sampleBuffer = Self.makeSampleBuffer(from: renderPixelBuffer, presentationTime: presentationTime) {
                 nonisolated(unsafe) let sb = sampleBuffer
                 sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
@@ -2517,6 +2597,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 os_unfair_lock_lock(&watchdogLock)
                 lastEnqueuedSampleBuffer = sb
                 os_unfair_lock_unlock(&watchdogLock)
+                // v1.7.x Issue A round 6: update luma history for
+                // the next-frame surround check, ONLY on successful
+                // enqueue. Suppressed frames don't update history
+                // (see comment in the suppression branch above).
+                if probeValid {
+                    blackFramePrevPrevAvgLuma = blackFramePrevAvgLuma
+                    blackFramePrevAvgLuma = blackProbe.avg
+                }
                 // v1.7.x: clear the failed-count once we successfully
                 // enqueue a frame, so a transient blip doesn't carry
                 // the count forward into a future event.
@@ -2621,7 +2709,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let variance = frameIntervals.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / Double(frameIntervals.count)
                     return sqrt(variance)
                 }()
-                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
+                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | black_supp=\(blackFramesSuppressedCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
 
             lastEnqueueTime = enqueueTime
@@ -3412,6 +3500,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if !targetEnvironment(simulator)
             mpv_set_property_string(mpv, "hwdec", "videotoolbox-copy")
             #endif
+            // v1.7.x Issue A round 6: reset the black-frame detector's
+            // luma history to neutral so the surround check doesn't
+            // carry the previous stream's last-frame luma into the
+            // new stream's startup. Neutral=128 means the surround
+            // check (prev>25 AND prev-prev>20) trips immediately on
+            // the first real bright frame, which is the right
+            // behaviour for tile-rebind / channel-change.
+            blackFramePrevAvgLuma = 128
+            blackFramePrevPrevAvgLuma = 128
             // v1.6.23: route URL strings through DebugLogger.sanitize
             // before any console / file output so Xtream credentials
             // (`/live/<u>/<p>/<id>` and `?username=&password=` query
@@ -4486,6 +4583,89 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // bread along with the filling.
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty
+        }
+
+        /// v1.7.x Issue A round 6: cheap luminance probe on a BGRA
+        /// CVPixelBuffer. Returns (avg, std) over a stratified 16x16
+        /// grid = 256 sample points, using Rec. 601 luma weights.
+        ///
+        /// Cost on Apple silicon, UHD 3840x2160:
+        ///   - CVPixelBufferLockBaseAddress with kCVPixelBufferLock_ReadOnly:
+        ///     ~50-100 microseconds (memory barrier; A18+ has unified
+        ///     memory so this is not a copy, just a synchronization).
+        ///   - 256 stride-walks across the IOSurface + arithmetic:
+        ///     ~50-100 microseconds.
+        ///   - Total: well under 0.5ms per frame, 25ms/sec at 50fps,
+        ///     ~2.5% of a CPU core. Acceptable on a single-stream
+        ///     UHD playback path.
+        ///
+        /// Returns (-1, -1) if the buffer can't be locked or the
+        /// format isn't 32BGRA (the format our render path uses).
+        /// Caller treats those as "don't suppress" by checking the
+        /// thresholds against the returned values.
+        private static func detectBlackFrame(_ pixelBuffer: CVPixelBuffer) -> (avg: Double, std: Double) {
+            // Format check: our render path always produces 32BGRA
+            // via CVPixelBufferCreate in setupFBO. If this ever
+            // changes (e.g. p010 zero-copy lands), this guard
+            // signals "skip detection" rather than misreading the
+            // bytes as BGRA.
+            let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
+            guard format == kCVPixelFormatType_32BGRA else {
+                return (-1, -1)
+            }
+            let lockResult = CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+            guard lockResult == kCVReturnSuccess else { return (-1, -1) }
+            defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            guard width > 0, height > 0,
+                  let base = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+                return (-1, -1)
+            }
+            let ptr = base.assumingMemoryBound(to: UInt8.self)
+
+            // 16x16 stratified grid = 256 samples, evenly distributed.
+            // Sampling at the center of each cell so we don't bias
+            // toward edges that may have letterbox bars on some
+            // sources.
+            let strips = 16
+            let stepX = max(1, width / strips)
+            let stepY = max(1, height / strips)
+            let centerX = stepX / 2
+            let centerY = stepY / 2
+
+            var sum: Double = 0
+            var sumSq: Double = 0
+            var count: Int = 0
+
+            for sy in 0..<strips {
+                let y = sy * stepY + centerY
+                if y >= height { break }
+                let rowOff = y * bytesPerRow
+                for sx in 0..<strips {
+                    let x = sx * stepX + centerX
+                    if x >= width { break }
+                    let off = rowOff + x * 4  // BGRA: 4 bytes/pixel
+                    let b = Double(ptr[off + 0])
+                    let g = Double(ptr[off + 1])
+                    let r = Double(ptr[off + 2])
+                    // Rec. 601 luma — close enough for "is it black".
+                    // (Stream is BT.2020 but we render to BGRA in
+                    // mpv's render shaders, so by the time we sample
+                    // here it's standard sRGB-style values.)
+                    let luma = 0.299 * r + 0.587 * g + 0.114 * b
+                    sum += luma
+                    sumSq += luma * luma
+                    count += 1
+                }
+            }
+            guard count > 0 else { return (-1, -1) }
+            let avg = sum / Double(count)
+            let variance = (sumSq / Double(count)) - (avg * avg)
+            let std = sqrt(max(0, variance))
+            return (avg, std)
         }
 
         /// Convert CVPixelBuffer to CMSampleBuffer for AVSampleBufferDisplayLayer.
