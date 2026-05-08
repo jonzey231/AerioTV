@@ -1276,6 +1276,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // rebuild gap.
         private var fboDestroyedAt: CFAbsoluteTime = 0
 
+        // v1.7.x Issue A round 2: localize mid-stream black flashes.
+        // Archie 2026-05-08 native-UHD test showed late=3 frames
+        // including FRAME #226 with render=8.1ms interval=211.8ms
+        // — mpv didn't ASK us to render for 200ms, then the actual
+        // render call returned in 8ms. That isolates the stall to
+        // libmpv's internal pipeline (decoder/demuxer/render-context),
+        // not our render or present path. lastScheduleRenderTime
+        // tracks the most recent mpv update-callback fire so a long
+        // silence shows up as a single [MPV-CALLBACK-GAP] line.
+        private var lastScheduleRenderTime: CFAbsoluteTime = 0
+
         init(urls: [URL], headers: [String: String], isLive: Bool,
              progressStore: PlayerProgressStore,
              logStore: AttemptLogStore,
@@ -2062,6 +2073,26 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         /// Called from mpv's update callback — schedules render on background thread.
         func scheduleRender() {
+            // v1.7.x Issue A: log silences in the mpv update-callback
+            // stream. Normal callback cadence on a smooth stream is
+            // ~16-33ms (matches the frame interval). Anything > 100ms
+            // means libmpv's internal pipeline stalled — decoder
+            // waiting for input, demuxer paused for cache, render-
+            // context blocked. Threshold is generous (100ms vs the
+            // ~33ms expected) so we only log real anomalies, not
+            // normal jitter. The first gap of a session is suppressed
+            // (lastScheduleRenderTime starts at 0).
+            let now = CFAbsoluteTimeGetCurrent()
+            if lastScheduleRenderTime > 0 {
+                let gapMs = (now - lastScheduleRenderTime) * 1000.0
+                if gapMs > 100 {
+                    #if DEBUG
+                    print("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms (libmpv internal stall — decoder/demuxer/render-context, not our render path)")
+                    #endif
+                }
+            }
+            lastScheduleRenderTime = now
+
             os_unfair_lock_lock(&renderLock)
             let pending = renderPending
             renderPending = true
@@ -2250,6 +2281,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let enqueueTime = CACurrentMediaTime()
             let intervalMs = lastEnqueueTime > 0 ? (enqueueTime - lastEnqueueTime) * 1000.0 : 0
             let expectedIntervalMs = fps > 0 ? 1000.0 / fps : 33.3
+            // v1.7.x Issue A: split present-time out of the existing
+            // renderMs (which only covers mpv_render_context_render +
+            // glFlush, ending at renderEnd). presentMs is everything
+            // between renderEnd and enqueueTime — i.e., the failed-
+            // layer check + makeSampleBuffer + AVSBDL.enqueue. Lets
+            // us tell layer-side stalls (CoreMedia/AVSBDL) apart from
+            // libmpv-side stalls. If render is slow → mpv. If present
+            // is slow → CoreMedia / AVSampleBufferDisplayLayer. If
+            // both are normal but interval is huge → mpv was silent
+            // (catch this via [MPV-CALLBACK-GAP]).
+            let presentMs = (enqueueTime - renderEnd) * 1000.0
 
             // ── Per-frame diagnostics ──
             // DEBUG-only, with tight frame caps. This block previously
@@ -2278,8 +2320,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // 2× expected) and hard failures (layer not ready / failed
             // / enqueue rejected). Fast-arrival bursts are expected and
             // no longer logged.
+            // v1.7.x Issue A: presentMs > 33 flags layer-side stalls
+            // (CoreMedia / AVSampleBufferDisplayLayer). With renderMs
+            // already gating libmpv-side stalls (see lateFrameCount
+            // increment above), this gives us per-frame breakdown of
+            // where the slow path is when an interval anomaly fires.
             let isAnomaly = intervalMs > 0 && (
                 intervalMs > expectedIntervalMs * 2.0 ||
+                presentMs > 33.0 ||
                 !layerReady || layerStatus == .failed || !enqueued
             )
 
@@ -2288,7 +2336,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // `streamTag` up front so log consumers can filter /
                 // group per channel (e.g. `grep "NBC Sports"` to see
                 // just that tile's frame history).
-                print("\(tag) \(streamTag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) pts=\(String(format: "%.3f", CMTimeGetSeconds(presentationTime)))s ready=\(layerReady) enqueued=\(enqueued) status=\(layerStatus == .failed ? "FAILED" : "ok")")
+                print("\(tag) \(streamTag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms present=\(String(format: "%.1f", presentMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) pts=\(String(format: "%.3f", CMTimeGetSeconds(presentationTime)))s ready=\(layerReady) enqueued=\(enqueued) status=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
             #endif
 
