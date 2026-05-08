@@ -1375,14 +1375,26 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // 16x16 grid sample of the BGRA pixel buffer = 256 luminance
         // samples. Compute avg + std using Rec.601 luma weights
         // (cheap on Apple silicon, <0.5ms on UHD). Trigger when
-        // avg < 4 AND std < 1 AND prev frame's avg > 25 AND prev-
-        // prev avg > 20. The std=0 signal is the key: real dark
-        // content (night sports, fade-to-black, dim commercials)
-        // always has spatial variation > 1 from sensor noise / film
-        // grain / compression. Codec-zero frames are mathematically
-        // uniform. The two-deep surround check (prev AND prev-prev
-        // were both bright) prevents suppressing a legitimate cut-
-        // to-black transition that lasts more than one frame.
+        // avg < 10 AND std < 8 AND prev frame's avg > 25 AND prev-
+        // prev avg > 20. The two-deep surround check (prev AND
+        // prev-prev were both bright) prevents suppressing a
+        // legitimate cut-to-black transition that lasts more than
+        // one frame.
+        //
+        // v1.7.x 3a-tighten (2026-05-08): initial release shipped
+        // with avg<4 AND std<1, calibrated for pure codec-zero
+        // (all bytes mathematically zero). Verification recording
+        // showed the bug also produces near-uniform-zero buffers
+        // with small partial-render slivers carried over from the
+        // previous frame, which pushes both avg and std above the
+        // tight thresholds: one observed leak had YAVG=7 and would
+        // never have hit avg<4. Loosened to avg<10 AND std<8 to
+        // catch the partial-corruption class. Real dark content
+        // sits at YAVG 16-30 on limited-range YCbCr with sensor
+        // noise pushing std above 8, so the surround check
+        // (prev_avg > 25, prev_prev_avg > 20) is what actually
+        // protects legitimate dark content; the avg/std numbers
+        // are just the "is this frame degenerate" filter.
         private var blackFramePrevAvgLuma: Double = 128  // neutral start so first frames don't suppress
         private var blackFramePrevPrevAvgLuma: Double = 128
         private var blackFramesSuppressedCount: Int64 = 0
@@ -2527,9 +2539,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // treat that as "don't suppress" (no false positives if
             // the probe itself fails).
             let probeValid = blackProbe.avg >= 0
+            // v1.7.x 3a-tighten (2026-05-08): loosened from avg<4
+            // and std<1 (pure codec-zero only) to avg<10 and std<8
+            // (codec-zero + partial-corruption with small carry-
+            // over slivers). Verification showed the bug produces
+            // both classes; the surround check below is what
+            // protects legitimate dark content. See block comment
+            // above the state declarations for the full rationale.
             let isSuspectBlackFrame = probeValid
-                && blackProbe.avg < 4.0
-                && blackProbe.std < 1.0
+                && blackProbe.avg < 10.0
+                && blackProbe.std < 8.0
                 && blackFramePrevAvgLuma > 25.0
                 && blackFramePrevPrevAvgLuma > 20.0
 
