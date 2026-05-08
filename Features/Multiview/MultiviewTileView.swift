@@ -430,6 +430,9 @@ struct MultiviewTileView: View {
     @ViewBuilder
     private var tileVideoContent: some View {
         ZStack {
+            // v1.7.x: black backdrop behind the representable, same
+            // pattern as `tappableRegion` and `PlayerView.playerView`.
+            Color.black
             MPVPlayerViewRepresentable(
                 urls: [tile.streamURL],
                 headers: tile.headers,
@@ -607,6 +610,11 @@ struct MultiviewTileView: View {
     /// `Button` action isn't stolen by these parent gestures.
     private var tappableRegion: some View {
         ZStack {
+            // v1.7.x: black backdrop directly behind the representable
+            // so the AerioTV navy theme background can't leak through
+            // during the ~1.5s window before the first decoded frame
+            // lands. Mirror of the same fix in PlayerView.swift.
+            Color.black
             // The actual mpv-backed video view. It's at the bottom of
             // the ZStack so overlays paint on top.
             MPVPlayerViewRepresentable(

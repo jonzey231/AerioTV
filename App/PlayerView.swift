@@ -512,6 +512,19 @@ private struct PlayerRootView: View {
     @ViewBuilder
     private var playerView: some View {
         #if canImport(Libmpv)
+        // v1.7.x: black backdrop directly behind the representable so
+        // the AerioTV navy theme background can't leak through during
+        // the ~1.5s window before the first decoded frame lands. The
+        // outer ZStack at body level already paints black, but on
+        // some layout paths (UHD letterbox, multiview tile transitions)
+        // SwiftUI's UIViewControllerRepresentable host appears to
+        // briefly show through to the SwiftUI background fill rather
+        // than the ZStack's Color.black. Adding an explicit
+        // `.background(Color.black)` on the representable closes that
+        // gap regardless of which parent is rendering. Combined with
+        // the `view.backgroundColor = .black` set in viewDidLoad, this
+        // is a double-fence: the UIKit side is black, AND the SwiftUI
+        // side is black.
         MPVPlayerViewRepresentable(
             urls: urls, headers: headers,
             isLive: isLive,
@@ -522,6 +535,7 @@ private struct PlayerRootView: View {
             logStore: logStore,
             onFatalError: { err in lastError = err; state = .error }
         )
+        .background(Color.black)
         #else
         Text("MPV engine not available on this platform")
             .foregroundColor(.red)

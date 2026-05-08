@@ -315,6 +315,20 @@ class MPVPlayerViewController: UIViewController {
         view.isUserInteractionEnabled = false
         view.layer.isOpaque = true
 
+        // v1.7.x: paint the player's host UIView and the sample buffer
+        // layer black explicitly so the AerioTV navy parent
+        // (Color(hex: "0A1628") = appBackground) doesn't bleed through
+        // during the ~1-2s window between viewDidLoad and the first
+        // decoded frame landing in `sampleBufferLayer`. Without this,
+        // users on UHD / high-bitrate streams (Sky Sports F1 UHD, p010
+        // 10-bit HEVC where the videotoolbox-copy fallback adds
+        // ~1.5s before any frame renders) see a brief navy "blue
+        // screen" between channel tap and first frame. Black is the
+        // industry-standard pre-frame state for video players (matches
+        // AVPlayerViewController and tvOS's video playback paradigm).
+        view.backgroundColor = .black
+        sampleBufferLayer.backgroundColor = UIColor.black.cgColor
+
         // AVSampleBufferDisplayLayer for vsync-synchronized presentation (both platforms).
         //
         // `.resizeAspect` keeps the source aspect ratio, letterboxing
@@ -726,7 +740,23 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// (open sheet → pick channel → sheet dismisses) stay under
         /// the threshold, while genuine "I left this paused for a
         /// while" pauses still snap forward on resume.
-        private static let snapToLiveMinPauseSeconds: TimeInterval = 2.0
+        ///
+        /// **History:** v1.7.x originally set this to 2.0s. Archie's
+        /// 2026-05-08 multiview tile-add testing surfaced that the
+        /// picker dwell on iPhone 17 Pro Max consistently lands at
+        /// 2.7s (dialog dismiss animation + tile re-layout +
+        /// SwiftUI diff settle). Above the 2s threshold means every
+        /// existing tile fires `loadfile replace` on every tile-add
+        /// → cascading 2-3s freezes per tile, even when no user
+        /// intent is to leave the tiles paused. Bumped to 5s to
+        /// cover the observed 2.7s picker dwell with comfortable
+        /// margin. Trade-off: a user who genuinely pauses (e.g.,
+        /// app backgrounded for 3-4s) won't get an explicit snap
+        /// to live edge, but mpv's live cache is 5s deep, so they
+        /// resume from at-most-5s-behind which is visually
+        /// indistinguishable from live for most live content. Long
+        /// idles (>5s) still snap-to-live as before.
+        private static let snapToLiveMinPauseSeconds: TimeInterval = 5.0
 
         /// Called from `updateUIViewController`. Sends `mute=0` when
         /// the tile becomes audio-active, `mute=1` otherwise. No-op
@@ -818,7 +848,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 targetAID = "auto"
             }
             let targetMute: Int32 = isActive ? 0 : 1
+            // v1.7.x: track wall-clock time around the audio-focus
+            // transition. Archie 2026-05-08 reported "occasional
+            // freeze or delay" during rapid focus switching but
+            // wasn't sure if it was AerioTV or upstream. Logging
+            // the time from intent → mpvQueue dispatch → property
+            // write completion lets us see (a) main-thread queue
+            // depth at the moment, (b) mpvQueue serial-depth, and
+            // (c) the AudioUnit reconfig latency. Anything > 200ms
+            // total indicates the AudioUnit reopen is genuinely
+            // slow on the device, which is the underlying
+            // limitation we'd need a pre-seek-on-acquire to
+            // address. Anything < 50ms but with user-perceived
+            // delay points at the underlying stream's catch-up
+            // (mpv replays cached audio when AID flips to auto).
+            let intentTime = CFAbsoluteTimeGetCurrent()
+            let strategy = useDecoderOffStrategy ? "decoder-off" : "mute-only"
+            let tileCount = MultiviewStore.shared.tiles.count
             mpvQueue.async { [weak self] in
+                let dispatchTime = CFAbsoluteTimeGetCurrent()
                 guard let self, let mpv = self.activeMPVHandle() else { return }
                 if self.lastWrittenAID != targetAID {
                     mpv_set_property_string(mpv, "aid", targetAID)
@@ -828,6 +876,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     var flag = targetMute
                     mpv_set_property(mpv, "mute", MPV_FORMAT_FLAG, &flag)
                     self.lastWrittenMute = targetMute
+                }
+                let writeTime = CFAbsoluteTimeGetCurrent()
+                let queueLatencyMs = (dispatchTime - intentTime) * 1000.0
+                let writeLatencyMs = (writeTime - dispatchTime) * 1000.0
+                let totalMs = (writeTime - intentTime) * 1000.0
+                if totalMs > 50 {
+                    #if DEBUG
+                    print("[MV-Audio] \(self.streamTag) focus=\(isActive ? "ACQUIRE" : "RELEASE") strategy=\(strategy) N=\(tileCount) queueLat=\(String(format: "%.1f", queueLatencyMs))ms writeLat=\(String(format: "%.1f", writeLatencyMs))ms total=\(String(format: "%.1f", totalMs))ms")
+                    #endif
                 }
             }
         }
@@ -1166,6 +1223,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var totalFrameCount: Int64 = 0                // Total frames rendered
         private var coalescedFrameCount: Int64 = 0            // Render requests coalesced (dropped)
         private let frameSampleSize = 120                     // Rolling window size (~2-4s at 30-60fps)
+
+        // v1.7.x black-flash diagnostics. Cleared on successful enqueue
+        // so a transient blip doesn't carry forward into a future event.
+        // Logged on first occurrence + every 30th to capture sustained
+        // failure runs without spamming.
+        private var layerFailedFrameCount: Int64 = 0          // Foreground sample-buffer-renderer .failed events
+        private var makeSampleBufferNilCount: Int64 = 0       // CMSampleBuffer construction failures
 
         init(urls: [URL], headers: [String: String], isLive: Bool,
              progressStore: PlayerProgressStore,
@@ -2005,11 +2069,56 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     #if DEBUG
                     print("[MPV-BG] Background: sampleBufferRenderer FAILED — auto-paused mpv to stop wasted decode work")
                     #endif
+                } else if !isInBackground {
+                    // v1.7.x diagnostic: foreground sample-buffer-layer
+                    // failures present as black-screen flashes during
+                    // playback (Archie 2026-05-08, UHD/high-bitrate).
+                    // Log every 30th occurrence so we capture the
+                    // pattern without flooding the log on a sustained
+                    // failure run. Includes layer-failure-error if
+                    // we can pull it from the renderer (iOS 17+ exposes
+                    // .error on the renderer).
+                    layerFailedFrameCount &+= 1
+                    if layerFailedFrameCount == 1 || layerFailedFrameCount % 30 == 0 {
+                        let err = sampleBufferLayer?.sampleBufferRenderer.error?.localizedDescription ?? "nil"
+                        #if DEBUG
+                        print("[MPV-LAYER] \(streamTag) FOREGROUND layer .failed (frame #\(layerFailedFrameCount), enqueue skipped) — error=\(err)")
+                        #endif
+                        DebugLogger.shared.log(
+                            "🔴 [MPV-LAYER] foreground .failed tile=\(tileID ?? "single") frame=\(layerFailedFrameCount) error=\(err)",
+                            category: "MPV-STREAM", level: .error
+                        )
+                    }
                 }
             } else if let sampleBuffer = Self.makeSampleBuffer(from: renderPixelBuffer, presentationTime: presentationTime) {
                 nonisolated(unsafe) let sb = sampleBuffer
                 sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
                 enqueued = true
+                // v1.7.x: clear the failed-count once we successfully
+                // enqueue a frame, so a transient blip doesn't carry
+                // the count forward into a future event.
+                if layerFailedFrameCount > 0 {
+                    #if DEBUG
+                    print("[MPV-LAYER] \(streamTag) layer recovered after \(layerFailedFrameCount) failed frames")
+                    #endif
+                    layerFailedFrameCount = 0
+                }
+            } else {
+                // v1.7.x: makeSampleBuffer returned nil. This is rare
+                // (CMSampleBuffer construction failure indicates either
+                // a corrupt pixel buffer from libmpv's render path or
+                // an OOM-class CoreMedia allocator failure). Log so we
+                // can correlate with user-visible black flashes.
+                makeSampleBufferNilCount &+= 1
+                if makeSampleBufferNilCount == 1 || makeSampleBufferNilCount % 30 == 0 {
+                    #if DEBUG
+                    print("[MPV-LAYER] \(streamTag) makeSampleBuffer returned nil (count=\(makeSampleBufferNilCount))")
+                    #endif
+                    DebugLogger.shared.log(
+                        "🟠 [MPV-LAYER] makeSampleBuffer nil tile=\(tileID ?? "single") count=\(makeSampleBufferNilCount)",
+                        category: "MPV-STREAM", level: .warning
+                    )
+                }
             }
 
             let enqueueTime = CACurrentMediaTime()
