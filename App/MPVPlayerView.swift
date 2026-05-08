@@ -352,6 +352,16 @@ class MPVPlayerViewController: UIViewController {
 
         #if DEBUG
         print("[MPV-DIAG] viewDidLoad: frame=\(view.frame), inWindow=\(view.window != nil)")
+        // v1.7.x Issue A round 3: log the AVSBDL initial config so
+        // the next test reveals whether anything about the layer
+        // setup (controlTimebase, color decoration policy, etc.) is
+        // contributing to the single-VSync black flashes during
+        // libmpv stalls.
+        let tb = sampleBufferLayer.controlTimebase
+        var rate: Double = -1
+        if let tb { rate = CMTimebaseGetRate(tb) }
+        let timebaseDesc: String = tb == nil ? "nil" : "set(rate=\(rate))"
+        print("[AVSBDL-INIT] videoGravity=\(sampleBufferLayer.videoGravity.rawValue) frame=\(sampleBufferLayer.frame) controlTimebase=\(timebaseDesc) opaque=\(sampleBufferLayer.isOpaque)")
         #endif
 
         coordinator?.setupRenderer(layer: view.layer)
@@ -1237,6 +1247,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // failure runs without spamming.
         private var layerFailedFrameCount: Int64 = 0          // Foreground sample-buffer-renderer .failed events
         private var makeSampleBufferNilCount: Int64 = 0       // CMSampleBuffer construction failures
+
+        // v1.7.x Issue A round 3 diagnostics — track AVSBDL state
+        // transitions, since Archie's 2026-05-08 screen recording
+        // showed single-VSync solid-black flashes during libmpv
+        // render stalls even though our renderer.status stayed at
+        // .rendering throughout. Hypothesis: AVSampleBufferDisplay
+        // Layer is internally clearing (or flagging requiresFlush)
+        // during the queue-empty window. These two trackers log the
+        // moment the layer transitions, so the next test log can
+        // confirm or rule out the hypothesis.
+        private var lastObservedLayerStatus: AVQueuedSampleBufferRenderingStatus = .unknown
+        private var lastObservedRequiresFlush: Bool = false
 
         // v1.7.x Issue A diagnostics — UHD / 10-bit HEVC blue screen
         // (pre-first-frame) and periodic black flashes (mid-stream).
@@ -2197,6 +2219,33 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Check display layer readiness before enqueue
             let layerReady = sampleBufferLayer?.sampleBufferRenderer.isReadyForMoreMediaData ?? false
             let layerStatus = sampleBufferLayer?.sampleBufferRenderer.status
+
+            // v1.7.x Issue A round 3: log AVSBDL state transitions so
+            // the next test log shows whether the layer is internally
+            // clearing or flagging requiresFlush during the libmpv
+            // render stalls (Archie's screen recording showed
+            // single-VSync black flashes that we believe correspond
+            // to layer-side auto-clear behavior, not anything mpv-
+            // side). Logged on transition only, so smooth playback
+            // produces zero noise.
+            if let layer = sampleBufferLayer {
+                let currentStatus = layer.sampleBufferRenderer.status
+                if currentStatus != lastObservedLayerStatus {
+                    let from = Self.statusName(lastObservedLayerStatus)
+                    let to = Self.statusName(currentStatus)
+                    #if DEBUG
+                    print("[AVSBDL-STATUS] \(streamTag) renderer.status: \(from) → \(to)")
+                    #endif
+                    lastObservedLayerStatus = currentStatus
+                }
+                let currentFlush = layer.requiresFlushToResumeDecoding
+                if currentFlush != lastObservedRequiresFlush {
+                    #if DEBUG
+                    print("[AVSBDL-FLUSH] \(streamTag) requiresFlushToResumeDecoding: \(lastObservedRequiresFlush) → \(currentFlush)")
+                    #endif
+                    lastObservedRequiresFlush = currentFlush
+                }
+            }
 
             // v1.6.8 lock-cycle fix: when the sample-buffer layer
             // is in `.failed` state, skip the enqueue entirely —
@@ -4125,6 +4174,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             "co located POCs unavailable",
             "No frame decoded?"
         ]
+
+        /// Human-readable name for AVQueuedSampleBufferRenderingStatus
+        /// raw values, used by the v1.7.x [AVSBDL-STATUS] transition
+        /// log. iOS 17+ defines: 0 = .unknown, 1 = .rendering,
+        /// 2 = .failed. Anything else is logged as raw value so a
+        /// future iOS adding a new case still produces useful logs.
+        private static func statusName(_ status: AVQueuedSampleBufferRenderingStatus) -> String {
+            switch status {
+            case .unknown:   return "unknown"
+            case .rendering: return "rendering"
+            case .failed:    return "failed"
+            @unknown default: return "raw(\(status.rawValue))"
+            }
+        }
 
         private static func isNoisyRecoveryMessage(_ text: String) -> Bool {
             for needle in noisyRecoverySubstrings where text.contains(needle) {
