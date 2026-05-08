@@ -2238,7 +2238,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     #endif
                     lastObservedLayerStatus = currentStatus
                 }
-                let currentFlush = layer.requiresFlushToResumeDecoding
+                // iOS 18 deprecated AVSampleBufferDisplayLayer.requiresFlushToResumeDecoding
+                // in favour of the renderer-side property of the same
+                // name, accessed via the layer's sampleBufferRenderer.
+                // Functionally identical, just on AVSampleBufferVideo
+                // Renderer (iOS 17+). We already use the renderer-
+                // side enqueue API throughout, so this matches our
+                // existing path.
+                let currentFlush = layer.sampleBufferRenderer.requiresFlushToResumeDecoding
                 if currentFlush != lastObservedRequiresFlush {
                     #if DEBUG
                     print("[AVSBDL-FLUSH] \(streamTag) requiresFlushToResumeDecoding: \(lastObservedRequiresFlush) → \(currentFlush)")
