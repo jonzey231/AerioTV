@@ -243,6 +243,30 @@ class MPVPlayerViewController: UIViewController {
     /// Used on both iOS (PiP-compatible) and tvOS (tear-free).
     let sampleBufferLayer = AVSampleBufferDisplayLayer()
 
+    /// v1.7.x Step 3b-lookahead: AVSampleBufferRenderSynchronizer drives
+    /// the layer's renderer with an authoritative master clock so the
+    /// compositor can't drop the IOSurface attachment during a lull.
+    /// Pre-3b the renderer had no clock authority and relied on
+    /// `enqueue` semantically meaning "this is the current frame, show
+    /// it now"; that left a single-VSync window where the IOSurface
+    /// attachment could be optimised away by CoreAnimation's change
+    /// detector, producing the YAVG=0 black flashes seen on UHD HEVC
+    /// HDR (Sky Sports Main Event UHD, ~1 per 12s on the 2026-05-08
+    /// 18:02 recording). The first 3b attempt (commit 9647f6e) shipped
+    /// the synchronizer naively and PTS-stamped buffers as
+    /// `host-time-now`; under the synchronizer's "schedule for time T"
+    /// contract every buffer was past-due at pull time, the renderer
+    /// queue saturated (`isReadyForMoreMediaData=false` on 203
+    /// consecutive frames), playback "glitched all over the place".
+    /// Reverted as `d43718d`. 3b-lookahead reintroduces the
+    /// synchronizer but stamps PTS at `host-time-now + 33.33ms` (one
+    /// 30fps source-frame interval) so the synchronizer always has a
+    /// future-dated buffer to schedule against the next display tick.
+    /// Watchdog re-enqueue path stays — it uses
+    /// `kCMSampleAttachmentKey_DisplayImmediately` which bypasses the
+    /// synchronizer's scheduling and presents ASAP.
+    let renderSynchronizer = AVSampleBufferRenderSynchronizer()
+
     #if os(iOS)
     /// PiP controller — created lazily on first request via
     /// `ensurePiPController()`. Nil until the single-stream
@@ -346,6 +370,20 @@ class MPVPlayerViewController: UIViewController {
         sampleBufferLayer.videoGravity = .resizeAspect
         sampleBufferLayer.frame = view.bounds
         view.layer.addSublayer(sampleBufferLayer)
+
+        // v1.7.x Step 3b-lookahead: hand the layer's renderer to the
+        // synchronizer, then arm the master clock at rate=1.0. Order
+        // matters — `rate` set before `addRenderer` is a silent no-op.
+        // The synchronizer's master clock defaults to host-time, which
+        // is what the render path PTS-stamps against (with a 33.33ms
+        // lookahead — see `renderAndPresent`). At rate=1.0 the
+        // synchronizer's clock advances in lockstep with host time, so
+        // a buffer stamped at `now + 33.33ms` is presented one source-
+        // frame interval later — long enough that no thread-scheduling
+        // jitter between PTS-stamping and the synchronizer's pull-side
+        // poll can render the buffer past-due.
+        renderSynchronizer.addRenderer(sampleBufferLayer.sampleBufferRenderer)
+        renderSynchronizer.rate = 1.0
 
         // PiP controller is NOT created here — see `ensurePiPController()`
         // above for the lazy-init rationale.
@@ -1338,11 +1376,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // attachment during gaps. The IOSurface backing is already
         // valid; we're just kicking the compositor.
         //
-        // Architecturally-correct fix (v1.8 candidate, NOT shipping
-        // here): migrate the display path to AVSampleBufferVideo
-        // Renderer + AVSampleBufferRenderSynchronizer (iOS 17+,
-        // documented at developer.apple.com). That's how AVPlayer
-        // avoids this symptom natively. Significant rewrite, deferred.
+        // v1.7.x Step 3b-lookahead (shipped 2026-05-08, second
+        // attempt): the architecturally-correct fix has now landed.
+        // `AVSampleBufferRenderSynchronizer` drives the layer's
+        // renderer at rate=1.0 with the host clock as master, and the
+        // render path PTS-stamps at `host-time-now + 33.33ms` so the
+        // synchronizer always has a future-dated buffer to schedule
+        // (see ivar `renderSynchronizer` and `renderAndPresent`).
+        // The watchdog stays armed as belt-and-braces for the cases
+        // where the synchronizer's pull-side poll missed a tick — its
+        // re-enqueue path uses `DisplayImmediately` so it bypasses the
+        // synchronizer's scheduling. Watchdog removal is gated on a
+        // field test showing `watchdog_reenq=0` AND zero on-screen
+        // flashes for the duration of a long UHD HEVC HDR run.
         private var displayLinkWatchdog: CADisplayLink?
         private var watchdogLock = os_unfair_lock_s()
         private var lastEnqueuedSampleBuffer: CMSampleBuffer?
@@ -2391,7 +2437,26 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             guard w > 0, h > 0, fbo != 0 else { return }
 
             let renderStart = CACurrentMediaTime()
-            let presentationTime = CMClockGetTime(CMClockGetHostTimeClock())
+            // v1.7.x Step 3b-lookahead: stamp PTS at host-time-now +
+            // 33.33ms so the synchronizer can schedule the buffer for
+            // the next display tick rather than receiving it past-due.
+            // 33.33ms = one source-frame interval at 30fps (Sky Sports
+            // UHD HEVC HDR is the worst-case test target). Display
+            // refresh is 60Hz minimum, 120Hz on ProMotion, so this
+            // gives the synchronizer 2-4 display ticks of scheduling
+            // runway. Smaller offsets (16.67ms) risk intermittent
+            // past-due if there's any thread-scheduling jitter between
+            // here and the synchronizer's poll. Larger offsets (50ms+)
+            // add visible end-to-end latency. The watchdog re-enqueue
+            // path stamps a fresh raw `host-time-now` PTS but flags
+            // those buffers with `DisplayImmediately`, which bypasses
+            // the synchronizer's scheduling — see
+            // `makeImmediateDisplayCopy(of:at:)` above.
+            let lookahead = CMTime(value: 33_333, timescale: 1_000_000)
+            let presentationTime = CMTimeAdd(
+                CMClockGetTime(CMClockGetHostTimeClock()),
+                lookahead
+            )
             let fps = detectedFps
 
             // Make our GL context current on the render thread
