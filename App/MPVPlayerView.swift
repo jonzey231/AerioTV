@@ -153,11 +153,13 @@ enum MPVLibraryWarmup {
         // as possible without hitting per-stream config. The goal
         // is to trigger the same libmpv init codepath real
         // playback uses: videotoolbox hwdec registration, libmpv
-        // vo init, fast-profile filter chain load.
+        // vo init, fast-profile filter chain load. v1.7.x: hwdec
+        // default is now videotoolbox-copy (was videotoolbox); see
+        // the rationale block above the matching call in setupMPV.
         mpv_set_option_string(mpv, "vo", "libmpv")
         mpv_set_option_string(mpv, "profile", "fast")
         #if !targetEnvironment(simulator)
-        mpv_set_option_string(mpv, "hwdec", "videotoolbox")
+        mpv_set_option_string(mpv, "hwdec", "videotoolbox-copy")
         #endif
 
         let initResult = mpv_initialize(mpv)
@@ -2503,10 +2505,46 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if targetEnvironment(simulator)
             checkError(mpv_set_option_string(mpv, "hwdec", "no"))
             #else
-            // videotoolbox (no -copy): GPU decode → GPU texture via IOSurface interop.
-            // Decoded frames stay on GPU — the OpenGL render API maps them as textures
-            // for zero-copy color conversion, scaling, and OSD.
-            checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
+            // v1.7.x: hwdec default is now videotoolbox-copy.
+            //
+            // Until v1.7.x we started in plain `videotoolbox` (zero-
+            // copy IOSurface→GL interop) and only fell back to
+            // videotoolbox-copy when GL interop failed (which it
+            // always does on 10-bit p010, i.e. UHD HDR HEVC). The
+            // fallback path issued a seek-to-current-time to force
+            // pipeline reinit; on live streams that seek fails with
+            // "Cannot seek in this stream" but mpv still does a full
+            // pipeline restart. Combined with the failed videotoolbox
+            // attempt and the second decoder warmup that followed,
+            // the fallback added ~2 seconds of blue-screen time on
+            // every UHD HEVC stream open (full breakdown in Archie's
+            // 2026-05-08 test logs).
+            //
+            // videotoolbox-copy decodes to a CPU-readable buffer,
+            // which we then upload to GL. Cost: roughly 1-2ms per
+            // frame at 1080p, 3-4ms at UHD on Apple silicon —
+            // negligible against a 33ms frame budget. No decode-
+            // quality difference, no codec compatibility difference.
+            //
+            // Field reports indicate plain videotoolbox often fails
+            // GL interop on 10-bit content anyway, so the "zero-copy
+            // happy path" has become a minority of streams in
+            // practice. Starting in copy mode unifies the path,
+            // halves the visible blue-screen window on UHD streams,
+            // and removes the failed-attempt + seek + reinit chain.
+            //
+            // The log-handler fallback below stays in as a safety
+            // net (claimHwdecFallbackIfNeeded is idempotent), but
+            // the seek-to-current-time inside it has been removed —
+            // it was the no-op that created the second 2-second
+            // window, and the fallback shouldn't normally fire now
+            // that we start in copy mode.
+            //
+            // To revert: change "videotoolbox-copy" back to
+            // "videotoolbox" here AND in the matching warmup call
+            // (~line 160) AND in the loadfile-replace reset inside
+            // play(url:) (~line 3036).
+            checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox-copy"))
             // Allow up to 90 consecutive VT decode failures before
             // falling back to software. Live MPEG-TS streams join
             // mid-GOP without SPS/PPS so VT errors until the next
@@ -2984,7 +3022,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let totalSetupMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
             #if DEBUG
             let cacheStr = String(format: "%.1f", cachingSecs)
-            print("[MPV-DIAG] ✓ mpv fully initialized: vo=libmpv (OpenGL ES render), hwdec=videotoolbox (requested)")
+            print("[MPV-DIAG] ✓ mpv fully initialized: vo=libmpv (OpenGL ES render), hwdec=videotoolbox-copy (requested)")
             print("[MPV-DIAG]   cache=\(cacheStr)s, readahead=\(cacheStr)s, isLive=\(isLive), setup_time=\(String(format: "%.0f", totalSetupMs))ms")
             #endif
 
@@ -3030,10 +3068,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             playbackStartTime = nil
             // `loadfile replace` reuses the same mpv core, so any runtime
             // hwdec downgrade from the previous stream must be cleared before
-            // the next file starts.
+            // the next file starts. v1.7.x: default is now videotoolbox-copy
+            // (see rationale block in setupMPV); the only "downgrade" the
+            // safety-net fallback can apply on top of that is the same
+            // videotoolbox-copy, so this reset is now mostly defensive.
             resetHwdecFallbackApplied()
             #if !targetEnvironment(simulator)
-            mpv_set_property_string(mpv, "hwdec", "videotoolbox")
+            mpv_set_property_string(mpv, "hwdec", "videotoolbox-copy")
             #endif
             // v1.6.23: route URL strings through DebugLogger.sanitize
             // before any console / file output so Xtream credentials
@@ -3122,22 +3163,33 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                 self.vtNullBufferWindow &+= 1
                                 self.vtNullBufferTotal &+= 1
                             }
-                            // 10-bit HEVC: OpenGL ES can't map the VideoToolbox texture.
-                            // Fall back to videotoolbox-copy (GPU decode → CPU copy → GL upload).
-                            // This is slower than zero-copy but still hardware-decoded.
+                            // Defensive fallback: if mpv ever ends up
+                            // in plain videotoolbox mode despite our
+                            // videotoolbox-copy default (e.g. a future
+                            // libmpv build silently re-promotes), the
+                            // GL-interop attempt on 10-bit p010 will
+                            // still fail with "Initializing texture
+                            // for hardware decoding failed". Reapply
+                            // copy mode so playback recovers without
+                            // a permanent black layer.
+                            //
+                            // v1.7.x: removed the seek-to-current-time
+                            // that used to follow this property write.
+                            // It was meant to force pipeline reinit
+                            // but on live streams it failed with
+                            // "Cannot seek in this stream" and mpv
+                            // restarted the pipeline anyway, costing
+                            // ~2 seconds of blue-screen time per UHD
+                            // stream open. With the videotoolbox-copy
+                            // default this branch shouldn't normally
+                            // fire at all, and even if it does, the
+                            // hwdec property write alone is enough —
+                            // mpv will pick up the new mode on the
+                            // next decode without our help.
                             if text.contains("Initializing texture for hardware decoding failed") && self.claimHwdecFallbackIfNeeded() {
-                                // v1.7.x Issue A: include time since
-                                // setupStartTime so the fallback gap
-                                // (videotoolbox attempt → fail →
-                                // copy mode init → first frame) is
-                                // measurable from the log alone.
                                 let elapsedMs = self.setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
-                                print("[MPV-DECODE] \(self.streamTag) GL interop failed (10-bit HEVC class) — falling back to videotoolbox-copy at +\(String(format: "%.0f", elapsedMs))ms from setup")
+                                print("[MPV-DECODE] \(self.streamTag) defensive fallback fired (mpv re-promoted to videotoolbox?) — reapplying videotoolbox-copy at +\(String(format: "%.0f", elapsedMs))ms from setup")
                                 mpv_set_property_string(mpv, "hwdec", "videotoolbox-copy")
-                                // Seek to current position to force reinit with the new hwdec
-                                var timePos: Double = 0
-                                mpv_get_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &timePos)
-                                self.mpvCommand(mpv, ["seek", String(format: "%.1f", timePos), "absolute", "exact"])
                             }
                             #if DEBUG
                             // Filter out expected recovery-phase noise
