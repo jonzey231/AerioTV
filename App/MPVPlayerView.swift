@@ -2953,6 +2953,57 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 setOption(mpv, "video-latency-hacks", "yes")
             }
 
+            // v1.7.x Issue A round 4 — render-stall mitigations
+            // recommended by Agent 2's research (2026-05-08) to
+            // reduce the 60-100ms `mpv_render_context_render`
+            // outliers documented in the test logs. Each option is
+            // independently revertable; remove the corresponding
+            // setOption line to restore prior behaviour.
+            //
+            // framedrop=vo — drop late frames at the VO layer so
+            //   the render call doesn't back up. Without this, when
+            //   a frame is delivered late to the renderer it stays
+            //   queued and forces subsequent frames into the same
+            //   slow path. Reference: mpv issue #13946 ("4K HDR
+            //   HEVC stuttering, fixed by --profile=fast", which
+            //   includes framedrop tuning).
+            //
+            // video-sync=audio — explicit, even though it matches
+            //   mpv's default. We set it explicitly because some
+            //   profiles can override it. We must NOT use display-
+            //   resample on iOS with vo=libmpv: display-resample
+            //   needs accurate VSync feedback from the host, and
+            //   our embedded render-context API doesn't feed that
+            //   back to libmpv. Multiple GH issues confirm display-
+            //   resample causing extra mistimed frames in this
+            //   exact configuration.
+            //
+            // video-timing-offset=0 — pairs with our existing
+            //   BLOCK_FOR_TARGET_TIME=0 in the render-param array.
+            //   When BLOCK_FOR_TARGET_TIME=0 is set without
+            //   video-timing-offset=0, mpv stages frames slightly
+            //   ahead of their intended display time, which on
+            //   iOS produces a frame's worth of drift per render
+            //   call (libmpv render.h docs).
+            //
+            // vd-queue-enable=yes + vd-queue-max-samples=8 —
+            //   decoder-ahead queue, so mpv has 1-2 frames pre-
+            //   decoded and ready when our render call arrives.
+            //   Shifts the per-frame upload variance off the
+            //   render thread and onto the decoder thread, which
+            //   is the right side to absorb it. Without this,
+            //   each `mpv_render_context_render` call may have
+            //   to wait for the next decoded frame before
+            //   returning. The 8-sample budget is mpv's
+            //   recommended default for live playback; live cache
+            //   already enforces a separate ~5s upper bound on
+            //   buffered demux data.
+            setOption(mpv, "framedrop", "vo")
+            setOption(mpv, "video-sync", "audio")
+            setOption(mpv, "video-timing-offset", "0")
+            setOption(mpv, "vd-queue-enable", "yes")
+            setOption(mpv, "vd-queue-max-samples", "8")
+
             // Multiview tiles: set initial `mute` / `pause` as mpv
             // options (not runtime properties) so the first decoded
             // frame already has the right audio-focus + pause state.
