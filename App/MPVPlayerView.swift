@@ -1099,7 +1099,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
                 if let ctx = eaglContext {
                     EAGLContext.setCurrent(ctx)
-                    if fbo != 0 { glDeleteFramebuffers(1, &fbo); fbo = 0 }
+                    if fbo != 0 {
+                        #if DEBUG
+                        print("[MPV-FBO] \(streamTag) destroy fbo=\(fbo) (teardown, was \(fboWidth)x\(fboHeight))")
+                        #endif
+                        glDeleteFramebuffers(1, &fbo); fbo = 0
+                    }
                     renderTexture = nil
                     renderPixelBuffer = nil
                     if let cache = textureCache { CVOpenGLESTextureCacheFlush(cache, 0) }
@@ -1230,6 +1235,46 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // failure runs without spamming.
         private var layerFailedFrameCount: Int64 = 0          // Foreground sample-buffer-renderer .failed events
         private var makeSampleBufferNilCount: Int64 = 0       // CMSampleBuffer construction failures
+
+        // v1.7.x Issue A diagnostics — UHD / 10-bit HEVC blue screen
+        // (pre-first-frame) and periodic black flashes (mid-stream).
+        // The blue screen correlates with the
+        // videotoolbox → videotoolbox-copy fallback (~1.5s gap before
+        // any frame). The black flashes correlate with bursts of
+        // MPV_EVENT_VIDEO_RECONFIG events that destroy and rebuild
+        // the OpenGL FBO mid-stream. These counters let us prove or
+        // disprove that correlation rather than guessing.
+        //
+        // Per-window counters reset on every video-reconfig so each
+        // window's "decoder error signature" is independently visible
+        // in the log. Cumulative totals are kept alongside for
+        // post-hoc correlation across an entire session.
+        private var lastVideoReconfigAt: CFAbsoluteTime = 0
+        private var videoReconfigCount: Int64 = 0
+        private var lastHwdecCurrentObserved: String = ""
+
+        // Per-reconfig-window decoder error counts. These are tallied
+        // BEFORE `isNoisyRecoveryMessage` filters them out of the
+        // visible log, so we can see decoder error storms even when
+        // the underlying lines are filtered to keep the console
+        // legible during normal playback.
+        private var ppsErrorWindow: Int64 = 0          // SPS/PPS missing or out-of-range
+        private var naluErrorWindow: Int64 = 0         // Skipping invalid undecodable NALU
+        private var hwdecErrorWindow: Int64 = 0        // VT decode hiccups
+        private var vtNullBufferWindow: Int64 = 0      // VT output buffer null
+
+        // Cumulative for full-session correlation. These never reset.
+        private var ppsErrorTotal: Int64 = 0
+        private var naluErrorTotal: Int64 = 0
+        private var hwdecErrorTotal: Int64 = 0
+        private var vtNullBufferTotal: Int64 = 0
+
+        // FBO lifecycle timing — answers "is the user-visible black
+        // flash a window where the FBO doesn't exist yet?" If
+        // fboDestroyedAt is recent (< 50ms) when a video-reconfig
+        // fires, we know the layer is presenting nothing for the
+        // rebuild gap.
+        private var fboDestroyedAt: CFAbsoluteTime = 0
 
         init(urls: [URL], headers: [String: String], isLive: Bool,
              progressStore: PlayerProgressStore,
@@ -1795,8 +1840,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             guard let eaglContext, let textureCache else { return }
             EAGLContext.setCurrent(eaglContext)
 
-            // Clean up old resources
-            if fbo != 0 { glDeleteFramebuffers(1, &fbo); fbo = 0 }
+            // Clean up old resources. v1.7.x Issue A: stamp
+            // fboDestroyedAt at the moment we delete so
+            // [MPV-RECONFIG] can correlate "FBO=DESTROYED" /
+            // "RECENTLY_REBUILT" with subsequent reconfig events
+            // — answers whether user-visible black flashes are
+            // the rebuild gap.
+            if fbo != 0 {
+                #if DEBUG
+                print("[MPV-FBO] \(streamTag) destroy fbo=\(fbo) (recreate path, was \(fboWidth)x\(fboHeight))")
+                #endif
+                fboDestroyedAt = CFAbsoluteTimeGetCurrent()
+                glDeleteFramebuffers(1, &fbo); fbo = 0
+            }
             renderTexture = nil
             renderPixelBuffer = nil
             CVOpenGLESTextureCacheFlush(textureCache, 0)
@@ -1850,7 +1906,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             fboHeight = height
 
             #if DEBUG
-            print("[MPV-DIAG] FBO created: \(width)x\(height), fbo=\(fbo), tex=\(texName)")
+            // v1.7.x Issue A: include rebuild-gap so we can see how
+            // long the layer was presenting nothing if this is a
+            // mid-stream FBO recreation (the prime suspect for black
+            // flashes on UHD 10-bit HEVC reconfig events).
+            let rebuildSuffix: String
+            if fboDestroyedAt > 0 {
+                let gapMs = (CFAbsoluteTimeGetCurrent() - fboDestroyedAt) * 1000.0
+                rebuildSuffix = " (rebuild_gap=\(String(format: "%.1f", gapMs))ms)"
+            } else {
+                rebuildSuffix = " (initial)"
+            }
+            print("[MPV-FBO] \(streamTag) created \(width)x\(height) fbo=\(fbo) tex=\(texName)\(rebuildSuffix)")
             #endif
         }
 
@@ -1928,7 +1995,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             #if DEBUG
-            print("[MPV-DIAG] FBO queued: \(w)x\(h)")
+            // v1.7.x Issue A: tag matches [MPV-FBO] destroy/created
+            // pair so a `grep "[MPV-FBO]"` reads the full FBO
+            // lifecycle for one stream in chronological order.
+            print("[MPV-FBO] \(streamTag) queued \(w)x\(h)")
             #endif
         }
 
@@ -2666,6 +2736,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             mpv_observe_property(mpv, 4, "eof-reached", MPV_FORMAT_FLAG)
             mpv_observe_property(mpv, 5, "paused-for-cache", MPV_FORMAT_FLAG)
             mpv_observe_property(mpv, 6, "core-idle", MPV_FORMAT_FLAG)
+            // v1.7.x Issue A: observe hwdec-current so we see the
+            // exact moment mpv flips from `videotoolbox` to
+            // `videotoolbox-copy` after the GL-interop failure
+            // (10-bit HEVC). Querying-on-demand only catches it
+            // after the fact; observing catches the transition.
+            mpv_observe_property(mpv, 7, "hwdec-current", MPV_FORMAT_STRING)
 
             let retained = Unmanaged.passRetained(self)
             self.wakeupRetain = retained
@@ -2879,17 +2955,61 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     case MPV_EVENT_PROPERTY_CHANGE:
                         self.handlePropertyChange(event)
 
+                    case MPV_EVENT_VIDEO_RECONFIG:
+                        // v1.7.x Issue A: dedicated handler logs the
+                        // full pipeline snapshot at every reconfig
+                        // and resets per-window decoder counters.
+                        self.handleVideoReconfig()
+
                     case MPV_EVENT_LOG_MESSAGE:
                         if let msg = UnsafeMutablePointer<mpv_event_log_message>(OpaquePointer(event.pointee.data)) {
                             let text = msg.pointee.text.map { String(cString: $0) } ?? ""
                             if text.contains("underrun") {
                                 self.audioUnderrunCount += 1
                             }
+                            // v1.7.x Issue A: tally decoder error
+                            // storms BEFORE the noise filter discards
+                            // them. These per-window counters reset
+                            // on every MPV_EVENT_VIDEO_RECONFIG so we
+                            // can see each reconfig window's decoder
+                            // error signature in the [MPV-RECONFIG]
+                            // log line. UHD 10-bit HEVC streams emit
+                            // bursts of these around the videotoolbox
+                            // → videotoolbox-copy fallback and around
+                            // every mid-stream reconfig — strong
+                            // candidates for the user-visible black
+                            // flashes Archie reported 2026-05-08.
+                            if text.contains("PPS id out of range")
+                                || text.contains("non-existing PPS")
+                                || text.contains("non-existing SPS") {
+                                self.ppsErrorWindow &+= 1
+                                self.ppsErrorTotal &+= 1
+                            }
+                            if text.contains("Skipping invalid undecodable NALU")
+                                || text.contains("Skipping NAL unit") {
+                                self.naluErrorWindow &+= 1
+                                self.naluErrorTotal &+= 1
+                            }
+                            if text.contains("Error while decoding frame")
+                                || text.contains("hardware accelerator failed to decode") {
+                                self.hwdecErrorWindow &+= 1
+                                self.hwdecErrorTotal &+= 1
+                            }
+                            if text.contains("vt decoder cb: output image buffer is null") {
+                                self.vtNullBufferWindow &+= 1
+                                self.vtNullBufferTotal &+= 1
+                            }
                             // 10-bit HEVC: OpenGL ES can't map the VideoToolbox texture.
                             // Fall back to videotoolbox-copy (GPU decode → CPU copy → GL upload).
                             // This is slower than zero-copy but still hardware-decoded.
                             if text.contains("Initializing texture for hardware decoding failed") && self.claimHwdecFallbackIfNeeded() {
-                                print("[MPV-DIAG] ⚠️ GL interop failed (likely 10-bit HEVC) — falling back to videotoolbox-copy")
+                                // v1.7.x Issue A: include time since
+                                // setupStartTime so the fallback gap
+                                // (videotoolbox attempt → fail →
+                                // copy mode init → first frame) is
+                                // measurable from the log alone.
+                                let elapsedMs = self.setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
+                                print("[MPV-DECODE] \(self.streamTag) GL interop failed (10-bit HEVC class) — falling back to videotoolbox-copy at +\(String(format: "%.0f", elapsedMs))ms from setup")
                                 mpv_set_property_string(mpv, "hwdec", "videotoolbox-copy")
                                 // Seek to current position to force reinit with the new hwdec
                                 var timePos: Double = 0
@@ -3072,6 +3192,79 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             print("[MPV-DIAG] State: opening (start-file)")
             #endif
+        }
+
+        /// v1.7.x Issue A diagnostic. mpv emits MPV_EVENT_VIDEO_RECONFIG
+        /// every time the video pipeline rebuilds — at startup (initial
+        /// config), at hwdec changes (videotoolbox → videotoolbox-copy
+        /// fallback), at decoder reset after error storms, and on
+        /// MPEG-TS PMT changes mid-stream. UHD 10-bit HEVC streams
+        /// (Sky Sports F1 UHD class) emit these every few seconds and
+        /// the burst is the prime suspect for the user-visible "black
+        /// flashes every 3-10s" Archie reported on 2026-05-08.
+        ///
+        /// What gets logged on every reconfig:
+        ///   - Time gap since the previous reconfig (bursty == bad).
+        ///   - Resolution / pixfmt / colormatrix / codec / hwdec — so
+        ///     we can tell if the trigger is a real format change or
+        ///     a same-format decoder rebuild.
+        ///   - "*CHANGED-from=" marker when hwdec actually flipped.
+        ///   - FBO presentation state at the moment of reconfig
+        ///     (DESTROYED, RECENTLY_REBUILT(Xms), or active(WxH)) —
+        ///     answers "did the user see black because the FBO was
+        ///     gone?"
+        ///   - Per-window decoder-error counts since the last
+        ///     reconfig (PPS / NALU / VT-null / hwdec). Tallied
+        ///     in MPV_EVENT_LOG_MESSAGE before the noise filter
+        ///     discards the lines, so the counts survive even when
+        ///     the underlying log lines don't print.
+        ///
+        /// After logging, per-window counters reset so each window's
+        /// signature is independently visible.
+        private func handleVideoReconfig() {
+            guard let mpv else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            videoReconfigCount &+= 1
+            let gap: String
+            if lastVideoReconfigAt > 0 {
+                gap = String(format: "%.0fms", (now - lastVideoReconfigAt) * 1000.0)
+            } else {
+                let elapsedMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
+                gap = "first(+\(String(format: "%.0f", elapsedMs))ms_from_setup)"
+            }
+
+            // Snapshot pipeline state.
+            var w: Int64 = 0; var h: Int64 = 0
+            mpv_get_property(mpv, "video-params/w", MPV_FORMAT_INT64, &w)
+            mpv_get_property(mpv, "video-params/h", MPV_FORMAT_INT64, &h)
+            let pixfmt = getMPVString(mpv, "video-params/pixelformat") ?? "?"
+            let colormatrix = getMPVString(mpv, "video-params/colormatrix") ?? "?"
+            let videoCodec = getMPVString(mpv, "video-codec") ?? "?"
+            let hwdec = getMPVString(mpv, "hwdec-current") ?? "none"
+
+            // FBO presentation state. fbo == 0 means we're
+            // actively presenting nothing right now; that's the
+            // window during which a user would see black.
+            let fboState: String
+            if fbo == 0 {
+                fboState = "DESTROYED"
+            } else if fboDestroyedAt > 0 && (now - fboDestroyedAt) < 0.05 {
+                let rebuildMs = (now - fboDestroyedAt) * 1000.0
+                fboState = "RECENTLY_REBUILT(\(String(format: "%.1f", rebuildMs))ms)"
+            } else {
+                fboState = "active(\(fboWidth)x\(fboHeight))"
+            }
+
+            #if DEBUG
+            print("[MPV-RECONFIG] \(streamTag) #\(videoReconfigCount) gap=\(gap) size=\(w)x\(h) pixfmt=\(pixfmt) colormatrix=\(colormatrix) codec=\(videoCodec) hwdec=\(hwdec) fbo=\(fboState) decoderErr_since_last: pps=\(ppsErrorWindow) nalu=\(naluErrorWindow) vt_null=\(vtNullBufferWindow) hwdec_err=\(hwdecErrorWindow)")
+            #endif
+
+            // Reset per-window counters. Cumulative totals stay.
+            ppsErrorWindow = 0
+            naluErrorWindow = 0
+            vtNullBufferWindow = 0
+            hwdecErrorWindow = 0
+            lastVideoReconfigAt = now
         }
 
         private func handleFileLoaded() {
@@ -3374,6 +3567,30 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let name = String(cString: namePtr)
 
             switch name {
+            case "hwdec-current":
+                // v1.7.x Issue A: log the moment mpv applies a new
+                // hwdec (most importantly, the videotoolbox →
+                // videotoolbox-copy fallback after GL-interop fails
+                // on 10-bit HEVC). The log-message path triggers the
+                // fallback by writing the property; observing the
+                // property tells us the moment libmpv has actually
+                // applied it, which is what matters for correlating
+                // the visible "blue screen" duration against decoder
+                // state. setupStartTime lets us measure +ms from the
+                // very beginning of mpv setup so we can see how much
+                // of the pre-first-frame window was spent in copy
+                // init vs the failed videotoolbox attempt.
+                if prop.format == MPV_FORMAT_STRING, let data = prop.data {
+                    let strPtr = data.assumingMemoryBound(to: UnsafePointer<CChar>?.self).pointee
+                    let value = strPtr.map { String(cString: $0) } ?? "none"
+                    let elapsedMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
+                    let prev = lastHwdecCurrentObserved.isEmpty ? "(initial)" : lastHwdecCurrentObserved
+                    #if DEBUG
+                    print("[MPV-DECODE] \(streamTag) hwdec-current: \(prev) → \(value) at +\(String(format: "%.0f", elapsedMs))ms from setup")
+                    #endif
+                    lastHwdecCurrentObserved = value
+                }
+
             case "pause":
                 if prop.format == MPV_FORMAT_FLAG, let data = prop.data {
                     let paused = data.assumingMemoryBound(to: Int32.self).pointee != 0
