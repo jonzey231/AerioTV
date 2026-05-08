@@ -2953,12 +2953,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 setOption(mpv, "video-latency-hacks", "yes")
             }
 
-            // v1.7.x Issue A round 4 — render-stall mitigations
-            // recommended by Agent 2's research (2026-05-08) to
-            // reduce the 60-100ms `mpv_render_context_render`
-            // outliers documented in the test logs. Each option is
-            // independently revertable; remove the corresponding
-            // setOption line to restore prior behaviour.
+            // v1.7.x Issue A round 4 — render-stall mitigations.
+            // Each option is independently revertable; remove the
+            // corresponding setOption line to restore prior
+            // behaviour.
             //
             // framedrop=vo — drop late frames at the VO layer so
             //   the render call doesn't back up. Without this, when
@@ -2986,23 +2984,27 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //   iOS produces a frame's worth of drift per render
             //   call (libmpv render.h docs).
             //
-            // vd-queue-enable=yes + vd-queue-max-samples=8 —
-            //   decoder-ahead queue, so mpv has 1-2 frames pre-
-            //   decoded and ready when our render call arrives.
-            //   Shifts the per-frame upload variance off the
-            //   render thread and onto the decoder thread, which
-            //   is the right side to absorb it. Without this,
-            //   each `mpv_render_context_render` call may have
-            //   to wait for the next decoded frame before
-            //   returning. The 8-sample budget is mpv's
-            //   recommended default for live playback; live cache
-            //   already enforces a separate ~5s upper bound on
-            //   buffered demux data.
+            // 2026-05-08 reverted: vd-queue-enable=yes +
+            // vd-queue-max-samples=8 were added in this same round
+            // on a research recommendation to smooth render
+            // variance via a decoder-ahead queue. Subsequent
+            // research (mpv DOCS/man/options.rst master,
+            // line ~5600) explicitly states the queue
+            // "should not be used with hardware decoding." With
+            // hwdec=videotoolbox-copy, holding 8 CMSampleBuffer
+            // refs whose backing IOSurfaces belong to
+            // VideoToolbox's output pool can race VT's release/
+            // recycle path — VT can zero a surface while we still
+            // hold the handle, producing "decoder claims success,
+            // output is black" single-VSync flashes. Field test
+            // 2026-05-08 confirmed: `late=0` (queue did its
+            // smoothing job) but solid-black flashes persisted at
+            // ~3 per 16s of UHD HEVC HDR playback. Removing the
+            // queue here so VT decode and our render run on the
+            // same thread, preserving IOSurface lifetimes.
             setOption(mpv, "framedrop", "vo")
             setOption(mpv, "video-sync", "audio")
             setOption(mpv, "video-timing-offset", "0")
-            setOption(mpv, "vd-queue-enable", "yes")
-            setOption(mpv, "vd-queue-max-samples", "8")
 
             // Multiview tiles: set initial `mute` / `pause` as mpv
             // options (not runtime properties) so the first decoded
