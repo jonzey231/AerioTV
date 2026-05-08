@@ -4721,52 +4721,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 sampleTiming: &timingInfo,
                 sampleBufferOut: &sampleBuffer
             )
-            guard createStatus == noErr, let buffer = sampleBuffer else { return nil }
-
-            // v1.7.x Step 4a — stamp every frame with
-            // kCMSampleAttachmentKey_DisplayImmediately so
-            // AVSampleBufferDisplayLayer presents at the next VSync
-            // instead of scheduling against any internal clock.
-            //
-            // The bug we're chasing: occasional single-VSync black
-            // flashes during UHD HEVC HDR live MPEG-TS (Sky Sports
-            // Main Event UHD class), at ~1 per 4.5-12s. Field test
-            // 2026-05-08 18:02 with the 3a-tighten detector showed
-            // visible YAVG=0 flashes despite `black_supp=0` over 900
-            // frames — the buffers we enqueued were NOT pure-zero at
-            // detection time, so the flash is happening at
-            // PRESENTATION, not in buffer content. CoreAnimation's
-            // change-detection optimizer can drop the IOSurface
-            // attachment during sub-50ms gaps in mpv's render
-            // callback, leaving the layer with no content for one
-            // VSync. The watchdog at line 1349 catches gaps >30ms
-            // but can't react inside a single VSync.
-            //
-            // DisplayImmediately tells AVSBDL "present at the next
-            // VSync, ignore PTS scheduling." Every enqueue refreshes
-            // the IOSurface attachment, which CoreAnimation's
-            // optimizer treats as a "live" change rather than
-            // optimization-eligible state. This is the same
-            // attachment `makeImmediateDisplayCopy` already sets on
-            // watchdog re-enqueues; extending it to the main path
-            // means the layer never has a stale attachment between
-            // enqueues. mpv's `video-sync=audio` still drives frame
-            // pacing — we don't need AVSBDL's internal scheduling.
-            //
-            // Three failed predecessors (synchronizer with
-            // PTS=now → past-due queue saturation; synchronizer with
-            // PTS=now+33ms → synchronizer clock not anchored to host
-            // time, infinite-future queue; synchronizer with explicit
-            // anchoring → not attempted, parked on architectural
-            // grounds) are documented in commits `9647f6e`,
-            // `84350d5`, and reverts `d43718d`/`2b0e098`. This
-            // attachment-only approach has documented behavior
-            // since iOS 8 and carries no clock-anchoring risk.
-            if let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: true) as? [Any],
-               let dict = attachments.first as? NSMutableDictionary {
-                dict[kCMSampleAttachmentKey_DisplayImmediately as String] = kCFBooleanTrue
-            }
-            return buffer
+            guard createStatus == noErr else { return nil }
+            return sampleBuffer
         }
 
         /// Query mpv's track-list and populate progressStore with audio/subtitle tracks.
