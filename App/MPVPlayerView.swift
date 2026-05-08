@@ -243,30 +243,6 @@ class MPVPlayerViewController: UIViewController {
     /// Used on both iOS (PiP-compatible) and tvOS (tear-free).
     let sampleBufferLayer = AVSampleBufferDisplayLayer()
 
-    /// v1.7.x Step 3b (2026-05-08): AVSampleBufferRenderSynchronizer
-    /// owns the presentation clock for the layer's sampleBufferRenderer.
-    /// This is the architecturally-correct fix for the IOSurface-
-    /// attachment-dropped class of black flashes that the Step 3a
-    /// black-frame detector cannot reach. See the rationale block
-    /// in the Coordinator (around the watchdog declaration) for the
-    /// full backstory: under the synchronizer's pull-side timing
-    /// contract, the compositor cannot drop the surface attachment
-    /// during a libmpv enqueue gap because the synchronizer is the
-    /// one telling the compositor "this surface is on screen at
-    /// host time T." The watchdog re-enqueue and 3a/3a-tighten
-    /// stay in place during the migration as belt-and-braces; once
-    /// field tests confirm zero flashes the watchdog goes away
-    /// (planned phase 5).
-    ///
-    /// The synchronizer is created here and wired to the renderer
-    /// in `viewDidLoad`. Default master clock is host-time; we set
-    /// rate=1.0 once and let mpv's push-side enqueue feed the
-    /// renderer's queue. PTS stamping (host time at frame-build
-    /// moment, see `makeSampleBuffer`) stays the same — the
-    /// synchronizer treats those PTSs as "present at next display
-    /// tick after this PTS."
-    let renderSynchronizer = AVSampleBufferRenderSynchronizer()
-
     #if os(iOS)
     /// PiP controller — created lazily on first request via
     /// `ensurePiPController()`. Nil until the single-stream
@@ -370,20 +346,6 @@ class MPVPlayerViewController: UIViewController {
         sampleBufferLayer.videoGravity = .resizeAspect
         sampleBufferLayer.frame = view.bounds
         view.layer.addSublayer(sampleBufferLayer)
-
-        // v1.7.x Step 3b: attach the layer's videoRenderer to the
-        // synchronizer and start the master clock. Order matters:
-        // addRenderer must come before any enqueue lands, and rate
-        // must be set after the renderer is attached. Setting rate
-        // before adding a renderer would silently no-op. We set
-        // rate=1.0 once here and leave it; pause is handled by
-        // mpv's decode-side pause (which empties the renderer's
-        // queue, leaving the synchronizer holding the last frame).
-        // No need to drive synchronizer.rate=0 on pause unless
-        // future verification shows on-screen drift during the
-        // pause -> mpv-pause-property-write window.
-        renderSynchronizer.addRenderer(sampleBufferLayer.sampleBufferRenderer)
-        renderSynchronizer.rate = 1.0
 
         // PiP controller is NOT created here — see `ensurePiPController()`
         // above for the lazy-init rationale.
@@ -1376,29 +1338,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // attachment during gaps. The IOSurface backing is already
         // valid; we're just kicking the compositor.
         //
-        // Architecturally-correct fix (Step 3b, SHIPPED 2026-05-08
-        // alongside this watchdog): migrate the display path to
-        // AVSampleBufferRenderSynchronizer (iOS 17+, documented at
-        // developer.apple.com). That's how AVPlayer avoids this
-        // symptom natively. The synchronizer owns the presentation
-        // clock and tells the compositor "this surface is on
-        // screen at host time T," which holds the IOSurface
-        // attachment regardless of enqueue cadence — the change-
-        // detection optimizer cannot drop the attach because it
-        // is no longer the authority on what is on screen. The
-        // synchronizer is created at `MPVPlayerViewController
-        // .renderSynchronizer` (search for the declaration) and
-        // wired to the layer's videoRenderer in viewDidLoad.
-        //
-        // This watchdog stays in place as a safety net through
-        // the first round of field tests. Once Archie confirms
-        // zero flashes on UHD HEVC HDR with both 3a/3a-tighten
-        // suppression counters AND screen-recording flash counts
-        // at zero, this watchdog (state declarations through tick
-        // implementation) goes away as a follow-up. Removing it
-        // before the field test would gamble on the synchronizer
-        // closing every gap the watchdog catches today; if even
-        // one class of gap survives, we want the watchdog there.
+        // Architecturally-correct fix (v1.8 candidate, NOT shipping
+        // here): migrate the display path to AVSampleBufferVideo
+        // Renderer + AVSampleBufferRenderSynchronizer (iOS 17+,
+        // documented at developer.apple.com). That's how AVPlayer
+        // avoids this symptom natively. Significant rewrite, deferred.
         private var displayLinkWatchdog: CADisplayLink?
         private var watchdogLock = os_unfair_lock_s()
         private var lastEnqueuedSampleBuffer: CMSampleBuffer?
