@@ -1932,17 +1932,61 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // AVSampleBufferDisplayLayer scales to fit the view.
                 var targetW = videoNativeWidth
                 var targetH = videoNativeHeight
+
+                // v1.7.x: caps are tile-count-aware on both platforms.
+                //
+                // Before: a flat 1920px dim cap on iOS, plus a tighter
+                // pixels/sec budget on tvOS, regardless of session
+                // shape. Both caps were sized for the worst case
+                // (9-tile multiview, where 9 simultaneous UHD FBOs
+                // would consume ~300 MB of GPU memory and ~9 GB/s of
+                // bandwidth). At solo playback there is no such
+                // shared GPU budget, but a UHD stream like Sky Sports
+                // Main Event UHD (3840×2160) was still being
+                // downscaled to 1920×1080. Half the pixels thrown
+                // away for nothing — the user picked UHD, they should
+                // get UHD.
+                //
+                // Now: solo (MultiviewStore.shared.tiles.count <= 1)
+                // gets native UHD up to 3840px on iOS AND tvOS, and
+                // the tvOS pixels/sec budget is bypassed for solo.
+                // Multi-tile keeps the historical caps so the 9-tile
+                // budget stays predictable.
+                //
+                // tvOS solo native UHD is an experiment at Archie's
+                // request 2026-05-08. Apple TV 4K's A15 should be
+                // able to sustain native UHD HEVC playback in solo,
+                // since the videotoolbox-copy decode + GL ES present
+                // is the bottleneck there, not the render-shader
+                // downscale. If solo native UHD on tvOS produces
+                // stutter, thermal regression, or sustained
+                // dropped-frame counts, revert by setting
+                // `tvOSAllowSoloNativeUHD = false` here.
+                //
+                // MultiviewStore is @MainActor; handleResize is
+                // always invoked on main (viewDidLayoutSubviews and
+                // the playback-restart DispatchQueue.main.async in
+                // handlePlaybackRestart), so assumeIsolated is safe.
+                let tileCount = MainActor.assumeIsolated { MultiviewStore.shared.tiles.count }
+                let isSolo = tileCount <= 1
+
                 #if os(tvOS)
-                // tvOS SW render budget: cap total pixels/sec so the A15 can sustain
-                // smooth playback. UHD@24fps is fine, 1080p@30fps is fine, 720p@60fps
-                // needs a small downscale. The threshold is ~40M pixels/sec.
-                if isLive {
-                    var fps: Double = 30
-                    if let mpv = self.activeMPVHandle() {
-                        var fpsVal: Double = 0
-                        mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fpsVal)
-                        if fpsVal > 0 { fps = fpsVal; detectedFps = fpsVal }
-                    }
+                // Always read container-fps so detectedFps stays
+                // populated for STREAM-SUMMARY logs even when we
+                // skip the pixels/sec cap (solo path).
+                if isLive, let mpv = self.activeMPVHandle() {
+                    var fpsVal: Double = 0
+                    mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fpsVal)
+                    if fpsVal > 0 { detectedFps = fpsVal }
+                }
+                // tvOS pixels/sec budget — multi-tile only.
+                // tvOS solo bypasses this so the user gets native
+                // UHD on Apple TV 4K. tvOS multi-tile keeps the
+                // 40M pixels/sec budget so the A15 can sustain
+                // smooth playback under N concurrent decodes.
+                let tvOSAllowSoloNativeUHD = true
+                if isLive && !(tvOSAllowSoloNativeUHD && isSolo) {
+                    var fps: Double = detectedFps > 0 ? detectedFps : 30
                     let maxPixelsPerSec: Double = 40_000_000
                     let currentPixelsPerSec = Double(targetW * targetH) * fps
                     if currentPixelsPerSec > maxPixelsPerSec {
@@ -1955,41 +1999,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     }
                 }
                 #endif
-                // v1.7.x: render-buffer cap is now tile-count-aware.
-                //
-                // Before: a flat 1920px cap on iOS regardless of
-                // session shape. The cap was sized for the worst
-                // case (9-tile multiview, where 9 simultaneous UHD
-                // FBOs would consume ~300 MB of GPU memory and
-                // ~9 GB/s of bandwidth). At solo playback there is
-                // no such pressure, but a UHD stream like
-                // Sky Sports Main Event UHD (3840×2160) was still
-                // being downscaled to 1920×1080. Half the pixels
-                // thrown away for nothing — the user picked UHD,
-                // they should get UHD.
-                //
-                // Now: solo (MultiviewStore.shared.tiles.count <= 1)
-                // gets native UHD up to 3840px. Multi-tile keeps the
-                // historical 1920 cap so the 9-tile budget stays
-                // predictable. Field report from Archie 2026-05-08
-                // on Sky Sports Main Event UHD on iPhone 17 Pro Max.
-                //
-                // tvOS keeps the 1920 cap unchanged: the pixels/sec
-                // budget above already aggressively downscales UHD
-                // (Apple TV 4K's A15 cannot sustain native UHD@30fps
-                // for live streams), and the dim cap there is just a
-                // safety net for content that slips past pixels/sec.
-                //
-                // MultiviewStore is @MainActor; handleResize is
-                // always invoked on main (viewDidLayoutSubviews and
-                // the playback-restart DispatchQueue.main.async in
-                // handlePlaybackRestart), so assumeIsolated is safe.
-                #if os(tvOS)
-                let maxDim = 1920
-                #else
-                let tileCount = MainActor.assumeIsolated { MultiviewStore.shared.tiles.count }
-                let maxDim: Int = (tileCount <= 1) ? 3840 : 1920
-                #endif
+
+                // Dim cap: solo gets native (3840), multi-tile gets
+                // 1920 on both platforms.
+                let maxDim: Int = isSolo ? 3840 : 1920
                 if targetW > maxDim || targetH > maxDim {
                     let ratio = min(Double(maxDim) / Double(targetW),
                                     Double(maxDim) / Double(targetH))
