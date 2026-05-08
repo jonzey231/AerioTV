@@ -3012,7 +3012,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // events per 16s of steady-state playback, with no
             // pipeline-side metric flagging anything wrong.
             //
-            // demuxer-lavf-o-append=fflags=+discardcorrupt —
+            // demuxer-lavf-o=fflags=+discardcorrupt —
             //   tells libavformat to drop corrupt MPEG-TS packets
             //   at the demuxer level, before they reach the parser
             //   that hands slices to VT. Targets the root cause
@@ -3020,9 +3020,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //   zeroes never reach VT in the first place. Live
             //   MPEG-TS over HTTP frequently has CC errors on
             //   discontinuities; `discardcorrupt` is the standard
-            //   FFmpeg-side hardening for this. Uses the `-append`
-            //   form so we don't clobber any existing
-            //   demuxer-lavf-o entries elsewhere.
+            //   FFmpeg-side hardening for this.
+            //
+            //   Tried `demuxer-lavf-o-append` first (idiomatic for
+            //   newer mpv builds, doesn't clobber peer entries),
+            //   but MPVKit's libmpv rejected it with "option not
+            //   found." Falling back to the plain `-o` form, which
+            //   has existed since pre-0.30 mpv. Safe in our config
+            //   because we don't set demuxer-lavf-o anywhere else.
             //
             // vd-lavc-threads=1 — single-threaded libavcodec
             //   parsing for the HW decode path. Removes a race
@@ -3036,7 +3041,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //
             // Each option is independently revertable. Pair stays
             // on test/v1.7.x-flash-fix until field-verified.
-            setOption(mpv, "demuxer-lavf-o-append", "fflags=+discardcorrupt")
+            setOption(mpv, "demuxer-lavf-o", "fflags=+discardcorrupt")
             setOption(mpv, "vd-lavc-threads", "1")
 
             // Multiview tiles: set initial `mute` / `pause` as mpv
