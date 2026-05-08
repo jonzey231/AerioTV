@@ -1955,7 +1955,41 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     }
                 }
                 #endif
+                // v1.7.x: render-buffer cap is now tile-count-aware.
+                //
+                // Before: a flat 1920px cap on iOS regardless of
+                // session shape. The cap was sized for the worst
+                // case (9-tile multiview, where 9 simultaneous UHD
+                // FBOs would consume ~300 MB of GPU memory and
+                // ~9 GB/s of bandwidth). At solo playback there is
+                // no such pressure, but a UHD stream like
+                // Sky Sports Main Event UHD (3840×2160) was still
+                // being downscaled to 1920×1080. Half the pixels
+                // thrown away for nothing — the user picked UHD,
+                // they should get UHD.
+                //
+                // Now: solo (MultiviewStore.shared.tiles.count <= 1)
+                // gets native UHD up to 3840px. Multi-tile keeps the
+                // historical 1920 cap so the 9-tile budget stays
+                // predictable. Field report from Archie 2026-05-08
+                // on Sky Sports Main Event UHD on iPhone 17 Pro Max.
+                //
+                // tvOS keeps the 1920 cap unchanged: the pixels/sec
+                // budget above already aggressively downscales UHD
+                // (Apple TV 4K's A15 cannot sustain native UHD@30fps
+                // for live streams), and the dim cap there is just a
+                // safety net for content that slips past pixels/sec.
+                //
+                // MultiviewStore is @MainActor; handleResize is
+                // always invoked on main (viewDidLayoutSubviews and
+                // the playback-restart DispatchQueue.main.async in
+                // handlePlaybackRestart), so assumeIsolated is safe.
+                #if os(tvOS)
                 let maxDim = 1920
+                #else
+                let tileCount = MainActor.assumeIsolated { MultiviewStore.shared.tiles.count }
+                let maxDim: Int = (tileCount <= 1) ? 3840 : 1920
+                #endif
                 if targetW > maxDim || targetH > maxDim {
                     let ratio = min(Double(maxDim) / Double(targetW),
                                     Double(maxDim) / Double(targetH))
@@ -1999,6 +2033,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // pair so a `grep "[MPV-FBO]"` reads the full FBO
             // lifecycle for one stream in chronological order.
             print("[MPV-FBO] \(streamTag) queued \(w)x\(h)")
+            // v1.7.x: log the cap-selection decision so a UHD stream
+            // capped to FHD vs allowed-native is visible at a glance.
+            // native vs render mismatch == we downscaled.
+            if videoNativeWidth > 0 && videoNativeHeight > 0 {
+                let native = "\(videoNativeWidth)x\(videoNativeHeight)"
+                let rendered = "\(w)x\(h)"
+                let downscaled = (w < videoNativeWidth || h < videoNativeHeight)
+                print("[MPV-RESIZE] \(streamTag) native=\(native) render=\(rendered) downscaled=\(downscaled)")
+            }
             #endif
         }
 
