@@ -2990,21 +2990,54 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // variance via a decoder-ahead queue. Subsequent
             // research (mpv DOCS/man/options.rst master,
             // line ~5600) explicitly states the queue
-            // "should not be used with hardware decoding." With
-            // hwdec=videotoolbox-copy, holding 8 CMSampleBuffer
-            // refs whose backing IOSurfaces belong to
-            // VideoToolbox's output pool can race VT's release/
-            // recycle path — VT can zero a surface while we still
-            // hold the handle, producing "decoder claims success,
-            // output is black" single-VSync flashes. Field test
-            // 2026-05-08 confirmed: `late=0` (queue did its
-            // smoothing job) but solid-black flashes persisted at
-            // ~3 per 16s of UHD HEVC HDR playback. Removing the
-            // queue here so VT decode and our render run on the
-            // same thread, preserving IOSurface lifetimes.
+            // "should not be used with hardware decoding." Removed
+            // to align with documented guidance.
             setOption(mpv, "framedrop", "vo")
             setOption(mpv, "video-sync", "audio")
             setOption(mpv, "video-timing-offset", "0")
+
+            // v1.7.x Issue A round 5 — anti-flash mitigations
+            // targeting the FFmpeg-VideoToolbox bridge's silent-
+            // failure path. Per the 2026-05-08 research pass
+            // (Agent B), the FFmpeg VT bridge does not propagate
+            // VT decode-error callbacks back as hard libav errors
+            // when reference frames go missing on a live MPEG-TS
+            // mid-GOP join — it returns the buffer as-is, which
+            // on a reference miss is a zero/black IOSurface.
+            // mpv's libav layer reports the frame as successfully
+            // decoded; our render pipeline faithfully presents the
+            // black IOSurface; user sees one VSync of solid black.
+            // Symptom is reproducible on UHD HEVC main10 BT.2020
+            // streams (Sky Sports Main Event UHD class) at ~3
+            // events per 16s of steady-state playback, with no
+            // pipeline-side metric flagging anything wrong.
+            //
+            // demuxer-lavf-o-append=fflags=+discardcorrupt —
+            //   tells libavformat to drop corrupt MPEG-TS packets
+            //   at the demuxer level, before they reach the parser
+            //   that hands slices to VT. Targets the root cause
+            //   directly: corrupt-ref slices that VT silently
+            //   zeroes never reach VT in the first place. Live
+            //   MPEG-TS over HTTP frequently has CC errors on
+            //   discontinuities; `discardcorrupt` is the standard
+            //   FFmpeg-side hardening for this. Uses the `-append`
+            //   form so we don't clobber any existing
+            //   demuxer-lavf-o entries elsewhere.
+            //
+            // vd-lavc-threads=1 — single-threaded libavcodec
+            //   parsing for the HW decode path. Removes a race
+            //   where the FFmpeg parser hands VT a slice whose
+            //   reference frames are still being assembled by a
+            //   parallel parse thread. HW decode (videotoolbox-
+            //   copy) does the actual decode work inside Apple's
+            //   VT process anyway — the lavc thread just shepherds
+            //   NALU to VT — so single-threaded parsing has no
+            //   meaningful throughput cost on Apple silicon.
+            //
+            // Each option is independently revertable. Pair stays
+            // on test/v1.7.x-flash-fix until field-verified.
+            setOption(mpv, "demuxer-lavf-o-append", "fflags=+discardcorrupt")
+            setOption(mpv, "vd-lavc-threads", "1")
 
             // Multiview tiles: set initial `mute` / `pause` as mpv
             // options (not runtime properties) so the first decoded
