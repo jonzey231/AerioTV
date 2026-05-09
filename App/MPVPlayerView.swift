@@ -1121,14 +1121,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
                 if let ctx = eaglContext {
                     EAGLContext.setCurrent(ctx)
-                    if fbo != 0 {
+                    if !fboSlots.isEmpty {
                         #if DEBUG
-                        print("[MPV-FBO] \(streamTag) destroy fbo=\(fbo) (teardown, was \(fboWidth)x\(fboHeight))")
+                        print("[MPV-FBO] \(streamTag) destroy \(fboSlots.count)-deep pool (teardown, was \(fboWidth)x\(fboHeight))")
                         #endif
-                        glDeleteFramebuffers(1, &fbo); fbo = 0
+                        for i in 0..<fboSlots.count {
+                            if fboSlots[i].fbo != 0 {
+                                glDeleteFramebuffers(1, &fboSlots[i].fbo)
+                            }
+                        }
+                        fboSlots = []
+                        renderBufferIndex = 0
                     }
-                    renderTexture = nil
-                    renderPixelBuffer = nil
                     if let cache = textureCache { CVOpenGLESTextureCacheFlush(cache, 0) }
                     EAGLContext.setCurrent(nil)
                 }
@@ -1148,9 +1152,51 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?  // vsync-synchronized display
         private var eaglContext: EAGLContext?
         private var textureCache: CVOpenGLESTextureCache?
-        private var renderPixelBuffer: CVPixelBuffer?   // IOSurface-backed, reused per resolution
-        private var renderTexture: CVOpenGLESTexture?    // GL texture wrapping the pixel buffer
-        private var fbo: GLuint = 0                      // FBO with texture as color attachment
+        // v1.7.x Step 5 — triple-buffered FBO ring.
+        //
+        // Prior single-buffer architecture (one CVPixelBuffer + one
+        // GL texture + one FBO, recreated per resolution) produced
+        // occasional single-VSync black flashes on UHD HEVC HDR live
+        // MPEG-TS playback (Sky Sports Main Event UHD class). Field
+        // tests through Steps 3a / 3a-tighten / 3b / 3b-lookahead /
+        // 4a all confirmed the pattern: SwiftUI overlays stay drawn
+        // while the AVSampleBufferDisplayLayer area goes pitch black
+        // for one VSync. The detector at line ~2537 logged
+        // `black_supp=0` on tests where flashes were visible, proving
+        // the buffer was NOT zero at our detection time but WAS zero
+        // when AVSBDL composed it.
+        //
+        // Root cause: producer/consumer race on a single shared
+        // IOSurface. mpv writes frame N+1 to the same IOSurface
+        // AVSBDL is about to read for VSync M. mpv's glClear at the
+        // start of its render pass leaves the IOSurface temporarily
+        // black. If AVSBDL composes during that sub-millisecond
+        // window, the layer renders black for that VSync. Step 4a's
+        // DisplayImmediately made it 5x worse (1 per 2.4s vs 1 per
+        // ~12s baseline) by removing AVSBDL's implicit hold time
+        // before composing — confirming the race hypothesis.
+        //
+        // Triple-buffered ring breaks the race: mpv writes to
+        // slot[renderBufferIndex], we hand that slot's pixel buffer
+        // to AVSBDL, then advance the cursor. By the time mpv comes
+        // back to this slot (after writing two other slots), AVSBDL
+        // has long since composed and released its reference. The
+        // watchdog's `lastEnqueuedSampleBuffer` cache is also safe:
+        // it points at most one slot behind mpv's write position,
+        // and mpv is two slots ahead before wrapping.
+        //
+        // Memory cost (UHD BGRA 3840x2160): 33MB per slot, ~99MB
+        // total per single-stream UHD instance. Multiview tiles
+        // render at much smaller resolutions (typically 640-960
+        // wide), so per-tile cost is ~5-10MB total.
+        private struct FBOSlot {
+            var pixelBuffer: CVPixelBuffer
+            var texture: CVOpenGLESTexture
+            var fbo: GLuint
+        }
+        private static let fboPoolSize = 3
+        private var fboSlots: [FBOSlot] = []
+        private var renderBufferIndex: Int = 0
         private var fboWidth: Int = 0
         private var fboHeight: Int = 0
         /// Detected stream FPS — used for diagnostics.
@@ -1973,76 +2019,107 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         private var mpvStarted = false
 
-        /// Creates (or recreates) the OpenGL FBO backed by an IOSurface CVPixelBuffer.
-        /// mpv renders into this FBO; the CVPixelBuffer IS the rendered frame (zero copy).
+        /// Creates (or recreates) the triple-buffered FBO ring.
+        /// Each of the 3 slots holds an IOSurface-backed
+        /// CVPixelBuffer + a GL texture wrapping it + an FBO with
+        /// that texture bound as the color attachment. mpv renders
+        /// into one slot per frame, advancing
+        /// `renderBufferIndex` round-robin. We hand the matching
+        /// slot's pixel buffer to AVSampleBufferDisplayLayer.
+        ///
+        /// See the FBOSlot declaration block above (~line 1151)
+        /// for the full Step 5 rationale.
         private func setupFBO(width: Int, height: Int) {
             guard let eaglContext, let textureCache else { return }
             EAGLContext.setCurrent(eaglContext)
 
-            // Clean up old resources. v1.7.x Issue A: stamp
+            // Clean up old ring. v1.7.x Issue A: stamp
             // fboDestroyedAt at the moment we delete so
             // [MPV-RECONFIG] can correlate "FBO=DESTROYED" /
             // "RECENTLY_REBUILT" with subsequent reconfig events
             // — answers whether user-visible black flashes are
             // the rebuild gap.
-            if fbo != 0 {
+            if !fboSlots.isEmpty {
                 #if DEBUG
-                print("[MPV-FBO] \(streamTag) destroy fbo=\(fbo) (recreate path, was \(fboWidth)x\(fboHeight))")
+                print("[MPV-FBO] \(streamTag) destroy \(fboSlots.count)-deep pool (recreate path, was \(fboWidth)x\(fboHeight))")
                 #endif
                 fboDestroyedAt = CFAbsoluteTimeGetCurrent()
-                glDeleteFramebuffers(1, &fbo); fbo = 0
+                for i in 0..<fboSlots.count {
+                    if fboSlots[i].fbo != 0 {
+                        glDeleteFramebuffers(1, &fboSlots[i].fbo)
+                    }
+                }
+                fboSlots = []
+                renderBufferIndex = 0
             }
-            renderTexture = nil
-            renderPixelBuffer = nil
             CVOpenGLESTextureCacheFlush(textureCache, 0)
 
-            // Create IOSurface-backed CVPixelBuffer (shared with GL via texture cache)
+            // Allocate the ring. Each slot gets a distinct
+            // IOSurface-backed CVPixelBuffer + matching GL texture
+            // (zero-copy — shares the IOSurface with mpv) + an FBO
+            // with that texture bound as the color attachment.
             let attrs: [CFString: Any] = [
                 kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
                 kCVPixelBufferOpenGLESCompatibilityKey: true as CFBoolean
             ]
-            var pb: CVPixelBuffer?
-            CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                                kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
-            guard let pixelBuffer = pb else { return }
-            renderPixelBuffer = pixelBuffer
-
-            // Wrap as OpenGL ES texture (zero-copy — shares IOSurface)
-            var texture: CVOpenGLESTexture?
-            let texResult = CVOpenGLESTextureCacheCreateTextureFromImage(
-                kCFAllocatorDefault, textureCache, pixelBuffer, nil,
-                GLenum(GL_TEXTURE_2D), GL_RGBA,
-                GLsizei(width), GLsizei(height),
-                GLenum(GL_BGRA), GLenum(GL_UNSIGNED_BYTE),
-                0, &texture
-            )
-            guard texResult == kCVReturnSuccess, let glTexture = texture else {
-                #if DEBUG
-                print("[MPV-ERR] CVOpenGLESTextureCacheCreateTextureFromImage failed: \(texResult)")
-                #endif
-                return
+            var newSlots: [FBOSlot] = []
+            newSlots.reserveCapacity(Self.fboPoolSize)
+            for slotIdx in 0..<Self.fboPoolSize {
+                var pb: CVPixelBuffer?
+                CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                    kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
+                guard let pixelBuffer = pb else {
+                    #if DEBUG
+                    print("[MPV-ERR] CVPixelBufferCreate failed for slot \(slotIdx)")
+                    #endif
+                    // Roll back any partial slots already created.
+                    for i in 0..<newSlots.count {
+                        if newSlots[i].fbo != 0 {
+                            glDeleteFramebuffers(1, &newSlots[i].fbo)
+                        }
+                    }
+                    return
+                }
+                var texture: CVOpenGLESTexture?
+                let texResult = CVOpenGLESTextureCacheCreateTextureFromImage(
+                    kCFAllocatorDefault, textureCache, pixelBuffer, nil,
+                    GLenum(GL_TEXTURE_2D), GL_RGBA,
+                    GLsizei(width), GLsizei(height),
+                    GLenum(GL_BGRA), GLenum(GL_UNSIGNED_BYTE),
+                    0, &texture
+                )
+                guard texResult == kCVReturnSuccess, let glTexture = texture else {
+                    #if DEBUG
+                    print("[MPV-ERR] CVOpenGLESTextureCacheCreateTextureFromImage failed for slot \(slotIdx): \(texResult)")
+                    #endif
+                    for i in 0..<newSlots.count {
+                        if newSlots[i].fbo != 0 {
+                            glDeleteFramebuffers(1, &newSlots[i].fbo)
+                        }
+                    }
+                    return
+                }
+                let texName = CVOpenGLESTextureGetName(glTexture)
+                var fbo: GLuint = 0
+                glGenFramebuffers(1, &fbo)
+                glBindFramebuffer(GLenum(GL_FRAMEBUFFER), fbo)
+                glFramebufferTexture2D(
+                    GLenum(GL_FRAMEBUFFER), GLenum(GL_COLOR_ATTACHMENT0),
+                    GLenum(GL_TEXTURE_2D), texName, 0
+                )
+                let fbStatus = glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))
+                if fbStatus != GL_FRAMEBUFFER_COMPLETE {
+                    #if DEBUG
+                    print("[MPV-ERR] FBO incomplete for slot \(slotIdx): \(fbStatus)")
+                    #endif
+                }
+                glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
+                newSlots.append(FBOSlot(pixelBuffer: pixelBuffer, texture: glTexture, fbo: fbo))
             }
-            renderTexture = glTexture
-
-            // Create FBO with the texture as color attachment
-            let texName = CVOpenGLESTextureGetName(glTexture)
-            glGenFramebuffers(1, &fbo)
-            glBindFramebuffer(GLenum(GL_FRAMEBUFFER), fbo)
-            glFramebufferTexture2D(
-                GLenum(GL_FRAMEBUFFER), GLenum(GL_COLOR_ATTACHMENT0),
-                GLenum(GL_TEXTURE_2D), texName, 0
-            )
-
-            let fbStatus = glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))
-            if fbStatus != GL_FRAMEBUFFER_COMPLETE {
-                #if DEBUG
-                print("[MPV-ERR] FBO incomplete: \(fbStatus)")
-                #endif
-            }
-
-            glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
+            fboSlots = newSlots
             fboWidth = width
             fboHeight = height
+            renderBufferIndex = 0
 
             #if DEBUG
             // v1.7.x Issue A: include rebuild-gap so we can see how
@@ -2056,7 +2133,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             } else {
                 rebuildSuffix = " (initial)"
             }
-            print("[MPV-FBO] \(streamTag) created \(width)x\(height) fbo=\(fbo) tex=\(texName)\(rebuildSuffix)")
+            let fboIDs = fboSlots.map { String($0.fbo) }.joined(separator: ",")
+            let texNames = fboSlots.map { String(CVOpenGLESTextureGetName($0.texture)) }.joined(separator: ",")
+            print("[MPV-FBO] \(streamTag) created \(fboSlots.count)-deep pool \(width)x\(height) fbos=[\(fboIDs)] tex=[\(texNames)]\(rebuildSuffix)")
             #endif
         }
 
@@ -2385,10 +2464,24 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             renderPending = false
             os_unfair_lock_unlock(&renderLock)
 
-            guard let mpvGL, let eaglContext, let renderPixelBuffer else { return }
+            guard let mpvGL, let eaglContext else { return }
+            guard !fboSlots.isEmpty else { return }
             let w = fboWidth
             let h = fboHeight
-            guard w > 0, h > 0, fbo != 0 else { return }
+            guard w > 0, h > 0 else { return }
+
+            // v1.7.x Step 5: advance the ring cursor and pick the
+            // next slot. mpv writes to slot[renderBufferIndex],
+            // we hand THAT slot's pixel buffer to AVSBDL. By the
+            // time the cursor wraps back to this slot (after two
+            // other slots have been written + handed off), AVSBDL
+            // has long since composed the previous reference and
+            // released it. No producer/consumer race on the
+            // IOSurface — the bug Steps 3a/3b/4a were trying to
+            // mask is gone at the source.
+            renderBufferIndex = (renderBufferIndex + 1) % fboSlots.count
+            let renderPixelBuffer = fboSlots[renderBufferIndex].pixelBuffer
+            let fbo = fboSlots[renderBufferIndex].fbo
 
             let renderStart = CACurrentMediaTime()
             let presentationTime = CMClockGetTime(CMClockGetHostTimeClock())
@@ -3869,17 +3962,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let videoCodec = getMPVString(mpv, "video-codec") ?? "?"
             let hwdec = getMPVString(mpv, "hwdec-current") ?? "none"
 
-            // FBO presentation state. fbo == 0 means we're
+            // FBO presentation state. Empty pool means we're
             // actively presenting nothing right now; that's the
             // window during which a user would see black.
             let fboState: String
-            if fbo == 0 {
+            if fboSlots.isEmpty {
                 fboState = "DESTROYED"
             } else if fboDestroyedAt > 0 && (now - fboDestroyedAt) < 0.05 {
                 let rebuildMs = (now - fboDestroyedAt) * 1000.0
                 fboState = "RECENTLY_REBUILT(\(String(format: "%.1f", rebuildMs))ms)"
             } else {
-                fboState = "active(\(fboWidth)x\(fboHeight))"
+                fboState = "active(\(fboSlots.count)-deep \(fboWidth)x\(fboHeight))"
             }
 
             #if DEBUG
