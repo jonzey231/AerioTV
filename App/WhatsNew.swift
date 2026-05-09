@@ -61,11 +61,6 @@ enum WhatsNewStore {
             title: "What's new in 1.7.0",
             bullets: [
                 "Dispatcharr Direct Connect: sign in with your Dispatcharr admin username and password instead of pasting a 32-character API key. Especially helpful on Apple TV where typing a long API key on the Siri Remote keyboard is painful",
-                "When you choose Username & Password, AerioTV exchanges your credentials for a session token over /api/accounts/token/ (the same endpoint the Dispatcharr web UI uses) and pulls your API key automatically so streaming, logos, and recordings keep working seamlessly",
-                "API Key sign-in is still here. The Add Server screen now has a clear Username & Password vs API Key picker; existing servers keep their current sign-in method untouched",
-                "Your Direct Connect credentials sync across your devices via iCloud. Set up Dispatcharr once on iPad and your Apple TV picks it up automatically without re-typing anything",
-                "Dispatcharr List view now shows the currently-airing program under each channel as soon as the guide loads. Previously many channels rendered with just the name until you opened the Guide tab",
-                "Expanded channel cards on Dispatcharr now show category tints (Sports / News / Movies / Kids) on each upcoming program, matching how the Guide tab tints them",
                 "Fixed occasional black-frame flashes during UHD HEVC HDR live playback",
                 "Smoother startup on UHD HEVC live channels (about 1-2 seconds longer to first frame, in exchange for stable playback)",
                 "Multiview: fixed the brief red 'Decoder unavailable' card that occasionally appeared when adding a tile",
