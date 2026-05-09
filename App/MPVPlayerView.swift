@@ -421,13 +421,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     /// saving network + GPU, and resume when PiP ends.
     var shouldPause: Bool = false
 
+    /// Multiview tile count at the moment this Representable is being
+    /// constructed. Captured on the main actor at SwiftUI render time
+    /// and passed through to the Coordinator so `setupMPV` (which
+    /// runs on a background queue and can't reach
+    /// `MultiviewStore.shared`) can pick the matching audio strategy
+    /// at pre-init time. Defaults to 1 — single-stream callers don't
+    /// need to set it because the audio-strategy branch only fires
+    /// for `initialIsAudioActive == false`, which never happens in
+    /// single-stream mode.
+    var initialTileCount: Int = 1
+
     func makeCoordinator() -> Coordinator {
         let c = Coordinator(urls: urls, headers: headers, isLive: isLive,
                             progressStore: progressStore, logStore: logStore,
                             onFatalError: onFatalError,
                             tileID: tileID,
                             initialIsAudioActive: isAudioActive,
-                            initialShouldPause: shouldPause)
+                            initialShouldPause: shouldPause,
+                            initialTileCount: initialTileCount)
         c.nowPlayingTitle = nowPlayingTitle
         c.nowPlayingSubtitle = nowPlayingSubtitle
         c.nowPlayingArtworkURL = nowPlayingArtworkURL
@@ -1507,13 +1519,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // silence shows up as a single [MPV-CALLBACK-GAP] line.
         private var lastScheduleRenderTime: CFAbsoluteTime = 0
 
+        /// Multiview tile count at the moment this Coordinator is
+        /// being constructed. Snapshot on the main actor by the
+        /// Representable. setupMPV (background queue) reads this
+        /// instead of touching `MultiviewStore.shared.tiles.count`
+        /// directly, which would be an actor-isolation violation.
+        /// See the audio-strategy branch in setupMPV for usage.
+        private let initialTileCount: Int
+
         init(urls: [URL], headers: [String: String], isLive: Bool,
              progressStore: PlayerProgressStore,
              logStore: AttemptLogStore,
              onFatalError: @escaping @MainActor @Sendable (String) -> Void,
              tileID: String? = nil,
              initialIsAudioActive: Bool = true,
-             initialShouldPause: Bool = false) {
+             initialShouldPause: Bool = false,
+             initialTileCount: Int = 1) {
             self.urls = urls
             self.headers = headers
             self.isLive = isLive
@@ -1523,6 +1544,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             self.tileID = tileID
             self.initialIsAudioActive = initialIsAudioActive
             self.initialShouldPause = initialShouldPause
+            self.initialTileCount = initialTileCount
             // Seed the `lastApplied*` debounce with the initial
             // values — setupMPV applies them via mpv_set_option
             // BEFORE mpv_initialize, so there's no need for
@@ -3413,20 +3435,64 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // tile defaults (initialIsAudioActive=true, initialShouldPause=false)
             // which happen to match mpv's own defaults — safe no-ops.
             //
-            // Non-audio tiles: set `aid=no` so mpv never even
-            // opens an AudioUnit for them. Previously we used
-            // `mute=yes` which is audible-silence but the AO
-            // stays open and competes with every other tile's
-            // AO on the shared AVAudioSession — that contention
-            // is what produced the "Audio device underrun"
-            // storms with 9 concurrent tiles, which then
-            // cascaded into 2-7s video-frame stalls. `aid=no`
-            // eliminates the AO entirely. `mute=yes` is kept as
-            // belt-and-suspenders against any audio packet that
-            // slips through between mpv_create and mpv_initialize.
+            // Non-audio tiles. Pre-init audio strategy MUST match
+            // what `applyAudioFocusIfChanged` does at runtime. The
+            // runtime path picks between two strategies based on
+            // tile count:
+            //   - tiles.count <= 6: mute-only (aid=auto on every
+            //     tile so the audio decoder stays alive everywhere;
+            //     mute toggles handle silencing). Field-tested as
+            //     safe on Apple TV 4K A15 hardware up to N=6.
+            //   - tiles.count >= 7: decoder-off (aid=no on non-audio
+            //     tiles so mpv never even opens an AudioUnit). v1.6.12
+            //     fix for "Audio device underrun" storms with 9
+            //     concurrent tiles all fighting the shared
+            //     AVAudioSession.
+            //
+            // Pre-init was previously hardcoded to the decoder-off
+            // strategy (`aid=no`) regardless of tile count. That
+            // produced Bug 2 from Freyguy1975's Discord report
+            // 2026-05-08: switching audio to a newly-added 2nd tile
+            // produced silence. Mechanism: tile created with `aid=no`
+            // → mpv never opens audio decoder → user switches focus
+            // → applyAudioFocusIfChanged writes `aid=auto` LATE →
+            // mpv has to start the audio decoder from scratch on a
+            // running stream, which fails or is silent because the
+            // demuxer has been told to skip audio packets the whole
+            // time. Switching back to tile 1 worked because tile 1's
+            // audio decoder had been alive from the start.
+            //
+            // Fix: at pre-init, query the same `tiles.count >= 7`
+            // boundary and pick the matching strategy. Mute-only
+            // mode keeps `aid` at mpv's default (`auto`) and just
+            // sets `mute=yes`, so the audio decoder runs on every
+            // tile from the first frame, just silenced. When the
+            // user later switches audio focus, applyAudioFocusIfChanged
+            // writes `mute=no` and audio resumes instantly — no
+            // late audio-decoder cold-start, no AudioUnit reopen
+            // race.
+            //
+            // `mute=yes` belt-and-suspenders against any audio packet
+            // that slips through between mpv_create and mpv_initialize
+            // applies in both branches.
             if !initialIsAudioActive {
-                setOption(mpv, "aid", "no")
-                checkError(mpv_set_option_string(mpv, "mute", "yes"))
+                // `initialTileCount` is snapshot at Representable
+                // construction time on the main actor, so it's safe
+                // to read here on the renderQueue without an actor
+                // hop. Boundary matches the runtime strategy in
+                // applyAudioFocusIfChanged: 7+ tiles → decoder-off,
+                // otherwise mute-only.
+                let useDecoderOffStrategy = initialTileCount >= 7
+                if useDecoderOffStrategy {
+                    setOption(mpv, "aid", "no")
+                    checkError(mpv_set_option_string(mpv, "mute", "yes"))
+                } else {
+                    // mute-only: leave `aid` at default (auto) so the
+                    // audio decoder stays alive. Just mute the
+                    // output. Matches applyAudioFocusIfChanged's
+                    // runtime strategy at this tile count.
+                    checkError(mpv_set_option_string(mpv, "mute", "yes"))
+                }
             }
             if initialShouldPause {
                 checkError(mpv_set_option_string(mpv, "pause", "yes"))
@@ -4409,8 +4475,34 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // retry budget gave up too quickly. The longer
                 // backoff lets the server stabilize without forcing
                 // the user to manually re-tap the row.
-                let isLoadingFailed = endFile.error == MPV_ERROR_LOADING_FAILED.rawValue
-                if isLoadingFailed && loadFailureRetryCount < maxLoadFailureRetries {
+                //
+                // v1.7.x — extend retry to MPV_ERROR_UNKNOWN_FORMAT
+                // (-17, "When trying to load the file, the file
+                // format could not be determined, or the file was
+                // too broken to open it"). Freyguy1975 reported on
+                // Discord 2026-05-08 that adding tiles to multiview
+                // on Apple TV consistently produced a transient red
+                // "Decoder unavailable / Playback error: unrecognized
+                // file format" overlay on either the new tile, the
+                // existing tile, or both — clearing if he removed
+                // and re-added. The user-visible "unrecognized file
+                // format" string maps to UNKNOWN_FORMAT, NOT
+                // LOADING_FAILED, so the previous retry path missed
+                // it entirely: failoverOrError fired without backoff,
+                // the warmup-retry guard (`anyAttemptStarted`) was
+                // false because we never got past start-file, and the
+                // overlay painted immediately. Same exponential-
+                // backoff retry as LOADING_FAILED is appropriate
+                // because the underlying cause is the same class:
+                // proxy/demuxer briefly couldn't return enough bytes
+                // to identify the stream within the analyze window.
+                // Step 9 (softer probe settings) reduces but doesn't
+                // eliminate this class on UHD HEVC under multiview
+                // network competition.
+                let isTransientLoadError =
+                    (endFile.error == MPV_ERROR_LOADING_FAILED.rawValue ||
+                     endFile.error == MPV_ERROR_UNKNOWN_FORMAT.rawValue)
+                if isTransientLoadError && loadFailureRetryCount < maxLoadFailureRetries {
                     loadFailureRetryCount += 1
                     let retryNum = loadFailureRetryCount
                     let maxR = maxLoadFailureRetries
@@ -4422,11 +4514,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let jitter = Double.random(in: 0...0.6)
                     let delay = baseDelay + jitter
                     let retryKind = isRecordingURL ? "recording" : "stream"
+                    let errLabel = endFile.error == MPV_ERROR_LOADING_FAILED.rawValue
+                        ? "LOADING_FAILED"
+                        : "UNKNOWN_FORMAT"
                     logStore.append(
-                        "⏳ MPV: \(retryKind) load failed — retry \(retryNum)/\(maxR) in \(String(format: "%.1f", delay))s"
+                        "⏳ MPV: \(retryKind) \(errLabel.lowercased()) — retry \(retryNum)/\(maxR) in \(String(format: "%.1f", delay))s"
                     )
                     #if DEBUG
-                    print("[MPV-DIAG] \(streamTag) LOADING_FAILED — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
+                    print("[MPV-DIAG] \(streamTag) \(errLabel) — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
                     #endif
                     let retryURL = urls[currentIndex]
                     DispatchQueue.global(qos: .userInitiated)
