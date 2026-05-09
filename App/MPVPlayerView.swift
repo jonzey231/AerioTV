@@ -1399,6 +1399,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // watchdog is doing real work.
         private var watchdogReenqueueCount: Int64 = 0
 
+        // v1.7.x Step 6 — backpressure skip counter. Incremented
+        // each time `renderAndPresent` early-returns because
+        // AVSampleBufferDisplayLayer's renderer reported
+        // `isReadyForMoreMediaData == false`. Exposed in FRAME
+        // SUMMARY. Field-only diagnostic; non-zero means mpv is
+        // producing frames faster than AVSBDL is consuming them
+        // (typical for fast hardware decoders on UHD content),
+        // and we're correctly rate-limiting via mpv's
+        // `framedrop=vo` policy by NOT calling
+        // mpv_render_context_render — mpv's internal queue
+        // fills, framedrop drops the late frames at the VO
+        // boundary, and the upstream demuxer/decoder pipeline
+        // is rate-limited to AVSBDL's consumption rate.
+        private var backpressureSkipCount: Int64 = 0
+
         // v1.7.x Issue A round 6 — black-frame detector (Step 3a).
         //
         // The 2026-05-08 fully-applied Step 2 test confirmed mpv's
@@ -2466,6 +2481,56 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             guard let mpvGL, let eaglContext else { return }
             guard !fboSlots.isEmpty else { return }
+
+            // v1.7.x Step 6 — apply backpressure on
+            // AVSampleBufferDisplayLayer's renderer. When the
+            // renderer reports `isReadyForMoreMediaData == false`,
+            // its internal queue is saturated. Apple's documented
+            // guidance (`AVQueuedSampleBufferRendering.h`): "It is
+            // safe to call enqueueSampleBuffer when
+            // readyForMoreMediaData is NO, but it is a bad idea to
+            // enqueue sample buffers without bound."
+            //
+            // Step 5 (triple-buffered FBO ring) eliminated the
+            // single-IOSurface producer/consumer race that caused
+            // single-VSync black flashes at ~1 per 12s on UHD HEVC
+            // HDR live MPEG-TS playback. Field test 2026-05-08
+            // 21:49 confirmed the flashes are gone (`black_supp=2`
+            // detector hits over 2400+ frames, watchdog-recovered
+            // cleanly). But the ring also removed implicit rate
+            // limiting that the single-buffer architecture had been
+            // providing — mpv's videotoolbox-copy decoder is faster
+            // than the source rate, and with three slots to write
+            // into, mpv ran at decoder speed (~70fps for a 30fps
+            // source). Symptoms over a 45s playback window:
+            //   - rss grew from 350MB → 1224MB (decoded UHD frames
+            //     piling up in mpv's output queue waiting for audio
+            //     to catch up)
+            //   - avsync drifted to 2.058s before audio decoder
+            //     reset
+            //   - libmpv demuxer logged "Too many packets in the
+            //     demuxer packet queues: video/0: 250 packets"
+            //   - main thread hung 239-371ms three times under
+            //     memory pressure
+            //
+            // Skipping the entire render pass (not just the
+            // enqueue) means we don't call
+            // mpv_render_context_render, so mpv's frame stays in
+            // mpv's internal queue. mpv's `framedrop=vo` policy
+            // drops late frames at the VO layer when the queue
+            // fills, which rate-limits the upstream
+            // demuxer/decoder pipeline to AVSBDL's consumption
+            // rate. The watchdog at line ~2349 already follows the
+            // same pattern (refuses re-enqueue when not ready);
+            // this unifies the policy across the main path and the
+            // watchdog path — both refuse to push when AVSBDL is
+            // full.
+            if let renderer = sampleBufferLayer?.sampleBufferRenderer,
+               !renderer.isReadyForMoreMediaData {
+                backpressureSkipCount &+= 1
+                return
+            }
+
             let w = fboWidth
             let h = fboHeight
             guard w > 0, h > 0 else { return }
@@ -2821,7 +2886,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let variance = frameIntervals.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / Double(frameIntervals.count)
                     return sqrt(variance)
                 }()
-                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | black_supp=\(blackFramesSuppressedCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
+                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | black_supp=\(blackFramesSuppressedCount) | bp_skip=\(backpressureSkipCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
 
             lastEnqueueTime = enqueueTime
