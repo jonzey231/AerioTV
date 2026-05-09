@@ -1333,6 +1333,42 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var videoReconfigCount: Int64 = 0
         private var lastHwdecCurrentObserved: String = ""
 
+        // v1.7.x Step 7 — audio reconfig + callback-gap correlation.
+        //
+        // Codex's CODEX_UHD_STUTTER_AVSYNC_NEXT_STEPS_2026-05-08.md
+        // recommends correlating MPV_EVENT_AUDIO_RECONFIG with
+        // MPV-CALLBACK-GAP events: AC3 audio for live MPEG-TS often
+        // reconfigs when the broadcast switches between mono/stereo/
+        // 5.1 segments, and each reconfig may cause a brief libmpv
+        // pause. The 22:04 field-test log showed three audio-reconfig
+        // events plus four 200ms callback gaps mid-playback; if the
+        // pairs reliably coincide we have a concrete next direction
+        // (audio path tuning). If they don't, network/decoder is the
+        // suspect.
+        //
+        // `lastAudioReconfigAt` is stamped in the dispatcher when
+        // MPV_EVENT_AUDIO_RECONFIG fires (currently routed through
+        // the `default:` case, which just prints "Event: audio-
+        // reconfig"). On each MPV-CALLBACK-GAP we log
+        // `since_audio_reconfig=Nms` so future readers can grep for
+        // gaps that arrived within ~100ms of an audio reconfig.
+        private var lastAudioReconfigAt: CFAbsoluteTime = 0
+        private var audioReconfigCount: Int64 = 0
+
+        // v1.7.x Step 7 — callback-gap severity counters.
+        //
+        // Cumulative tallies of the gap classifications already
+        // emitted at line ~2455 (mild 50-100ms, moderate 100-300ms,
+        // severe 300ms+). Surfaced in FRAME SUMMARY so we can see
+        // whether gaps are clustered (one bad reconfigure window) or
+        // chronic (steady-state decoder issue). The 22:04 test had
+        // ~5 moderate-class gaps in a 5-second window — strongly
+        // clustered, suggesting episodic root cause rather than
+        // continuous instability.
+        private var callbackGapMildCount: Int64 = 0
+        private var callbackGapModerateCount: Int64 = 0
+        private var callbackGapSevereCount: Int64 = 0
+
         // Per-reconfig-window decoder error counts. These are tallied
         // BEFORE `isNoisyRecoveryMessage` filters them out of the
         // visible log, so we can see decoder error storms even when
@@ -2448,11 +2484,45 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let gapMs = (now - lastScheduleRenderTime) * 1000.0
                 if gapMs > 50 {
                     let severity: String
-                    if gapMs > 300 { severity = "SEVERE" }
-                    else if gapMs > 100 { severity = "moderate" }
-                    else { severity = "mild" }
+                    if gapMs > 300 {
+                        severity = "SEVERE"
+                        callbackGapSevereCount &+= 1
+                    } else if gapMs > 100 {
+                        severity = "moderate"
+                        callbackGapModerateCount &+= 1
+                    } else {
+                        severity = "mild"
+                        callbackGapMildCount &+= 1
+                    }
+                    // v1.7.x Step 7: snapshot PTS pair + audio-reconfig
+                    // recency at the moment of the gap. Codex's analysis
+                    // of the 22:04 log identified that the gap detection
+                    // alone doesn't tell us whether video stalled while
+                    // audio kept advancing (presentation/sync side) or
+                    // whether both sides paused together (decode side).
+                    // The PTS pair distinguishes:
+                    //   - audio_pts advancing past video_pts during gap
+                    //     → video-only stall (suspect decode/render)
+                    //   - both frozen at same value → joint pause
+                    //     (suspect demuxer/network)
+                    // The since_audio_reconfig delta surfaces whether
+                    // the gap landed in the wake of an AC3 reconfig.
                     #if DEBUG
-                    print("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms \(severity) (libmpv internal stall — decoder/demuxer/render-context, not our render path)")
+                    var audioPts: Double = 0
+                    var videoPts: Double = 0
+                    if let mpv = activeMPVHandle() {
+                        mpv_get_property(mpv, "audio-pts", MPV_FORMAT_DOUBLE, &audioPts)
+                        mpv_get_property(mpv, "video-pts", MPV_FORMAT_DOUBLE, &videoPts)
+                    }
+                    let avDiff = audioPts - videoPts  // positive = audio ahead = video lagging
+                    let sinceAudioReconfig: String
+                    if lastAudioReconfigAt > 0 {
+                        let deltaMs = (now - lastAudioReconfigAt) * 1000.0
+                        sinceAudioReconfig = "\(String(format: "%.0f", deltaMs))ms"
+                    } else {
+                        sinceAudioReconfig = "n/a"
+                    }
+                    print("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms \(severity) audio_pts=\(String(format: "%.3f", audioPts))s video_pts=\(String(format: "%.3f", videoPts))s a-v=\(String(format: "%+.3f", avDiff))s(positive=video_behind) since_audio_reconfig=\(sinceAudioReconfig) (libmpv internal stall — decoder/demuxer/render-context, not our render path)")
                     #endif
                 }
             }
@@ -2886,7 +2956,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let variance = frameIntervals.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / Double(frameIntervals.count)
                     return sqrt(variance)
                 }()
-                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | black_supp=\(blackFramesSuppressedCount) | bp_skip=\(backpressureSkipCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
+                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | black_supp=\(blackFramesSuppressedCount) | bp_skip=\(backpressureSkipCount) | gaps=\(callbackGapMildCount)/\(callbackGapModerateCount)/\(callbackGapSevereCount)(mild/mod/sev) | audio_reconfigs=\(audioReconfigCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
 
             lastEnqueueTime = enqueueTime
@@ -3735,6 +3805,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // and resets per-window decoder counters.
                         self.handleVideoReconfig()
 
+                    case MPV_EVENT_AUDIO_RECONFIG:
+                        // v1.7.x Step 7: stamp the timestamp so
+                        // subsequent MPV-CALLBACK-GAP logs can show
+                        // `since_audio_reconfig=Nms`. AC3 audio in
+                        // live MPEG-TS reconfigs on
+                        // mono/stereo/5.1 transitions; each reconfig
+                        // may briefly stall libmpv. Codex flagged
+                        // this correlation as a key diagnostic.
+                        self.lastAudioReconfigAt = CFAbsoluteTimeGetCurrent()
+                        self.audioReconfigCount &+= 1
+                        #if DEBUG
+                        print("[MPV-DIAG] \(self.streamTag) Event: audio-reconfig #\(self.audioReconfigCount)")
+                        #endif
+
                     case MPV_EVENT_LOG_MESSAGE:
                         if let msg = UnsafeMutablePointer<mpv_event_log_message>(OpaquePointer(event.pointee.data)) {
                             let text = msg.pointee.text.map { String(cString: $0) } ?? ""
@@ -4523,12 +4607,31 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &estimatedFPS)
             var displayFPS: Double = 0
             mpv_get_property(mpv, "estimated-display-fps", MPV_FORMAT_DOUBLE, &displayFPS)
+            // v1.7.x Step 7: container-fps is the FPS reported by the
+            // demuxer. Codex flagged that we never establish a stable
+            // cadence reference (`fps_detected=0.00` throughout the
+            // 22:04 log), which leaves anomaly detection partially
+            // blind. Both `container-fps` (demuxer-reported) and
+            // `estimated-vf-fps` (decoder-measured) are surfaced
+            // separately in MPV-PERF so we can see whether mpv ever
+            // converges on a stable cadence for UHD HEVC live MPEG-TS.
+            var containerFPS: Double = 0
+            mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &containerFPS)
 
             // A/V sync
             var avsync: Double = 0
             mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsync)
             var audioPts: Double = 0
             mpv_get_property(mpv, "audio-pts", MPV_FORMAT_DOUBLE, &audioPts)
+            // v1.7.x Step 7: video-pts surfaced alongside audio-pts
+            // for sign-explicit avsync diagnosis. mpv's `avsync`
+            // property is documented as `audio_pts - video_pts`:
+            // positive means audio is ahead, video is behind. The
+            // 22:04 log's `avsync=2.3348s` was video lagging audio
+            // by 2.3s, NOT video ahead. Logging the raw PTS pair
+            // makes the direction unambiguous in future analysis.
+            var videoPts: Double = 0
+            mpv_get_property(mpv, "video-pts", MPV_FORMAT_DOUBLE, &videoPts)
 
             // Audio device buffer
             let isPlaying: Bool = {
@@ -4582,15 +4685,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // gives you that one stream's jitter timeline.
             let t = streamTag
             print("[\(ts)] \(t) [MPV-DIAG] time=\(ms)ms isPlaying=\(isPlaying) callbacks/\(isLive ? 15 : 5)s=\(timeChangeCount)")
-            print("[\(ts)] \(t) [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: \(String(format: "%.1f", estimatedFPS))/\(String(format: "%.1f", displayFPS))disp, hwdec=\(hwdecCurrent)")
+            print("[\(ts)] \(t) [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: estimated=\(String(format: "%.1f", estimatedFPS))/container=\(String(format: "%.1f", containerFPS))/display=\(String(format: "%.1f", displayFPS)), hwdec=\(hwdecCurrent)")
             print("[\(ts)] \(t) [MPV-FRAME] render: \(String(format: "%.1f", avgRenderMs))ms avg / \(String(format: "%.1f", maxRenderMs))ms max, interval: \(String(format: "%.1f", avgInterval))ms avg [\(String(format: "%.1f", minInterval))-\(String(format: "%.1f", maxInterval))ms], jitter: \(String(format: "%.2f", jitterMs))ms, late: \(lateFrames)/\(frameCount), layer: \(layerStatus)")
             print("[\(ts)] \(t) [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(demuxerBytes / 1024)KB/s, paused_for_cache: \(pausedForCache != 0)")
-            print("[\(ts)] \(t) [MPV-AUDIO] avsync: \(String(format: "%.4f", avsync))s, audio_pts: \(String(format: "%.2f", audioPts))s, underruns: \(audioUnderrunCount), buf_events: \(bufferEventCount), buf_time: \(String(format: "%.1f", totalBufferingDuration))s")
+            // v1.7.x Step 7: surface raw audio_pts AND video_pts plus
+            // sign-explicit `a-v` (audio minus video; positive = video
+            // behind). Avoids the sign confusion that bit my Step 7
+            // proposal where I read avsync as "video ahead" and
+            // proposed an over-emission fix for an under-emission
+            // problem. Also includes audio_reconfig running count so
+            // gaps can be correlated post-hoc.
+            print("[\(ts)] \(t) [MPV-AUDIO] audio_pts=\(String(format: "%.2f", audioPts))s video_pts=\(String(format: "%.2f", videoPts))s a-v=\(String(format: "%+.4f", audioPts - videoPts))s(positive=video_behind) avsync=\(String(format: "%.4f", avsync))s underruns=\(audioUnderrunCount) audio_reconfigs=\(audioReconfigCount) buf_events=\(bufferEventCount) buf_time=\(String(format: "%.1f", totalBufferingDuration))s")
             // One-line per-stream summary — the "tl;dr" that's
             // easiest to grep when scanning 9 concurrent tiles'
             // logs. Mirrors the key numbers from the verbose lines
             // above so `grep STREAM-SUMMARY` gives a quick overview.
-            print("[\(ts)] \(t) [STREAM-SUMMARY] fps=\(String(format: "%.1f", estimatedFPS)) interval=\(String(format: "%.1f", avgInterval))ms jitter=\(String(format: "%.1f", jitterMs))ms late=\(lateFrames)/\(frameCount) vo_drops=+\(deltaVideoDrops) dec_drops=+\(deltaDecoderDrops) underruns=\(audioUnderrunCount) avsync=\(String(format: "%.3f", avsync))s cache=\(String(format: "%.1f", cacheDuration))s hwdec=\(hwdecCurrent) layer=\(layerStatus)")
+            // v1.7.x Step 7: includes container-fps and gap-class
+            // counts so steady-state cadence health is visible at a
+            // glance.
+            print("[\(ts)] \(t) [STREAM-SUMMARY] fps=\(String(format: "%.1f", estimatedFPS))/cont=\(String(format: "%.1f", containerFPS)) interval=\(String(format: "%.1f", avgInterval))ms jitter=\(String(format: "%.1f", jitterMs))ms late=\(lateFrames)/\(frameCount) vo_drops=+\(deltaVideoDrops) dec_drops=+\(deltaDecoderDrops) underruns=\(audioUnderrunCount) a-v=\(String(format: "%+.3f", audioPts - videoPts))s gaps=\(callbackGapMildCount)/\(callbackGapModerateCount)/\(callbackGapSevereCount)(mild/mod/sev) cache=\(String(format: "%.1f", cacheDuration))s hwdec=\(hwdecCurrent) layer=\(layerStatus)")
             #endif
 
             DebugLogger.shared.log(
