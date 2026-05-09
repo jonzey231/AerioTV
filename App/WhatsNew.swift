@@ -65,7 +65,12 @@ enum WhatsNewStore {
                 "API Key sign-in is still here. The Add Server screen now has a clear Username & Password vs API Key picker; existing servers keep their current sign-in method untouched",
                 "Your Direct Connect credentials sync across your devices via iCloud. Set up Dispatcharr once on iPad and your Apple TV picks it up automatically without re-typing anything",
                 "Dispatcharr List view now shows the currently-airing program under each channel as soon as the guide loads. Previously many channels rendered with just the name until you opened the Guide tab",
-                "Expanded channel cards on Dispatcharr now show category tints (Sports / News / Movies / Kids) on each upcoming program, matching how the Guide tab tints them"
+                "Expanded channel cards on Dispatcharr now show category tints (Sports / News / Movies / Kids) on each upcoming program, matching how the Guide tab tints them",
+                "Fixed occasional black-frame flashes during UHD HEVC HDR live playback",
+                "Smoother startup on UHD HEVC live channels (about 1-2 seconds longer to first frame, in exchange for stable playback)",
+                "Multiview: fixed the brief red 'Decoder unavailable' card that occasionally appeared when adding a tile",
+                "Multiview: fixed silent audio when switching audio focus to a freshly-added tile",
+                "Apple TV: fixed the channel info banner occasionally getting stuck visible after a stream starts"
             ],
             releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.0")
         ),
