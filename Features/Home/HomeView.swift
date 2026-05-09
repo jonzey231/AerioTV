@@ -4864,7 +4864,15 @@ private struct ChannelInfoBanner: View {
     /// the next up/down keeps flipping channels instead of walking
     /// the bottom pills).
     @State private var bannerWindowActive: Bool = false
-    @State private var bannerHideTask: Task<Void, Never>?
+    /// Wall-clock timestamp of the most recent stream-start.
+    /// Belt-and-suspenders against `bannerWindowActive` getting
+    /// stranded `true` if the auto-hide Task is cancelled at an
+    /// unfortunate moment (Apple TV report 2026-05-08: banner
+    /// occasionally stuck visible until Menu/Back interaction).
+    /// `shouldRender` reads this and a wall-clock comparison so
+    /// the banner can never outlive the budget regardless of
+    /// Task state.
+    @State private var bannerOpenedAt: Date?
 
     /// Renders when EITHER (a) chrome is up — handles brand-new
     /// stream starts (cold-launch / row-tap that bump
@@ -4881,14 +4889,34 @@ private struct ChannelInfoBanner: View {
     /// open. On iPhone the two overlays render at the same
     /// top-left coordinates and would otherwise overlap — banner
     /// would cover the stats card the user explicitly opened.
+    ///
+    /// v1.7.x: `bannerWindowActive` is gated by a wall-clock
+    /// freshness check on `bannerOpenedAt` so a stranded `true`
+    /// (Apple TV stream-start race observed 2026-05-08, banner
+    /// stuck visible until Menu/Back) can't keep the banner
+    /// permanently up. Even if the auto-hide Task is somehow
+    /// cancelled before its write lands, the wall-clock guard
+    /// expires at +5s and the banner stops rendering on the next
+    /// view evaluation.
     private var shouldRender: Bool {
         let isSingleStream = multiviewStore.tiles.count <= 1
         let isFullscreenActive = nowPlaying.isActive && !nowPlaying.isMinimized
-        return (nowPlaying.chromeIsVisible || bannerWindowActive)
+        let bannerWindowFresh: Bool = {
+            guard bannerWindowActive else { return false }
+            guard let openedAt = bannerOpenedAt else { return false }
+            return Date().timeIntervalSince(openedAt) < Self.bannerWindowSeconds
+        }()
+        return (nowPlaying.chromeIsVisible || bannerWindowFresh)
             && isSingleStream
             && isFullscreenActive
             && !nowPlaying.streamInfoIsVisible
     }
+
+    /// 5-second budget for the post-stream-start banner window.
+    /// Single source of truth: used by both the SwiftUI `.task(id:)`
+    /// fader below and the wall-clock freshness check in
+    /// `shouldRender`.
+    private static let bannerWindowSeconds: TimeInterval = 5.0
 
     /// Resolve current program for this channel. First the
     /// lightweight `ChannelDisplayItem.currentProgram*` fields
@@ -4939,14 +4967,29 @@ private struct ChannelInfoBanner: View {
         // stream-start that bumped `chromeWakeToken`), the banner is
         // shown via that path too — both signals together are
         // idempotent.
-        .onChange(of: nowPlaying.streamStartedToken) { _, newToken in
-            guard newToken != nil else { return }
+        //
+        // v1.7.x: replaced an `.onChange(of: streamStartedToken)`
+        // with a manual Task by `.task(id:)` because Apple TV users
+        // reported the banner occasionally getting stranded visible
+        // (2026-05-08) — the manual Task could be cancelled mid-
+        // window without its replacement running, leaving
+        // `bannerWindowActive` stuck at `true` forever. SwiftUI's
+        // `.task(id:)` is bound to view lifecycle and re-runs
+        // deterministically when the id changes; combined with the
+        // wall-clock freshness check in `shouldRender` (which uses
+        // `bannerOpenedAt`), the banner can no longer outlive its
+        // budget regardless of Task state.
+        .task(id: nowPlaying.streamStartedToken) {
+            guard nowPlaying.streamStartedToken != nil else { return }
+            bannerOpenedAt = Date()
             bannerWindowActive = true
-            bannerHideTask?.cancel()
-            bannerHideTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard !Task.isCancelled else { return }
+            do {
+                try await Task.sleep(nanoseconds: UInt64(Self.bannerWindowSeconds * 1_000_000_000))
                 bannerWindowActive = false
+            } catch {
+                // Cancelled — view torn down or token changed.
+                // The wall-clock check in `shouldRender` is the
+                // backstop.
             }
         }
         .animation(.easeInOut(duration: 0.3), value: nowPlaying.chromeIsVisible)
