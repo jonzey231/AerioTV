@@ -311,6 +311,13 @@
   (cold launch before token store is populated, network blip
   during refresh, etc.).
 
+### Contributors
+
+Thanks to [@JCBird1012](https://github.com/JCBird1012) for two PRs that landed in v1.7.0:
+
+- [#15](https://github.com/jonzey231/AerioTV/pull/15) `perf(network): reuse fetch sessions and preserve NW fallback timeouts` — replaces ad-hoc per-call URLSession instances with long-lived shared sessions for the large Xtream / Dispatcharr / XMLTV / Xtream series-detail fetches, and preserves request and session timeout intent when `HTTPRouter` falls back to `NWHTTPClient` so large HSTS-bypass requests no longer silently drop to the transport default timeout.
+- [#16](https://github.com/jonzey231/AerioTV/pull/16) `fix(mpv): serialize shared playback state access` — moves the mpv handle and related lifecycle flags behind a lock-backed `PlaybackState` and routes cross-queue access through atomic helper methods. Fixes shutdown, background, and `hwdec`-fallback races; keeps the background auto-pause ownership checks consistent; and fixes the `autoPausedOnBackground` comment so it matches both background pause paths. Follow-on cleanup to PR #14.
+
 ## v1.6.23 - 2026-05-02
 
 ### Security
