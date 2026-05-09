@@ -3245,22 +3245,35 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // upstream profiling (see issue #4213). Live-only — VOD
             // benefits from more thorough probing for reliable seek.
             //
-            // `demuxer-lavf-analyzeduration=0.1`: cap libavformat's
-            // stream-analysis stage at 100ms. Default is 5s — libmpv
-            // scans that much data to identify all elementary streams
-            // before the first frame decodes, which dominates first-
-            // frame latency on well-formed MPEG-TS. Dropping to 0.1s
-            // trusts the first PMT/PAT table (arrives within a few
-            // packets on broadcast-grade TS) and moves straight to
-            // decode. Worst case on an oddly-muxed stream: mpv misses
-            // a late-arriving audio track. Acceptable tradeoff for
-            // the user-perceived speedup.
+            // `demuxer-lavf-analyzeduration=1.5`: cap libavformat's
+            // stream-analysis stage at 1.5 seconds. Default is 5s.
+            // Originally tuned to 0.1s for tap-to-first-frame latency,
+            // but field testing 2026-05-08 (Step 7-8 instrumentation
+            // on Sky Sports Main Event UHD HEVC HDR) showed `fps_detected
+            // =0.0/container=0.0/display=0.0` for the entire 2-minute
+            // playback session — mpv literally never characterized the
+            // stream's frame rate because 100ms wasn't enough samples
+            // for a 30fps source (would need ~3-4 frames minimum =
+            // 100-130ms minimum, with no GOP-boundary tolerance).
+            // Without a cadence reference, mpv's `framedrop=vo` policy
+            // can't classify late frames, so it never engaged during
+            // the periodic 200ms callback gaps that produced visible
+            // held-frame stutter. 1.5s gives mpv ~45 source frames
+            // worth of analysis runway, which is plenty to lock fps,
+            // pixel format, color matrix, and audio params cleanly.
+            // Codex's CODEX_POST_FLASH_STUTTER_NEXT_STEPS Fix 1
+            // recommends this exact direction.
             //
-            // `demuxer-lavf-probesize=32768`: 32KB probe (default 5MB).
-            // Pairs with analyzeduration — once we've capped the time
-            // budget, capping the byte budget prevents mpv from
-            // waiting for a full 5MB buffer to arrive before
-            // confirming the stream is decodable.
+            // `demuxer-lavf-probesize=1048576`: 1 MB probe (default
+            // 5MB). Originally tuned to 32 KB for the same first-frame
+            // latency goal. UHD HEVC Main10 BT.2020 streams need more
+            // bytes to expose SPS/PPS/VPS NALs cleanly; the 32 KB cap
+            // forced libavformat to emit `Skipping invalid undecodable
+            // NALU: 39` warnings and triggered the playback-restart
+            // reconfig pattern visible in every field-test log. 1 MB
+            // is enough headroom for HEVC parameter sets plus a few
+            // initial frames without falling all the way back to
+            // libavformat's 5MB default.
             //
             // (Note: `demuxer-lavf-o-add=fflags=+nobuffer` would also
             // be a free win here, but MPVKit's bundled libmpv build
@@ -3289,8 +3302,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // streams with incorrect FPS metadata (rare on broadcast
             // MPEG-TS).
             if isLive {
-                setOption(mpv, "demuxer-lavf-analyzeduration", "0.1")
-                setOption(mpv, "demuxer-lavf-probesize", "32768")
+                setOption(mpv, "demuxer-lavf-analyzeduration", "1.5")
+                setOption(mpv, "demuxer-lavf-probesize", "1048576")
                 setOption(mpv, "cache-pause-initial", "no")
                 setOption(mpv, "hls-bitrate", "max")
                 setOption(mpv, "video-latency-hacks", "yes")
@@ -3637,19 +3650,52 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 mpv_set_property_string(mpv, "cache-secs", String(format: "%.1f", cachingSecs))
                 mpv_set_property_string(mpv, "demuxer-max-back-bytes", "0")
                 mpv_set_property_string(mpv, "demuxer-donate-buffer", "no")
-                mpv_set_property_string(mpv, "demuxer-lavf-probe-info", "nostreams")
-                mpv_set_property_string(mpv, "demuxer-lavf-analyzeduration", "0")
-                // Smaller probesize — MPEG-TS's codec identity is
-                // obvious from the first ~32KB of PAT/PMT/PES
-                // headers. mpv/ffmpeg's default probesize is 5MB
-                // which for live TS means reading 200-500ms of data
-                // before committing to a demuxer/decoder. 32KB is
-                // ~2-4 TS packets worth of probing — enough to
-                // identify codec, cheap to read from the stream.
-                // Live-only; VOD keeps the larger default for mkv/
-                // mp4 moov-parsing correctness.
-                mpv_set_property_string(mpv, "demuxer-lavf-probesize", "32768")
-                mpv_set_property_string(mpv, "probesize", "32768")
+                // v1.7.x Step 9 — soften the runtime startup overrides.
+                // These post-init `mpv_set_property_string` calls
+                // were setting the demuxer-analysis options to MORE
+                // aggressive values than the pre-init options at
+                // line ~3292, which is what mpv actually consulted
+                // when calling avformat_find_stream_info. Field test
+                // 2026-05-08 (Step 8 instrumentation on Sky Sports
+                // Main Event UHD HEVC HDR) showed the consequence:
+                // `fps_detected=0.0/container=0.0/display=0.0` for
+                // the entire 2-minute playback session. mpv literally
+                // never characterized the stream's frame rate.
+                //
+                // - `probe-info=nostreams` skipped
+                //   avformat_find_stream_info() entirely once any
+                //   stream had been identified, which on
+                //   broadcast-grade MPEG-TS means after the first
+                //   PAT/PMT pair. fps detection happens INSIDE
+                //   find_stream_info, so skipping it = no fps.
+                //   Now `auto` — let mpv complete the analysis.
+                //
+                // - `analyzeduration=0` would have been "use
+                //   libavformat default = 5s" but combined with
+                //   probe-info=nostreams it didn't matter. Now 1.5s
+                //   to give mpv ~45 frames of analysis runway at
+                //   30fps source.
+                //
+                // - `probesize=32768` (32KB) was too small for UHD
+                //   HEVC Main10 BT.2020 streams with their full SPS/
+                //   PPS/VPS NAL payloads. Field test logged
+                //   "Skipping invalid undecodable NALU: 39" at
+                //   startup, which is libavformat tripping on
+                //   incomplete HEVC parameter sets. 1MB is enough
+                //   headroom for HEVC parameter sets plus several
+                //   initial frames without falling all the way back
+                //   to libavformat's 5MB default.
+                //
+                // Trade-off: tap-to-first-frame latency goes from
+                // ~1.3s (current) to probably ~2.5–3s. UX cost is
+                // small for live broadcast; users tap a channel and
+                // wait briefly anyway. Codex's
+                // CODEX_POST_FLASH_STUTTER_NEXT_STEPS recommends
+                // exactly this direction (Fix 1).
+                mpv_set_property_string(mpv, "demuxer-lavf-probe-info", "auto")
+                mpv_set_property_string(mpv, "demuxer-lavf-analyzeduration", "1.5")
+                mpv_set_property_string(mpv, "demuxer-lavf-probesize", "1048576")
+                mpv_set_property_string(mpv, "probesize", "1048576")
             } else {
                 // VOD: larger buffer for seek-back
                 mpv_set_property_string(mpv, "demuxer-max-bytes", "50MiB")
