@@ -451,7 +451,11 @@ struct MultiviewTileView: View {
                 },
                 tileID: tile.id,
                 isAudioActive: isAudioActive,
-                shouldPause: shouldPause
+                shouldPause: shouldPause,
+                // Snapshot tile count for setupMPV's pre-init audio
+                // strategy (mute-only ≤6, decoder-off ≥7). See the
+                // !initialIsAudioActive branch in setupMPV.
+                initialTileCount: store.tiles.count
             )
             .id(tile.id)
             .onAppear {
@@ -641,7 +645,11 @@ struct MultiviewTileView: View {
                 },
                 tileID: tile.id,
                 isAudioActive: isAudioActive,
-                shouldPause: shouldPause
+                shouldPause: shouldPause,
+                // Snapshot tile count for setupMPV's pre-init audio
+                // strategy (mute-only ≤6, decoder-off ≥7). See the
+                // !initialIsAudioActive branch in setupMPV.
+                initialTileCount: store.tiles.count
             )
             // SwiftUI identity is the TILE id, not the item.id, so
             // rearrange (which shuffles `tiles` but keeps ids) doesn't

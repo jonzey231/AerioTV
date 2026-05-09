@@ -421,13 +421,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     /// saving network + GPU, and resume when PiP ends.
     var shouldPause: Bool = false
 
+    /// Multiview tile count at the moment this Representable is being
+    /// constructed. Captured on the main actor at SwiftUI render time
+    /// and passed through to the Coordinator so `setupMPV` (which
+    /// runs on a background queue and can't reach
+    /// `MultiviewStore.shared`) can pick the matching audio strategy
+    /// at pre-init time. Defaults to 1 — single-stream callers don't
+    /// need to set it because the audio-strategy branch only fires
+    /// for `initialIsAudioActive == false`, which never happens in
+    /// single-stream mode.
+    var initialTileCount: Int = 1
+
     func makeCoordinator() -> Coordinator {
         let c = Coordinator(urls: urls, headers: headers, isLive: isLive,
                             progressStore: progressStore, logStore: logStore,
                             onFatalError: onFatalError,
                             tileID: tileID,
                             initialIsAudioActive: isAudioActive,
-                            initialShouldPause: shouldPause)
+                            initialShouldPause: shouldPause,
+                            initialTileCount: initialTileCount)
         c.nowPlayingTitle = nowPlayingTitle
         c.nowPlayingSubtitle = nowPlayingSubtitle
         c.nowPlayingArtworkURL = nowPlayingArtworkURL
@@ -1102,6 +1114,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// render-thread-owned GL resources. Safe to call multiple times: once
         /// the first caller nils the resources, subsequent calls become no-ops.
         private func teardownRenderResourcesOnRenderQueue() {
+            // v1.7.x Issue A round 4: tear down the IOSurface re-attach
+            // watchdog first. The display link is main-thread; since
+            // teardownRenderResourcesOnRenderQueue can be called from
+            // either main (via stop()) or mpvQueue (via MPV_EVENT_
+            // SHUTDOWN), we dispatch to main to invalidate. assumed
+            // safe — invalidate is idempotent and the lock-protected
+            // buffer release inside stopWatchdog is also idempotent.
+            Task { @MainActor [weak self] in
+                self?.stopWatchdog()
+            }
             // renderQueue -> mpvQueue is async-only, so this sync is deadlock-free
             // from both stop() (main thread) and MPV_EVENT_SHUTDOWN (mpvQueue).
             renderQueue.sync { [self] in
@@ -1111,14 +1133,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
                 if let ctx = eaglContext {
                     EAGLContext.setCurrent(ctx)
-                    if fbo != 0 {
+                    if !fboSlots.isEmpty {
                         #if DEBUG
-                        print("[MPV-FBO] \(streamTag) destroy fbo=\(fbo) (teardown, was \(fboWidth)x\(fboHeight))")
+                        print("[MPV-FBO] \(streamTag) destroy \(fboSlots.count)-deep pool (teardown, was \(fboWidth)x\(fboHeight))")
                         #endif
-                        glDeleteFramebuffers(1, &fbo); fbo = 0
+                        for i in 0..<fboSlots.count {
+                            if fboSlots[i].fbo != 0 {
+                                glDeleteFramebuffers(1, &fboSlots[i].fbo)
+                            }
+                        }
+                        fboSlots = []
+                        renderBufferIndex = 0
                     }
-                    renderTexture = nil
-                    renderPixelBuffer = nil
                     if let cache = textureCache { CVOpenGLESTextureCacheFlush(cache, 0) }
                     EAGLContext.setCurrent(nil)
                 }
@@ -1138,9 +1164,51 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?  // vsync-synchronized display
         private var eaglContext: EAGLContext?
         private var textureCache: CVOpenGLESTextureCache?
-        private var renderPixelBuffer: CVPixelBuffer?   // IOSurface-backed, reused per resolution
-        private var renderTexture: CVOpenGLESTexture?    // GL texture wrapping the pixel buffer
-        private var fbo: GLuint = 0                      // FBO with texture as color attachment
+        // v1.7.x Step 5 — triple-buffered FBO ring.
+        //
+        // Prior single-buffer architecture (one CVPixelBuffer + one
+        // GL texture + one FBO, recreated per resolution) produced
+        // occasional single-VSync black flashes on UHD HEVC HDR live
+        // MPEG-TS playback (Sky Sports Main Event UHD class). Field
+        // tests through Steps 3a / 3a-tighten / 3b / 3b-lookahead /
+        // 4a all confirmed the pattern: SwiftUI overlays stay drawn
+        // while the AVSampleBufferDisplayLayer area goes pitch black
+        // for one VSync. The detector at line ~2537 logged
+        // `black_supp=0` on tests where flashes were visible, proving
+        // the buffer was NOT zero at our detection time but WAS zero
+        // when AVSBDL composed it.
+        //
+        // Root cause: producer/consumer race on a single shared
+        // IOSurface. mpv writes frame N+1 to the same IOSurface
+        // AVSBDL is about to read for VSync M. mpv's glClear at the
+        // start of its render pass leaves the IOSurface temporarily
+        // black. If AVSBDL composes during that sub-millisecond
+        // window, the layer renders black for that VSync. Step 4a's
+        // DisplayImmediately made it 5x worse (1 per 2.4s vs 1 per
+        // ~12s baseline) by removing AVSBDL's implicit hold time
+        // before composing — confirming the race hypothesis.
+        //
+        // Triple-buffered ring breaks the race: mpv writes to
+        // slot[renderBufferIndex], we hand that slot's pixel buffer
+        // to AVSBDL, then advance the cursor. By the time mpv comes
+        // back to this slot (after writing two other slots), AVSBDL
+        // has long since composed and released its reference. The
+        // watchdog's `lastEnqueuedSampleBuffer` cache is also safe:
+        // it points at most one slot behind mpv's write position,
+        // and mpv is two slots ahead before wrapping.
+        //
+        // Memory cost (UHD BGRA 3840x2160): 33MB per slot, ~99MB
+        // total per single-stream UHD instance. Multiview tiles
+        // render at much smaller resolutions (typically 640-960
+        // wide), so per-tile cost is ~5-10MB total.
+        private struct FBOSlot {
+            var pixelBuffer: CVPixelBuffer
+            var texture: CVOpenGLESTexture
+            var fbo: GLuint
+        }
+        private static let fboPoolSize = 3
+        private var fboSlots: [FBOSlot] = []
+        private var renderBufferIndex: Int = 0
         private var fboWidth: Int = 0
         private var fboHeight: Int = 0
         /// Detected stream FPS — used for diagnostics.
@@ -1277,6 +1345,42 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var videoReconfigCount: Int64 = 0
         private var lastHwdecCurrentObserved: String = ""
 
+        // v1.7.x Step 7 — audio reconfig + callback-gap correlation.
+        //
+        // Codex's CODEX_UHD_STUTTER_AVSYNC_NEXT_STEPS_2026-05-08.md
+        // recommends correlating MPV_EVENT_AUDIO_RECONFIG with
+        // MPV-CALLBACK-GAP events: AC3 audio for live MPEG-TS often
+        // reconfigs when the broadcast switches between mono/stereo/
+        // 5.1 segments, and each reconfig may cause a brief libmpv
+        // pause. The 22:04 field-test log showed three audio-reconfig
+        // events plus four 200ms callback gaps mid-playback; if the
+        // pairs reliably coincide we have a concrete next direction
+        // (audio path tuning). If they don't, network/decoder is the
+        // suspect.
+        //
+        // `lastAudioReconfigAt` is stamped in the dispatcher when
+        // MPV_EVENT_AUDIO_RECONFIG fires (currently routed through
+        // the `default:` case, which just prints "Event: audio-
+        // reconfig"). On each MPV-CALLBACK-GAP we log
+        // `since_audio_reconfig=Nms` so future readers can grep for
+        // gaps that arrived within ~100ms of an audio reconfig.
+        private var lastAudioReconfigAt: CFAbsoluteTime = 0
+        private var audioReconfigCount: Int64 = 0
+
+        // v1.7.x Step 7 — callback-gap severity counters.
+        //
+        // Cumulative tallies of the gap classifications already
+        // emitted at line ~2455 (mild 50-100ms, moderate 100-300ms,
+        // severe 300ms+). Surfaced in FRAME SUMMARY so we can see
+        // whether gaps are clustered (one bad reconfigure window) or
+        // chronic (steady-state decoder issue). The 22:04 test had
+        // ~5 moderate-class gaps in a 5-second window — strongly
+        // clustered, suggesting episodic root cause rather than
+        // continuous instability.
+        private var callbackGapMildCount: Int64 = 0
+        private var callbackGapModerateCount: Int64 = 0
+        private var callbackGapSevereCount: Int64 = 0
+
         // Per-reconfig-window decoder error counts. These are tallied
         // BEFORE `isNoisyRecoveryMessage` filters them out of the
         // visible log, so we can see decoder error storms even when
@@ -1300,6 +1404,110 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // rebuild gap.
         private var fboDestroyedAt: CFAbsoluteTime = 0
 
+        // v1.7.x Issue A round 4: CoreAnimation IOSurface re-attach
+        // watchdog. Three pieces of research (AVSBDL/HDR, libmpv,
+        // other iOS players, all 2026-05-08) converged on the same
+        // root cause: AVSampleBufferDisplayLayer is a CALayer subclass
+        // that publishes its current frame as an IOSurface attached
+        // to the layer tree. When our enqueue stops feeding fresh
+        // PTS values long enough (which happens during the 60-100ms
+        // libmpv render stalls confirmed in the logs), CoreAnimation's
+        // change-detection optimizer can drop the surface attachment
+        // for one VSync. With HDR content (BT.2020 / p010), the EDR
+        // composition path falls back to backgroundColor (black) for
+        // that VSync instead of holding a clamped SDR copy of the
+        // last frame, producing exactly the user-visible single-frame
+        // black flashes Archie reproduced and verified via 60fps
+        // screen capture (avg=0, std=0 single VSyncs).
+        //
+        // The fix is the standard "feed the layer at display refresh"
+        // pattern used by moonlight-ios PR #482 and WebKit's MSE
+        // backend (Bug 181623). A CADisplayLink ticks at the display
+        // refresh rate; on each tick, if the layer hasn't received a
+        // fresh enqueue in `watchdogStaleThreshold` seconds, we
+        // re-enqueue the most recent CMSampleBuffer with a fresh
+        // host-time PTS. That forces CoreAnimation to attach the
+        // IOSurface as a new contents reference every VSync,
+        // defeating the change-detection optimizer that drops the
+        // attachment during gaps. The IOSurface backing is already
+        // valid; we're just kicking the compositor.
+        //
+        // Architecturally-correct fix (v1.8 candidate, NOT shipping
+        // here): migrate the display path to AVSampleBufferVideo
+        // Renderer + AVSampleBufferRenderSynchronizer (iOS 17+,
+        // documented at developer.apple.com). That's how AVPlayer
+        // avoids this symptom natively. Significant rewrite, deferred.
+        private var displayLinkWatchdog: CADisplayLink?
+        private var watchdogLock = os_unfair_lock_s()
+        private var lastEnqueuedSampleBuffer: CMSampleBuffer?
+        private let watchdogStaleThreshold: CFTimeInterval = 0.030  // 30ms
+        // Cumulative count of watchdog-driven re-enqueues, exposed
+        // in FRAME SUMMARY so we can see how often the watchdog
+        // saved a flash. Field-only diagnostic; non-zero means the
+        // watchdog is doing real work.
+        private var watchdogReenqueueCount: Int64 = 0
+
+        // v1.7.x Step 6 — backpressure skip counter. Incremented
+        // each time `renderAndPresent` early-returns because
+        // AVSampleBufferDisplayLayer's renderer reported
+        // `isReadyForMoreMediaData == false`. Exposed in FRAME
+        // SUMMARY. Field-only diagnostic; non-zero means mpv is
+        // producing frames faster than AVSBDL is consuming them
+        // (typical for fast hardware decoders on UHD content),
+        // and we're correctly rate-limiting via mpv's
+        // `framedrop=vo` policy by NOT calling
+        // mpv_render_context_render — mpv's internal queue
+        // fills, framedrop drops the late frames at the VO
+        // boundary, and the upstream demuxer/decoder pipeline
+        // is rate-limited to AVSBDL's consumption rate.
+        private var backpressureSkipCount: Int64 = 0
+
+        // v1.7.x Issue A round 6 — black-frame detector (Step 3a).
+        //
+        // The 2026-05-08 fully-applied Step 2 test confirmed mpv's
+        // VideoToolbox path occasionally emits a frame whose backing
+        // CVPixelBuffer is uniformly zero — luminance avg=0, std=0
+        // mathematically — interspersed in an otherwise smooth frame
+        // stream (late=0/2954, vo_drops=0, dec_drops=0). 17 such
+        // frames in 76s of UHD HEVC HDR playback (~1 every 4.5s).
+        // Surrounded by normal content frames (avg 25-130). The bug
+        // is inside libmpv's render or VT codepath — from outside
+        // libmpv we can't reach it. This detector catches them on
+        // input, before we wrap them into a CMSampleBuffer for the
+        // display layer. The CADisplayLink watchdog above already
+        // handles "queue stale" by re-enqueueing the last good
+        // CMSampleBuffer with a fresh PTS — so suppressing here just
+        // means the user sees the previous frame held for one mpv-
+        // frame-interval (~16ms) instead of a literal black flash.
+        //
+        // Detection (per Agent C 2026-05-08 research): stratified
+        // 16x16 grid sample of the BGRA pixel buffer = 256 luminance
+        // samples. Compute avg + std using Rec.601 luma weights
+        // (cheap on Apple silicon, <0.5ms on UHD). Trigger when
+        // avg < 10 AND std < 8 AND prev frame's avg > 25 AND prev-
+        // prev avg > 20. The two-deep surround check (prev AND
+        // prev-prev were both bright) prevents suppressing a
+        // legitimate cut-to-black transition that lasts more than
+        // one frame.
+        //
+        // v1.7.x 3a-tighten (2026-05-08): initial release shipped
+        // with avg<4 AND std<1, calibrated for pure codec-zero
+        // (all bytes mathematically zero). Verification recording
+        // showed the bug also produces near-uniform-zero buffers
+        // with small partial-render slivers carried over from the
+        // previous frame, which pushes both avg and std above the
+        // tight thresholds: one observed leak had YAVG=7 and would
+        // never have hit avg<4. Loosened to avg<10 AND std<8 to
+        // catch the partial-corruption class. Real dark content
+        // sits at YAVG 16-30 on limited-range YCbCr with sensor
+        // noise pushing std above 8, so the surround check
+        // (prev_avg > 25, prev_prev_avg > 20) is what actually
+        // protects legitimate dark content; the avg/std numbers
+        // are just the "is this frame degenerate" filter.
+        private var blackFramePrevAvgLuma: Double = 128  // neutral start so first frames don't suppress
+        private var blackFramePrevPrevAvgLuma: Double = 128
+        private var blackFramesSuppressedCount: Int64 = 0
+
         // v1.7.x Issue A round 2: localize mid-stream black flashes.
         // Archie 2026-05-08 native-UHD test showed late=3 frames
         // including FRAME #226 with render=8.1ms interval=211.8ms
@@ -1311,13 +1519,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // silence shows up as a single [MPV-CALLBACK-GAP] line.
         private var lastScheduleRenderTime: CFAbsoluteTime = 0
 
+        /// Multiview tile count at the moment this Coordinator is
+        /// being constructed. Snapshot on the main actor by the
+        /// Representable. setupMPV (background queue) reads this
+        /// instead of touching `MultiviewStore.shared.tiles.count`
+        /// directly, which would be an actor-isolation violation.
+        /// See the audio-strategy branch in setupMPV for usage.
+        private let initialTileCount: Int
+
         init(urls: [URL], headers: [String: String], isLive: Bool,
              progressStore: PlayerProgressStore,
              logStore: AttemptLogStore,
              onFatalError: @escaping @MainActor @Sendable (String) -> Void,
              tileID: String? = nil,
              initialIsAudioActive: Bool = true,
-             initialShouldPause: Bool = false) {
+             initialShouldPause: Bool = false,
+             initialTileCount: Int = 1) {
             self.urls = urls
             self.headers = headers
             self.isLive = isLive
@@ -1327,6 +1544,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             self.tileID = tileID
             self.initialIsAudioActive = initialIsAudioActive
             self.initialShouldPause = initialShouldPause
+            self.initialTileCount = initialTileCount
             // Seed the `lastApplied*` debounce with the initial
             // values — setupMPV applies them via mpv_set_option
             // BEFORE mpv_initialize, so there's no need for
@@ -1853,6 +2071,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         func setupRenderer(layer: CALayer) {
             self.sampleBufferLayer = layer.sublayers?.compactMap { $0 as? AVSampleBufferDisplayLayer }.first
             kickstartIfNeeded()
+            // v1.7.x Issue A round 4: arm the IOSurface re-attach
+            // watchdog now that the layer reference is in place.
+            // See the watchdog-state declaration block for the full
+            // rationale and source list.
+            startWatchdogIfNeeded()
         }
 
         /// Dispatch `start()` on the render queue exactly once.
@@ -1869,76 +2092,107 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         private var mpvStarted = false
 
-        /// Creates (or recreates) the OpenGL FBO backed by an IOSurface CVPixelBuffer.
-        /// mpv renders into this FBO; the CVPixelBuffer IS the rendered frame (zero copy).
+        /// Creates (or recreates) the triple-buffered FBO ring.
+        /// Each of the 3 slots holds an IOSurface-backed
+        /// CVPixelBuffer + a GL texture wrapping it + an FBO with
+        /// that texture bound as the color attachment. mpv renders
+        /// into one slot per frame, advancing
+        /// `renderBufferIndex` round-robin. We hand the matching
+        /// slot's pixel buffer to AVSampleBufferDisplayLayer.
+        ///
+        /// See the FBOSlot declaration block above (~line 1151)
+        /// for the full Step 5 rationale.
         private func setupFBO(width: Int, height: Int) {
             guard let eaglContext, let textureCache else { return }
             EAGLContext.setCurrent(eaglContext)
 
-            // Clean up old resources. v1.7.x Issue A: stamp
+            // Clean up old ring. v1.7.x Issue A: stamp
             // fboDestroyedAt at the moment we delete so
             // [MPV-RECONFIG] can correlate "FBO=DESTROYED" /
             // "RECENTLY_REBUILT" with subsequent reconfig events
             // — answers whether user-visible black flashes are
             // the rebuild gap.
-            if fbo != 0 {
+            if !fboSlots.isEmpty {
                 #if DEBUG
-                print("[MPV-FBO] \(streamTag) destroy fbo=\(fbo) (recreate path, was \(fboWidth)x\(fboHeight))")
+                print("[MPV-FBO] \(streamTag) destroy \(fboSlots.count)-deep pool (recreate path, was \(fboWidth)x\(fboHeight))")
                 #endif
                 fboDestroyedAt = CFAbsoluteTimeGetCurrent()
-                glDeleteFramebuffers(1, &fbo); fbo = 0
+                for i in 0..<fboSlots.count {
+                    if fboSlots[i].fbo != 0 {
+                        glDeleteFramebuffers(1, &fboSlots[i].fbo)
+                    }
+                }
+                fboSlots = []
+                renderBufferIndex = 0
             }
-            renderTexture = nil
-            renderPixelBuffer = nil
             CVOpenGLESTextureCacheFlush(textureCache, 0)
 
-            // Create IOSurface-backed CVPixelBuffer (shared with GL via texture cache)
+            // Allocate the ring. Each slot gets a distinct
+            // IOSurface-backed CVPixelBuffer + matching GL texture
+            // (zero-copy — shares the IOSurface with mpv) + an FBO
+            // with that texture bound as the color attachment.
             let attrs: [CFString: Any] = [
                 kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
                 kCVPixelBufferOpenGLESCompatibilityKey: true as CFBoolean
             ]
-            var pb: CVPixelBuffer?
-            CVPixelBufferCreate(kCFAllocatorDefault, width, height,
-                                kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
-            guard let pixelBuffer = pb else { return }
-            renderPixelBuffer = pixelBuffer
-
-            // Wrap as OpenGL ES texture (zero-copy — shares IOSurface)
-            var texture: CVOpenGLESTexture?
-            let texResult = CVOpenGLESTextureCacheCreateTextureFromImage(
-                kCFAllocatorDefault, textureCache, pixelBuffer, nil,
-                GLenum(GL_TEXTURE_2D), GL_RGBA,
-                GLsizei(width), GLsizei(height),
-                GLenum(GL_BGRA), GLenum(GL_UNSIGNED_BYTE),
-                0, &texture
-            )
-            guard texResult == kCVReturnSuccess, let glTexture = texture else {
-                #if DEBUG
-                print("[MPV-ERR] CVOpenGLESTextureCacheCreateTextureFromImage failed: \(texResult)")
-                #endif
-                return
+            var newSlots: [FBOSlot] = []
+            newSlots.reserveCapacity(Self.fboPoolSize)
+            for slotIdx in 0..<Self.fboPoolSize {
+                var pb: CVPixelBuffer?
+                CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                    kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
+                guard let pixelBuffer = pb else {
+                    #if DEBUG
+                    print("[MPV-ERR] CVPixelBufferCreate failed for slot \(slotIdx)")
+                    #endif
+                    // Roll back any partial slots already created.
+                    for i in 0..<newSlots.count {
+                        if newSlots[i].fbo != 0 {
+                            glDeleteFramebuffers(1, &newSlots[i].fbo)
+                        }
+                    }
+                    return
+                }
+                var texture: CVOpenGLESTexture?
+                let texResult = CVOpenGLESTextureCacheCreateTextureFromImage(
+                    kCFAllocatorDefault, textureCache, pixelBuffer, nil,
+                    GLenum(GL_TEXTURE_2D), GL_RGBA,
+                    GLsizei(width), GLsizei(height),
+                    GLenum(GL_BGRA), GLenum(GL_UNSIGNED_BYTE),
+                    0, &texture
+                )
+                guard texResult == kCVReturnSuccess, let glTexture = texture else {
+                    #if DEBUG
+                    print("[MPV-ERR] CVOpenGLESTextureCacheCreateTextureFromImage failed for slot \(slotIdx): \(texResult)")
+                    #endif
+                    for i in 0..<newSlots.count {
+                        if newSlots[i].fbo != 0 {
+                            glDeleteFramebuffers(1, &newSlots[i].fbo)
+                        }
+                    }
+                    return
+                }
+                let texName = CVOpenGLESTextureGetName(glTexture)
+                var fbo: GLuint = 0
+                glGenFramebuffers(1, &fbo)
+                glBindFramebuffer(GLenum(GL_FRAMEBUFFER), fbo)
+                glFramebufferTexture2D(
+                    GLenum(GL_FRAMEBUFFER), GLenum(GL_COLOR_ATTACHMENT0),
+                    GLenum(GL_TEXTURE_2D), texName, 0
+                )
+                let fbStatus = glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))
+                if fbStatus != GL_FRAMEBUFFER_COMPLETE {
+                    #if DEBUG
+                    print("[MPV-ERR] FBO incomplete for slot \(slotIdx): \(fbStatus)")
+                    #endif
+                }
+                glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
+                newSlots.append(FBOSlot(pixelBuffer: pixelBuffer, texture: glTexture, fbo: fbo))
             }
-            renderTexture = glTexture
-
-            // Create FBO with the texture as color attachment
-            let texName = CVOpenGLESTextureGetName(glTexture)
-            glGenFramebuffers(1, &fbo)
-            glBindFramebuffer(GLenum(GL_FRAMEBUFFER), fbo)
-            glFramebufferTexture2D(
-                GLenum(GL_FRAMEBUFFER), GLenum(GL_COLOR_ATTACHMENT0),
-                GLenum(GL_TEXTURE_2D), texName, 0
-            )
-
-            let fbStatus = glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))
-            if fbStatus != GL_FRAMEBUFFER_COMPLETE {
-                #if DEBUG
-                print("[MPV-ERR] FBO incomplete: \(fbStatus)")
-                #endif
-            }
-
-            glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
+            fboSlots = newSlots
             fboWidth = width
             fboHeight = height
+            renderBufferIndex = 0
 
             #if DEBUG
             // v1.7.x Issue A: include rebuild-gap so we can see how
@@ -1952,7 +2206,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             } else {
                 rebuildSuffix = " (initial)"
             }
-            print("[MPV-FBO] \(streamTag) created \(width)x\(height) fbo=\(fbo) tex=\(texName)\(rebuildSuffix)")
+            let fboIDs = fboSlots.map { String($0.fbo) }.joined(separator: ",")
+            let texNames = fboSlots.map { String(CVOpenGLESTextureGetName($0.texture)) }.joined(separator: ",")
+            print("[MPV-FBO] \(streamTag) created \(fboSlots.count)-deep pool \(width)x\(height) fbos=[\(fboIDs)] tex=[\(texNames)]\(rebuildSuffix)")
             #endif
         }
 
@@ -2093,6 +2349,130 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #endif
         }
 
+        // MARK: - CoreAnimation IOSurface re-attach watchdog (v1.7.x Issue A)
+
+        /// Start the display-refresh watchdog. Called once after the
+        /// sample buffer layer is in place; idempotent (subsequent
+        /// calls are no-ops). The display link runs at the display's
+        /// preferred refresh rate (60Hz on iPhone, 120Hz on ProMotion)
+        /// and is added to .common run-loop modes so it keeps firing
+        /// during scroll gestures and other tracked-mode work.
+        @MainActor
+        func startWatchdogIfNeeded() {
+            guard displayLinkWatchdog == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(handleWatchdogTick(_:)))
+            // ProMotion-friendly: prefer 60Hz, allow 30-120 range so
+            // iOS picks the display-aligned cadence. The 30Hz floor
+            // guarantees we still tick between mpv frames during
+            // libmpv stalls.
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 60)
+            link.add(to: .main, forMode: .common)
+            displayLinkWatchdog = link
+        }
+
+        /// Tear down the watchdog. Called from the same main-thread
+        /// teardown path that releases the layer. Safe to call
+        /// multiple times.
+        @MainActor
+        func stopWatchdog() {
+            displayLinkWatchdog?.invalidate()
+            displayLinkWatchdog = nil
+            os_unfair_lock_lock(&watchdogLock)
+            lastEnqueuedSampleBuffer = nil
+            os_unfair_lock_unlock(&watchdogLock)
+        }
+
+        /// Display-link tick. Runs on the main thread.
+        ///
+        /// Read `lastEnqueueTime` (touched from renderQueue but
+        /// CFAbsoluteTime is a Double — torn reads are at worst a
+        /// single tick of false positive/negative on Apple silicon,
+        /// not a correctness issue). If the layer hasn't received a
+        /// fresh enqueue in `watchdogStaleThreshold` seconds, copy
+        /// the most recently enqueued sample buffer with a fresh
+        /// host-time PTS and re-enqueue it. The IOSurface backing
+        /// stays the same; we're forcing CoreAnimation to attach it
+        /// as a fresh contents reference for this VSync.
+        ///
+        /// Skipped when the layer is .failed (existing background-
+        /// pause path handles recovery) or not ready for more media
+        /// data (would just be rejected). Watchdog stays silent on
+        /// those paths.
+        @MainActor
+        @objc private func handleWatchdogTick(_ link: CADisplayLink) {
+            let now = CACurrentMediaTime()
+            let lastEnq = lastEnqueueTime
+            let staleAge = now - lastEnq
+            guard staleAge >= watchdogStaleThreshold else { return }
+            guard let layer = sampleBufferLayer else { return }
+            let renderer = layer.sampleBufferRenderer
+            guard renderer.status != .failed,
+                  renderer.isReadyForMoreMediaData else { return }
+
+            // Pull the cached buffer under the lock. Don't hold the
+            // lock through the CMSampleBuffer copy — it's quick but
+            // not free.
+            os_unfair_lock_lock(&watchdogLock)
+            let cached = lastEnqueuedSampleBuffer
+            os_unfair_lock_unlock(&watchdogLock)
+            guard let cached else { return }
+
+            // Re-stamp with current host time. AVSBDL will reject a
+            // sample whose PTS exactly matches a previously-enqueued
+            // sample's PTS, so we must produce a strictly later PTS
+            // every tick.
+            let freshPTS = CMClockGetTime(CMClockGetHostTimeClock())
+            guard let restamped = Self.makeImmediateDisplayCopy(of: cached, at: freshPTS) else { return }
+            renderer.enqueue(restamped)
+
+            watchdogReenqueueCount &+= 1
+            #if DEBUG
+            // Log first re-enqueue + every 60th so we get a clear
+            // signal that the watchdog is firing without flooding
+            // the console during a sustained stall.
+            if watchdogReenqueueCount == 1 || watchdogReenqueueCount % 60 == 0 {
+                let staleMs = staleAge * 1000.0
+                print("[AVSBDL-WATCHDOG] \(streamTag) re-enqueue #\(watchdogReenqueueCount) (stale=\(String(format: "%.0f", staleMs))ms)")
+            }
+            #endif
+        }
+
+        /// Build a CMSampleBuffer that points at the same IOSurface
+        /// as `source` but with a new presentation timestamp and the
+        /// kCMSampleAttachmentKey_DisplayImmediately attachment set.
+        /// CMSampleBufferCreateCopyWithNewTiming preserves the format
+        /// description and image buffer reference, so the GPU
+        /// resources are reused — no extra upload, no extra alloc on
+        /// the GPU side. The DisplayImmediately attachment tells
+        /// AVSBDL to present the frame ASAP rather than scheduling
+        /// it against any internal clock.
+        private static func makeImmediateDisplayCopy(of source: CMSampleBuffer, at pts: CMTime) -> CMSampleBuffer? {
+            var newTiming = CMSampleTimingInfo(
+                duration: .invalid,
+                presentationTimeStamp: pts,
+                decodeTimeStamp: .invalid
+            )
+            var copy: CMSampleBuffer?
+            let status = CMSampleBufferCreateCopyWithNewTiming(
+                allocator: kCFAllocatorDefault,
+                sampleBuffer: source,
+                sampleTimingEntryCount: 1,
+                sampleTimingArray: &newTiming,
+                sampleBufferOut: &copy
+            )
+            guard status == noErr, let buffer = copy else { return nil }
+
+            // Stamp DisplayImmediately on every sample. The attachment
+            // array always has at least one entry per sample for non-
+            // empty CMSampleBuffers; our render-side buffers are
+            // single-sample so we just set it on index 0.
+            if let attachments = CMSampleBufferGetSampleAttachmentsArray(buffer, createIfNecessary: true) as? [Any],
+               let dict = attachments.first as? NSMutableDictionary {
+                dict[kCMSampleAttachmentKey_DisplayImmediately as String] = kCFBooleanTrue
+            }
+            return buffer
+        }
+
         // MARK: - Background OpenGL ES Render + Display via AVSampleBufferDisplayLayer
 
         /// Called from mpv's update callback — schedules render on background thread.
@@ -2126,11 +2506,53 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let gapMs = (now - lastScheduleRenderTime) * 1000.0
                 if gapMs > 50 {
                     let severity: String
-                    if gapMs > 300 { severity = "SEVERE" }
-                    else if gapMs > 100 { severity = "moderate" }
-                    else { severity = "mild" }
+                    if gapMs > 300 {
+                        severity = "SEVERE"
+                        callbackGapSevereCount &+= 1
+                    } else if gapMs > 100 {
+                        severity = "moderate"
+                        callbackGapModerateCount &+= 1
+                    } else {
+                        severity = "mild"
+                        callbackGapMildCount &+= 1
+                    }
+                    // v1.7.x Step 8: read mpv's audio-pts and avsync
+                    // properties at the moment of the gap. Step 7 also
+                    // read mpv's `video-pts`, but that property is
+                    // populated by mpv's internal video-output module
+                    // — which doesn't run in our setup (we use
+                    // `vo=libmpv` and render via mpv_render_context_*).
+                    // `video-pts` therefore returned 0.000s for the
+                    // entire 22:21 session and our self-computed
+                    // `a-v = audio_pts - video_pts` was structurally
+                    // bogus (just `audio_pts - 0`). mpv's `avsync`
+                    // property IS computed internally — it's mpv's
+                    // own audio_position - video_position, updated as
+                    // mpv emits frames to us via mpv_render_context_render
+                    // — so we use that as the canonical sync metric
+                    // here. Codex's CODEX_VIDEO_PTS_AVSYNC_DIAGNOSIS
+                    // documented this exact bug class.
+                    //
+                    // The since_audio_reconfig delta surfaces whether
+                    // the gap landed in the wake of an AC3 reconfig
+                    // (refuted by the 22:21 data: all 3 reconfigs
+                    // fired at startup; mid-playback gaps were 10-33s
+                    // after the last reconfig).
                     #if DEBUG
-                    print("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms \(severity) (libmpv internal stall — decoder/demuxer/render-context, not our render path)")
+                    var audioPts: Double = 0
+                    var avsyncProp: Double = 0
+                    if let mpv = activeMPVHandle() {
+                        mpv_get_property(mpv, "audio-pts", MPV_FORMAT_DOUBLE, &audioPts)
+                        mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsyncProp)
+                    }
+                    let sinceAudioReconfig: String
+                    if lastAudioReconfigAt > 0 {
+                        let deltaMs = (now - lastAudioReconfigAt) * 1000.0
+                        sinceAudioReconfig = "\(String(format: "%.0f", deltaMs))ms"
+                    } else {
+                        sinceAudioReconfig = "n/a"
+                    }
+                    print("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms \(severity) audio_pts=\(String(format: "%.3f", audioPts))s avsync=\(String(format: "%+.4f", avsyncProp))s(positive=video_behind, mpv-internal) since_audio_reconfig=\(sinceAudioReconfig) (libmpv internal stall — decoder/demuxer/render-context, not our render path)")
                     #endif
                 }
             }
@@ -2157,10 +2579,74 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             renderPending = false
             os_unfair_lock_unlock(&renderLock)
 
-            guard let mpvGL, let eaglContext, let renderPixelBuffer else { return }
+            guard let mpvGL, let eaglContext else { return }
+            guard !fboSlots.isEmpty else { return }
+
+            // v1.7.x Step 6 — apply backpressure on
+            // AVSampleBufferDisplayLayer's renderer. When the
+            // renderer reports `isReadyForMoreMediaData == false`,
+            // its internal queue is saturated. Apple's documented
+            // guidance (`AVQueuedSampleBufferRendering.h`): "It is
+            // safe to call enqueueSampleBuffer when
+            // readyForMoreMediaData is NO, but it is a bad idea to
+            // enqueue sample buffers without bound."
+            //
+            // Step 5 (triple-buffered FBO ring) eliminated the
+            // single-IOSurface producer/consumer race that caused
+            // single-VSync black flashes at ~1 per 12s on UHD HEVC
+            // HDR live MPEG-TS playback. Field test 2026-05-08
+            // 21:49 confirmed the flashes are gone (`black_supp=2`
+            // detector hits over 2400+ frames, watchdog-recovered
+            // cleanly). But the ring also removed implicit rate
+            // limiting that the single-buffer architecture had been
+            // providing — mpv's videotoolbox-copy decoder is faster
+            // than the source rate, and with three slots to write
+            // into, mpv ran at decoder speed (~70fps for a 30fps
+            // source). Symptoms over a 45s playback window:
+            //   - rss grew from 350MB → 1224MB (decoded UHD frames
+            //     piling up in mpv's output queue waiting for audio
+            //     to catch up)
+            //   - avsync drifted to 2.058s before audio decoder
+            //     reset
+            //   - libmpv demuxer logged "Too many packets in the
+            //     demuxer packet queues: video/0: 250 packets"
+            //   - main thread hung 239-371ms three times under
+            //     memory pressure
+            //
+            // Skipping the entire render pass (not just the
+            // enqueue) means we don't call
+            // mpv_render_context_render, so mpv's frame stays in
+            // mpv's internal queue. mpv's `framedrop=vo` policy
+            // drops late frames at the VO layer when the queue
+            // fills, which rate-limits the upstream
+            // demuxer/decoder pipeline to AVSBDL's consumption
+            // rate. The watchdog at line ~2349 already follows the
+            // same pattern (refuses re-enqueue when not ready);
+            // this unifies the policy across the main path and the
+            // watchdog path — both refuse to push when AVSBDL is
+            // full.
+            if let renderer = sampleBufferLayer?.sampleBufferRenderer,
+               !renderer.isReadyForMoreMediaData {
+                backpressureSkipCount &+= 1
+                return
+            }
+
             let w = fboWidth
             let h = fboHeight
-            guard w > 0, h > 0, fbo != 0 else { return }
+            guard w > 0, h > 0 else { return }
+
+            // v1.7.x Step 5: advance the ring cursor and pick the
+            // next slot. mpv writes to slot[renderBufferIndex],
+            // we hand THAT slot's pixel buffer to AVSBDL. By the
+            // time the cursor wraps back to this slot (after two
+            // other slots have been written + handed off), AVSBDL
+            // has long since composed the previous reference and
+            // released it. No producer/consumer race on the
+            // IOSurface — the bug Steps 3a/3b/4a were trying to
+            // mask is gone at the source.
+            renderBufferIndex = (renderBufferIndex + 1) % fboSlots.count
+            let renderPixelBuffer = fboSlots[renderBufferIndex].pixelBuffer
+            let fbo = fboSlots[renderBufferIndex].fbo
 
             let renderStart = CACurrentMediaTime()
             let presentationTime = CMClockGetTime(CMClockGetHostTimeClock())
@@ -2293,6 +2779,37 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // and a brief blank frame is preferable to a
             // surprise pause they didn't ask for.
             var enqueued = false
+
+            // v1.7.x Issue A round 6 (Step 3a): black-frame detector.
+            // mpv's VT path occasionally hands us a uniformly-zero
+            // CVPixelBuffer in an otherwise smooth frame stream
+            // (verified 2026-05-08, 17 events in 76s of UHD HEVC HDR
+            // playback). The detector below catches them before we
+            // wrap into a CMSampleBuffer; suppression skips the
+            // enqueue and leaves lastEnqueuedSampleBuffer untouched
+            // so the CADisplayLink watchdog re-enqueues the previous
+            // good frame on its next tick. Two-deep surround check
+            // ensures we don't suppress legitimate cuts to black.
+            // See block-level comment above the state declarations
+            // for the full rationale and source.
+            let blackProbe = Self.detectBlackFrame(renderPixelBuffer)
+            // Probe returned (-1, -1) on lock-failure / non-BGRA;
+            // treat that as "don't suppress" (no false positives if
+            // the probe itself fails).
+            let probeValid = blackProbe.avg >= 0
+            // v1.7.x 3a-tighten (2026-05-08): loosened from avg<4
+            // and std<1 (pure codec-zero only) to avg<10 and std<8
+            // (codec-zero + partial-corruption with small carry-
+            // over slivers). Verification showed the bug produces
+            // both classes; the surround check below is what
+            // protects legitimate dark content. See block comment
+            // above the state declarations for the full rationale.
+            let isSuspectBlackFrame = probeValid
+                && blackProbe.avg < 10.0
+                && blackProbe.std < 8.0
+                && blackFramePrevAvgLuma > 25.0
+                && blackFramePrevPrevAvgLuma > 20.0
+
             if layerStatus == .failed {
                 if isInBackground && markAutoPausedOnBackgroundIfNeeded() {
                     mpvQueue.async { [weak self] in
@@ -2324,10 +2841,47 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         )
                     }
                 }
+            } else if isSuspectBlackFrame {
+                // Suppress: don't build a CMSampleBuffer, don't
+                // enqueue, don't update lastEnqueuedSampleBuffer.
+                // The CADisplayLink watchdog will tick within
+                // ~16ms and re-enqueue the previously-cached good
+                // sample buffer with a fresh PTS, so the user sees
+                // the previous frame held instead of solid black.
+                blackFramesSuppressedCount &+= 1
+                #if DEBUG
+                if blackFramesSuppressedCount == 1 || blackFramesSuppressedCount % 10 == 0 {
+                    print("[BLACK-DETECT] \(streamTag) suppressed black frame #\(blackFramesSuppressedCount) (avg=\(String(format: "%.2f", blackProbe.avg)) std=\(String(format: "%.2f", blackProbe.std)) prev=\(String(format: "%.0f", blackFramePrevAvgLuma)) prev_prev=\(String(format: "%.0f", blackFramePrevPrevAvgLuma)))")
+                }
+                #endif
+                // Note: we deliberately do NOT update the prev/prev-
+                // prev luma history with the suppressed frame. The
+                // surround check on the NEXT frame still compares
+                // against the last GOOD frame's luma, so a sustained
+                // codec-zero burst (rare but possible) would only
+                // suppress the first frame, not subsequent ones —
+                // which is correct: if the source actually went
+                // dark, we want frames after the first to update
+                // the comparison baseline.
             } else if let sampleBuffer = Self.makeSampleBuffer(from: renderPixelBuffer, presentationTime: presentationTime) {
                 nonisolated(unsafe) let sb = sampleBuffer
                 sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
                 enqueued = true
+                // v1.7.x Issue A round 4: cache the latest enqueued
+                // buffer for the IOSurface re-attach watchdog. Stored
+                // under watchdogLock so the main-thread display-link
+                // tick can read it safely.
+                os_unfair_lock_lock(&watchdogLock)
+                lastEnqueuedSampleBuffer = sb
+                os_unfair_lock_unlock(&watchdogLock)
+                // v1.7.x Issue A round 6: update luma history for
+                // the next-frame surround check, ONLY on successful
+                // enqueue. Suppressed frames don't update history
+                // (see comment in the suppression branch above).
+                if probeValid {
+                    blackFramePrevPrevAvgLuma = blackFramePrevAvgLuma
+                    blackFramePrevAvgLuma = blackProbe.avg
+                }
                 // v1.7.x: clear the failed-count once we successfully
                 // enqueue a frame, so a transient blip doesn't carry
                 // the count forward into a future event.
@@ -2432,7 +2986,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let variance = frameIntervals.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / Double(frameIntervals.count)
                     return sqrt(variance)
                 }()
-                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
+                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | black_supp=\(blackFramesSuppressedCount) | bp_skip=\(backpressureSkipCount) | gaps=\(callbackGapMildCount)/\(callbackGapModerateCount)/\(callbackGapSevereCount)(mild/mod/sev) | audio_reconfigs=\(audioReconfigCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
 
             lastEnqueueTime = enqueueTime
@@ -2713,22 +3267,35 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // upstream profiling (see issue #4213). Live-only — VOD
             // benefits from more thorough probing for reliable seek.
             //
-            // `demuxer-lavf-analyzeduration=0.1`: cap libavformat's
-            // stream-analysis stage at 100ms. Default is 5s — libmpv
-            // scans that much data to identify all elementary streams
-            // before the first frame decodes, which dominates first-
-            // frame latency on well-formed MPEG-TS. Dropping to 0.1s
-            // trusts the first PMT/PAT table (arrives within a few
-            // packets on broadcast-grade TS) and moves straight to
-            // decode. Worst case on an oddly-muxed stream: mpv misses
-            // a late-arriving audio track. Acceptable tradeoff for
-            // the user-perceived speedup.
+            // `demuxer-lavf-analyzeduration=1.5`: cap libavformat's
+            // stream-analysis stage at 1.5 seconds. Default is 5s.
+            // Originally tuned to 0.1s for tap-to-first-frame latency,
+            // but field testing 2026-05-08 (Step 7-8 instrumentation
+            // on Sky Sports Main Event UHD HEVC HDR) showed `fps_detected
+            // =0.0/container=0.0/display=0.0` for the entire 2-minute
+            // playback session — mpv literally never characterized the
+            // stream's frame rate because 100ms wasn't enough samples
+            // for a 30fps source (would need ~3-4 frames minimum =
+            // 100-130ms minimum, with no GOP-boundary tolerance).
+            // Without a cadence reference, mpv's `framedrop=vo` policy
+            // can't classify late frames, so it never engaged during
+            // the periodic 200ms callback gaps that produced visible
+            // held-frame stutter. 1.5s gives mpv ~45 source frames
+            // worth of analysis runway, which is plenty to lock fps,
+            // pixel format, color matrix, and audio params cleanly.
+            // Codex's CODEX_POST_FLASH_STUTTER_NEXT_STEPS Fix 1
+            // recommends this exact direction.
             //
-            // `demuxer-lavf-probesize=32768`: 32KB probe (default 5MB).
-            // Pairs with analyzeduration — once we've capped the time
-            // budget, capping the byte budget prevents mpv from
-            // waiting for a full 5MB buffer to arrive before
-            // confirming the stream is decodable.
+            // `demuxer-lavf-probesize=1048576`: 1 MB probe (default
+            // 5MB). Originally tuned to 32 KB for the same first-frame
+            // latency goal. UHD HEVC Main10 BT.2020 streams need more
+            // bytes to expose SPS/PPS/VPS NALs cleanly; the 32 KB cap
+            // forced libavformat to emit `Skipping invalid undecodable
+            // NALU: 39` warnings and triggered the playback-restart
+            // reconfig pattern visible in every field-test log. 1 MB
+            // is enough headroom for HEVC parameter sets plus a few
+            // initial frames without falling all the way back to
+            // libavformat's 5MB default.
             //
             // (Note: `demuxer-lavf-o-add=fflags=+nobuffer` would also
             // be a free win here, but MPVKit's bundled libmpv build
@@ -2757,12 +3324,103 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // streams with incorrect FPS metadata (rare on broadcast
             // MPEG-TS).
             if isLive {
-                setOption(mpv, "demuxer-lavf-analyzeduration", "0.1")
-                setOption(mpv, "demuxer-lavf-probesize", "32768")
+                setOption(mpv, "demuxer-lavf-analyzeduration", "1.5")
+                setOption(mpv, "demuxer-lavf-probesize", "1048576")
                 setOption(mpv, "cache-pause-initial", "no")
                 setOption(mpv, "hls-bitrate", "max")
                 setOption(mpv, "video-latency-hacks", "yes")
             }
+
+            // v1.7.x Issue A round 4 — render-stall mitigations.
+            // Each option is independently revertable; remove the
+            // corresponding setOption line to restore prior
+            // behaviour.
+            //
+            // framedrop=vo — drop late frames at the VO layer so
+            //   the render call doesn't back up. Without this, when
+            //   a frame is delivered late to the renderer it stays
+            //   queued and forces subsequent frames into the same
+            //   slow path. Reference: mpv issue #13946 ("4K HDR
+            //   HEVC stuttering, fixed by --profile=fast", which
+            //   includes framedrop tuning).
+            //
+            // video-sync=audio — explicit, even though it matches
+            //   mpv's default. We set it explicitly because some
+            //   profiles can override it. We must NOT use display-
+            //   resample on iOS with vo=libmpv: display-resample
+            //   needs accurate VSync feedback from the host, and
+            //   our embedded render-context API doesn't feed that
+            //   back to libmpv. Multiple GH issues confirm display-
+            //   resample causing extra mistimed frames in this
+            //   exact configuration.
+            //
+            // video-timing-offset=0 — pairs with our existing
+            //   BLOCK_FOR_TARGET_TIME=0 in the render-param array.
+            //   When BLOCK_FOR_TARGET_TIME=0 is set without
+            //   video-timing-offset=0, mpv stages frames slightly
+            //   ahead of their intended display time, which on
+            //   iOS produces a frame's worth of drift per render
+            //   call (libmpv render.h docs).
+            //
+            // 2026-05-08 reverted: vd-queue-enable=yes +
+            // vd-queue-max-samples=8 were added in this same round
+            // on a research recommendation to smooth render
+            // variance via a decoder-ahead queue. Subsequent
+            // research (mpv DOCS/man/options.rst master,
+            // line ~5600) explicitly states the queue
+            // "should not be used with hardware decoding." Removed
+            // to align with documented guidance.
+            setOption(mpv, "framedrop", "vo")
+            setOption(mpv, "video-sync", "audio")
+            setOption(mpv, "video-timing-offset", "0")
+
+            // v1.7.x Issue A round 5 — anti-flash mitigations
+            // targeting the FFmpeg-VideoToolbox bridge's silent-
+            // failure path. Per the 2026-05-08 research pass
+            // (Agent B), the FFmpeg VT bridge does not propagate
+            // VT decode-error callbacks back as hard libav errors
+            // when reference frames go missing on a live MPEG-TS
+            // mid-GOP join — it returns the buffer as-is, which
+            // on a reference miss is a zero/black IOSurface.
+            // mpv's libav layer reports the frame as successfully
+            // decoded; our render pipeline faithfully presents the
+            // black IOSurface; user sees one VSync of solid black.
+            // Symptom is reproducible on UHD HEVC main10 BT.2020
+            // streams (Sky Sports Main Event UHD class) at ~3
+            // events per 16s of steady-state playback, with no
+            // pipeline-side metric flagging anything wrong.
+            //
+            // demuxer-lavf-o=fflags=+discardcorrupt —
+            //   tells libavformat to drop corrupt MPEG-TS packets
+            //   at the demuxer level, before they reach the parser
+            //   that hands slices to VT. Targets the root cause
+            //   directly: corrupt-ref slices that VT silently
+            //   zeroes never reach VT in the first place. Live
+            //   MPEG-TS over HTTP frequently has CC errors on
+            //   discontinuities; `discardcorrupt` is the standard
+            //   FFmpeg-side hardening for this.
+            //
+            //   Tried `demuxer-lavf-o-append` first (idiomatic for
+            //   newer mpv builds, doesn't clobber peer entries),
+            //   but MPVKit's libmpv rejected it with "option not
+            //   found." Falling back to the plain `-o` form, which
+            //   has existed since pre-0.30 mpv. Safe in our config
+            //   because we don't set demuxer-lavf-o anywhere else.
+            //
+            // vd-lavc-threads=1 — single-threaded libavcodec
+            //   parsing for the HW decode path. Removes a race
+            //   where the FFmpeg parser hands VT a slice whose
+            //   reference frames are still being assembled by a
+            //   parallel parse thread. HW decode (videotoolbox-
+            //   copy) does the actual decode work inside Apple's
+            //   VT process anyway — the lavc thread just shepherds
+            //   NALU to VT — so single-threaded parsing has no
+            //   meaningful throughput cost on Apple silicon.
+            //
+            // Each option is independently revertable. Pair stays
+            // on test/v1.7.x-flash-fix until field-verified.
+            setOption(mpv, "demuxer-lavf-o", "fflags=+discardcorrupt")
+            setOption(mpv, "vd-lavc-threads", "1")
 
             // Multiview tiles: set initial `mute` / `pause` as mpv
             // options (not runtime properties) so the first decoded
@@ -2777,20 +3435,64 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // tile defaults (initialIsAudioActive=true, initialShouldPause=false)
             // which happen to match mpv's own defaults — safe no-ops.
             //
-            // Non-audio tiles: set `aid=no` so mpv never even
-            // opens an AudioUnit for them. Previously we used
-            // `mute=yes` which is audible-silence but the AO
-            // stays open and competes with every other tile's
-            // AO on the shared AVAudioSession — that contention
-            // is what produced the "Audio device underrun"
-            // storms with 9 concurrent tiles, which then
-            // cascaded into 2-7s video-frame stalls. `aid=no`
-            // eliminates the AO entirely. `mute=yes` is kept as
-            // belt-and-suspenders against any audio packet that
-            // slips through between mpv_create and mpv_initialize.
+            // Non-audio tiles. Pre-init audio strategy MUST match
+            // what `applyAudioFocusIfChanged` does at runtime. The
+            // runtime path picks between two strategies based on
+            // tile count:
+            //   - tiles.count <= 6: mute-only (aid=auto on every
+            //     tile so the audio decoder stays alive everywhere;
+            //     mute toggles handle silencing). Field-tested as
+            //     safe on Apple TV 4K A15 hardware up to N=6.
+            //   - tiles.count >= 7: decoder-off (aid=no on non-audio
+            //     tiles so mpv never even opens an AudioUnit). v1.6.12
+            //     fix for "Audio device underrun" storms with 9
+            //     concurrent tiles all fighting the shared
+            //     AVAudioSession.
+            //
+            // Pre-init was previously hardcoded to the decoder-off
+            // strategy (`aid=no`) regardless of tile count. That
+            // produced Bug 2 from Freyguy1975's Discord report
+            // 2026-05-08: switching audio to a newly-added 2nd tile
+            // produced silence. Mechanism: tile created with `aid=no`
+            // → mpv never opens audio decoder → user switches focus
+            // → applyAudioFocusIfChanged writes `aid=auto` LATE →
+            // mpv has to start the audio decoder from scratch on a
+            // running stream, which fails or is silent because the
+            // demuxer has been told to skip audio packets the whole
+            // time. Switching back to tile 1 worked because tile 1's
+            // audio decoder had been alive from the start.
+            //
+            // Fix: at pre-init, query the same `tiles.count >= 7`
+            // boundary and pick the matching strategy. Mute-only
+            // mode keeps `aid` at mpv's default (`auto`) and just
+            // sets `mute=yes`, so the audio decoder runs on every
+            // tile from the first frame, just silenced. When the
+            // user later switches audio focus, applyAudioFocusIfChanged
+            // writes `mute=no` and audio resumes instantly — no
+            // late audio-decoder cold-start, no AudioUnit reopen
+            // race.
+            //
+            // `mute=yes` belt-and-suspenders against any audio packet
+            // that slips through between mpv_create and mpv_initialize
+            // applies in both branches.
             if !initialIsAudioActive {
-                setOption(mpv, "aid", "no")
-                checkError(mpv_set_option_string(mpv, "mute", "yes"))
+                // `initialTileCount` is snapshot at Representable
+                // construction time on the main actor, so it's safe
+                // to read here on the renderQueue without an actor
+                // hop. Boundary matches the runtime strategy in
+                // applyAudioFocusIfChanged: 7+ tiles → decoder-off,
+                // otherwise mute-only.
+                let useDecoderOffStrategy = initialTileCount >= 7
+                if useDecoderOffStrategy {
+                    setOption(mpv, "aid", "no")
+                    checkError(mpv_set_option_string(mpv, "mute", "yes"))
+                } else {
+                    // mute-only: leave `aid` at default (auto) so the
+                    // audio decoder stays alive. Just mute the
+                    // output. Matches applyAudioFocusIfChanged's
+                    // runtime strategy at this tile count.
+                    checkError(mpv_set_option_string(mpv, "mute", "yes"))
+                }
             }
             if initialShouldPause {
                 checkError(mpv_set_option_string(mpv, "pause", "yes"))
@@ -3014,19 +3716,52 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 mpv_set_property_string(mpv, "cache-secs", String(format: "%.1f", cachingSecs))
                 mpv_set_property_string(mpv, "demuxer-max-back-bytes", "0")
                 mpv_set_property_string(mpv, "demuxer-donate-buffer", "no")
-                mpv_set_property_string(mpv, "demuxer-lavf-probe-info", "nostreams")
-                mpv_set_property_string(mpv, "demuxer-lavf-analyzeduration", "0")
-                // Smaller probesize — MPEG-TS's codec identity is
-                // obvious from the first ~32KB of PAT/PMT/PES
-                // headers. mpv/ffmpeg's default probesize is 5MB
-                // which for live TS means reading 200-500ms of data
-                // before committing to a demuxer/decoder. 32KB is
-                // ~2-4 TS packets worth of probing — enough to
-                // identify codec, cheap to read from the stream.
-                // Live-only; VOD keeps the larger default for mkv/
-                // mp4 moov-parsing correctness.
-                mpv_set_property_string(mpv, "demuxer-lavf-probesize", "32768")
-                mpv_set_property_string(mpv, "probesize", "32768")
+                // v1.7.x Step 9 — soften the runtime startup overrides.
+                // These post-init `mpv_set_property_string` calls
+                // were setting the demuxer-analysis options to MORE
+                // aggressive values than the pre-init options at
+                // line ~3292, which is what mpv actually consulted
+                // when calling avformat_find_stream_info. Field test
+                // 2026-05-08 (Step 8 instrumentation on Sky Sports
+                // Main Event UHD HEVC HDR) showed the consequence:
+                // `fps_detected=0.0/container=0.0/display=0.0` for
+                // the entire 2-minute playback session. mpv literally
+                // never characterized the stream's frame rate.
+                //
+                // - `probe-info=nostreams` skipped
+                //   avformat_find_stream_info() entirely once any
+                //   stream had been identified, which on
+                //   broadcast-grade MPEG-TS means after the first
+                //   PAT/PMT pair. fps detection happens INSIDE
+                //   find_stream_info, so skipping it = no fps.
+                //   Now `auto` — let mpv complete the analysis.
+                //
+                // - `analyzeduration=0` would have been "use
+                //   libavformat default = 5s" but combined with
+                //   probe-info=nostreams it didn't matter. Now 1.5s
+                //   to give mpv ~45 frames of analysis runway at
+                //   30fps source.
+                //
+                // - `probesize=32768` (32KB) was too small for UHD
+                //   HEVC Main10 BT.2020 streams with their full SPS/
+                //   PPS/VPS NAL payloads. Field test logged
+                //   "Skipping invalid undecodable NALU: 39" at
+                //   startup, which is libavformat tripping on
+                //   incomplete HEVC parameter sets. 1MB is enough
+                //   headroom for HEVC parameter sets plus several
+                //   initial frames without falling all the way back
+                //   to libavformat's 5MB default.
+                //
+                // Trade-off: tap-to-first-frame latency goes from
+                // ~1.3s (current) to probably ~2.5–3s. UX cost is
+                // small for live broadcast; users tap a channel and
+                // wait briefly anyway. Codex's
+                // CODEX_POST_FLASH_STUTTER_NEXT_STEPS recommends
+                // exactly this direction (Fix 1).
+                mpv_set_property_string(mpv, "demuxer-lavf-probe-info", "auto")
+                mpv_set_property_string(mpv, "demuxer-lavf-analyzeduration", "1.5")
+                mpv_set_property_string(mpv, "demuxer-lavf-probesize", "1048576")
+                mpv_set_property_string(mpv, "probesize", "1048576")
             } else {
                 // VOD: larger buffer for seek-back
                 mpv_set_property_string(mpv, "demuxer-max-bytes", "50MiB")
@@ -3132,6 +3867,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if !targetEnvironment(simulator)
             mpv_set_property_string(mpv, "hwdec", "videotoolbox-copy")
             #endif
+            // v1.7.x Issue A round 6: reset the black-frame detector's
+            // luma history to neutral so the surround check doesn't
+            // carry the previous stream's last-frame luma into the
+            // new stream's startup. Neutral=128 means the surround
+            // check (prev>25 AND prev-prev>20) trips immediately on
+            // the first real bright frame, which is the right
+            // behaviour for tile-rebind / channel-change.
+            blackFramePrevAvgLuma = 128
+            blackFramePrevPrevAvgLuma = 128
             // v1.6.23: route URL strings through DebugLogger.sanitize
             // before any console / file output so Xtream credentials
             // (`/live/<u>/<p>/<id>` and `?username=&password=` query
@@ -3180,6 +3924,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // full pipeline snapshot at every reconfig
                         // and resets per-window decoder counters.
                         self.handleVideoReconfig()
+
+                    case MPV_EVENT_AUDIO_RECONFIG:
+                        // v1.7.x Step 7: stamp the timestamp so
+                        // subsequent MPV-CALLBACK-GAP logs can show
+                        // `since_audio_reconfig=Nms`. AC3 audio in
+                        // live MPEG-TS reconfigs on
+                        // mono/stereo/5.1 transitions; each reconfig
+                        // may briefly stall libmpv. Codex flagged
+                        // this correlation as a key diagnostic.
+                        self.lastAudioReconfigAt = CFAbsoluteTimeGetCurrent()
+                        self.audioReconfigCount &+= 1
+                        #if DEBUG
+                        print("[MPV-DIAG] \(self.streamTag) Event: audio-reconfig #\(self.audioReconfigCount)")
+                        #endif
 
                     case MPV_EVENT_LOG_MESSAGE:
                         if let msg = UnsafeMutablePointer<mpv_event_log_message>(OpaquePointer(event.pointee.data)) {
@@ -3473,17 +4231,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let videoCodec = getMPVString(mpv, "video-codec") ?? "?"
             let hwdec = getMPVString(mpv, "hwdec-current") ?? "none"
 
-            // FBO presentation state. fbo == 0 means we're
+            // FBO presentation state. Empty pool means we're
             // actively presenting nothing right now; that's the
             // window during which a user would see black.
             let fboState: String
-            if fbo == 0 {
+            if fboSlots.isEmpty {
                 fboState = "DESTROYED"
             } else if fboDestroyedAt > 0 && (now - fboDestroyedAt) < 0.05 {
                 let rebuildMs = (now - fboDestroyedAt) * 1000.0
                 fboState = "RECENTLY_REBUILT(\(String(format: "%.1f", rebuildMs))ms)"
             } else {
-                fboState = "active(\(fboWidth)x\(fboHeight))"
+                fboState = "active(\(fboSlots.count)-deep \(fboWidth)x\(fboHeight))"
             }
 
             #if DEBUG
@@ -3717,8 +4475,34 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // retry budget gave up too quickly. The longer
                 // backoff lets the server stabilize without forcing
                 // the user to manually re-tap the row.
-                let isLoadingFailed = endFile.error == MPV_ERROR_LOADING_FAILED.rawValue
-                if isLoadingFailed && loadFailureRetryCount < maxLoadFailureRetries {
+                //
+                // v1.7.x — extend retry to MPV_ERROR_UNKNOWN_FORMAT
+                // (-17, "When trying to load the file, the file
+                // format could not be determined, or the file was
+                // too broken to open it"). Freyguy1975 reported on
+                // Discord 2026-05-08 that adding tiles to multiview
+                // on Apple TV consistently produced a transient red
+                // "Decoder unavailable / Playback error: unrecognized
+                // file format" overlay on either the new tile, the
+                // existing tile, or both — clearing if he removed
+                // and re-added. The user-visible "unrecognized file
+                // format" string maps to UNKNOWN_FORMAT, NOT
+                // LOADING_FAILED, so the previous retry path missed
+                // it entirely: failoverOrError fired without backoff,
+                // the warmup-retry guard (`anyAttemptStarted`) was
+                // false because we never got past start-file, and the
+                // overlay painted immediately. Same exponential-
+                // backoff retry as LOADING_FAILED is appropriate
+                // because the underlying cause is the same class:
+                // proxy/demuxer briefly couldn't return enough bytes
+                // to identify the stream within the analyze window.
+                // Step 9 (softer probe settings) reduces but doesn't
+                // eliminate this class on UHD HEVC under multiview
+                // network competition.
+                let isTransientLoadError =
+                    (endFile.error == MPV_ERROR_LOADING_FAILED.rawValue ||
+                     endFile.error == MPV_ERROR_UNKNOWN_FORMAT.rawValue)
+                if isTransientLoadError && loadFailureRetryCount < maxLoadFailureRetries {
                     loadFailureRetryCount += 1
                     let retryNum = loadFailureRetryCount
                     let maxR = maxLoadFailureRetries
@@ -3730,11 +4514,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let jitter = Double.random(in: 0...0.6)
                     let delay = baseDelay + jitter
                     let retryKind = isRecordingURL ? "recording" : "stream"
+                    let errLabel = endFile.error == MPV_ERROR_LOADING_FAILED.rawValue
+                        ? "LOADING_FAILED"
+                        : "UNKNOWN_FORMAT"
                     logStore.append(
-                        "⏳ MPV: \(retryKind) load failed — retry \(retryNum)/\(maxR) in \(String(format: "%.1f", delay))s"
+                        "⏳ MPV: \(retryKind) \(errLabel.lowercased()) — retry \(retryNum)/\(maxR) in \(String(format: "%.1f", delay))s"
                     )
                     #if DEBUG
-                    print("[MPV-DIAG] \(streamTag) LOADING_FAILED — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
+                    print("[MPV-DIAG] \(streamTag) \(errLabel) — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
                     #endif
                     let retryURL = urls[currentIndex]
                     DispatchQueue.global(qos: .userInitiated)
@@ -3969,8 +4756,26 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &estimatedFPS)
             var displayFPS: Double = 0
             mpv_get_property(mpv, "estimated-display-fps", MPV_FORMAT_DOUBLE, &displayFPS)
+            // v1.7.x Step 7: container-fps is the FPS reported by the
+            // demuxer. Codex flagged that we never establish a stable
+            // cadence reference (`fps_detected=0.00` throughout the
+            // 22:04 log), which leaves anomaly detection partially
+            // blind. Both `container-fps` (demuxer-reported) and
+            // `estimated-vf-fps` (decoder-measured) are surfaced
+            // separately in MPV-PERF so we can see whether mpv ever
+            // converges on a stable cadence for UHD HEVC live MPEG-TS.
+            var containerFPS: Double = 0
+            mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &containerFPS)
 
-            // A/V sync
+            // A/V sync. mpv's `avsync` is computed internally as
+            // audio_position - video_position; positive means video
+            // is behind audio, negative means video is ahead. With
+            // `vo=libmpv` we don't have a working `video-pts`
+            // property (the 22:21 field test found it returns 0.000s
+            // throughout the session — populated only by mpv's
+            // internal VO module which we replace), so we rely on
+            // mpv's own `avsync` for the canonical sync metric. See
+            // also the MPV-CALLBACK-GAP block in `scheduleRender`.
             var avsync: Double = 0
             mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsync)
             var audioPts: Double = 0
@@ -3983,9 +4788,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 return flag == 0
             }()
 
-            // Network speed (for live streams)
-            var demuxerBytes: Int64 = 0
-            mpv_get_property(mpv, "demuxer-cache-state/raw-input-rate", MPV_FORMAT_INT64, &demuxerBytes)
+            // Network speed (for live streams).
+            // v1.7.x Step 8: `demuxer-cache-state/raw-input-rate` is
+            // returned as a DOUBLE (bytes/sec, fractional ok), not an
+            // INT64. Reading it as INT64 always returned 0 (silent
+            // format-mismatch failure), which made the cache-drain
+            // hypothesis from the 22:21 field test (`speed: 1441KB/s,
+            // input_rate: 0KB/s`) untestable. Fixed format. Two other
+            // sites at lines ~5072 / ~5107 already use DOUBLE
+            // correctly; this was the only broken one.
+            var demuxerInputBytesPerSec: Double = 0
+            mpv_get_property(mpv, "demuxer-cache-state/raw-input-rate", MPV_FORMAT_DOUBLE, &demuxerInputBytesPerSec)
 
             let hwdecCurrent = getMPVString(mpv, "hwdec-current") ?? "none"
 
@@ -4028,15 +4841,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // gives you that one stream's jitter timeline.
             let t = streamTag
             print("[\(ts)] \(t) [MPV-DIAG] time=\(ms)ms isPlaying=\(isPlaying) callbacks/\(isLive ? 15 : 5)s=\(timeChangeCount)")
-            print("[\(ts)] \(t) [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: \(String(format: "%.1f", estimatedFPS))/\(String(format: "%.1f", displayFPS))disp, hwdec=\(hwdecCurrent)")
+            print("[\(ts)] \(t) [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: estimated=\(String(format: "%.1f", estimatedFPS))/container=\(String(format: "%.1f", containerFPS))/display=\(String(format: "%.1f", displayFPS)), hwdec=\(hwdecCurrent)")
             print("[\(ts)] \(t) [MPV-FRAME] render: \(String(format: "%.1f", avgRenderMs))ms avg / \(String(format: "%.1f", maxRenderMs))ms max, interval: \(String(format: "%.1f", avgInterval))ms avg [\(String(format: "%.1f", minInterval))-\(String(format: "%.1f", maxInterval))ms], jitter: \(String(format: "%.2f", jitterMs))ms, late: \(lateFrames)/\(frameCount), layer: \(layerStatus)")
-            print("[\(ts)] \(t) [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(demuxerBytes / 1024)KB/s, paused_for_cache: \(pausedForCache != 0)")
-            print("[\(ts)] \(t) [MPV-AUDIO] avsync: \(String(format: "%.4f", avsync))s, audio_pts: \(String(format: "%.2f", audioPts))s, underruns: \(audioUnderrunCount), buf_events: \(bufferEventCount), buf_time: \(String(format: "%.1f", totalBufferingDuration))s")
+            print("[\(ts)] \(t) [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(String(format: "%.0f", demuxerInputBytesPerSec / 1024))KB/s, paused_for_cache: \(pausedForCache != 0)")
+            // v1.7.x Step 8: drop the video-pts read and the
+            // self-computed `a-v` field. mpv's `avsync` property is
+            // the canonical sync metric on this render path; see the
+            // comment block at the avsync read above for the full
+            // rationale. `audio_pts` is still included because it's
+            // the only useful absolute time anchor on this path.
+            print("[\(ts)] \(t) [MPV-AUDIO] audio_pts=\(String(format: "%.2f", audioPts))s avsync=\(String(format: "%+.4f", avsync))s(positive=video_behind, mpv-internal) underruns=\(audioUnderrunCount) audio_reconfigs=\(audioReconfigCount) buf_events=\(bufferEventCount) buf_time=\(String(format: "%.1f", totalBufferingDuration))s")
             // One-line per-stream summary — the "tl;dr" that's
             // easiest to grep when scanning 9 concurrent tiles'
             // logs. Mirrors the key numbers from the verbose lines
             // above so `grep STREAM-SUMMARY` gives a quick overview.
-            print("[\(ts)] \(t) [STREAM-SUMMARY] fps=\(String(format: "%.1f", estimatedFPS)) interval=\(String(format: "%.1f", avgInterval))ms jitter=\(String(format: "%.1f", jitterMs))ms late=\(lateFrames)/\(frameCount) vo_drops=+\(deltaVideoDrops) dec_drops=+\(deltaDecoderDrops) underruns=\(audioUnderrunCount) avsync=\(String(format: "%.3f", avsync))s cache=\(String(format: "%.1f", cacheDuration))s hwdec=\(hwdecCurrent) layer=\(layerStatus)")
+            // v1.7.x Step 8: `avsync` (mpv-internal, sign-explicit)
+            // replaces the bogus self-computed `a-v`. Includes
+            // container-fps and gap-class counts so steady-state
+            // cadence health is visible at a glance.
+            print("[\(ts)] \(t) [STREAM-SUMMARY] fps=\(String(format: "%.1f", estimatedFPS))/cont=\(String(format: "%.1f", containerFPS)) interval=\(String(format: "%.1f", avgInterval))ms jitter=\(String(format: "%.1f", jitterMs))ms late=\(lateFrames)/\(frameCount) vo_drops=+\(deltaVideoDrops) dec_drops=+\(deltaDecoderDrops) underruns=\(audioUnderrunCount) avsync=\(String(format: "%+.3f", avsync))s gaps=\(callbackGapMildCount)/\(callbackGapModerateCount)/\(callbackGapSevereCount)(mild/mod/sev) cache=\(String(format: "%.1f", cacheDuration))s hwdec=\(hwdecCurrent) layer=\(layerStatus)")
             #endif
 
             DebugLogger.shared.log(
@@ -4206,6 +5029,89 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // bread along with the filling.
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty
+        }
+
+        /// v1.7.x Issue A round 6: cheap luminance probe on a BGRA
+        /// CVPixelBuffer. Returns (avg, std) over a stratified 16x16
+        /// grid = 256 sample points, using Rec. 601 luma weights.
+        ///
+        /// Cost on Apple silicon, UHD 3840x2160:
+        ///   - CVPixelBufferLockBaseAddress with kCVPixelBufferLock_ReadOnly:
+        ///     ~50-100 microseconds (memory barrier; A18+ has unified
+        ///     memory so this is not a copy, just a synchronization).
+        ///   - 256 stride-walks across the IOSurface + arithmetic:
+        ///     ~50-100 microseconds.
+        ///   - Total: well under 0.5ms per frame, 25ms/sec at 50fps,
+        ///     ~2.5% of a CPU core. Acceptable on a single-stream
+        ///     UHD playback path.
+        ///
+        /// Returns (-1, -1) if the buffer can't be locked or the
+        /// format isn't 32BGRA (the format our render path uses).
+        /// Caller treats those as "don't suppress" by checking the
+        /// thresholds against the returned values.
+        private static func detectBlackFrame(_ pixelBuffer: CVPixelBuffer) -> (avg: Double, std: Double) {
+            // Format check: our render path always produces 32BGRA
+            // via CVPixelBufferCreate in setupFBO. If this ever
+            // changes (e.g. p010 zero-copy lands), this guard
+            // signals "skip detection" rather than misreading the
+            // bytes as BGRA.
+            let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
+            guard format == kCVPixelFormatType_32BGRA else {
+                return (-1, -1)
+            }
+            let lockResult = CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+            guard lockResult == kCVReturnSuccess else { return (-1, -1) }
+            defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+            let width = CVPixelBufferGetWidth(pixelBuffer)
+            let height = CVPixelBufferGetHeight(pixelBuffer)
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+            guard width > 0, height > 0,
+                  let base = CVPixelBufferGetBaseAddress(pixelBuffer) else {
+                return (-1, -1)
+            }
+            let ptr = base.assumingMemoryBound(to: UInt8.self)
+
+            // 16x16 stratified grid = 256 samples, evenly distributed.
+            // Sampling at the center of each cell so we don't bias
+            // toward edges that may have letterbox bars on some
+            // sources.
+            let strips = 16
+            let stepX = max(1, width / strips)
+            let stepY = max(1, height / strips)
+            let centerX = stepX / 2
+            let centerY = stepY / 2
+
+            var sum: Double = 0
+            var sumSq: Double = 0
+            var count: Int = 0
+
+            for sy in 0..<strips {
+                let y = sy * stepY + centerY
+                if y >= height { break }
+                let rowOff = y * bytesPerRow
+                for sx in 0..<strips {
+                    let x = sx * stepX + centerX
+                    if x >= width { break }
+                    let off = rowOff + x * 4  // BGRA: 4 bytes/pixel
+                    let b = Double(ptr[off + 0])
+                    let g = Double(ptr[off + 1])
+                    let r = Double(ptr[off + 2])
+                    // Rec. 601 luma — close enough for "is it black".
+                    // (Stream is BT.2020 but we render to BGRA in
+                    // mpv's render shaders, so by the time we sample
+                    // here it's standard sRGB-style values.)
+                    let luma = 0.299 * r + 0.587 * g + 0.114 * b
+                    sum += luma
+                    sumSq += luma * luma
+                    count += 1
+                }
+            }
+            guard count > 0 else { return (-1, -1) }
+            let avg = sum / Double(count)
+            let variance = (sumSq / Double(count)) - (avg * avg)
+            let std = sqrt(max(0, variance))
+            return (avg, std)
         }
 
         /// Convert CVPixelBuffer to CMSampleBuffer for AVSampleBufferDisplayLayer.

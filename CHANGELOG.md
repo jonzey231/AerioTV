@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.7.0 - 2026-05-03
+## v1.7.0 - 2026-05-08
 
 ### Added
 
@@ -96,6 +96,84 @@
   per-program tint stays unchanged because it reads from
   `GuideStore.programs` which carries categories directly
   from the enrichment fan-out's primary path.
+- **UHD HEVC HDR black flashes during live playback fixed.**
+  Live MPEG-TS streams in the Sky Sports Main Event UHD class
+  (3840x2160 p010 BT.2020 over `videotoolbox-copy`) occasionally
+  produced single-VSync black flashes during otherwise smooth
+  playback. SwiftUI overlays stayed drawn while the
+  AVSampleBufferDisplayLayer area went pitch black for one
+  display tick, ~1 per 4-12 seconds depending on stream class
+  and device. Root cause: producer/consumer race on a single
+  shared IOSurface. mpv's GL render pass and AVSBDL's
+  compositor both touched the same backing store, and mpv's
+  `glClear` at the start of each frame briefly left the
+  IOSurface zero. If AVSBDL composed during that
+  sub-millisecond window the layer rendered black for that
+  VSync. Fix: triple-buffered FBO ring (3 IOSurface-backed
+  CVPixelBuffers + matching GL textures + matching FBOs,
+  advanced round-robin per render pass). By the time mpv
+  comes back to a slot after writing two other slots, AVSBDL
+  has long since composed and released its reference. No race.
+- **Live-stream startup characterization improved for UHD
+  HEVC.** Previous low-latency demuxer probe settings
+  (`analyzeduration=0.1s`, `probesize=32KB`,
+  `probe-info=nostreams`) were calibrated for H.264 SD/HD and
+  gave libavformat too little data to characterize UHD HEVC
+  Main10 BT.2020 MPEG-TS streams cleanly. Symptoms included
+  `fps_detected=0.0` for the entire playback session, a
+  `Skipping invalid undecodable NALU: 39` warning at startup,
+  and a `0×0 ?` initial state followed by a playback-restart
+  reconfig once mpv had enough data. Tuned to
+  `analyzeduration=1.5s`, `probesize=1MB`, `probe-info=auto`
+  for live streams. Trade-off: tap-to-first-frame latency
+  increases by approximately 1-1.5 seconds in exchange for
+  stable cadence detection and a libavformat that can identify
+  HEVC parameter sets without falling through to its 5MB
+  default. Pre-init and post-init runtime overrides reconciled
+  to the same values (the old code set them differently in the
+  two phases, with runtime winning, which made the pre-init
+  values dead code).
+- **Multiview "Decoder unavailable" red overlay on tile add.**
+  Adding a tile to a multiview occasionally surfaced the red
+  "Decoder unavailable / Playback error: unrecognized file
+  format" card on the new tile, the existing tile, or both,
+  even though the underlying streams were fine. The visible
+  message mapped to `MPV_ERROR_UNKNOWN_FORMAT` (-17), but the
+  existing exponential-backoff retry path only caught
+  `MPV_ERROR_LOADING_FAILED` (-13). UNKNOWN_FORMAT fell
+  straight through to the fatal-error path with no retry, the
+  warmup-retry guard didn't fire because we never got past
+  start-file, and the overlay painted permanently. Both error
+  codes now trip the same retry policy: 3 retries for live
+  (1s/2s/4s with 0-600ms jitter), 5 retries for recording URLs
+  (3s/6s/12s/24s/48s).
+- **Multiview audio silent on 2nd tile after switching focus.**
+  Adding a 2nd tile to a multiview, then switching audio focus
+  to that tile, occasionally left the new tile silent.
+  Switching audio back to the 1st tile worked normally. Pre-
+  init audio strategy in `setupMPV` was hardcoded to the
+  decoder-off path (`aid=no`) regardless of tile count, but
+  the runtime path uses mute-only at `tiles.count <= 6`.
+  Mismatch: a tile created when `count=2` had its audio
+  decoder permanently dark because `aid=no` told the demuxer
+  to skip audio packets entirely. Switching focus later wrote
+  `aid=auto` LATE on a running stream, which couldn't reliably
+  cold-start the decoder. Pre-init now reads the tile count
+  snapshotted at Representable construction time on the main
+  actor and picks the matching strategy.
+- **Apple TV: program-info banner occasionally stuck visible
+  on stream start.** The channel + program banner that
+  appears in the top-left when a stream starts sometimes
+  failed to auto-fade after its 5-second budget; pressing
+  Menu/Back to summon chrome made it disappear with chrome's
+  own auto-fade. The auto-hide timer was a manual `Task`
+  cancellation inside `.onChange(of: streamStartedToken)` that
+  could race with SwiftUI's view lifecycle on tvOS, leaving
+  the activation flag stuck `true`. Replaced with SwiftUI's
+  `.task(id:)` modifier (lifecycle-bound, deterministic re-run
+  on id change) plus a wall-clock freshness backstop in the
+  `shouldRender` computation so the banner can never outlive
+  its budget regardless of Task state.
 
 ### Changed
 
@@ -152,6 +230,68 @@
   `buildServerConnection` writes the credential-type raw onto the
   new `ServerConnection` and hands the JWT pair to the token
   store keyed by the new server's UUID.
+- New triple-buffered FBO ring in `MPVPlayerView.swift`. New
+  `FBOSlot` private struct holds `{pixelBuffer, texture, fbo}`.
+  `fboPoolSize=3`. `renderBufferIndex` advances round-robin per
+  render pass. Replaces the previous single-buffer architecture
+  that exposed a producer/consumer race on the shared
+  IOSurface. Memory cost ~99MB per single-stream UHD instance;
+  multiview tiles render at smaller resolutions (~640-960
+  wide) so per-tile cost is approximately 5-10MB total.
+- New backpressure gate at `renderAndPresent` entry. Skips the
+  entire render pass when
+  `sampleBufferRenderer.isReadyForMoreMediaData == false`.
+  Defensive in practice (AVSBDL's queue is large enough that
+  ready=false is rare during normal playback) but keeps the
+  policy explicit and unifies it with the watchdog's identical
+  guard.
+- New diagnostic surface for cadence + sync analysis on UHD
+  HEVC live MPEG-TS. `MPV-PERF` shows
+  `fps: estimated=X/container=X/display=X` instead of a single
+  fps value. `MPV-AUDIO` surfaces sign-explicit
+  `avsync=±X.XXXXs(positive=video_behind, mpv-internal)` plus
+  `audio_reconfigs=N`. `MPV-CALLBACK-GAP` log lines snapshot
+  `audio_pts` and `since_audio_reconfig=Nms` at the moment of
+  the gap so recurring stalls can be correlated with AC3
+  reconfigs. Cumulative gap-class counters
+  `gaps=N/N/N(mild/mod/sev)` in FRAME and STREAM SUMMARY.
+  `demuxer-cache-state/raw-input-rate` read fixed
+  (`MPV_FORMAT_DOUBLE`, was silent-failing as
+  `MPV_FORMAT_INT64`).
+- New 16x16 stratified luma-probe black-frame detector with
+  surround check. Fires when
+  `avg<10 && std<8 && prev_avg>25 && prev_prev_avg>20`.
+  Belt-and-suspenders against partial-corruption frames the
+  triple-buffer ring can't reach (those are libmpv-side codec
+  artefacts in the source data, not presentation race).
+- New CADisplayLink watchdog at 30ms stale threshold.
+  Re-enqueues the cached last-good `CMSampleBuffer` with
+  `kCMSampleAttachmentKey_DisplayImmediately` when libmpv has
+  an internal stall longer than a display refresh tick, so the
+  layer stays alive instead of going blank.
+- `ChannelInfoBanner` auto-hide rewritten from
+  `.onChange(of:) + manual Task` to `.task(id:)` + wall-clock
+  freshness check. SwiftUI's `.task(id:)` is bound to view
+  lifecycle and re-runs deterministically on id change, which
+  the manual cancellation pattern didn't fully handle on tvOS.
+  Single source of truth for the 5s window:
+  `Self.bannerWindowSeconds` static, used by both the sleep
+  duration and the wall-clock comparison so they can never
+  drift.
+- `MPVPlayerViewRepresentable` gains
+  `initialTileCount: Int = 1` snapshotted at SwiftUI
+  construction time on the main actor. Threaded through to the
+  `Coordinator` init so `setupMPV` (background queue) can pick
+  the matching audio strategy without an actor-isolation
+  violation reading `MultiviewStore.shared.tiles.count`
+  directly.
+- `framedrop=vo` and `video-sync=audio` shipped via the
+  pre-init option block (live streams). `framedrop=decoder+vo`
+  shipped via the runtime override (intentionally more
+  aggressive than pre-init for stall recovery). Pre-init and
+  runtime values for the demuxer probe options are now
+  reconciled so the runtime override no longer silently
+  re-aggressives values the pre-init block softened.
 
 ### Back-compat invariants (verified)
 
