@@ -1997,6 +1997,13 @@ struct EPGGuideView: View {
     /// the mini by the time a plain `@FocusState` write can fire.
     @Namespace private var guideFocusNS
     @Environment(\.resetFocus) private var resetFocus
+
+    /// The channel row that `resetFocus(in: guideFocusNS)` should
+    /// land on. Set before each `.forceGuideFocus` reset to the
+    /// currently-playing channel (single-stream) or the last-added
+    /// tile's channel (multiview). Nil falls back to `channels.first`
+    /// — the historical default.
+    @State private var guideFocusTargetChannelID: String? = nil
     #endif
 
     // Time window: 1h back + user-configured hours forward.
@@ -2308,7 +2315,20 @@ struct EPGGuideView: View {
                 // `resetFocus(in:)` forces tvOS to re-evaluate
                 // focus within the scope and lands on the row
                 // carrying `.prefersDefaultFocus(true, in:)` —
-                // which is the top channel row.
+                // which we now point at the playing channel.
+                //
+                // Resolve target: multiview → last-added tile's
+                // channel; single-stream → NowPlayingManager item.
+                // If the resolved channel isn't in the current
+                // channel list (e.g., filtered out), fall back to
+                // the top row (nil guideFocusTargetChannelID).
+                let mvLastID = MultiviewStore.shared.tiles.last?.item.id
+                let singleID = NowPlayingManager.shared.playingItem?.id
+                let candidateID = mvLastID ?? singleID
+                let targetID = candidateID.flatMap { id in
+                    channels.contains(where: { $0.id == id }) ? id : nil
+                }
+                guideFocusTargetChannelID = targetID
                 //
                 // The 400ms delay covers the 350ms minimize spring
                 // animation; triggering during the animation lets
@@ -2316,6 +2336,11 @@ struct EPGGuideView: View {
                 // frame is still in flux.
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 400_000_000)
+                    // Scroll the guide to bring the target row into
+                    // view before handing focus to it.
+                    if let id = guideFocusTargetChannelID {
+                        proxy.scrollTo(id, anchor: .center)
+                    }
                     resetFocus(in: guideFocusNS)
                 }
             }
@@ -2380,11 +2405,16 @@ struct EPGGuideView: View {
                 // outer ScrollView to claim focus from a minimized
                 // mini player.
                 .focused($focusedChannelID, equals: channel.id)
-                // Mark the top row as the default-focus target so
-                // `resetFocus(in: guideFocusNS)` lands here. See
-                // the `.forceGuideFocus` handler on the outer
-                // ScrollView for the full rationale.
-                .prefersDefaultFocus(channel.id == channels.first?.id, in: guideFocusNS)
+                // Mark the playing channel as the default-focus
+                // target so `resetFocus(in: guideFocusNS)` lands
+                // there. `guideFocusTargetChannelID` is set by the
+                // `.forceGuideFocus` handler to the currently-
+                // playing channel (or last-added multiview tile);
+                // falls back to the top row when nil.
+                .prefersDefaultFocus(
+                    channel.id == (guideFocusTargetChannelID ?? channels.first?.id),
+                    in: guideFocusNS
+                )
                 #endif
 
             // Right: program area, clipped to exactly the visible
