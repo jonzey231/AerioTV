@@ -2277,7 +2277,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // smooth playback under N concurrent decodes.
                 let tvOSAllowSoloNativeUHD = true
                 if isLive && !(tvOSAllowSoloNativeUHD && isSolo) {
-                    var fps: Double = detectedFps > 0 ? detectedFps : 30
+                    let fps: Double = detectedFps > 0 ? detectedFps : 30
                     let maxPixelsPerSec: Double = 40_000_000
                     let currentPixelsPerSec = Double(targetW * targetH) * fps
                     if currentPixelsPerSec > maxPixelsPerSec {
