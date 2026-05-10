@@ -2234,8 +2234,22 @@ struct EPGGuideView: View {
                         Color.clear
                             .frame(height: 0)
                             .id("guide.top")
+                        // Resolve the focus target once before the
+                        // ForEach so the O(n) channels scan happens
+                        // once per render pass rather than once per
+                        // row. Each guideRow receives the pre-resolved
+                        // value and does a single O(1) equality check.
+                        #if os(tvOS)
+                        let focusTargetID: String? = guideFocusTargetChannelID.flatMap { id in
+                            channels.first(where: { $0.id == id })?.id
+                        } ?? channels.first?.id
+                        #endif
                         ForEach(channels) { channel in
+                            #if os(tvOS)
+                            guideRow(for: channel, screenWidth: geo.size.width, focusTargetID: focusTargetID)
+                            #else
                             guideRow(for: channel, screenWidth: geo.size.width)
+                            #endif
                         }
                     } header: {
                         // ── Time header (pinned at top) ──
@@ -2427,7 +2441,11 @@ struct EPGGuideView: View {
     // channel column's `zIndex(0.5)`. Any leftward overflow was
     // therefore invisible (covered by the opaque channel column),
     // which means this simplification loses no visible behaviour.
-    private func guideRow(for channel: ChannelDisplayItem, screenWidth: CGFloat) -> some View {
+    private func guideRow(for channel: ChannelDisplayItem, screenWidth: CGFloat
+        #if os(tvOS)
+        , focusTargetID: String? = nil
+        #endif
+    ) -> some View {
         HStack(spacing: 0) {
             // Left: fixed-width channel column. Standalone UIView;
             // no overlap with program cells.
@@ -2447,11 +2465,10 @@ struct EPGGuideView: View {
                 .focused($focusedChannelID, equals: channel.id)
                 // Mark the playing channel as the default-focus
                 // target so `resetFocus(in: guideFocusNS)` lands
-                // there. `effectiveGuideFocusTargetID` is computed
-                // once per render pass (not per-row) so this
-                // comparison is O(1) here rather than O(n) per row.
+                // there. `focusTargetID` is resolved once before the
+                // ForEach (O(n) total), so this comparison is O(1).
                 .prefersDefaultFocus(
-                    channel.id == effectiveGuideFocusTargetID,
+                    channel.id == focusTargetID,
                     in: guideFocusNS
                 )
                 #endif
