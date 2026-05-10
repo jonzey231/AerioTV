@@ -2005,19 +2005,43 @@ struct EPGGuideView: View {
     /// — the historical default.
     @State private var guideFocusTargetChannelID: String? = nil
 
-    /// Re-validates `guideFocusTargetChannelID` against the current
-    /// `channels` array and returns the effective focus target ID.
-    /// Computing this once here avoids an O(n²) scan inside `guideRow`
-    /// where `prefersDefaultFocus` would otherwise call
-    /// `channels.first(where:)` for every row in the ForEach.
-    /// Falls back to `channels.first?.id` when the stored ID is nil
-    /// or no longer present in the current (possibly filtered) list.
+    /// Cached, already-validated focus target ID. This is refreshed
+    /// when the requested target or the current channel list changes,
+    /// so per-row comparisons stay O(1) during rendering.
+    @State private var cachedEffectiveGuideFocusTargetID: String? = nil
+
+    /// Snapshot of the channel IDs used for the most recent focus-target
+    /// validation. Keeping this lets us avoid unnecessary recomputation
+    /// when unrelated state changes trigger a view update.
+    @State private var cachedGuideFocusChannelIDs: [String] = []
+
+    /// Returns the cached effective focus target ID. When the cache has
+    /// not yet been populated, preserve the historical fallback to the
+    /// first visible channel.
     private var effectiveGuideFocusTargetID: String? {
-        if let stored = guideFocusTargetChannelID,
-           channels.contains(where: { $0.id == stored }) {
-            return stored
+        cachedEffectiveGuideFocusTargetID ?? channels.first?.id
+    }
+
+    /// Re-validates `guideFocusTargetChannelID` against the current
+    /// channel list and updates the cached effective focus target.
+    /// Call this from the parent scope when `.forceGuideFocus` changes
+    /// the requested target and whenever the channel list changes.
+    private func refreshEffectiveGuideFocusTargetID() {
+        let currentChannelIDs = channels.map(\.id)
+        guard currentChannelIDs != cachedGuideFocusChannelIDs
+                || cachedEffectiveGuideFocusTargetID != guideFocusTargetChannelID else {
+            return
         }
-        return channels.first?.id
+
+        cachedGuideFocusChannelIDs = currentChannelIDs
+        let channelIDSet = Set(currentChannelIDs)
+
+        if let stored = guideFocusTargetChannelID,
+           channelIDSet.contains(stored) {
+            cachedEffectiveGuideFocusTargetID = stored
+        } else {
+            cachedEffectiveGuideFocusTargetID = currentChannelIDs.first
+        }
     }
     #endif
 
