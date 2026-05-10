@@ -2303,43 +2303,38 @@ struct EPGGuideView: View {
             .onReceive(
                 NotificationCenter.default.publisher(for: .forceGuideFocus)
             ) { _ in
-                // Reclaim focus from the minimized mini-player via
-                // Apple's imperative focus-reset API. See
-                // ChannelListView's `.forceGuideFocus` handler for
-                // the full rationale — briefly: a plain
-                // `@FocusState` write (what this handler did
-                // pre-v1.6.4) was treated by tvOS as a focus
-                // REQUEST that the engine routinely rejected
-                // because it had already committed to the mini
-                // tile by the time the write landed. Calling
-                // `resetFocus(in:)` forces tvOS to re-evaluate
-                // focus within the scope and lands on the row
-                // carrying `.prefersDefaultFocus(true, in:)` —
-                // which we now point at the playing channel.
-                //
-                // Resolve target: multiview → last-added tile's
-                // channel; single-stream → NowPlayingManager item.
-                // If the resolved channel isn't in the current
-                // channel list (e.g., filtered out), fall back to
-                // the top row (nil guideFocusTargetChannelID).
-                let mvLastID = MultiviewStore.shared.tiles.last?.item.id
-                let singleID = NowPlayingManager.shared.playingItem?.id
-                let candidateID = mvLastID ?? singleID
-                let targetID = candidateID.flatMap { id in
-                    channels.contains(where: { $0.id == id }) ? id : nil
-                }
-                guideFocusTargetChannelID = targetID
-                //
-                // The 400ms delay covers the 350ms minimize spring
-                // animation; triggering during the animation lets
-                // tvOS ignore the reset because the mini tile's
-                // frame is still in flux.
+                // All work runs on the main actor so @MainActor-
+                // isolated singletons (MultiviewStore, NowPlayingManager)
+                // and @State mutations are accessed safely regardless
+                // of which thread NotificationCenter delivers on.
                 Task { @MainActor in
+                    // Resolve target: use the last-added multiview tile
+                    // (keyed by addedAt, not array order which can change
+                    // via drag-rearrange), then fall back to the single-
+                    // stream playing item, then nil → top row.
+                    let mvLastID = MultiviewStore.shared.tiles
+                        .max(by: { $0.addedAt < $1.addedAt })?.item.id
+                    let singleID = NowPlayingManager.shared.playingItem?.id
+                    let candidateID = mvLastID ?? singleID
+                    // Only store the target if it's actually present in
+                    // the current (possibly filtered) channel list —
+                    // otherwise leave it nil so the fallback to
+                    // channels.first in prefersDefaultFocus still fires.
+                    guideFocusTargetChannelID = candidateID.flatMap { id in
+                        channels.first(where: { $0.id == id })?.id
+                    }
+                    // The 400ms delay covers the 350ms minimize spring
+                    // animation; triggering during the animation lets
+                    // tvOS ignore the reset because the mini tile's
+                    // frame is still in flux.
                     try? await Task.sleep(nanoseconds: 400_000_000)
                     // Scroll the guide to bring the target row into
-                    // view before handing focus to it.
+                    // view before handing focus to it. Animated to
+                    // match the .guideScrollToTop pattern.
                     if let id = guideFocusTargetChannelID {
-                        proxy.scrollTo(id, anchor: .center)
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            proxy.scrollTo(id, anchor: .center)
+                        }
                     }
                     resetFocus(in: guideFocusNS)
                 }
@@ -2407,12 +2402,16 @@ struct EPGGuideView: View {
                 .focused($focusedChannelID, equals: channel.id)
                 // Mark the playing channel as the default-focus
                 // target so `resetFocus(in: guideFocusNS)` lands
-                // there. `guideFocusTargetChannelID` is set by the
-                // `.forceGuideFocus` handler to the currently-
-                // playing channel (or last-added multiview tile);
-                // falls back to the top row when nil.
+                // there. `guideFocusTargetChannelID` is the stored
+                // intent from the last `.forceGuideFocus` event;
+                // we re-validate it against the current `channels`
+                // array on every render so a filter change or list
+                // refresh automatically falls back to `channels.first`
+                // rather than targeting an ID no longer in the list.
                 .prefersDefaultFocus(
-                    channel.id == (guideFocusTargetChannelID ?? channels.first?.id),
+                    channel.id == (guideFocusTargetChannelID.flatMap { id in
+                        channels.first(where: { $0.id == id })?.id
+                    } ?? channels.first?.id),
                     in: guideFocusNS
                 )
                 #endif
