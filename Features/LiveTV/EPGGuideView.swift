@@ -2004,6 +2004,21 @@ struct EPGGuideView: View {
     /// tile's channel (multiview). Nil falls back to `channels.first`
     /// — the historical default.
     @State private var guideFocusTargetChannelID: String? = nil
+
+    /// Re-validates `guideFocusTargetChannelID` against the current
+    /// `channels` array and returns the effective focus target ID.
+    /// Computing this once here avoids an O(n²) scan inside `guideRow`
+    /// where `prefersDefaultFocus` would otherwise call
+    /// `channels.first(where:)` for every row in the ForEach.
+    /// Falls back to `channels.first?.id` when the stored ID is nil
+    /// or no longer present in the current (possibly filtered) list.
+    private var effectiveGuideFocusTargetID: String? {
+        if let stored = guideFocusTargetChannelID,
+           channels.contains(where: { $0.id == stored }) {
+            return stored
+        }
+        return channels.first?.id
+    }
     #endif
 
     // Time window: 1h back + user-configured hours forward.
@@ -2329,9 +2344,15 @@ struct EPGGuideView: View {
                     // frame is still in flux.
                     try? await Task.sleep(nanoseconds: 400_000_000)
                     // Scroll the guide to bring the target row into
-                    // view before handing focus to it. Animated to
-                    // match the .guideScrollToTop pattern.
-                    if let id = guideFocusTargetChannelID {
+                    // view before handing focus to it. Re-validate
+                    // against channels here (post-sleep) in case the
+                    // list or filter changed during the 400ms delay —
+                    // scroll is skipped rather than targeting a missing
+                    // id. Falls back to top-row focus via resetFocus.
+                    let validatedScrollTargetID = guideFocusTargetChannelID.flatMap { id in
+                        channels.first(where: { $0.id == id })?.id
+                    }
+                    if let id = validatedScrollTargetID {
                         withAnimation(.easeInOut(duration: 0.25)) {
                             proxy.scrollTo(id, anchor: .center)
                         }
@@ -2402,16 +2423,11 @@ struct EPGGuideView: View {
                 .focused($focusedChannelID, equals: channel.id)
                 // Mark the playing channel as the default-focus
                 // target so `resetFocus(in: guideFocusNS)` lands
-                // there. `guideFocusTargetChannelID` is the stored
-                // intent from the last `.forceGuideFocus` event;
-                // we re-validate it against the current `channels`
-                // array on every render so a filter change or list
-                // refresh automatically falls back to `channels.first`
-                // rather than targeting an ID no longer in the list.
+                // there. `effectiveGuideFocusTargetID` is computed
+                // once per render pass (not per-row) so this
+                // comparison is O(1) here rather than O(n) per row.
                 .prefersDefaultFocus(
-                    channel.id == (guideFocusTargetChannelID.flatMap { id in
-                        channels.first(where: { $0.id == id })?.id
-                    } ?? channels.first?.id),
+                    channel.id == effectiveGuideFocusTargetID,
                     in: guideFocusNS
                 )
                 #endif
