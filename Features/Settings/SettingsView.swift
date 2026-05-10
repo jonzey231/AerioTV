@@ -599,6 +599,36 @@ struct SettingsView: View {
                             for w in stale { modelContext.delete(w) }
                             debugLog("🗑️ Deleted \(stale.count) orphaned WatchProgress rows for server \(sid)")
                         }
+                        // v1.7.x: cascade delete server-side Recording
+                        // rows scoped to this server. These are
+                        // Dispatcharr server-side recordings (rows
+                        // where `localFilePath == nil` and
+                        // `remoteRecordingID != nil`). After the
+                        // server is removed, the row is useless: the
+                        // Dispatcharr playback URL it references
+                        // (`/api/channels/recordings/<id>/file/` or
+                        // `/api/channels/recordings/<id>/hls/`) is
+                        // unreachable, and `MyRecordingsView` would
+                        // surface unplayable rows pointing at a
+                        // server the user just deleted.
+                        //
+                        // Local recordings (rows where
+                        // `localFilePath != nil`) are intentionally
+                        // NOT cascaded. The user may have captured
+                        // those locally on purpose and want to keep
+                        // the `.ts` files in `Documents/Recordings/`
+                        // even after the source server is removed.
+                        // The `localFilePath == nil` predicate is
+                        // the gate.
+                        let recDescriptor = FetchDescriptor<Recording>(
+                            predicate: #Predicate<Recording> {
+                                $0.serverID == sid && $0.localFilePath == nil
+                            }
+                        )
+                        if let stale = try? modelContext.fetch(recDescriptor) {
+                            for r in stale { modelContext.delete(r) }
+                            debugLog("🗑️ Deleted \(stale.count) orphaned server-side Recording rows for server \(sid)")
+                        }
                         modelContext.delete(server)
                         try? modelContext.save()
                         // Push updated list to iCloud (server removed)
