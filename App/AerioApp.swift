@@ -1697,15 +1697,63 @@ struct RootView: View {
             }
         }
 
-        // Check for servers deleted on other devices
+        // Check for servers deleted on other devices.
+        //
+        // v1.7.x defense-in-depth fix paired with `SyncManager.pushServers`'s
+        // schedule-time `lastPushTime` stamp: a freshly-added local server
+        // (still inside the 2-second push debounce window OR with a stale
+        // bounce-back-guard timestamp that let a foreign KVS notification
+        // through) must NOT be deleted just because the in-flight remote
+        // payload pre-dates this device's push. The user's intent is
+        // "I just added this server", and there is no scenario where a server
+        // created in the last few seconds was legitimately "deleted on
+        // another device" because the cross-device propagation alone
+        // takes longer than the freshness threshold. Skipping the delete
+        // gives `pushServers`' debounced work a chance to catch up and
+        // write the new server to KVS, after which subsequent merges
+        // see a consistent state.
+        //
+        // Threshold: 10 seconds. Comfortably longer than the 2.0s push
+        // debounce, the typical end-to-end iCloud KVS propagation
+        // latency (sub-second on Apple's backbone in practice but can
+        // spike to a few seconds under congestion), and any reasonable
+        // multi-step Add Server flow's tail (saveCredentialsSynced runs
+        // on the next run loop, but the user might have tapped Save and
+        // had the modal dismiss animation in flight). Short enough that
+        // a server legitimately deleted on another device WHILE this
+        // device was offline still gets cleaned up on the next sync.
+        // The createdAt is preserved from the original insert, so the
+        // 10s window is measured from when the server was first added,
+        // not from when this merge runs.
         let remoteIDs = Set(remoteServers.map { $0.id })
+        let now = Date()
         for local in servers where !remoteIDs.contains(local.id) {
             // Only delete if sync has been active (i.e., remote has servers but this one is missing)
             if !remoteServers.isEmpty {
+                let ageSeconds = now.timeIntervalSince(local.createdAt)
+                if ageSeconds < 10 {
+                    // v1.7.x: caught a near-miss. The race we're guarding
+                    // against (FINDING 1 in the v1.7.0 multi-server-add
+                    // bug investigation): a foreign KVS notification fires
+                    // during the local push debounce, the bounce-back
+                    // guard fails because lastPushTime is stale, and we
+                    // arrive here with a JUST-ADDED local server about
+                    // to be wrongly deleted. File-backed log so users
+                    // who hit this can ship us a forensic trail.
+                    DebugLogger.shared.log(
+                        "SyncManager: SKIPPED delete of server \(local.name) (too young: \(String(format: "%.1f", ageSeconds))s old, threshold 10s, remoteCount=\(remoteServers.count)). Race-guard prevented data loss; the push debounce will catch up.",
+                        category: "Sync",
+                        level: .warning
+                    )
+                    continue
+                }
                 local.deleteCredentialsFromKeychain()
                 modelContext.delete(local)
-                DebugLogger.shared.log("SyncManager: deleted server \(local.name) (removed on another device)",
-                                       category: "Sync", level: .info)
+                DebugLogger.shared.log(
+                    "SyncManager: deleted server \(local.name) (removed on another device, age=\(String(format: "%.1f", ageSeconds))s, remoteCount=\(remoteServers.count))",
+                    category: "Sync",
+                    level: .info
+                )
             }
         }
 
