@@ -581,10 +581,37 @@ struct SettingsView: View {
                             for p in stale { modelContext.delete(p) }
                             debugLog("🗑️ Deleted \(stale.count) orphaned EPGProgram rows for server \(sid)")
                         }
+                        // v1.7.x: cascade delete WatchProgress rows
+                        // scoped to this server so movie / series /
+                        // recording resume positions don't orphan
+                        // when the server is removed. Mirrors the
+                        // EPGProgram cascade above. WatchProgress.
+                        // serverID is Optional<String>; the SwiftData
+                        // #Predicate `$0.serverID == sid` unwraps and
+                        // matches only rows whose serverID is exactly
+                        // `sid`, leaving legacy nil-serverID rows
+                        // (pre-multi-server era) untouched. Same
+                        // safety pattern the EPGProgram cascade uses.
+                        let wpDescriptor = FetchDescriptor<WatchProgress>(
+                            predicate: #Predicate<WatchProgress> { $0.serverID == sid }
+                        )
+                        if let stale = try? modelContext.fetch(wpDescriptor) {
+                            for w in stale { modelContext.delete(w) }
+                            debugLog("🗑️ Deleted \(stale.count) orphaned WatchProgress rows for server \(sid)")
+                        }
                         modelContext.delete(server)
                         try? modelContext.save()
                         // Push updated list to iCloud (server removed)
                         SyncManager.shared.pushServers(servers.filter { $0.id != server.id })
+                        // Push the post-cascade WatchProgress set to
+                        // iCloud (immediate, not debounced) so the
+                        // deletion replicates to other devices before
+                        // they next pull. Without this, another device
+                        // would re-introduce the orphaned rows on its
+                        // next merge pass via the KVS payload.
+                        if let remaining = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
+                            SyncManager.shared.pushWatchProgress(remaining, immediate: true)
+                        }
                     }
                 }
                 Button("Cancel", role: .cancel) {}
