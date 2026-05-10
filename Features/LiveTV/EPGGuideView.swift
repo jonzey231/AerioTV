@@ -2018,30 +2018,17 @@ struct EPGGuideView: View {
     /// Returns the cached effective focus target ID. When the cache has
     /// not yet been populated, preserve the historical fallback to the
     /// first visible channel.
+    /// Returns the requested guide focus target when it still exists in
+    /// the current channel list; otherwise falls back to the first channel.
+    /// This is computed directly so it cannot become stale if the channel
+    /// list or requested focus target changes.
     private var effectiveGuideFocusTargetID: String? {
-        cachedEffectiveGuideFocusTargetID ?? channels.first?.id
-    }
-
-    /// Re-validates `guideFocusTargetChannelID` against the current
-    /// channel list and updates the cached effective focus target.
-    /// Call this from the parent scope when `.forceGuideFocus` changes
-    /// the requested target and whenever the channel list changes.
-    private func refreshEffectiveGuideFocusTargetID() {
-        let currentChannelIDs = channels.map(\.id)
-        guard currentChannelIDs != cachedGuideFocusChannelIDs
-                || cachedEffectiveGuideFocusTargetID != guideFocusTargetChannelID else {
-            return
+        if let requestedChannelID = guideFocusTargetChannelID,
+           channels.contains(where: { $0.id == requestedChannelID }) {
+            return requestedChannelID
         }
 
-        cachedGuideFocusChannelIDs = currentChannelIDs
-        let channelIDSet = Set(currentChannelIDs)
-
-        if let stored = guideFocusTargetChannelID,
-           channelIDSet.contains(stored) {
-            cachedEffectiveGuideFocusTargetID = stored
-        } else {
-            cachedEffectiveGuideFocusTargetID = currentChannelIDs.first
-        }
+        return channels.first?.id
     }
     #endif
 
