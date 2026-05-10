@@ -1,5 +1,48 @@
 # Changelog
 
+## v1.7.1 - 2026-05-10
+
+### Fixed
+
+- **Adding a second Dispatcharr Direct Connect server now reliably
+  saves credentials when iCloud sync is enabled.** A 2-second push
+  debounce in `SyncManager.pushServers` opened a window where the
+  bounce-back guard's `lastPushTime` was stale (from the previous
+  successful push, potentially minutes earlier). A foreign
+  `NSUbiquitousKeyValueStore.didChangeExternallyNotification`
+  arriving in that window caused `mergeRemoteServers` to run against
+  KVS contents that didn't yet contain the just-added local server,
+  and the "delete local servers not in remote" branch tore the new
+  SwiftData row plus its Keychain entries out before
+  `saveCredentialsSynced` could persist them. Symptom: the new
+  server appeared on receiving devices with empty credentials
+  (`hasCreds=false`) and produced a "Connection Error / Invalid
+  credentials" overlay when activated. Fixed with two layered
+  guards: (1) `pushServers` now stamps `lastPushTime` immediately
+  at schedule time so the bounce-back guard correctly suppresses
+  notifications during the debounce window; (2) the
+  delete-not-in-remote branch in `mergeRemoteServers` now skips
+  servers whose `createdAt` is within the last 10 seconds,
+  regardless of (1). Forensic instrumentation: both branches
+  (skip-young and actually-delete) emit file-backed
+  `DebugLogger.shared.log` lines with server age and remote count,
+  so any future occurrence appears cleanly in user-exported
+  diagnostic logs.
+
+### Changed
+
+- **Deleting a server now cascades to its watch progress and
+  server-side recordings.** Previously orphaned `WatchProgress`
+  rows persisted in SwiftData (and survived the iCloud sync push)
+  and server-side Dispatcharr `Recording` rows stayed in the local
+  list even though they pointed at a server that no longer existed.
+  Both are now scrubbed via `FetchDescriptor` + `#Predicate`
+  lookups in the Settings, Delete Playlist alert handler. Local
+  recordings (`localFilePath != nil`) are preserved because they
+  are user-generated content and the user may want to keep them
+  after disconnecting from the recording server. EPG rows already
+  cascaded since v1.3.4.
+
 ## v1.7.0 - 2026-05-08
 
 ### Added

@@ -57,6 +57,15 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.1",
+            title: "What's new in 1.7.1",
+            bullets: [
+                "Fixed a race that could leave a second Dispatcharr Direct Connect server unable to authenticate when iCloud sync is enabled. Adding multiple Dispatcharr servers now reliably persists credentials across devices",
+                "Deleting a server now also removes its watch progress and server-side recording rows from this device. Local recordings are preserved"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.1")
+        ),
+        WhatsNewRelease(
             version: "1.7.0",
             title: "What's new in 1.7.0",
             bullets: [
