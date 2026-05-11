@@ -11,6 +11,44 @@ AerioTV is a native IPTV streaming application for iOS, iPadOS, tvOS, and macOS 
 Sideload using your preferred method using the .ipa from [Releases](https://github.com/jonzey231/AerioTV/releases).
 - This version will occasionally be ahead of the Apple Testflight version.
 
+## Screenshots
+
+<details>
+<summary><strong>iPhone</strong></summary>
+<br>
+<img src="docs/screenshots/iphone/01.png" width="200" />
+<img src="docs/screenshots/iphone/02.png" width="200" />
+<img src="docs/screenshots/iphone/03.png" width="200" />
+<img src="docs/screenshots/iphone/04.png" width="200" />
+<img src="docs/screenshots/iphone/05.png" width="200" />
+<img src="docs/screenshots/iphone/06.png" width="200" />
+<img src="docs/screenshots/iphone/07.png" width="200" />
+</details>
+
+<details>
+<summary><strong>iPad</strong></summary>
+<br>
+<img src="docs/screenshots/ipad/01.png" width="320" />
+<img src="docs/screenshots/ipad/02.png" width="320" />
+<img src="docs/screenshots/ipad/03.png" width="320" />
+<img src="docs/screenshots/ipad/04.png" width="320" />
+<img src="docs/screenshots/ipad/05.png" width="320" />
+<img src="docs/screenshots/ipad/06.png" width="320" />
+<img src="docs/screenshots/ipad/07.png" width="320" />
+</details>
+
+<details>
+<summary><strong>Apple TV</strong></summary>
+<br>
+<img src="docs/screenshots/appletv/01.png" width="420" />
+<img src="docs/screenshots/appletv/02.png" width="420" />
+<img src="docs/screenshots/appletv/03.png" width="420" />
+<img src="docs/screenshots/appletv/04.png" width="420" />
+<img src="docs/screenshots/appletv/05.png" width="420" />
+<img src="docs/screenshots/appletv/06.png" width="420" />
+<img src="docs/screenshots/appletv/07.png" width="420" />
+</details>
+
 ## Features
 
 A native Apple-platform IPTV client. Stream live TV with full EPG,
