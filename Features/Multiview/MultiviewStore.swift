@@ -175,6 +175,48 @@ final class MultiviewStore: ObservableObject {
     /// device has been in a bag all day.
     var warningLastShownAt: Date?
 
+    /// v1.7.x: when `true`, single-taps on Guide channel cells
+    /// (`EPGGuideView`'s `GuideProgramButton`) add the channel to
+    /// `tiles` (or remove it if already present) instead of starting
+    /// playback. Set when the user picks "Add to Multiview" from
+    /// the long-press context menu; cleared when the user taps the
+    /// "Done" button in the in-Guide staging banner, when `tiles`
+    /// hits the hard cap, or when the user manually drains `tiles`
+    /// back to zero. Freyguy1975 (Discord 2026-05-11) requested a
+    /// way to build a multiview pile directly from the Guide without
+    /// having to play a stream first; this flag is the toggle the
+    /// Guide checks at tap time.
+    @Published var isStagingFromGuide: Bool = false
+
+    /// Looks up the tile currently representing `channelID`, or
+    /// `nil` if no tile is tracking that channel. Used by the Guide
+    /// staging-mode toggle to find which tile to remove on re-tap,
+    /// and by the "Add to Multiview" menu label so an already-staged
+    /// channel reads as "Remove from Multiview" instead.
+    func tile(forChannelID channelID: String) -> MultiviewTile? {
+        tiles.first { $0.item.id == channelID }
+    }
+
+    /// Wipes every tile. Used by `EPGGuideView` when entering
+    /// staging mode so the user assembles a fresh multiview pile
+    /// rather than appending to whatever was previously there
+    /// (matches Freyguy's "start fresh" intent). Also clears
+    /// `audioTileID`, `fullscreenTileID`, and `relocatingTileID`
+    /// so dangling references can't survive across the reset.
+    func clearAll() {
+        let count = tiles.count
+        tiles.removeAll()
+        audioTileID = nil
+        fullscreenTileID = nil
+        relocatingTileID = nil
+        if count > 0 {
+            DebugLogger.shared.log(
+                "[MV-Tile] clearAll: wiped \(count) tile(s)",
+                category: "Playback", level: .info
+            )
+        }
+    }
+
     // MARK: - Progress-store registry
     //
     // The unified N=1 chrome (PlaybackChromeOverlay + PlaybackOptionsPanel)

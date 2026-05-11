@@ -1965,9 +1965,23 @@ struct EPGGuideView: View {
     // view mounts — no more blank guide on a tab switch while XMLTV
     // re-parses from scratch.
     @ObservedObject private var guideStore = GuideStore.shared
+    /// v1.7.x: observed so the staging banner appears / disappears
+    /// when `isStagingFromGuide` flips, and so the cell-level tap
+    /// behavior swaps between "play" and "toggle in pile". Shared
+    /// singleton; observation cost is the same as having the cells
+    /// observe it directly, with the bonus that the top-level
+    /// banner can react to `tiles.count` changes too.
+    @ObservedObject private var multiviewStore = MultiviewStore.shared
     @EnvironmentObject private var channelStore: ChannelStore
     @Environment(\.modelContext) private var modelContext
     @State private var _epgCacheIsFresh = false
+
+    /// v1.7.x: transient toast string for staging actions ("Added X
+    /// to Multiview", "Removed Y", "Max reached", etc.). Set by
+    /// `handleMultiviewIntent`; auto-clears after ~2.5s via the
+    /// `showStagingToast` helper. Same pattern as
+    /// `AddToMultiviewSheet.toastMessage`.
+    @State private var stagingToast: String? = nil
     #if os(tvOS)
     /// Programmatic focus target for a channel row's left-hand cell.
     /// Normally nil (focus engine drives navigation).
@@ -2069,7 +2083,34 @@ struct EPGGuideView: View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
             guideContent
+            // v1.7.x: staging-mode toast bottom-center. Sits in the
+            // ZStack rather than as a sibling modifier so it floats
+            // above the guide grid (including the horizontal
+            // ScrollView contents) while staying out of the way of
+            // the time header and channel column.
+            if let msg = stagingToast {
+                VStack {
+                    Spacer()
+                    stagingToastView(msg)
+                        .padding(.bottom, 32)
+                }
+                .transition(.opacity)
+            }
         }
+        .animation(.easeInOut(duration: 0.2), value: stagingToast)
+        // v1.7.x: in-Guide staging banner. Pinned at the top via
+        // safeAreaInset so the guide content shifts down rather than
+        // being covered. Only renders when `isStagingFromGuide` is
+        // true. When the flag flips off (user tapped Done, hit the
+        // hard cap, or removed every tile), the safe area collapses
+        // back. Conditional view inside the closure cleanly produces
+        // an empty inset when off; SwiftUI animates the collapse.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if multiviewStore.isStagingFromGuide {
+                stagingBanner
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: multiviewStore.isStagingFromGuide)
         #if os(tvOS)
         .ignoresSafeArea(.all, edges: [.leading, .trailing, .bottom])
         #endif
@@ -2534,7 +2575,9 @@ struct EPGGuideView: View {
         return GuideProgramButton(
             prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
             leadingClip: leadingClip,
-            shortTimeFormatter: shortTimeFormatter, onSelect: onSelectChannel
+            shortTimeFormatter: shortTimeFormatter,
+            onSelect: onSelectChannel,
+            onMultiviewIntent: { handleMultiviewIntent(channel: $0) }
         )
         .offset(x: x, y: 0)
         // NOTE: `.focused($focusedProgramID, equals: prog.id)` was
@@ -2573,6 +2616,143 @@ struct EPGGuideView: View {
             .frame(maxHeight: .infinity)
             .offset(x: screenX)
             .opacity(visible ? 1 : 0)
+    }
+
+    // MARK: - Multiview Staging (v1.7.x)
+
+    /// Top-edge banner shown while `MultiviewStore.shared.isStagingFromGuide`
+    /// is true. Surfaces the current tile count and a Done button so
+    /// the user always has a visible way to exit staging mode.
+    /// Tapping a channel in the Guide while this banner is showing
+    /// toggles that channel in/out of the multiview pile instead of
+    /// starting playback. See `handleMultiviewIntent(channel:)` for
+    /// the toggle logic.
+    private var stagingBanner: some View {
+        let count = multiviewStore.tiles.count
+        let label = count == 1
+            ? "1 tile staged for Multiview"
+            : "\(count) tiles staged for Multiview"
+        return HStack(spacing: 12) {
+            Image(systemName: "rectangle.3.group.fill")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(.accentPrimary)
+            Text(label)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.textPrimary)
+            Spacer()
+            Button {
+                multiviewStore.isStagingFromGuide = false
+                DebugLogger.shared.log(
+                    "[MV-Tile] staging mode: user tapped Done (count=\(multiviewStore.tiles.count))",
+                    category: "Playback", level: .info
+                )
+            } label: {
+                Text("Done")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+                    .background(Capsule().fill(Color.accentPrimary))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color.accentPrimary.opacity(0.4))
+                .frame(height: 1)
+        }
+    }
+
+    /// Toast bubble for staging-mode add / remove confirmations.
+    /// Auto-dismisses after ~2.5s via `showStagingToast(_:)`.
+    private func stagingToastView(_ text: String) -> some View {
+        Text(text)
+            #if os(tvOS)
+            .font(.system(size: 22, weight: .semibold))
+            .padding(.horizontal, 24)
+            .padding(.vertical, 14)
+            #else
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            #endif
+            .foregroundColor(.white)
+            .background(
+                Capsule()
+                    .fill(Color.black.opacity(0.85))
+            )
+            .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
+    }
+
+    /// Sets `stagingToast` and schedules an auto-clear ~2.5s later.
+    /// Idempotent against rapid successive calls: the second toast
+    /// replaces the first, and only the latest message's auto-clear
+    /// will null out the state.
+    private func showStagingToast(_ message: String) {
+        stagingToast = message
+        Task {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            await MainActor.run {
+                if stagingToast == message { stagingToast = nil }
+            }
+        }
+    }
+
+    /// Routes a channel selection through the staging-mode toggle:
+    /// the first invocation (when staging isn't yet active) wipes
+    /// the existing pile and switches the flag on so subsequent
+    /// single-taps in the Guide flow back through this same method.
+    /// Already-staged channels get removed; not-yet-staged channels
+    /// get added. Hitting the hard cap auto-exits staging.
+    private func handleMultiviewIntent(channel: ChannelDisplayItem) {
+        // First entry: wipe and flip the flag. Subsequent calls just
+        // toggle (the flag is already true and the pile is whatever
+        // the user has built so far).
+        if !multiviewStore.isStagingFromGuide {
+            multiviewStore.clearAll()
+            multiviewStore.isStagingFromGuide = true
+            DebugLogger.shared.log(
+                "[MV-Tile] staging mode: entered from Guide (channel=\(channel.name))",
+                category: "Playback", level: .info
+            )
+        }
+        // Toggle: already-staged → remove, else → add.
+        if let tile = multiviewStore.tile(forChannelID: channel.id) {
+            multiviewStore.remove(id: tile.id)
+            showStagingToast("Removed \(channel.name)")
+            return
+        }
+        let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+        let result = multiviewStore.add(channel, server: activeServer)
+        switch result {
+        case .added:
+            showStagingToast("Added \(channel.name)")
+        case .needsWarning:
+            // Staging mode is an explicit "I want a lot of tiles"
+            // intent. Bypassing the warning here avoids interrupting
+            // the build flow with a confirmation dialog on every
+            // tile past the soft limit. The user can still observe
+            // the count climbing in the banner.
+            _ = multiviewStore.add(channel, server: activeServer, bypassWarning: true)
+            showStagingToast("Added \(channel.name)")
+        case .rejectedMax:
+            showStagingToast("Maximum \(multiviewStore.maxTiles) streams reached")
+            // Hit the hard cap. Exit staging so the user gets the
+            // banner out of their way and can move on to the
+            // Multiview tab.
+            multiviewStore.isStagingFromGuide = false
+        case .alreadyPresent:
+            // Defensive: the tile(forChannelID:) check above should
+            // have caught this. If we somehow reach here, surface
+            // the toast and move on.
+            showStagingToast("Already added")
+        case .unresolvable:
+            showStagingToast("\(channel.name) has no playable stream")
+        }
     }
 
     // MARK: - Helpers
@@ -2732,9 +2912,23 @@ private struct GuideProgramButton: View {
     let leadingClip: CGFloat
     let shortTimeFormatter: DateFormatter
     let onSelect: (ChannelDisplayItem) -> Void
+    /// v1.7.x: routes "Add to Multiview" context-menu taps AND
+    /// single-taps-while-staging back to `EPGGuideView`'s
+    /// `handleMultiviewIntent(channel:)`. The cell itself doesn't
+    /// know whether staging mode is active; it just calls this
+    /// closure whenever the user expresses multiview-pile intent.
+    /// The parent does the wipe-on-first-entry, the add / remove
+    /// toggle, and the toast.
+    let onMultiviewIntent: (ChannelDisplayItem) -> Void
     // Access ReminderManager directly — @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
     private var reminderManager: ReminderManager { .shared }
+    /// v1.7.x: observed so the cell-level tap behavior swaps between
+    /// "play this channel" and "toggle in multiview pile" when the
+    /// `isStagingFromGuide` flag flips, and so the long-press menu
+    /// label reads "Remove from Multiview" instead of "Add to
+    /// Multiview" for an already-staged channel.
+    @ObservedObject private var multiviewStore = MultiviewStore.shared
     /// FavoritesStore lets us offer "Add/Remove from Favorites" from a
     /// program cell's long-press menu — users expect that action to
     /// work from anywhere they long-press in the guide, not just the
@@ -2915,7 +3109,19 @@ private struct GuideProgramButton: View {
                 TVPressOverlay(
                     minimumPressDuration: 0.35,
                     isFocused: $isFocused,
-                    onTap: { onSelect(channelItem) },
+                    onTap: {
+                        // v1.7.x: when the Guide is in staging mode,
+                        // Select on a cell adds / removes the channel
+                        // from the multiview pile instead of playing
+                        // it. The parent's `handleMultiviewIntent`
+                        // owns the toggle logic; we just forward the
+                        // channel.
+                        if multiviewStore.isStagingFromGuide {
+                            onMultiviewIntent(channelItem)
+                        } else {
+                            onSelect(channelItem)
+                        }
+                    },
                     onLongPress: { showCtxDialog = true }
                 )
             )
@@ -2928,6 +3134,15 @@ private struct GuideProgramButton: View {
                        ? "Remove from Favorites"
                        : "Add to Favorites") {
                     favoritesStore.toggle(channelItem)
+                }
+                // v1.7.x: Add / Remove from Multiview. Label flips
+                // based on whether this channel is currently staged
+                // so the action verb always describes what tapping
+                // will do.
+                Button(multiviewStore.tile(forChannelID: channelItem.id) != nil
+                       ? "Remove from Multiview"
+                       : "Add to Multiview") {
+                    onMultiviewIntent(channelItem)
                 }
                 Button("Program Info") {
                     activeSheet = .programInfo(
@@ -2986,7 +3201,18 @@ private struct GuideProgramButton: View {
         #else
         cellContent
             .contentShape(Rectangle())
-            .onTapGesture { onSelect(channelItem) }
+            .onTapGesture {
+                // v1.7.x: when staging is active, the cell tap
+                // toggles the channel in the multiview pile rather
+                // than starting playback. Otherwise normal Guide
+                // behavior (play this channel). See
+                // `EPGGuideView.handleMultiviewIntent(channel:)`.
+                if multiviewStore.isStagingFromGuide {
+                    onMultiviewIntent(channelItem)
+                } else {
+                    onSelect(channelItem)
+                }
+            }
             .onLongPressGesture(minimumDuration: 0.4) {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 showGuidePopover = true
@@ -3082,6 +3308,29 @@ private struct GuideProgramButton: View {
                 ) {
                     favoritesStore.toggle(channelItem)
                     showGuidePopover = false
+                }
+                // v1.7.x: Add / Remove from Multiview. Label and icon
+                // flip based on whether this channel is currently
+                // staged so the action verb always matches the
+                // outcome of tapping.
+                let isStaged = multiviewStore.tile(forChannelID: channelItem.id) != nil
+                guidePopoverActionButton(
+                    title: isStaged
+                        ? "Remove from Multiview"
+                        : "Add to Multiview",
+                    systemImage: isStaged
+                        ? "rectangle.3.group"
+                        : "rectangle.3.group.fill",
+                    isDestructive: false
+                ) {
+                    showGuidePopover = false
+                    // Slight delay matches the Program Info / Record
+                    // pattern below: iOS occasionally swallows
+                    // follow-on UI work if it fires during the
+                    // popover's dismiss animation.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        onMultiviewIntent(channelItem)
+                    }
                 }
                 guidePopoverActionButton(
                     title: "Program Info",
