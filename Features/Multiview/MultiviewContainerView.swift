@@ -85,12 +85,19 @@ struct MultiviewContainerView: View {
     /// tvOS N=1 chrome focus targets. Binding flows into
     /// `PlaybackBottomChrome_tvOS` so the Options / Add Stream
     /// pills can opt into named focus via `.focused(_:equals:)`.
-    /// Driven by the D-pad-down handler on the tile: when the
-    /// chrome appears, we set this to `.options` so focus moves
-    /// onto the pill immediately instead of requiring the user to
-    /// press down a second time. Resets to `nil` (implicit
-    /// fallback to the tile's `prefersDefaultFocus`) when the
-    /// chrome fades back out.
+    /// Driven by the chrome-visibility observer below: when chrome
+    /// appears, we set this to `.addStream` so focus moves onto the
+    /// "+" pill immediately. Freyguy1975 (Discord 2026-05-11) flagged
+    /// that pressing Menu/Back from a left-positioned tile and then
+    /// D-pad-down required an additional arrow-right to reach "+",
+    /// because tvOS's spatial focus routing lands on the leftmost
+    /// pill (Options) by default. Jumping focus straight to the
+    /// rightmost pill collapses that into a single Menu/Back press
+    /// and matches Freyguy's intent of using the chrome primarily
+    /// to extend into multiview. Options / Record stay reachable
+    /// via D-pad-left from the "+" landing position. Resets to `nil`
+    /// (implicit fallback to the tile's `prefersDefaultFocus`) when
+    /// the chrome fades back out.
     enum ChromeFocusTarget: Hashable { case options, addStream, record }
     @FocusState private var focusedChrome: ChromeFocusTarget?
 
@@ -744,12 +751,25 @@ struct MultiviewContainerView: View {
             chromeState.reportFocusActivity()
         }
         .onChange(of: chromeState.isVisible) { _, visible in
-            // When chrome fades, release any pill focus so the next
-            // render restores the tile as the default focus via
-            // `.prefersDefaultFocus` — otherwise the focus engine
-            // would keep the (now invisible + height-0) pill as its
-            // remembered target and D-pad events would get dropped.
-            if !visible {
+            if visible {
+                // v1.7.x: when chrome appears, programmatically move
+                // focus to the "+" / Add Stream pill so the user can
+                // build out a multiview tile pile with a single
+                // Menu/Back-then-Select sequence regardless of which
+                // tile was previously focused. Without this, the
+                // spatial focus routing lands the next D-pad-down on
+                // Options (leftmost pill) from a left-positioned tile,
+                // forcing a manual arrow-right traversal to reach "+".
+                // See `ChromeFocusTarget` doc comment for the
+                // Freyguy1975 Discord report that motivated this.
+                focusedChrome = .addStream
+            } else {
+                // When chrome fades, release any pill focus so the next
+                // render restores the tile as the default focus via
+                // `.prefersDefaultFocus`. Otherwise the focus engine
+                // would keep the (now invisible + height-0) pill as
+                // its remembered target and D-pad events would get
+                // dropped.
                 focusedChrome = nil
             }
         }
