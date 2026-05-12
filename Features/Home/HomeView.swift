@@ -1881,7 +1881,11 @@ final class ChannelStore: ObservableObject {
             guard let streamURL = URL(string: ch.url) else { return nil }
             var item = ChannelDisplayItem(
                 id: ch.id.uuidString, name: ch.name,
-                number: ch.channelNumber.map { String($0) } ?? String(i + 1),
+                // v1.7.x: `M3UChannel.channelNumber` is now the raw
+                // `tvg-chno` string, so decimal numbers like "2.1"
+                // pass through unchanged. Fall back to the 1-based
+                // list index when `tvg-chno` is missing or empty.
+                number: ch.channelNumber ?? String(i + 1),
                 logoURL: URL(string: ch.tvgLogo),
                 group: ch.groupTitle.isEmpty ? "Uncategorized" : ch.groupTitle,
                 categoryOrder: groups.firstIndex(of: ch.groupTitle) ?? Int.max,
@@ -2048,9 +2052,12 @@ final class ChannelStore: ObservableObject {
         var items: [ChannelDisplayItem] = dChannels.enumerated().map { (i, ch) in
             let grp  = ch.channelGroupID.flatMap { groupNameByID[$0] } ?? "Uncategorized"
             let urls = streamURLs(ch.uuid)
-            let num  = ch.channelNumber.map { n in
-                n.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(n)) : String(n)
-            } ?? String(i + 1)
+            // v1.7.x: `DispatcharrChannel.channelNumber` is now a
+            // pre-normalised string (whole-number doubles flattened
+            // to integer form, decimals preserved, strings passed
+            // through trimmed). Fall back to the 1-based list index
+            // when the API returned null / missing.
+            let num = ch.channelNumber ?? String(i + 1)
             var item = ChannelDisplayItem(
                 id: String(ch.id), name: ch.name, number: num,
                 logoURL: logoURL(ch.logoID), group: grp,

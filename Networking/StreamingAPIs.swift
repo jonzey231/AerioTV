@@ -3055,9 +3055,31 @@ struct DispatcharrChannel: Decodable, Identifiable {
     let id: Int
     let name: String
 
-    /// Dispatcharr returns `channel_number` as a number that is often encoded as a float (e.g. 11444.0).
-    /// Keep it as Double to avoid decoding failures.
-    let channelNumber: Double?
+    /// Dispatcharr's channel number, normalised to a display-ready
+    /// string. v1.7.x: stored as `String?` (was `Double?`) so ATSC
+    /// over-the-air `major.minor` numbers like "2.1" / "5.1" survive
+    /// the round trip from Dispatcharr's API into the channel-list
+    /// UI.
+    ///
+    /// Why this had to change: Dispatcharr's underlying column is a
+    /// decimal type, and Django REST Framework's `DecimalField`
+    /// defaults to `coerce_to_string=True` so the field is serialized
+    /// as a JSON string ("2.1"), not a JSON number. The old
+    /// `decodeIfPresent(Double.self, …)` path either threw
+    /// `typeMismatch` and dropped the channel (some builds) or
+    /// silently fell through to `nil` (others), which downstream
+    /// turned into the 1-based-index fallback in the channel-list
+    /// builder. Field report from "the Moterator" (Discord
+    /// 2026-05-11): "2.1 is 2, 2.2 is 3, 5.1 is 7" matched the
+    /// fallback pattern exactly.
+    ///
+    /// The custom decoder accepts JSON Double, JSON Int, and JSON
+    /// String in that order. Whole-number doubles ("11.0") get
+    /// flattened to their integer string ("11") so existing
+    /// integer-numbered lineups render unchanged. Empty / null /
+    /// absent yields `nil` so callers fall through to their own
+    /// fallback.
+    let channelNumber: String?
 
     /// These are present in the channels payload you posted.
     /// Some Dispatcharr versions use `channel_group_id`, others use `channel_group`.
@@ -3088,7 +3110,27 @@ struct DispatcharrChannel: Decodable, Identifiable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(Int.self, forKey: .id)
         name = try container.decode(String.self, forKey: .name)
-        channelNumber = try container.decodeIfPresent(Double.self, forKey: .channelNumber)
+        // v1.7.x: accept Double, Int, or String for channel_number.
+        // See the `channelNumber` doc comment for the rationale.
+        // Order matters: try numeric types first (Double covers the
+        // common "11444.0" float case AND any Int-valued numbers),
+        // then String (Django REST DecimalField default shape).
+        // Note: `try?` on a throwing `T?`-returning function flattens
+        // throw-into-nil so the result is a single `T?`, not `T??`.
+        if let d = try? container.decodeIfPresent(Double.self, forKey: .channelNumber) {
+            // Whole-number doubles flatten to "11" instead of "11.0"
+            // so integer-numbered lineups stay clean.
+            channelNumber = d.truncatingRemainder(dividingBy: 1) == 0
+                ? String(Int(d))
+                : String(d)
+        } else if let i = try? container.decodeIfPresent(Int.self, forKey: .channelNumber) {
+            channelNumber = String(i)
+        } else if let s = try? container.decodeIfPresent(String.self, forKey: .channelNumber) {
+            let trimmed = s.trimmingCharacters(in: .whitespaces)
+            channelNumber = trimmed.isEmpty ? nil : trimmed
+        } else {
+            channelNumber = nil
+        }
         uuid = try container.decodeIfPresent(String.self, forKey: .uuid)
         logoID = try container.decodeIfPresent(Int.self, forKey: .logoID)
         streams = try container.decodeIfPresent([Int].self, forKey: .streams)
@@ -3111,11 +3153,6 @@ struct DispatcharrChannel: Decodable, Identifiable {
             ?? extra.decodeIfPresent(Int.self, forKey: .channelGroup)
     }
 
-    /// Convenience for UI sorting/display when you want an integer channel number.
-    var channelNumberInt: Int? {
-        guard let n = channelNumber else { return nil }
-        return Int(n.rounded())
-    }
 }
 
 // MARK: - Dispatcharr VOD
