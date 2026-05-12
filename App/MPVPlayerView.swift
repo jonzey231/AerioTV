@@ -534,11 +534,26 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         if tileID != nil {
             context.coordinator.applyAudioFocusIfChanged(isAudioActive)
             context.coordinator.applyPauseIfChanged(shouldPause)
+            // v1.7.x: route URL changes through the in-place
+            // `swapStream` path so a channel-flip on the current
+            // tile reuses the existing mpv handle (loadfile replace)
+            // instead of going through a coordinator teardown +
+            // rebuild. The actual flip is initiated upstream by
+            // `MultiviewStore.swapTileContent`, which updates the
+            // tile's `streamURL` while preserving the tile's `id`;
+            // that drives a fresh Representable with new `urls`
+            // through this update pass. `swapStreamIfChanged`
+            // dedups against the steady stream of no-op update
+            // calls SwiftUI emits. tileID-gated for the same
+            // reasons the audio / pause helpers are: single-stream
+            // mode has its own lifecycle and doesn't go through
+            // the multiview flip path.
+            context.coordinator.swapStreamIfChanged(to: urls, newTitle: nowPlayingTitle)
             // NOTE: no PiP wiring here. Multiview tiles do NOT
             // auto-PiP on background (eager-creating
             // AVPictureInPictureController during a multi-tile
             // mount reproducibly freezes the app). The manual PiP
-            // menu item was also removed — PiP is auto-only.
+            // menu item was also removed (PiP is auto-only).
             // Single-stream playback (the case the user was
             // reporting as broken vs v1.6.0) still gets auto-PiP
             // via the eager-create call in `makeUIViewController`
@@ -847,6 +862,30 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 guard let self, let mpv = self.activeMPVHandle() else { return }
                 self.mpvCommand(mpv, ["loadfile", newURL.absoluteString, "replace"])
             }
+        }
+
+        /// SwiftUI update-pass entry point for `swapStream`. Compares
+        /// the incoming primary URL against the Coordinator's current
+        /// one and forwards to `swapStream(to:newTitle:)` only on a
+        /// real change. Idempotent against the steady stream of
+        /// no-op `updateUIViewController` calls SwiftUI issues for
+        /// unrelated state changes (audio focus flip, pause flip,
+        /// tile reorder, every ancestor `@Published` fire).
+        ///
+        /// Empty incoming URL list is treated as a no-op rather than
+        /// triggering a swap (there's no sensible loadfile target),
+        /// and the (rare) edge case where SwiftUI rebinds with no
+        /// URLs during a teardown shouldn't accidentally tear the
+        /// existing stream.
+        @MainActor
+        fileprivate func swapStreamIfChanged(to newURLs: [URL], newTitle: String) {
+            guard let newURL = newURLs.first else { return }
+            // urls.first is the URL the Coordinator is currently
+            // playing (or just issued a swap toward); compare on the
+            // absolute string form to dodge any URL-equality quirks
+            // around trailing slashes or query order.
+            if urls.first?.absoluteString == newURL.absoluteString { return }
+            swapStream(to: newURL, newTitle: newTitle)
         }
 
         /// Called from `updateUIViewController`. Sends `mute=0` when
