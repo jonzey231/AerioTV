@@ -15,16 +15,29 @@ final class ServerConnectionViewModel {
     var localURL: String = ""     // LAN URL (e.g. http://192.168.1.10:9191)
     var localEPGURL: String = ""  // Local EPG URL for M3U when on LAN
 
-    /// v1.7 Direct Connect — when `serverType == .dispatcharrAPI`, which
-    /// credential mode the user is configuring. Defaults to `.apiKey`
-    /// so the legacy Add Server flow is unchanged for users picking
-    /// Dispatcharr without engaging the new picker. Switching to
-    /// `.usernamePassword` reveals Username/Password fields and hides
-    /// the Admin API Key field; on Test Connection success, the API
-    /// key is fetched from `/api/accounts/users/me/` and persisted
-    /// alongside the credentials so long-lived connections (mpv,
-    /// logo fetches) keep working.
-    var dispatcharrCredentialType: DispatcharrCredentialType = .apiKey
+    /// v1.7 Direct Connect: when `serverType == .dispatcharrAPI`,
+    /// which credential mode the user is configuring. v1.7.x:
+    /// defaults to `.usernamePassword` so the Configure screen lands
+    /// on the Direct Connect username + password fields by default;
+    /// users with API keys can flip the segmented picker to
+    /// `.apiKey` to reveal the Admin API Key field instead. (Earlier
+    /// builds defaulted to `.apiKey` to keep the legacy flow stable
+    /// during the v1.7.0 rollout; now that Direct Connect is
+    /// established, leading with it matches what most users actually
+    /// want, especially on Apple TV where typing a 32-character API
+    /// key on the Siri Remote keyboard is painful.)
+    ///
+    /// Behaviour wiring (unchanged): on Test Connection success in
+    /// `.usernamePassword` mode, the API key is fetched from
+    /// `/api/accounts/users/me/` and persisted alongside the
+    /// credentials so long-lived connections (mpv, logo fetches,
+    /// recording playback) keep working with a durable credential.
+    ///
+    /// Model-level default (`ServerConnection.dispatcharrCredentialTypeRaw`
+    /// empty → resolves to `.apiKey` via accessor) is untouched.
+    /// Only the NEW-server form's starting value changes. Existing
+    /// v1.6.x servers stay on their existing credential type.
+    var dispatcharrCredentialType: DispatcharrCredentialType = .usernamePassword
 
     /// v1.7: a freshly-issued JWT pair from the Direct Connect login
     /// during Test Connection. Held here transiently so the Save
@@ -471,7 +484,11 @@ final class ServerConnectionViewModel {
         verificationError = nil
         verifiedServerName = nil
         discoveredDispatcharrAuthMode = nil
-        dispatcharrCredentialType = .apiKey
+        // v1.7.x: matches the property default above. Back-button
+        // out of the Configure screen and re-entering should land
+        // on the same Direct Connect username + password starting
+        // state the form opened with, not snap to API Key mode.
+        dispatcharrCredentialType = .usernamePassword
         pendingJWTPair = nil
     }
 
