@@ -230,7 +230,7 @@ short version is:
 Click each type for the full breakdown:
 
 <details>
-<summary><strong>Dispatcharr API</strong> <em>(Recommended)</em> — Native API with API key authentication. <em>Most full-featured option.</em></summary>
+<summary><strong>Dispatcharr Direct Connect</strong> <em>(Recommended)</em> — Dispatcharr Admin Username & Password or API with API key authentication. <em>Most full-featured option.</em></summary>
 
 [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr) is a
 self-hosted IPTV middleware that gives users control over their IPTV services.
