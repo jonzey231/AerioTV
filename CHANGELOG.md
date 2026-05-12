@@ -1,5 +1,75 @@
 # Changelog
 
+## v1.7.2 - 2026-05-11
+
+### Added
+
+- **Build a Multiview pile directly from the Guide.** Long-press any
+  channel cell and the existing context menu (Favorites, Program
+  Info, Record from Now, Reminder) now offers an "Add to Multiview"
+  action alongside them. Tapping it for the first time wipes any
+  pre-existing Multiview tiles, switches the Guide into staging
+  mode, adds the channel, and pins a banner at the top of the Guide
+  reading "N tiles staged for Multiview" with a Done button. While
+  staging mode is active, single-tapping any other channel cell
+  adds it (or removes it if already staged) instead of starting
+  playback. Each add or remove confirms with a brief toast.
+  Tapping Done leaves the staged tiles in place so the user can
+  switch to the Multiview tab to play them. Hitting the 9-tile
+  hard cap auto-exits staging. The long-press menu label flips
+  between "Add to Multiview" and "Remove from Multiview" based on
+  the channel's current presence in the pile.
+  - Implementation surfaces: new `@Published isStagingFromGuide`,
+    `clearAll()`, and `tile(forChannelID:)` on `MultiviewStore`;
+    new top-edge banner via `safeAreaInset` plus floating toast on
+    `EPGGuideView`; new `handleMultiviewIntent(channel:)` owns
+    wipe-on-entry, toggle, soft-cap warning bypass, hard-cap exit,
+    and toast wiring; new `onMultiviewIntent` closure threaded down
+    to `GuideProgramButton` which observes the store so the tap
+    path picks between `onSelect` (normal play) and the staging
+    toggle, and the context menu label flips accordingly.
+  - Field-requested by Freyguy1975 (Discord 2026-05-11) for the
+    "build a Multiview before pressing play on anything" workflow.
+
+### Fixed
+
+- **Apple TV: pressing Menu or Back during playback now focuses
+  the "+" Add Stream pill directly.** Spatial focus routing on
+  tvOS previously landed the next D-pad-down from a left-positioned
+  tile on Options (the leftmost pill), forcing an additional
+  arrow-right traversal to reach "+". `MultiviewContainerView`'s
+  `focusedChrome` `@FocusState` had a fade-out clearer at
+  `.onChange(of: chromeState.isVisible)` but the documented
+  symmetric fade-in setter was never written; this release adds it
+  targeting `.addStream`. Options and Record stay reachable via
+  D-pad-left from the "+" landing position. Reported by
+  Freyguy1975 (Discord 2026-05-11).
+- **Decimal channel numbers from Dispatcharr and M3U now display
+  correctly.** ATSC over-the-air major.minor numbers (2.1 CBS-HD,
+  5.1 ABC-HD, etc.) were collapsing to a 1-based-list-index
+  fallback because both provider decoders were narrowing the
+  channel-number value to a type that couldn't carry a decimal:
+    - `DispatcharrChannel.channelNumber` was declared `Double?`
+      and decoded as JSON Number only, but Dispatcharr's underlying
+      column is a decimal type and Django REST Framework's
+      `DecimalField` defaults to `coerce_to_string=True`, so the
+      field arrives as a JSON String ("2.1"). The old decoder
+      threw `typeMismatch` on the string path.
+    - `M3UChannel.channelNumber` was declared `Int?` and parsed
+      via `Int($0)` against the raw `tvg-chno` attribute value.
+      Any decimal value returned `nil`.
+    - The downstream channel-list builder substituted
+      `String(i + 1)` whenever `channelNumber` was nil, which is
+      exactly the "2.1 → 2, 2.2 → 3, 5.1 → 7" symptom pattern
+      "the Moterator" (Discord 2026-05-11) reported.
+  Both fields are now `String?`. The Dispatcharr decoder accepts
+  JSON Double / Int / String (in that order), flattens whole-number
+  doubles to integer form ("11.0" → "11") so existing integer
+  lineups stay clean, and falls through to nil on null / missing /
+  empty. The M3U parser preserves `tvg-chno` verbatim (trimmed,
+  empty becomes nil). Behavior-preserving for integer-numbered
+  lineups across Dispatcharr, M3U, and Xtream Codes.
+
 ## v1.7.1 - 2026-05-10
 
 ### Fixed
