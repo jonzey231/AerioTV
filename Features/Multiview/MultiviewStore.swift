@@ -458,6 +458,85 @@ final class MultiviewStore: ObservableObject {
         )
     }
 
+    /// v1.7.x: in-place swap of a tile's content for a different
+    /// channel, preserving the tile's `id` so SwiftUI keeps the
+    /// existing `MPVPlayerView` mounted (and its `Coordinator` +
+    /// mpv handle + AVSampleBufferDisplayLayer alive). Used by the
+    /// Apple-TV-and-iPhone channel-flip path
+    /// (`NowPlayingManager.flushPendingChannelChange`) instead of
+    /// the old `PlayerSession.exit() + enterMultiview()` teardown.
+    ///
+    /// Why the change: the teardown path called
+    /// `mpv_terminate_destroy` on the old coordinator, dismantled
+    /// the AVSBDL layer, and stood up a fresh coordinator + handle
+    /// for the new channel. The resulting first-frame latency
+    /// (mpv_create + mpv_initialize + OpenGL ES setup + AVSBDL
+    /// setup + libavformat's 1.5s `analyzeduration` probe per v1.7.0)
+    /// produced a visible "30fps then 60fps with a 200ms hiccup"
+    /// wobble reported by "the Moterator" (Discord 2026-05-11).
+    /// Reusing the coordinator and issuing `loadfile <newURL>
+    /// replace` against the existing mpv handle keeps the old
+    /// channel's last decoded frame on screen while the new
+    /// stream's demuxer probe runs, then the new stream cuts in
+    /// at its real container fps with no cadence wobble.
+    ///
+    /// The caller pairs this with a
+    /// `Coordinator.swapStream(to:nowPlayingTitle:)` call which
+    /// SwiftUI fires automatically via `updateUIViewController`
+    /// when the tile's `streamURL` changes.
+    ///
+    /// - Parameters:
+    ///   - tileID: the existing tile to repurpose. Caller is
+    ///     expected to be the N=1 single-stream channel-flip
+    ///     path; multi-tile multiview channel-flip isn't a
+    ///     supported gesture today.
+    ///   - item: the channel to play in this tile next.
+    ///   - server: active server for `authHeaders`.
+    /// - Returns: `true` if the swap landed, `false` if the
+    ///   tile id isn't in the store or the new channel has no
+    ///   playable stream URL. Caller may choose to fall back to
+    ///   the legacy teardown/rebuild path on `false`.
+    @discardableResult
+    func swapTileContent(
+        tileID: String,
+        to item: ChannelDisplayItem,
+        server: ServerConnection?
+    ) -> Bool {
+        guard let idx = tiles.firstIndex(where: { $0.id == tileID }) else {
+            DebugLogger.shared.log(
+                "[MV-Tile] swapTileContent: tile id=\(tileID) not found (count=\(tiles.count))",
+                category: "Playback", level: .warning
+            )
+            return false
+        }
+        guard let resolved = Self.resolveStream(item, server: server) else {
+            // NOTE: never log `item.streamURLs` (XC URLs carry auth
+            // credentials in the path). Name-only is safe.
+            DebugLogger.shared.log(
+                "[MV-Tile] swapTileContent: unresolvable channel=\(item.name)",
+                category: "Playback", level: .warning
+            )
+            return false
+        }
+        // Preserve `addedAt` so any "most-recent-tile" ordering
+        // heuristics (audio-focus default on remove, recency hints
+        // in chrome) keep treating this tile as the same slot.
+        let preservedAddedAt = tiles[idx].addedAt
+        let previousName = tiles[idx].item.name
+        tiles[idx] = MultiviewTile(
+            id: tileID,                  // pinned
+            item: item,
+            streamURL: resolved.url,
+            headers: resolved.headers,
+            addedAt: preservedAddedAt
+        )
+        DebugLogger.shared.log(
+            "[MV-Tile] swapTileContent: tile id=\(tileID) \(previousName) -> \(item.name)",
+            category: "Playback", level: .info
+        )
+        return true
+    }
+
     /// Remove the tile with the given id. If the removed tile held
     /// audio, promote the newest remaining tile to audio. If no
     /// tiles remain, audio goes nil (caller should exit multiview).

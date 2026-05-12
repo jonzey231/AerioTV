@@ -782,6 +782,73 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// idles (>5s) still snap-to-live as before.
         private static let snapToLiveMinPauseSeconds: TimeInterval = 5.0
 
+        /// v1.7.x: in-place stream swap on the existing mpv handle.
+        /// Issues `loadfile <newURL> replace`, which keeps the GL
+        /// render context, FBO ring, AVSampleBufferDisplayLayer,
+        /// audio session, and (where compatible) the videotoolbox-copy
+        /// decoder session alive across a channel-flip. The old
+        /// channel's last decoded frame stays in the AVSBDL while
+        /// mpv internally probes the new stream's headers; once
+        /// `playback-restart` fires, frames flow at the new stream's
+        /// real container fps with no cadence wobble.
+        ///
+        /// Paired with `MultiviewStore.swapTileContent(tileID:to:server:)`
+        /// at the model layer (that method preserves the tile id so
+        /// SwiftUI keeps THIS Coordinator mounted); SwiftUI's
+        /// `updateUIViewController` pass then spots the new
+        /// `urls.first` and routes through here.
+        ///
+        /// Replaces the v1.6.15 channel-flip lifecycle of
+        /// `PlayerSession.exit() + enterMultiview(seeding:)`, which
+        /// dismantled the entire coordinator and produced the
+        /// "30fps then 60fps with a 200ms hiccup" wobble "the
+        /// Moterator" reported (Discord 2026-05-11).
+        ///
+        /// - Parameters:
+        ///   - newURL: the new stream URL. Headers don't change here
+        ///     because in-server channel-flip uses the same auth.
+        ///   - newTitle: the new channel's display name, for the
+        ///     `MPNowPlayingInfoCenter` metadata. Empty string is
+        ///     fine and leaves the existing title alone.
+        @MainActor
+        fileprivate func swapStream(to newURL: URL, newTitle: String) {
+            // Update the Coordinator's URL bookkeeping on the main
+            // queue first so any subsequent reader (snap-to-live
+            // reload, telemetry log line, retry path) sees the new
+            // URL. The actual loadfile dispatches to mpvQueue below.
+            urls = [newURL]
+            currentIndex = 0
+            // Reset per-stream telemetry so the diagnostic logs read
+            // cleanly for the new stream rather than mixing with the
+            // outgoing one's tail. mpv's own `container-fps` /
+            // reconfigure events will repopulate `detectedFps` once
+            // the new stream's headers are parsed.
+            detectedFps = 0
+            // Re-apply NowPlayingInfo metadata so the lockscreen +
+            // Control Center reflect the new channel. The bridge
+            // ownership rule from `shouldDriveNowPlayingBridge()`
+            // still applies: if this coordinator isn't the
+            // authoritative one, the bridge stays quiet. iOS-only
+            // because tvOS doesn't surface the bridge UI (no
+            // lockscreen / Control Center video metadata path).
+            if !newTitle.isEmpty {
+                nowPlayingTitle = newTitle
+                #if os(iOS)
+                reassertNowPlayingBridge()
+                #endif
+            }
+            let safeURL = DebugLogger.sanitize(newURL.absoluteString)
+            logStore.append("↻ MPV: swap stream → \(newTitle)")
+            DebugLogger.shared.log(
+                "[MV-Tile] swapStream: \(streamTag) to=\(newTitle) url=\(safeURL.prefix(80))",
+                category: "MPV-STREAM", level: .info
+            )
+            mpvQueue.async { [weak self] in
+                guard let self, let mpv = self.activeMPVHandle() else { return }
+                self.mpvCommand(mpv, ["loadfile", newURL.absoluteString, "replace"])
+            }
+        }
+
         /// Called from `updateUIViewController`. Sends `mute=0` when
         /// the tile becomes audio-active, `mute=1` otherwise. No-op
         /// when the incoming value matches the last applied.
