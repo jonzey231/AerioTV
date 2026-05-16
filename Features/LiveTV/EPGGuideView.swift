@@ -1968,26 +1968,20 @@ struct EPGGuideView: View {
     @EnvironmentObject private var channelStore: ChannelStore
     @Environment(\.modelContext) private var modelContext
     @State private var _epgCacheIsFresh = false
+
+    /// The channel row that `resetFocus(in: guideFocusNS)` on tvOS
+    /// should land on. Set before each `.forceGuideFocus` reset to the
+    /// currently-playing channel (single-stream) or the last-added
+    /// tile's channel (multiview). Nil falls back to `channels.first`
+    /// — the historical default. Only set within the tvOS `.forceGuideFocus`
+    /// handler; always nil on iOS, so the inline `focusTargetID`
+    /// resolution falls through to `channels.first?.id`.
+    @State private var guideFocusTargetChannelID: String? = nil
+
     #if os(tvOS)
     /// Programmatic focus target for a channel row's left-hand cell.
     /// Normally nil (focus engine drives navigation).
     @FocusState private var focusedChannelID: String?
-    /// Programmatic focus target for a specific program cell. Used
-    /// by `.forceGuideFocus` to land focus on the currently-playing
-    /// program of the first channel after the single-stream player
-    /// minimizes — without this, tvOS's spatial search from the
-    /// top-right mini position lands on a program 2–3 hours in the
-    /// future (because that's what's directly below the mini).
-    /// Setting this to a program's id claims focus on that cell.
-    // NOTE: `@FocusState private var focusedProgramID: String?` was
-    // removed alongside the `.focused(...)` binding on each program
-    // cell. Both formed a redundant focus-routing channel that
-    // created two competing focus targets per cell
-    // (`TVPressOverlay`'s `PressCatcherView` + the SwiftUI
-    // `.focused` binding), which manifested as specific program
-    // cells being permanently unreachable via Siri Remote D-pad.
-    // See `programCell(_:channelItem:nextProgramStart:)` for the
-    // full diagnosis and rationale.
 
     /// Namespace + imperative reset hook for the guide's focus
     /// scope. See ChannelListView's identical setup for the full
@@ -1998,38 +1992,6 @@ struct EPGGuideView: View {
     @Namespace private var guideFocusNS
     @Environment(\.resetFocus) private var resetFocus
 
-    /// The channel row that `resetFocus(in: guideFocusNS)` should
-    /// land on. Set before each `.forceGuideFocus` reset to the
-    /// currently-playing channel (single-stream) or the last-added
-    /// tile's channel (multiview). Nil falls back to `channels.first`
-    /// — the historical default.
-    @State private var guideFocusTargetChannelID: String? = nil
-
-    /// Cached, already-validated focus target ID. This is refreshed
-    /// when the requested target or the current channel list changes,
-    /// so per-row comparisons stay O(1) during rendering.
-    @State private var cachedEffectiveGuideFocusTargetID: String? = nil
-
-    /// Snapshot of the channel IDs used for the most recent focus-target
-    /// validation. Keeping this lets us avoid unnecessary recomputation
-    /// when unrelated state changes trigger a view update.
-    @State private var cachedGuideFocusChannelIDs: [String] = []
-
-    /// Returns the cached effective focus target ID. When the cache has
-    /// not yet been populated, preserve the historical fallback to the
-    /// first visible channel.
-    /// Returns the requested guide focus target when it still exists in
-    /// the current channel list; otherwise falls back to the first channel.
-    /// This is computed directly so it cannot become stale if the channel
-    /// list or requested focus target changes.
-    private var effectiveGuideFocusTargetID: String? {
-        if let requestedChannelID = guideFocusTargetChannelID,
-           channels.contains(where: { $0.id == requestedChannelID }) {
-            return requestedChannelID
-        }
-
-        return channels.first?.id
-    }
     #endif
 
     // Time window: 1h back + user-configured hours forward.
@@ -2226,17 +2188,11 @@ struct EPGGuideView: View {
                         // once per render pass rather than once per
                         // row. Each guideRow receives the pre-resolved
                         // value and does a single O(1) equality check.
-                        #if os(tvOS)
                         let focusTargetID: String? = guideFocusTargetChannelID.flatMap { id in
                             channels.first(where: { $0.id == id })?.id
                         } ?? channels.first?.id
-                        #endif
                         ForEach(channels) { channel in
-                            #if os(tvOS)
                             guideRow(for: channel, screenWidth: geo.size.width, focusTargetID: focusTargetID)
-                            #else
-                            guideRow(for: channel, screenWidth: geo.size.width)
-                            #endif
                         }
                     } header: {
                         // ── Time header (pinned at top) ──
@@ -2428,11 +2384,7 @@ struct EPGGuideView: View {
     // channel column's `zIndex(0.5)`. Any leftward overflow was
     // therefore invisible (covered by the opaque channel column),
     // which means this simplification loses no visible behaviour.
-    private func guideRow(for channel: ChannelDisplayItem, screenWidth: CGFloat
-        #if os(tvOS)
-        , focusTargetID: String? = nil
-        #endif
-    ) -> some View {
+    private func guideRow(for channel: ChannelDisplayItem, screenWidth: CGFloat, focusTargetID: String? = nil) -> some View {
         HStack(spacing: 0) {
             // Left: fixed-width channel column. Standalone UIView;
             // no overlap with program cells.
