@@ -57,6 +57,25 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.2",
+            title: "What's new in 1.7.2",
+            bullets: [
+                "Build a Multiview setup directly from the Guide. Long-press a channel and pick Add to Multiview. AerioTV switches to staging mode where every tap on a channel adds or removes a tile in the pile, with a count plus Done banner pinned at the top. Especially helpful on Apple TV where you can assemble four games or news streams before any of them starts playing",
+                "Apple TV: pressing Menu or Back during playback now lands focus on the + Add Stream pill, so a single Select adds another stream regardless of which tile you were on",
+                "Decimal channel numbers (ATSC over-the-air formats like 2.1 / 5.1) now display correctly on Dispatcharr and M3U playlists"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.2")
+        ),
+        WhatsNewRelease(
+            version: "1.7.1",
+            title: "What's new in 1.7.1",
+            bullets: [
+                "Fixed a race that could leave a second Dispatcharr Direct Connect server unable to authenticate when iCloud sync is enabled. Adding multiple Dispatcharr servers now reliably persists credentials across devices",
+                "Deleting a server now also removes its watch progress and server-side recording rows from this device. Local recordings are preserved"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.1")
+        ),
+        WhatsNewRelease(
             version: "1.7.0",
             title: "What's new in 1.7.0",
             bullets: [

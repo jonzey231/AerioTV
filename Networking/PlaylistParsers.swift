@@ -9,7 +9,17 @@ struct M3UChannel: Identifiable {
     var tvgID: String
     var tvgName: String
     var tvgLogo: String
-    var channelNumber: Int?
+    /// `tvg-chno` from the playlist, preserved verbatim (trimmed of
+    /// whitespace). v1.7.x: stored as `String?` (was `Int?`) so ATSC
+    /// over-the-air `major.minor` numbers like "2.1" / "5.1" survive
+    /// parsing. The previous `Int(rawString)` coercion silently
+    /// returned `nil` for any decimal-valued `tvg-chno`, which made
+    /// the channel-list builder fall through to a 1-based-index
+    /// fallback (a channel with `tvg-chno="2.1"` sitting in slot 2
+    /// would display as "2", slot 3 as "3", and so on). Field
+    /// report from "the Moterator" (Discord 2026-05-11) confirmed
+    /// the symptom on broadcast lineups.
+    var channelNumber: String?
     var rawAttributes: [String: String]
 }
 
@@ -39,6 +49,14 @@ struct M3UParser {
                 }
 
                 if !urlLine.isEmpty {
+                    // v1.7.x: preserve the raw `tvg-chno` string so
+                    // decimal channel numbers survive. See
+                    // `M3UChannel.channelNumber` doc comment.
+                    let chno: String? = {
+                        guard let raw = attrs["tvg-chno"] else { return nil }
+                        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+                        return trimmed.isEmpty ? nil : trimmed
+                    }()
                     let channel = M3UChannel(
                         name: attrs["name"] ?? "Unknown Channel",
                         url: urlLine,
@@ -46,7 +64,7 @@ struct M3UParser {
                         tvgID: attrs["tvg-id"] ?? "",
                         tvgName: attrs["tvg-name"] ?? "",
                         tvgLogo: attrs["tvg-logo"] ?? "",
-                        channelNumber: attrs["tvg-chno"].flatMap { Int($0) },
+                        channelNumber: chno,
                         rawAttributes: attrs
                     )
                     channels.append(channel)

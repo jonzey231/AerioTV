@@ -1881,7 +1881,11 @@ final class ChannelStore: ObservableObject {
             guard let streamURL = URL(string: ch.url) else { return nil }
             var item = ChannelDisplayItem(
                 id: ch.id.uuidString, name: ch.name,
-                number: ch.channelNumber.map { String($0) } ?? String(i + 1),
+                // v1.7.x: `M3UChannel.channelNumber` is now the raw
+                // `tvg-chno` string, so decimal numbers like "2.1"
+                // pass through unchanged. Fall back to the 1-based
+                // list index when `tvg-chno` is missing or empty.
+                number: ch.channelNumber ?? String(i + 1),
                 logoURL: URL(string: ch.tvgLogo),
                 group: ch.groupTitle.isEmpty ? "Uncategorized" : ch.groupTitle,
                 categoryOrder: groups.firstIndex(of: ch.groupTitle) ?? Int.max,
@@ -2048,9 +2052,12 @@ final class ChannelStore: ObservableObject {
         var items: [ChannelDisplayItem] = dChannels.enumerated().map { (i, ch) in
             let grp  = ch.channelGroupID.flatMap { groupNameByID[$0] } ?? "Uncategorized"
             let urls = streamURLs(ch.uuid)
-            let num  = ch.channelNumber.map { n in
-                n.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(n)) : String(n)
-            } ?? String(i + 1)
+            // v1.7.x: `DispatcharrChannel.channelNumber` is now a
+            // pre-normalised string (whole-number doubles flattened
+            // to integer form, decimals preserved, strings passed
+            // through trimmed). Fall back to the 1-based list index
+            // when the API returned null / missing.
+            let num = ch.channelNumber ?? String(i + 1)
             var item = ChannelDisplayItem(
                 id: String(ch.id), name: ch.name, number: num,
                 logoURL: logoURL(ch.logoID), group: grp,
@@ -2761,14 +2768,59 @@ final class NowPlayingManager: ObservableObject {
         let resolvedHeaders = server?.authHeaders ?? ["Accept": "*/*"]
         debugLog("[MV-ChannelFlip] flush step=\(step) from=\(current.name)(id=\(current.id)) to=\(next.name)(id=\(next.id)) unified=\(PlaybackFeatureFlags.useUnifiedPlayback)")
         if PlaybackFeatureFlags.useUnifiedPlayback {
-            // Unified path: re-enter multiview seeded with the new
-            // channel. Mirrors the row-tap path used elsewhere in
-            // HomeView. The exit() + enterMultiview() pair drops the
-            // current tile and seeds a fresh one — same lifecycle
-            // mpv expects for a clean stream swap.
-            debugLog("[MV-ChannelFlip] calling PlayerSession.exit() then enterMultiview(...)")
-            PlayerSession.shared.exit()
-            PlayerSession.shared.enterMultiview(seeding: next, server: server)
+            // v1.7.x Option A: in-place content swap on the existing
+            // N=1 tile instead of `PlayerSession.exit() +
+            // enterMultiview(seeding:)`. The old teardown lifecycle
+            // dismantled the entire MPVPlayerView Coordinator (mpv
+            // handle destroyed, GL context torn down, AVSampleBuffer
+            // DisplayLayer detached), then stood a fresh one up for
+            // the next channel. The user saw a brief blackdrop, then
+            // the new stream's libavformat 1.5s `analyzeduration`
+            // probe playing out with `detectedFps == 0` for the first
+            // frame and a ~200ms hiccup as cadence locked. "the
+            // Moterator" (Discord 2026-05-11) reported the symptom
+            // as "30fps for a while, hiccup, then 60fps."
+            //
+            // `swapTileContent` preserves the tile's SwiftUI id so
+            // the Coordinator survives; SwiftUI's update pass spots
+            // the new `streamURL` on the Representable and routes
+            // through `Coordinator.swapStream` →
+            // `mpv loadfile <newURL> replace`. mpv probes the new
+            // stream internally while the old channel's last
+            // decoded frame stays in the AVSBDL; once
+            // `playback-restart` fires, new frames flow at the
+            // correct container fps. No teardown blackdrop, no
+            // cadence wobble.
+            //
+            // Gated on N=1 because:
+            //   - Channel-flip itself is N=1-only at the call site
+            //     (`MultiviewContainerView.swift:732`); we should
+            //     never reach this branch with N>1, but the guard
+            //     is cheap and defensive.
+            //   - Multi-tile multiview channel-flip isn't a
+            //     supported gesture today, and the swap-on-audio-
+            //     tile path would need additional thought about
+            //     non-audio-tile invariants.
+            //
+            // Fallback to the legacy `exit() + enterMultiview()`
+            // path when the store doesn't have a single tile we can
+            // target, or when `swapTileContent` returns false
+            // (channel not resolvable on the active server, tile
+            // id no longer in store). Preserves the prior user-
+            // visible behaviour for those edge cases.
+            let store = MultiviewStore.shared
+            let didSwap: Bool = {
+                guard store.tiles.count == 1,
+                      let tileID = store.audioTileID else { return false }
+                return store.swapTileContent(tileID: tileID, to: next, server: server)
+            }()
+            if didSwap {
+                debugLog("[MV-ChannelFlip] swapTileContent succeeded (in-place reuse, no teardown)")
+            } else {
+                debugLog("[MV-ChannelFlip] swap path unavailable; falling back to PlayerSession.exit() + enterMultiview(...)")
+                PlayerSession.shared.exit()
+                PlayerSession.shared.enterMultiview(seeding: next, server: server)
+            }
         }
         // wakeChrome=false → channel scroll surfaces ONLY the
         // banner (its own 5s timer) and leaves chrome hidden so

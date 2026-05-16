@@ -175,6 +175,48 @@ final class MultiviewStore: ObservableObject {
     /// device has been in a bag all day.
     var warningLastShownAt: Date?
 
+    /// v1.7.x: when `true`, single-taps on Guide channel cells
+    /// (`EPGGuideView`'s `GuideProgramButton`) add the channel to
+    /// `tiles` (or remove it if already present) instead of starting
+    /// playback. Set when the user picks "Add to Multiview" from
+    /// the long-press context menu; cleared when the user taps the
+    /// "Done" button in the in-Guide staging banner, when `tiles`
+    /// hits the hard cap, or when the user manually drains `tiles`
+    /// back to zero. Freyguy1975 (Discord 2026-05-11) requested a
+    /// way to build a multiview pile directly from the Guide without
+    /// having to play a stream first; this flag is the toggle the
+    /// Guide checks at tap time.
+    @Published var isStagingFromGuide: Bool = false
+
+    /// Looks up the tile currently representing `channelID`, or
+    /// `nil` if no tile is tracking that channel. Used by the Guide
+    /// staging-mode toggle to find which tile to remove on re-tap,
+    /// and by the "Add to Multiview" menu label so an already-staged
+    /// channel reads as "Remove from Multiview" instead.
+    func tile(forChannelID channelID: String) -> MultiviewTile? {
+        tiles.first { $0.item.id == channelID }
+    }
+
+    /// Wipes every tile. Used by `EPGGuideView` when entering
+    /// staging mode so the user assembles a fresh multiview pile
+    /// rather than appending to whatever was previously there
+    /// (matches Freyguy's "start fresh" intent). Also clears
+    /// `audioTileID`, `fullscreenTileID`, and `relocatingTileID`
+    /// so dangling references can't survive across the reset.
+    func clearAll() {
+        let count = tiles.count
+        tiles.removeAll()
+        audioTileID = nil
+        fullscreenTileID = nil
+        relocatingTileID = nil
+        if count > 0 {
+            DebugLogger.shared.log(
+                "[MV-Tile] clearAll: wiped \(count) tile(s)",
+                category: "Playback", level: .info
+            )
+        }
+    }
+
     // MARK: - Progress-store registry
     //
     // The unified N=1 chrome (PlaybackChromeOverlay + PlaybackOptionsPanel)
@@ -414,6 +456,85 @@ final class MultiviewStore: ObservableObject {
             "[MV-Tile] seed tile[0] from single: \(item.name) id=\(item.id)",
             category: "Playback", level: .info
         )
+    }
+
+    /// v1.7.x: in-place swap of a tile's content for a different
+    /// channel, preserving the tile's `id` so SwiftUI keeps the
+    /// existing `MPVPlayerView` mounted (and its `Coordinator` +
+    /// mpv handle + AVSampleBufferDisplayLayer alive). Used by the
+    /// Apple-TV-and-iPhone channel-flip path
+    /// (`NowPlayingManager.flushPendingChannelChange`) instead of
+    /// the old `PlayerSession.exit() + enterMultiview()` teardown.
+    ///
+    /// Why the change: the teardown path called
+    /// `mpv_terminate_destroy` on the old coordinator, dismantled
+    /// the AVSBDL layer, and stood up a fresh coordinator + handle
+    /// for the new channel. The resulting first-frame latency
+    /// (mpv_create + mpv_initialize + OpenGL ES setup + AVSBDL
+    /// setup + libavformat's 1.5s `analyzeduration` probe per v1.7.0)
+    /// produced a visible "30fps then 60fps with a 200ms hiccup"
+    /// wobble reported by "the Moterator" (Discord 2026-05-11).
+    /// Reusing the coordinator and issuing `loadfile <newURL>
+    /// replace` against the existing mpv handle keeps the old
+    /// channel's last decoded frame on screen while the new
+    /// stream's demuxer probe runs, then the new stream cuts in
+    /// at its real container fps with no cadence wobble.
+    ///
+    /// The caller pairs this with a
+    /// `Coordinator.swapStream(to:nowPlayingTitle:)` call which
+    /// SwiftUI fires automatically via `updateUIViewController`
+    /// when the tile's `streamURL` changes.
+    ///
+    /// - Parameters:
+    ///   - tileID: the existing tile to repurpose. Caller is
+    ///     expected to be the N=1 single-stream channel-flip
+    ///     path; multi-tile multiview channel-flip isn't a
+    ///     supported gesture today.
+    ///   - item: the channel to play in this tile next.
+    ///   - server: active server for `authHeaders`.
+    /// - Returns: `true` if the swap landed, `false` if the
+    ///   tile id isn't in the store or the new channel has no
+    ///   playable stream URL. Caller may choose to fall back to
+    ///   the legacy teardown/rebuild path on `false`.
+    @discardableResult
+    func swapTileContent(
+        tileID: String,
+        to item: ChannelDisplayItem,
+        server: ServerConnection?
+    ) -> Bool {
+        guard let idx = tiles.firstIndex(where: { $0.id == tileID }) else {
+            DebugLogger.shared.log(
+                "[MV-Tile] swapTileContent: tile id=\(tileID) not found (count=\(tiles.count))",
+                category: "Playback", level: .warning
+            )
+            return false
+        }
+        guard let resolved = Self.resolveStream(item, server: server) else {
+            // NOTE: never log `item.streamURLs` (XC URLs carry auth
+            // credentials in the path). Name-only is safe.
+            DebugLogger.shared.log(
+                "[MV-Tile] swapTileContent: unresolvable channel=\(item.name)",
+                category: "Playback", level: .warning
+            )
+            return false
+        }
+        // Preserve `addedAt` so any "most-recent-tile" ordering
+        // heuristics (audio-focus default on remove, recency hints
+        // in chrome) keep treating this tile as the same slot.
+        let preservedAddedAt = tiles[idx].addedAt
+        let previousName = tiles[idx].item.name
+        tiles[idx] = MultiviewTile(
+            id: tileID,                  // pinned
+            item: item,
+            streamURL: resolved.url,
+            headers: resolved.headers,
+            addedAt: preservedAddedAt
+        )
+        DebugLogger.shared.log(
+            "[MV-Tile] swapTileContent: tile id=\(tileID) \(previousName) -> \(item.name)",
+            category: "Playback", level: .info
+        )
+        return true
     }
 
     /// Remove the tile with the given id. If the removed tile held

@@ -479,6 +479,23 @@ final class SyncManager: ObservableObject {
         nonisolated(unsafe) let capturedServers = servers.map { $0 }
         let key = kvsKey
 
+        // v1.7.x bounce-back-guard fix: stamp `lastPushTime` AT SCHEDULE TIME,
+        // not just when the debounced work fires. The 2-second debounce on
+        // non-immediate pushes opened a window where `processRemoteChange`'s
+        // `(now - lastPushTime) < 5.0` guard saw a stale timestamp from the
+        // previous successful push (potentially minutes/hours ago) and
+        // wrongly let a foreign KVS notification through. The follow-on
+        // `mergeRemoteServers` then ran against KVS that didn't yet contain
+        // the just-added local server and the "delete local servers not in
+        // remote" branch tore the new SwiftData row + its Keychain entries
+        // out before `saveCredentialsSynced` could persist them. Stamping
+        // here closes the window: any didChangeExternally notification
+        // arriving during the debounce sees a fresh timestamp and the
+        // guard correctly suppresses the spurious merge. The work block
+        // re-stamps after the actual KVS write so a notification that
+        // arrives AFTER the push has the same protection. Idempotent.
+        lastPushTime = ProcessInfo.processInfo.systemUptime
+
         pushDebounce?.cancel()
         let work = DispatchWorkItem {
             // DispatchWorkItem runs on DispatchQueue.main but is NOT a @MainActor

@@ -64,7 +64,7 @@ struct WelcomeView: View {
 
                     // Supported source types
                     VStack(spacing: 10) {
-                        FeaturePill(icon: "key.fill", title: "Dispatcharr Server Credentials")
+                        FeaturePill(icon: "key.fill", title: "Dispatcharr Direct Connect")
                         FeaturePill(icon: "tv.and.hifispeaker.fill", title: "Xtream Codes")
                         FeaturePill(icon: "doc.text.fill", title: "M3U + EPG")
                     }
@@ -129,7 +129,7 @@ struct WelcomeView: View {
 
                     // Supported source types
                     VStack(spacing: 8) {
-                        FeaturePill(icon: "key.fill", title: "Dispatcharr Server Credentials")
+                        FeaturePill(icon: "key.fill", title: "Dispatcharr Direct Connect")
                         FeaturePill(icon: "tv.and.hifispeaker.fill", title: "Xtream Codes")
                         FeaturePill(icon: "doc.text.fill", title: "M3U + EPG")
                     }
@@ -291,7 +291,7 @@ struct WelcomeView: View {
                     Text("Detect Home WiFi")
                         .font(.headlineSmall)
                         .foregroundColor(.textPrimary)
-                    Text("Let Aerio recognise your home network and automatically use the server's local URL when you're on it. iOS requires Location permission to read the WiFi name.")
+                    Text("Let AerioTV recognise your home network and automatically use the server's local URL when you're on it. iOS requires Location permission to read the WiFi name.")
                         .font(.bodySmall)
                         .foregroundColor(.textSecondary)
                         .lineLimit(4)
