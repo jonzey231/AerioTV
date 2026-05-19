@@ -2141,105 +2141,128 @@ struct EPGGuideView: View {
     }()
 
     var body: some View {
+        bodyContent
+            .animation(.easeInOut(duration: 0.2), value: stagingToast)
+            .animation(.easeInOut(duration: 0.2), value: multiviewStore.isStagingFromGuide)
+        #if os(tvOS)
+            .ignoresSafeArea(.all, edges: [.leading, .trailing, .bottom])
+        #endif
+            .task(id: channels.count) {
+                guard !channels.isEmpty else { return }
+                // Reset the rolling-prefetch "already fetched" set
+                // every time the channel list changes (server switch,
+                // initial load, iCloud-sync import). Otherwise the
+                // set poisoned subsequent scroll cycles: a cell that
+                // got fetched empty would stay flagged forever and
+                // never retry, producing the GH #3 "scroll past and
+                // come back, cell is empty" regression. This line +
+                // the "only insert on non-empty fetch" change in
+                // `prefetchIfNeeded` together close the loop.
+                guideStore.resetPrefetchCache()
+
+                let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+                let activeServerID = activeServer?.id.uuidString ?? "unknown"
+
+                // Phase 0: load from persistent SwiftData cache (scoped to active
+                // server so orphaned rows from a deleted server can't populate
+                // the guide with mismatched channel IDs).
+                let cacheIsFresh = await guideStore.loadFromCache(modelContext: modelContext, channels: channels, serverID: activeServerID)
+                // Phase 1: seed from current-program data on channels (fills gaps)
+                guideStore.seedFromChannels(channels)
+                // Seed EPGCache so List-view card expansion is instant
+                await guideStore.seedEPGCache(channels: channels, server: activeServer)
+
+                // Phase 2: fetch from network only if cache is stale.
+                // Also fetch if the cache has no future programs (e.g., fresh install with only
+                // seedFromChannels data: only current programs, nothing upcoming).
+                //
+                // The previous form (`.values.flatMap { $0 }.contains { … }`)
+                // eagerly allocated a flattened Array across every cached
+                // program on the main thread; on the 97k-row torture-test
+                // playlist that's a 15+ MB alloc and a ~2-3s hang per call.
+                // The nested-contains form short-circuits twice: outer on
+                // the first channel with any future program, inner on the
+                // first future program in that channel. On a healthy EPG
+                // cache this is effectively O(1).
+                let futureCutoff = Date().addingTimeInterval(1800)
+                let hasFuturePrograms = guideStore.programs.contains { _, progs in
+                    progs.contains { $0.end > futureCutoff }
+                }
+                guard !cacheIsFresh || !hasFuturePrograms else {
+                    debugLog("📺 EPG cache is fresh with future programs; skipping network fetch")
+                    return
+                }
+                channelStore.isEPGLoading = true
+                await guideStore.fetchUpcoming(channels: channels, servers: servers)
+                // Save fetched data to persistent cache
+                let serverID = activeServer?.id.uuidString ?? "unknown"
+                guideStore.saveToCache(modelContext: modelContext, serverID: serverID)
+                // Re-seed EPGCache with freshly fetched data
+                await guideStore.seedEPGCache(channels: channels, server: activeServer)
+                channelStore.isEPGLoading = false
+            }
+            // When MainTabView's loadAllEPG() finishes, re-seed guide from EPGCache
+            .onChange(of: channelStore.isEPGLoading) { wasLoading, isLoading in
+                if wasLoading && !isLoading && !channels.isEmpty {
+                    let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+                    guideStore.seedFromChannels(channels)
+                    Task {
+                        await guideStore.seedEPGCache(channels: channels, server: activeServer)
+                    }
+                }
+            }
+    }
+
+    /// Body shell that swaps the staging-banner placement strategy
+    /// per platform. iOS pins the banner via `safeAreaInset(edge:
+    /// .top)` so it stays above the scrolling guide content. tvOS
+    /// places the banner as a sibling of `guideContent` in a `VStack`
+    /// so the focus engine's spatial search routes from the topmost
+    /// guide row up into the banner buttons. (`safeAreaInset` on
+    /// tvOS doesn't reliably participate in focus traversal, which
+    /// was the symptom Freyguy1975 reported in v1.7.2: he could SEE
+    /// the Done button but couldn't D-pad to it.)
+    @ViewBuilder
+    private var bodyContent: some View {
+        #if os(tvOS)
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            VStack(spacing: 0) {
+                if multiviewStore.isStagingFromGuide {
+                    stagingBanner
+                }
+                guideContent
+            }
+            stagingToastOverlay
+        }
+        #else
         ZStack {
             Color.appBackground.ignoresSafeArea()
             guideContent
-            // v1.7.x: staging-mode toast bottom-center. Sits in the
-            // ZStack rather than as a sibling modifier so it floats
-            // above the guide grid (including the horizontal
-            // ScrollView contents) while staying out of the way of
-            // the time header and channel column.
-            if let msg = stagingToast {
-                VStack {
-                    Spacer()
-                    stagingToastView(msg)
-                        .padding(.bottom, 32)
-                }
-                .transition(.opacity)
-            }
+            stagingToastOverlay
         }
-        .animation(.easeInOut(duration: 0.2), value: stagingToast)
-        // v1.7.x: in-Guide staging banner. Pinned at the top via
-        // safeAreaInset so the guide content shifts down rather than
-        // being covered. Only renders when `isStagingFromGuide` is
-        // true. When the flag flips off (user tapped Done, hit the
-        // hard cap, or removed every tile), the safe area collapses
-        // back. Conditional view inside the closure cleanly produces
-        // an empty inset when off; SwiftUI animates the collapse.
         .safeAreaInset(edge: .top, spacing: 0) {
             if multiviewStore.isStagingFromGuide {
                 stagingBanner
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: multiviewStore.isStagingFromGuide)
-        #if os(tvOS)
-        .ignoresSafeArea(.all, edges: [.leading, .trailing, .bottom])
         #endif
-        .task(id: channels.count) {
-            guard !channels.isEmpty else { return }
-            // Reset the rolling-prefetch "already fetched" set
-            // every time the channel list changes (server switch,
-            // initial load, iCloud-sync import). Otherwise the
-            // set poisoned subsequent scroll cycles: a cell that
-            // got fetched empty would stay flagged forever and
-            // never retry, producing the GH #3 "scroll past and
-            // come back, cell is empty" regression. This line +
-            // the "only insert on non-empty fetch" change in
-            // `prefetchIfNeeded` together close the loop.
-            guideStore.resetPrefetchCache()
+    }
 
-            let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
-            let activeServerID = activeServer?.id.uuidString ?? "unknown"
-
-            // Phase 0: load from persistent SwiftData cache (scoped to active
-            // server so orphaned rows from a deleted server can't populate
-            // the guide with mismatched channel IDs).
-            let cacheIsFresh = await guideStore.loadFromCache(modelContext: modelContext, channels: channels, serverID: activeServerID)
-            // Phase 1: seed from current-program data on channels (fills gaps)
-            guideStore.seedFromChannels(channels)
-            // Seed EPGCache so List-view card expansion is instant
-            await guideStore.seedEPGCache(channels: channels, server: activeServer)
-
-            // Phase 2: fetch from network only if cache is stale.
-            // Also fetch if the cache has no future programs (e.g., fresh install with only
-            // seedFromChannels data — only current programs, nothing upcoming).
-            //
-            // The previous form (`.values.flatMap { $0 }.contains { … }`)
-            // eagerly allocated a flattened Array across every cached
-            // program on the main thread — on the 97k-row torture-test
-            // playlist that's a 15+ MB alloc and a ~2-3s hang per call.
-            // The nested-contains form short-circuits twice: outer on
-            // the first channel with any future program, inner on the
-            // first future program in that channel. On a healthy EPG
-            // cache this is effectively O(1).
-            let futureCutoff = Date().addingTimeInterval(1800)
-            let hasFuturePrograms = guideStore.programs.contains { _, progs in
-                progs.contains { $0.end > futureCutoff }
+    /// Staging-mode toast bottom-center. Sits in the ZStack rather
+    /// than as a sibling modifier so it floats above the guide grid
+    /// (including the horizontal ScrollView contents) while staying
+    /// out of the way of the time header and channel column.
+    @ViewBuilder
+    private var stagingToastOverlay: some View {
+        if let msg = stagingToast {
+            VStack {
+                Spacer()
+                stagingToastView(msg)
+                    .padding(.bottom, 32)
             }
-            guard !cacheIsFresh || !hasFuturePrograms else {
-                debugLog("📺 EPG cache is fresh with future programs — skipping network fetch")
-                return
-            }
-            channelStore.isEPGLoading = true
-            await guideStore.fetchUpcoming(channels: channels, servers: servers)
-            // Save fetched data to persistent cache
-            let serverID = activeServer?.id.uuidString ?? "unknown"
-            guideStore.saveToCache(modelContext: modelContext, serverID: serverID)
-            // Re-seed EPGCache with freshly fetched data
-            await guideStore.seedEPGCache(channels: channels, server: activeServer)
-            channelStore.isEPGLoading = false
+            .transition(.opacity)
         }
-        // When MainTabView's loadAllEPG() finishes, re-seed guide from EPGCache
-        .onChange(of: channelStore.isEPGLoading) { wasLoading, isLoading in
-            if wasLoading && !isLoading && !channels.isEmpty {
-                let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
-                guideStore.seedFromChannels(channels)
-                Task {
-                    await guideStore.seedEPGCache(channels: channels, server: activeServer)
-                }
-            }
-        }
-        // Timer removed — time indicator redraws via TimelineView
     }
 
     // MARK: - Horizontal Scroll State
@@ -2712,18 +2735,32 @@ struct EPGGuideView: View {
     // MARK: - Multiview Staging (v1.7.x)
 
     /// Top-edge banner shown while `MultiviewStore.shared.isStagingFromGuide`
-    /// is true. Surfaces the current tile count and a Done button so
-    /// the user always has a visible way to exit staging mode.
-    /// Tapping a channel in the Guide while this banner is showing
-    /// toggles that channel in/out of the multiview pile instead of
-    /// starting playback. See `handleMultiviewIntent(channel:)` for
-    /// the toggle logic.
+    /// is true. Surfaces the current tile count plus Play and Done
+    /// actions. Tapping a channel in the Guide while this banner is
+    /// showing toggles that channel in/out of the multiview pile
+    /// instead of starting playback. See `handleMultiviewIntent(channel:)`
+    /// for the toggle logic.
+    ///
+    /// v1.7.3 (Freyguy1975 Discord 2026-05-11): added the Play button.
+    /// Tapping Done only exits staging mode; users on Apple TV had no
+    /// obvious path from "I've staged 3 channels" to "start watching
+    /// them." Play flips `PlayerSession.mode` to `.multiview` without
+    /// re-seeding (the staged tiles are already in
+    /// `MultiviewStore.tiles`), which mounts `MultiviewContainerView`
+    /// against them via the existing observer at `HomeView.swift:3583`.
+    ///
+    /// The banner is wrapped in `.focusSection()` on tvOS so the focus
+    /// engine treats the button row as one reachable region. The host
+    /// view places the banner inside a `VStack` on tvOS (so spatial
+    /// focus routes from the topmost guide row up into the banner) and
+    /// inside `safeAreaInset(edge: .top)` on iOS (so the banner stays
+    /// pinned during scroll).
     private var stagingBanner: some View {
         let count = multiviewStore.tiles.count
         let label = count == 1
             ? "1 tile staged for Multiview"
             : "\(count) tiles staged for Multiview"
-        return HStack(spacing: 12) {
+        let banner = HStack(spacing: 12) {
             Image(systemName: "rectangle.3.group.fill")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundColor(.accentPrimary)
@@ -2731,6 +2768,35 @@ struct EPGGuideView: View {
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(.textPrimary)
             Spacer()
+            // Play (primary action). Disabled when no tiles are
+            // staged so the user doesn't fire `enterMultiview` with
+            // an empty store.
+            Button {
+                let staged = multiviewStore.tiles.count
+                multiviewStore.isStagingFromGuide = false
+                let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+                PlayerSession.shared.enterMultiview(seeding: nil, server: activeServer)
+                DebugLogger.shared.log(
+                    "[MV-Tile] staging mode: user tapped Play (count=\(staged))",
+                    category: "Playback", level: .info
+                )
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Play")
+                        .font(.system(size: 15, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+                .background(Capsule().fill(Color.accentPrimary))
+            }
+            .buttonStyle(.plain)
+            .disabled(count == 0)
+            .opacity(count == 0 ? 0.5 : 1.0)
+            // Done (secondary action). Outlined rather than filled so
+            // the visual hierarchy reads Play-then-Done.
             Button {
                 multiviewStore.isStagingFromGuide = false
                 DebugLogger.shared.log(
@@ -2740,10 +2806,12 @@ struct EPGGuideView: View {
             } label: {
                 Text("Done")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(.accentPrimary)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 6)
-                    .background(Capsule().fill(Color.accentPrimary))
+                    .background(
+                        Capsule().stroke(Color.accentPrimary, lineWidth: 1)
+                    )
             }
             .buttonStyle(.plain)
         }
@@ -2756,6 +2824,11 @@ struct EPGGuideView: View {
                 .fill(Color.accentPrimary.opacity(0.4))
                 .frame(height: 1)
         }
+        #if os(tvOS)
+        return banner.focusSection()
+        #else
+        return banner
+        #endif
     }
 
     /// Toast bubble for staging-mode add / remove confirmations.
