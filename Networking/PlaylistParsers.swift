@@ -1,4 +1,5 @@
 import Foundation
+import Compression
 
 // MARK: - M3U Parsed Channel
 struct M3UChannel: Identifiable {
@@ -172,10 +173,40 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
     private var currentText = ""
     private var insideProgramme = false
 
+    /// v1.7.3: filter-during-parse channel allowlist. When non-nil,
+    /// any `<programme>` whose `channel=` attribute (lowercased) is
+    /// NOT in this set is skipped entirely: its title / desc /
+    /// category text is never accumulated and no `ParsedEPGProgram`
+    /// is appended. This keeps the working set tiny when parsing a
+    /// huge XMLTV source (a 10k-channel Gracenote feed) against a
+    /// user with only ~300 channels, only the ~3% of programmes
+    /// that match a known channel survive. `nil` keeps everything
+    /// (back-compat for small-file callers).
+    private var knownChannelIDs: Set<String>?
+    /// True while parsing a `<programme>` whose channel isn't in
+    /// `knownChannelIDs`. Suppresses text accumulation + the final
+    /// append so a skipped programme costs almost nothing.
+    private var skippingProgramme = false
+
     // MARK: - Public entry points
     static func parse(data: Data) -> [ParsedEPGProgram] {
         let instance = XMLTVParser()
         let xmlParser = XMLParser(data: data)
+        xmlParser.delegate = instance
+        xmlParser.parse()
+        return instance.programmes
+    }
+
+    /// Parse an XMLTV document straight off an `InputStream` (used by
+    /// the gzip path so the decompressed bytes are pulled
+    /// incrementally rather than held whole in memory). `knownChannelIDs`,
+    /// when supplied, filters programmes during parse so only the
+    /// channels the user actually has survive (see the parser's
+    /// `knownChannelIDs` property).
+    static func parse(stream: InputStream, knownChannelIDs: Set<String>?) -> [ParsedEPGProgram] {
+        let instance = XMLTVParser()
+        instance.knownChannelIDs = knownChannelIDs
+        let xmlParser = XMLParser(stream: stream)
         xmlParser.delegate = instance
         xmlParser.parse()
         return instance.programmes
@@ -191,20 +222,175 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
     /// Passing `DispatcharrAPI.streamAuthHeaders` here closes the
     /// gap. Empty dict for M3U / public XMLTV URLs preserves the
     /// previous behaviour.
-    static func fetchAndParse(url: URL, headers: [String: String] = [:]) async throws -> [ParsedEPGProgram] {
+    ///
+    /// v1.7.3: transparently handles gzip-compressed XMLTV
+    /// (`.xml.gz`). Detection is by URL extension, response
+    /// `Content-Type` (`application/x-gzip` / `application/gzip`),
+    /// or the `1f 8b` magic bytes. When `knownChannelIDs` is
+    /// supplied, the gzip path filters programmes during parse so a
+    /// huge multi-thousand-channel feed boils down to just the
+    /// user's channels (FadiFC's request: a 552 MB-uncompressed
+    /// Gracenote feed parsed against ~300 channels yields only the
+    /// ~3% that match). Uncompressed XMLTV ignores `knownChannelIDs`
+    /// and keeps the existing whole-document parse for back-compat.
+    static func fetchAndParse(
+        url: URL,
+        headers: [String: String] = [:],
+        knownChannelIDs: Set<String>? = nil
+    ) async throws -> [ParsedEPGProgram] {
         var request = URLRequest(url: url)
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
-        let (data, response) = try await session.data(for: request)
+
+        // Gzip is detectable from the URL extension before we even
+        // hit the network; combined with the response content-type
+        // and the magic-byte sniff below, all three RFC-1952
+        // signal paths are covered.
+        let extLooksGzipped = url.pathExtension.lowercased() == "gz"
+
+        // Use a download task so the (possibly hundreds of MB)
+        // compressed body lands on disk, not in a `Data` in RAM.
+        let (tempURL, response) = try await session.download(for: request)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         guard let http = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
         }
         guard (200...299).contains(http.statusCode) else {
-            // Surface the status as `serverError` so callers can
-            // distinguish 401/403/404/etc from generic invalidResponse
-            // and surface a useful diagnostic in the log.
             throw APIError.serverError(http.statusCode)
         }
-        return parse(data: data)
+
+        let contentType = http.value(forHTTPHeaderField: "Content-Type")?.lowercased()
+        let ctLooksGzipped = contentType.map {
+            $0.contains("gzip") || $0.contains("x-gzip")
+        } ?? false
+        let magicLooksGzipped = fileStartsWithGzipMagic(tempURL)
+
+        guard extLooksGzipped || ctLooksGzipped || magicLooksGzipped else {
+            // Plain XMLTV. Preserve the existing whole-document parse.
+            // (knownChannelIDs filtering is a gzip-path optimization;
+            // uncompressed feeds are small enough to parse whole.)
+            let data = try Data(contentsOf: tempURL)
+            return parse(data: data)
+        }
+
+        // Gzip path. Stream-decompress the temp file to a second
+        // temp file (bounded memory, ~64 KB working set), then parse
+        // the decompressed XML off an InputStream with optional
+        // channel filtering. The decompressed file is transient and
+        // deleted on return.
+        let decompressedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aerio-xmltv-\(UUID().uuidString).xml")
+        defer { try? FileManager.default.removeItem(at: decompressedURL) }
+        try streamDecompressGzip(from: tempURL, to: decompressedURL)
+        guard let stream = InputStream(url: decompressedURL) else {
+            throw APIError.invalidResponse
+        }
+        return parse(stream: stream, knownChannelIDs: knownChannelIDs)
+    }
+
+    // MARK: - Gzip streaming decompression (v1.7.3)
+
+    /// Cheap magic-byte sniff: reads the first 2 bytes of a file and
+    /// checks for the gzip signature `1f 8b`. Final detection
+    /// fallback when the URL extension and Content-Type are
+    /// inconclusive (some servers send `application/octet-stream`).
+    private static func fileStartsWithGzipMagic(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 2), head.count == 2 else { return false }
+        return head[head.startIndex] == 0x1f && head[head.startIndex + 1] == 0x8b
+    }
+
+    /// Streams a gzip file through Apple's `Compression` framework
+    /// and writes the decompressed bytes to `destURL`. Bounded
+    /// memory: reads + writes in 64 KB chunks, never materializing
+    /// the (potentially multi-GB) decompressed payload in RAM.
+    ///
+    /// gzip = RFC 1952 header + raw DEFLATE (RFC 1951) + 8-byte
+    /// trailer. `Compression`'s `.zlib` algorithm decodes raw
+    /// DEFLATE, so we skip the variable-length gzip header up front
+    /// and feed the remaining DEFLATE stream to an `InputFilter`.
+    /// The trailer (CRC32 + ISIZE) is harmless trailing data the
+    /// filter stops reading at the DEFLATE end-of-stream marker.
+    private static func streamDecompressGzip(from sourceURL: URL, to destURL: URL) throws {
+        guard let input = InputStream(url: sourceURL) else {
+            throw APIError.invalidResponse
+        }
+        input.open()
+        defer { input.close() }
+
+        try skipGzipHeader(input)
+
+        FileManager.default.createFile(atPath: destURL.path, contents: nil)
+        guard let output = OutputStream(url: destURL, append: false) else {
+            throw APIError.invalidResponse
+        }
+        output.open()
+        defer { output.close() }
+
+        let bufferSize = 64 * 1024
+        // InputFilter pulls compressed DEFLATE bytes from `input`
+        // (now positioned past the gzip header) on demand and yields
+        // decompressed bytes via `readData(ofLength:)`.
+        let filter = try InputFilter(.decompress, using: .zlib, bufferCapacity: bufferSize) { (count: Int) -> Data? in
+            var buf = [UInt8](repeating: 0, count: count)
+            let n = input.read(&buf, maxLength: count)
+            if n <= 0 { return nil }
+            return Data(buf[0..<n])
+        }
+        while let chunk = try filter.readData(ofLength: bufferSize), !chunk.isEmpty {
+            var bytes = [UInt8](chunk)
+            var offset = 0
+            while offset < bytes.count {
+                let written = output.write(&bytes[offset], maxLength: bytes.count - offset)
+                if written <= 0 {
+                    throw APIError.invalidResponse
+                }
+                offset += written
+            }
+        }
+    }
+
+    /// Advances `input` past the gzip header per RFC 1952 so the
+    /// stream is positioned at the start of the DEFLATE payload.
+    /// Handles the optional FEXTRA / FNAME / FCOMMENT / FHCRC fields
+    /// the FLG byte may enable. Reads sequentially (InputStream has
+    /// no seek), which is fine since the header is tiny.
+    private static func skipGzipHeader(_ input: InputStream) throws {
+        func readByte() throws -> UInt8 {
+            var b: UInt8 = 0
+            let n = input.read(&b, maxLength: 1)
+            guard n == 1 else { throw APIError.invalidResponse }
+            return b
+        }
+        let id1 = try readByte()
+        let id2 = try readByte()
+        guard id1 == 0x1f, id2 == 0x8b else {
+            throw APIError.invalidResponse   // not gzip after all
+        }
+        _ = try readByte()             // CM (compression method)
+        let flg = try readByte()       // FLG
+        for _ in 0..<6 { _ = try readByte() }   // MTIME(4) + XFL(1) + OS(1)
+
+        // FEXTRA
+        if flg & 0x04 != 0 {
+            let xlen0 = Int(try readByte())
+            let xlen1 = Int(try readByte())
+            let xlen = xlen0 | (xlen1 << 8)
+            for _ in 0..<xlen { _ = try readByte() }
+        }
+        // FNAME (zero-terminated)
+        if flg & 0x08 != 0 {
+            while try readByte() != 0 {}
+        }
+        // FCOMMENT (zero-terminated)
+        if flg & 0x10 != 0 {
+            while try readByte() != 0 {}
+        }
+        // FHCRC
+        if flg & 0x02 != 0 {
+            _ = try readByte()
+            _ = try readByte()
+        }
     }
 
     // MARK: - XMLParserDelegate
@@ -229,11 +415,20 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
             currentTitle      = ""
             currentDesc       = ""
             currentCategories = []
+            // v1.7.3: decide up-front whether this programme survives
+            // the channel filter. The `channel=` attribute is present
+            // at start, so we can short-circuit before accumulating
+            // any text.
+            if let known = knownChannelIDs {
+                skippingProgramme = !known.contains(currentChannelID.lowercased())
+            } else {
+                skippingProgramme = false
+            }
         }
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        guard insideProgramme else { return }
+        guard insideProgramme, !skippingProgramme else { return }
         // Accumulate the raw fragment. Trimming happens once in
         // `didEndElement` so multi-chunk text (e.g. "Hello " +
         // "World" from a single `<title>Hello World</title>`) stays
@@ -245,7 +440,7 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
                 didEndElement elementName: String,
                 namespaceURI: String?,
                 qualifiedName qName: String?) {
-        if insideProgramme {
+        if insideProgramme && !skippingProgramme {
             let trimmed = currentText.trimmingCharacters(in: .whitespacesAndNewlines)
             switch elementName {
             case "title":
@@ -275,6 +470,13 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
         }
         if elementName == "programme" {
             insideProgramme = false
+            // v1.7.3: a filtered-out programme resets state and bails
+            // without appending. Reset the flag here so the next
+            // programme re-evaluates against the allowlist.
+            if skippingProgramme {
+                skippingProgramme = false
+                return
+            }
             if let start = parseXMLTVDate(currentStart),
                let stop  = parseXMLTVDate(currentStop),
                !currentTitle.isEmpty {

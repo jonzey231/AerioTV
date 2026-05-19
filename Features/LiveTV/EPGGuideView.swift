@@ -1322,9 +1322,26 @@ final class GuideStore: ObservableObject {
         // which made Freyguy1975's 403-on-/output/epg invisible until
         // we curl-probed the endpoint manually. Surface status + error
         // so the next case is diagnosable from the log alone.
+        // v1.7.3: build the channel allowlist for filter-during-parse.
+        // Covers every key the merge loop below can match on (tvg-id,
+        // channel number, Dispatcharr UUID), lowercased to match the
+        // parser's case-folded comparison. Only the gzip path inside
+        // `fetchAndParse` consults this; uncompressed XMLTV parses
+        // whole (small enough) and ignores it. Empty set passes nil
+        // so a misconfigured channel list never filters everything out.
+        var knownChannelKeys = Set<String>()
+        for ch in channels {
+            if let tvg = ch.tvgID, !tvg.isEmpty { knownChannelKeys.insert(tvg.lowercased()) }
+            if !ch.number.isEmpty { knownChannelKeys.insert(ch.number.lowercased()) }
+            if let uuid = ch.uuid, !uuid.isEmpty { knownChannelKeys.insert(uuid.lowercased()) }
+        }
         let parsed: [ParsedEPGProgram]
         do {
-            parsed = try await XMLTVParser.fetchAndParse(url: url, headers: headers)
+            parsed = try await XMLTVParser.fetchAndParse(
+                url: url,
+                headers: headers,
+                knownChannelIDs: knownChannelKeys.isEmpty ? nil : knownChannelKeys
+            )
             debugLog("📺 XMLTV fetched OK from \(url.host ?? "?") (headers=\(headers.count), \(parsed.count) programs parsed)")
         } catch let APIError.serverError(code) {
             // v1.6.22: spell out the most common WAN-deployment
