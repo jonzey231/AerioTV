@@ -729,7 +729,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         /// Tracks whether the app is currently in the iOS background
         /// state. Set true in `didEnterBackground`, false in
-        /// `willEnterForeground`. v1.6.8: read by `renderAndPresent`
+        /// `willEnterForeground`. v1.6.8: read by `renderFrame`
         /// to decide whether to auto-pause mpv when the sample-buffer
         /// layer enters `.failed` status — see the screen-lock fix
         /// in that function for the full rationale.
@@ -1220,15 +1220,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// render-thread-owned GL resources. Safe to call multiple times: once
         /// the first caller nils the resources, subsequent calls become no-ops.
         private func teardownRenderResourcesOnRenderQueue() {
-            // v1.7.x Issue A round 4: tear down the IOSurface re-attach
-            // watchdog first. The display link is main-thread; since
-            // teardownRenderResourcesOnRenderQueue can be called from
-            // either main (via stop()) or mpvQueue (via MPV_EVENT_
-            // SHUTDOWN), we dispatch to main to invalidate. assumed
-            // safe — invalidate is idempotent and the lock-protected
-            // buffer release inside stopWatchdog is also idempotent.
+            // v1.8: tear down the frame pacer first. The display
+            // link is main-thread; since teardownRenderResources-
+            // OnRenderQueue can be called from either main (via
+            // stop()) or mpvQueue (via MPV_EVENT_SHUTDOWN), we
+            // dispatch to main to invalidate. Safe — invalidate is
+            // idempotent and the lock-protected buffer release
+            // inside stopPacer is also idempotent.
             Task { @MainActor [weak self] in
-                self?.stopWatchdog()
+                self?.stopPacer()
             }
             // renderQueue -> mpvQueue is async-only, so this sync is deadlock-free
             // from both stop() (main thread) and MPV_EVENT_SHUTDOWN (mpvQueue).
@@ -1250,6 +1250,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         }
                         fboSlots = []
                         renderBufferIndex = 0
+                        cachedFormatDesc = nil
+                        cachedFormatDescPixelBuffer = nil
                     }
                     if let cache = textureCache { CVOpenGLESTextureCacheFlush(cache, 0) }
                     EAGLContext.setCurrent(nil)
@@ -1299,8 +1301,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // to AVSBDL, then advance the cursor. By the time mpv comes
         // back to this slot (after writing two other slots), AVSBDL
         // has long since composed and released its reference. The
-        // watchdog's `lastEnqueuedSampleBuffer` cache is also safe:
-        // it points at most one slot behind mpv's write position,
+        // pacer's `pendingPixelBuffer` reference is also safe: it
+        // points at most one slot behind mpv's write position,
         // and mpv is two slots ahead before wrapping.
         //
         // Memory cost (UHD BGRA 3840x2160): 33MB per slot, ~99MB
@@ -1319,6 +1321,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var fboHeight: Int = 0
         /// Detected stream FPS — used for diagnostics.
         private var detectedFps: Double = 0
+        /// v1.8: cache the CMFormatDescription per pixel buffer so
+        /// `renderFrame` doesn't call
+        /// `CMVideoFormatDescriptionCreateForImageBuffer` every
+        /// frame. The format only changes when the FBO is recreated
+        /// (resize / pixel-format change), so this stays valid for
+        /// the lifetime of a given FBO pool. The pixel-buffer
+        /// reference is used as the cache key — a different slot
+        /// hands us a different `CVPixelBuffer` pointer, which
+        /// triggers a refresh. Cleared by `setupFBO` when the pool
+        /// is rebuilt.
+        private var cachedFormatDesc: CMFormatDescription?
+        private var cachedFormatDescPixelBuffer: CVPixelBuffer?
         private var renderWidth: Int = 0
         private var renderHeight: Int = 0
         private var videoNativeWidth: Int = 0   // Video's display width (for render sizing)
@@ -1407,7 +1421,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // Frame timing — jitter & tearing diagnostics
         private var lastRenderTime: CFAbsoluteTime = 0       // When last frame finished rendering
-        private var lastEnqueueTime: CFAbsoluteTime = 0      // When last frame was enqueued to display layer
         private var frameIntervals: [Double] = []             // Recent inter-frame intervals (ms)
         private var renderDurations: [Double] = []            // Recent render durations (ms)
         private var lateFrameCount: Int64 = 0                 // Frames that took longer than expected
@@ -1510,51 +1523,86 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // rebuild gap.
         private var fboDestroyedAt: CFAbsoluteTime = 0
 
-        // v1.7.x Issue A round 4: CoreAnimation IOSurface re-attach
-        // watchdog. Three pieces of research (AVSBDL/HDR, libmpv,
-        // other iOS players, all 2026-05-08) converged on the same
-        // root cause: AVSampleBufferDisplayLayer is a CALayer subclass
+        // v1.8 Frame Pacer (replaces v1.7.x watchdog).
+        //
+        // Background: AVSampleBufferDisplayLayer is a CALayer subclass
         // that publishes its current frame as an IOSurface attached
-        // to the layer tree. When our enqueue stops feeding fresh
-        // PTS values long enough (which happens during the 60-100ms
-        // libmpv render stalls confirmed in the logs), CoreAnimation's
-        // change-detection optimizer can drop the surface attachment
-        // for one VSync. With HDR content (BT.2020 / p010), the EDR
-        // composition path falls back to backgroundColor (black) for
-        // that VSync instead of holding a clamped SDR copy of the
-        // last frame, producing exactly the user-visible single-frame
-        // black flashes Archie reproduced and verified via 60fps
-        // screen capture (avg=0, std=0 single VSyncs).
+        // to the layer tree. Two distinct problems used to live in
+        // this region:
         //
-        // The fix is the standard "feed the layer at display refresh"
-        // pattern used by moonlight-ios PR #482 and WebKit's MSE
-        // backend (Bug 181623). A CADisplayLink ticks at the display
-        // refresh rate; on each tick, if the layer hasn't received a
-        // fresh enqueue in `watchdogStaleThreshold` seconds, we
-        // re-enqueue the most recent CMSampleBuffer with a fresh
-        // host-time PTS. That forces CoreAnimation to attach the
-        // IOSurface as a new contents reference every VSync,
-        // defeating the change-detection optimizer that drops the
-        // attachment during gaps. The IOSurface backing is already
-        // valid; we're just kicking the compositor.
+        //   1. CoreAnimation IOSurface re-attach (v1.7.x): when our
+        //      enqueue stopped feeding fresh PTS values long enough
+        //      (60-100ms libmpv render stalls), CoreAnimation's
+        //      change-detection optimizer could drop the surface
+        //      attachment for one VSync. With HDR (BT.2020/p010),
+        //      the EDR composition path fell back to backgroundColor
+        //      (black) producing single-VSync flashes.
+        //   2. Content-rate enqueue judder: mpv with
+        //      `video-sync=audio` + `vo=libmpv` delivers frames at
+        //      the content rate (24/30/60 fps), not the display rate.
+        //      AVSBDL was being asked to bridge that mismatch on its
+        //      own — fine for 30/60 on 60Hz (clean 2:2 / 1:1), but
+        //      24 on 60Hz produced irregular 3:2 pulldown ("stroby"
+        //      VOD reports), and 30 on 60Hz in multiview lost a race
+        //      with the watchdog's 30ms stale threshold (frame
+        //      arrives at ~33ms, watchdog fires at ~33ms, two
+        //      sources competing to enqueue).
         //
-        // Architecturally-correct fix (v1.8 candidate, NOT shipping
-        // here): migrate the display path to AVSampleBufferVideo
-        // Renderer + AVSampleBufferRenderSynchronizer (iOS 17+,
-        // documented at developer.apple.com). That's how AVPlayer
-        // avoids this symptom natively. Significant rewrite, deferred.
-        private var displayLinkWatchdog: CADisplayLink?
-        private var watchdogLock = os_unfair_lock_s()
-        private var lastEnqueuedSampleBuffer: CMSampleBuffer?
-        private let watchdogStaleThreshold: CFTimeInterval = 0.030  // 30ms
-        // Cumulative count of watchdog-driven re-enqueues, exposed
-        // in FRAME SUMMARY so we can see how often the watchdog
-        // saved a flash. Field-only diagnostic; non-zero means the
-        // watchdog is doing real work.
-        private var watchdogReenqueueCount: Int64 = 0
+        // The fix unifies both: replace the stale-threshold watchdog
+        // with a frame *pacer* that ticks at the display refresh
+        // rate and ALWAYS enqueues — either the latest rendered
+        // frame from mpv (handed off via `pendingPixelBuffer` under
+        // `pacerLock`) or a re-stamped copy of the last enqueued
+        // buffer if mpv hasn't produced a new frame since the last
+        // tick. This gives AVSBDL a clean 60fps input regardless of
+        // content rate. Frame duplication is decided by us via the
+        // pacer cadence, not by AVSBDL guessing from PTS gaps:
+        //
+        //   60fps content -> 1:1 every tick gets a new frame.
+        //   30fps content -> 2:2 every other tick gets a new frame.
+        //   24fps content -> 3:2 alternating (clean pulldown cadence).
+        //
+        // The IOSurface re-attach issue is naturally solved: the
+        // pacer enqueues every VSync, so CoreAnimation never sees a
+        // gap long enough to drop the surface attachment.
+        //
+        // Architecturally-correct future fix (deferred): migrate to
+        // AVSampleBufferVideoRenderer + AVSampleBufferRenderSync-
+        // ronizer (iOS 17+), which is how AVPlayer handles this
+        // natively. Significant rewrite; the pacer is the practical
+        // ship-it solution.
+        private var displayLinkPacer: CADisplayLink?
+        // `pacerLock` protects the render → pacer handoff. The
+        // render thread (renderQueue) writes the latest rendered
+        // pixel buffer + format description here; the pacer reads
+        // them on the next main-thread tick. The pacer also updates
+        // `lastEnqueuedCMSB` under this lock so a teardown on main
+        // can null it deterministically.
+        private var pacerLock = os_unfair_lock_s()
+        // Render-thread-owned, pacer-readable. `pendingPixelBuffer`
+        // is the FBO slot's IOSurface-backed CVPixelBuffer; the
+        // triple-buffer ring guarantees the render thread won't
+        // overwrite this slot for at least two more renders, by
+        // which time AVSBDL has long since composed + released.
+        private var pendingPixelBuffer: CVPixelBuffer?
+        private var pendingFormatDesc: CMFormatDescription?
+        private var pendingFrameSerial: UInt64 = 0
+        private var lastPresentedFrameSerial: UInt64 = 0
+        // The last CMSampleBuffer we handed to AVSBDL. Re-stamped
+        // and re-enqueued on pacer ticks where mpv hasn't produced
+        // a new frame, keeping AVSBDL fed at display refresh rate.
+        private var lastEnqueuedCMSB: CMSampleBuffer?
+        // Cumulative pacer diagnostics. `pacerNewFrameCount` ticks
+        // where a fresh mpv frame was available; `pacerDupCount`
+        // ticks where we re-stamped the last frame (the difference
+        // tells us the dup ratio = display_fps / content_fps).
+        // `pacerSkipCount` ticks where AVSBDL refused more media.
+        private var pacerNewFrameCount: Int64 = 0
+        private var pacerDupCount: Int64 = 0
+        private var pacerSkipCount: Int64 = 0
 
         // v1.7.x Step 6 — backpressure skip counter. Incremented
-        // each time `renderAndPresent` early-returns because
+        // each time `renderFrame` early-returns because
         // AVSampleBufferDisplayLayer's renderer reported
         // `isReadyForMoreMediaData == false`. Exposed in FRAME
         // SUMMARY. Field-only diagnostic; non-zero means mpv is
@@ -1566,6 +1614,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // fills, framedrop drops the late frames at the VO
         // boundary, and the upstream demuxer/decoder pipeline
         // is rate-limited to AVSBDL's consumption rate.
+        //
+        // v1.8: this check stays in the render path (not the
+        // pacer) precisely to preserve the `framedrop=vo`
+        // feedback loop. Moving it to the pacer would let the
+        // mpv decoder run unbounded again — observed before as
+        // RSS 350MB → 1224MB over 45s on UHD HEVC. The pacer
+        // tracks its own `pacerSkipCount` for ticks where the
+        // layer refused a duplicate.
         private var backpressureSkipCount: Int64 = 0
 
         // v1.7.x Issue A round 6 — black-frame detector (Step 3a).
@@ -1579,12 +1635,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // Surrounded by normal content frames (avg 25-130). The bug
         // is inside libmpv's render or VT codepath — from outside
         // libmpv we can't reach it. This detector catches them on
-        // input, before we wrap them into a CMSampleBuffer for the
-        // display layer. The CADisplayLink watchdog above already
-        // handles "queue stale" by re-enqueueing the last good
-        // CMSampleBuffer with a fresh PTS — so suppressing here just
-        // means the user sees the previous frame held for one mpv-
-        // frame-interval (~16ms) instead of a literal black flash.
+        // input, before we publish to the pacer. The frame pacer
+        // (`handlePacerTick`) already handles "no new frame this
+        // VSync" by re-stamping the last good CMSampleBuffer — so
+        // suppressing here just means the user sees the previous
+        // frame held for one or two pacer ticks (~16-33ms) instead
+        // of a literal black flash.
         //
         // Detection (per Agent C 2026-05-08 research): stratified
         // 16x16 grid sample of the BGRA pixel buffer = 256 luminance
@@ -1893,7 +1949,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         @objc private func didEnterBackground() {
             guard let mpv = activeMPVHandle() else { return }
             #if os(iOS)
-            // v1.6.8: track background state so `renderAndPresent`
+            // v1.6.8: track background state so `renderFrame`
             // can decide whether to auto-pause mpv when the sample-
             // buffer layer flips to `.failed`. Set early so the
             // flag is honoured even if any of the policy branches
@@ -2053,6 +2109,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     print("[MPV-BG] Foreground: sampleBufferRenderer FAILED (\(err)) — flushing to recover")
                     #endif
                     layer.sampleBufferRenderer.flush()
+                    // v1.8: invalidate the pacer's cached buffer
+                    // post-flush. The pre-flush CMSampleBuffer no
+                    // longer references anything in the renderer's
+                    // queue; re-enqueueing it would be wasted work
+                    // until mpv produces a fresh frame. Clearing
+                    // means the pacer simply skips ticks until the
+                    // render path republishes — the next pacer
+                    // tick after that gets a fresh fully-valid
+                    // CMSampleBuffer.
+                    os_unfair_lock_lock(&self.pacerLock)
+                    self.lastEnqueuedCMSB = nil
+                    os_unfair_lock_unlock(&self.pacerLock)
                 }
             }
             #endif
@@ -2177,11 +2245,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         func setupRenderer(layer: CALayer) {
             self.sampleBufferLayer = layer.sublayers?.compactMap { $0 as? AVSampleBufferDisplayLayer }.first
             kickstartIfNeeded()
-            // v1.7.x Issue A round 4: arm the IOSurface re-attach
-            // watchdog now that the layer reference is in place.
-            // See the watchdog-state declaration block for the full
-            // rationale and source list.
-            startWatchdogIfNeeded()
+            // v1.8: arm the frame pacer now that the layer
+            // reference is in place. See the pacer-state
+            // declaration block for the full rationale.
+            startPacerIfNeeded()
         }
 
         /// Dispatch `start()` on the render queue exactly once.
@@ -2230,6 +2297,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
                 fboSlots = []
                 renderBufferIndex = 0
+                // v1.8: invalidate the cached format description —
+                // the new pool will have fresh CVPixelBuffer
+                // references (and may have different dimensions /
+                // pixel format), so the cached CMFormatDescription
+                // doesn't match anything in the new ring. Also
+                // clear the pacer's pending publish so it doesn't
+                // try to enqueue against a torn-down pool.
+                cachedFormatDesc = nil
+                cachedFormatDescPixelBuffer = nil
+                os_unfair_lock_lock(&pacerLock)
+                pendingPixelBuffer = nil
+                pendingFormatDesc = nil
+                os_unfair_lock_unlock(&pacerLock)
             }
             CVOpenGLESTextureCacheFlush(textureCache, 0)
 
@@ -2455,92 +2535,125 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #endif
         }
 
-        // MARK: - CoreAnimation IOSurface re-attach watchdog (v1.7.x Issue A)
+        // MARK: - Frame Pacer (v1.8 — replaces v1.7.x watchdog)
 
-        /// Start the display-refresh watchdog. Called once after the
-        /// sample buffer layer is in place; idempotent (subsequent
-        /// calls are no-ops). The display link runs at the display's
-        /// preferred refresh rate (60Hz on iPhone, 120Hz on ProMotion)
-        /// and is added to .common run-loop modes so it keeps firing
-        /// during scroll gestures and other tracked-mode work.
+        /// Start the frame pacer. Called once after the sample
+        /// buffer layer is in place; idempotent (subsequent calls
+        /// are no-ops). The display link runs at the display's
+        /// preferred refresh rate (60Hz on tvOS / iPhone, 120Hz on
+        /// ProMotion) and is added to `.common` run-loop modes so
+        /// it keeps firing during scroll gestures and other
+        /// tracked-mode work.
+        ///
+        /// The pacer is the SINGLE source of AVSBDL enqueues. The
+        /// render path stores the latest rendered frame under
+        /// `pacerLock`; this tick reads it. If a new frame is
+        /// available, we build a fresh CMSampleBuffer and enqueue.
+        /// If not, we re-stamp the last CMSampleBuffer (frame
+        /// duplication, naturally producing clean 3:2 pulldown for
+        /// 24fps content on 60Hz, 2:2 for 30fps, 1:1 for 60fps).
         @MainActor
-        func startWatchdogIfNeeded() {
-            guard displayLinkWatchdog == nil else { return }
-            let link = CADisplayLink(target: self, selector: #selector(handleWatchdogTick(_:)))
+        func startPacerIfNeeded() {
+            guard displayLinkPacer == nil else { return }
+            let link = CADisplayLink(target: self, selector: #selector(handlePacerTick(_:)))
             // ProMotion-friendly: prefer 60Hz, allow 30-120 range so
-            // iOS picks the display-aligned cadence. The 30Hz floor
-            // guarantees we still tick between mpv frames during
-            // libmpv stalls.
+            // iOS picks the display-aligned cadence. We want every
+            // VSync, not a content-rate cadence.
             link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 60)
             link.add(to: .main, forMode: .common)
-            displayLinkWatchdog = link
+            displayLinkPacer = link
         }
 
-        /// Tear down the watchdog. Called from the same main-thread
+        /// Tear down the pacer. Called from the same main-thread
         /// teardown path that releases the layer. Safe to call
         /// multiple times.
         @MainActor
-        func stopWatchdog() {
-            displayLinkWatchdog?.invalidate()
-            displayLinkWatchdog = nil
-            os_unfair_lock_lock(&watchdogLock)
-            lastEnqueuedSampleBuffer = nil
-            os_unfair_lock_unlock(&watchdogLock)
+        func stopPacer() {
+            displayLinkPacer?.invalidate()
+            displayLinkPacer = nil
+            os_unfair_lock_lock(&pacerLock)
+            pendingPixelBuffer = nil
+            pendingFormatDesc = nil
+            pendingFrameSerial = 0
+            lastPresentedFrameSerial = 0
+            lastEnqueuedCMSB = nil
+            os_unfair_lock_unlock(&pacerLock)
         }
 
         /// Display-link tick. Runs on the main thread.
         ///
-        /// Read `lastEnqueueTime` (touched from renderQueue but
-        /// CFAbsoluteTime is a Double — torn reads are at worst a
-        /// single tick of false positive/negative on Apple silicon,
-        /// not a correctness issue). If the layer hasn't received a
-        /// fresh enqueue in `watchdogStaleThreshold` seconds, copy
-        /// the most recently enqueued sample buffer with a fresh
-        /// host-time PTS and re-enqueue it. The IOSurface backing
-        /// stays the same; we're forcing CoreAnimation to attach it
-        /// as a fresh contents reference for this VSync.
+        /// Reads the latest rendered frame under `pacerLock`. If a
+        /// new frame is available since the last tick, builds a
+        /// fresh CMSampleBuffer and enqueues it. Otherwise, copies
+        /// the last enqueued CMSampleBuffer with a fresh host-time
+        /// PTS and the `DisplayImmediately` attachment, and
+        /// enqueues that. Either way, AVSBDL gets exactly one
+        /// buffer per VSync, which both:
+        ///   1. Prevents CoreAnimation from dropping the IOSurface
+        ///      attachment during libmpv render stalls.
+        ///   2. Produces clean pulldown cadence for sub-60fps
+        ///      content (the previous watchdog stale-threshold
+        ///      approach produced irregular 3:2 for 24fps and a
+        ///      race-with-real-frame for 30fps).
         ///
         /// Skipped when the layer is .failed (existing background-
-        /// pause path handles recovery) or not ready for more media
-        /// data (would just be rejected). Watchdog stays silent on
-        /// those paths.
+        /// pause path handles recovery) or not ready for more
+        /// media data (just bumps `pacerSkipCount`; the pending
+        /// frame stays "new" so the next tick can retry).
         @MainActor
-        @objc private func handleWatchdogTick(_ link: CADisplayLink) {
-            let now = CACurrentMediaTime()
-            let lastEnq = lastEnqueueTime
-            let staleAge = now - lastEnq
-            guard staleAge >= watchdogStaleThreshold else { return }
+        @objc private func handlePacerTick(_ link: CADisplayLink) {
             guard let layer = sampleBufferLayer else { return }
             let renderer = layer.sampleBufferRenderer
             guard renderer.status != .failed,
-                  renderer.isReadyForMoreMediaData else { return }
-
-            // Pull the cached buffer under the lock. Don't hold the
-            // lock through the CMSampleBuffer copy — it's quick but
-            // not free.
-            os_unfair_lock_lock(&watchdogLock)
-            let cached = lastEnqueuedSampleBuffer
-            os_unfair_lock_unlock(&watchdogLock)
-            guard let cached else { return }
-
-            // Re-stamp with current host time. AVSBDL will reject a
-            // sample whose PTS exactly matches a previously-enqueued
-            // sample's PTS, so we must produce a strictly later PTS
-            // every tick.
-            let freshPTS = CMClockGetTime(CMClockGetHostTimeClock())
-            guard let restamped = Self.makeImmediateDisplayCopy(of: cached, at: freshPTS) else { return }
-            renderer.enqueue(restamped)
-
-            watchdogReenqueueCount &+= 1
-            #if DEBUG
-            // Log first re-enqueue + every 60th so we get a clear
-            // signal that the watchdog is firing without flooding
-            // the console during a sustained stall.
-            if watchdogReenqueueCount == 1 || watchdogReenqueueCount % 60 == 0 {
-                let staleMs = staleAge * 1000.0
-                print("[AVSBDL-WATCHDOG] \(streamTag) re-enqueue #\(watchdogReenqueueCount) (stale=\(String(format: "%.0f", staleMs))ms)")
+                  renderer.isReadyForMoreMediaData else {
+                pacerSkipCount &+= 1
+                return
             }
-            #endif
+
+            // Pull the pending frame + last enqueued buffer under
+            // the lock. Don't hold the lock through the CoreMedia
+            // calls — they're cheap but not free, and the render
+            // thread may be waiting to publish the next frame.
+            os_unfair_lock_lock(&pacerLock)
+            let pendingPB = pendingPixelBuffer
+            let pendingFD = pendingFormatDesc
+            let pendingSerial = pendingFrameSerial
+            let presentedSerial = lastPresentedFrameSerial
+            let lastSB = lastEnqueuedCMSB
+            os_unfair_lock_unlock(&pacerLock)
+
+            let pts = CMClockGetTime(CMClockGetHostTimeClock())
+            let hasNewFrame = pendingSerial != presentedSerial && pendingPB != nil && pendingFD != nil
+
+            if hasNewFrame, let pb = pendingPB, let fd = pendingFD {
+                // Build a fresh CMSampleBuffer for the new frame.
+                guard let sb = Self.makeSampleBuffer(from: pb, formatDesc: fd, presentationTime: pts) else {
+                    makeSampleBufferNilCount &+= 1
+                    return
+                }
+                renderer.enqueue(sb)
+                pacerNewFrameCount &+= 1
+                os_unfair_lock_lock(&pacerLock)
+                lastEnqueuedCMSB = sb
+                lastPresentedFrameSerial = pendingSerial
+                os_unfair_lock_unlock(&pacerLock)
+            } else if let last = lastSB {
+                // No new frame since last tick — duplicate the
+                // last one with a fresh PTS + DisplayImmediately.
+                // AVSBDL rejects samples whose PTS exactly matches
+                // a previously-enqueued sample's PTS, so the PTS
+                // must be strictly later every tick (which it is,
+                // since we use the host clock).
+                guard let dup = Self.makeImmediateDisplayCopy(of: last, at: pts) else { return }
+                renderer.enqueue(dup)
+                pacerDupCount &+= 1
+                os_unfair_lock_lock(&pacerLock)
+                lastEnqueuedCMSB = dup
+                os_unfair_lock_unlock(&pacerLock)
+            }
+            // else: nothing to enqueue yet (first-frame window).
+            // The next tick will pick up whatever the render
+            // thread publishes.
         }
 
         /// Build a CMSampleBuffer that points at the same IOSurface
@@ -2551,7 +2664,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// resources are reused — no extra upload, no extra alloc on
         /// the GPU side. The DisplayImmediately attachment tells
         /// AVSBDL to present the frame ASAP rather than scheduling
-        /// it against any internal clock.
+        /// it against any internal clock — important for the pacer's
+        /// duplicate path, where we're already aligned to VSync via
+        /// CADisplayLink and don't want AVSBDL second-guessing us
+        /// with its own PTS scheduling clock.
         private static func makeImmediateDisplayCopy(of source: CMSampleBuffer, at pts: CMTime) -> CMSampleBuffer? {
             var newTiming = CMSampleTimingInfo(
                 duration: .invalid,
@@ -2674,13 +2790,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             renderQueue.async { [weak self] in
-                self?.renderAndPresent()
+                self?.renderFrame()
             }
         }
 
-        /// Runs on renderQueue — GPU renders mpv frame to CVPixelBuffer via OpenGL FBO,
-        /// then enqueues to AVSampleBufferDisplayLayer. Zero CPU pixel copies.
-        private func renderAndPresent() {
+        /// Runs on renderQueue — GPU renders mpv frame to a CVPixelBuffer
+        /// via OpenGL FBO, then publishes the result for the main-thread
+        /// frame pacer to enqueue at the next VSync. Zero CPU pixel copies.
+        ///
+        /// v1.8 design change: this function no longer touches
+        /// AVSampleBufferDisplayLayer directly. The pacer
+        /// (`handlePacerTick`) is the single source of enqueues. We
+        /// publish the latest rendered (pixel buffer, format desc,
+        /// serial) tuple under `pacerLock`; the pacer reads it on
+        /// the next VSync. This:
+        ///   - eliminates the dual-source enqueue race the watchdog
+        ///     had with content-rate frames at 30fps;
+        ///   - decouples content frame rate from display rate so 24fps
+        ///     content naturally gets clean 3:2 pulldown (the pacer
+        ///     duplicates frames between mpv-driven publishes);
+        ///   - keeps the IOSurface attached at every VSync (the
+        ///     CoreAnimation re-attach bug the watchdog was added to
+        ///     fix is solved automatically by the pacer).
+        ///
+        /// Backpressure check stays here (not in the pacer) so mpv's
+        /// `framedrop=vo` policy still gets the feedback signal that
+        /// AVSBDL is saturated. Moving it to the pacer would let the
+        /// mpv decoder run unbounded again (the 350MB → 1224MB RSS
+        /// growth observed on UHD HEVC under the original Step 5
+        /// triple-buffer ring without backpressure).
+        private func renderFrame() {
             os_unfair_lock_lock(&renderLock)
             renderPending = false
             os_unfair_lock_unlock(&renderLock)
@@ -2700,15 +2839,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Step 5 (triple-buffered FBO ring) eliminated the
             // single-IOSurface producer/consumer race that caused
             // single-VSync black flashes at ~1 per 12s on UHD HEVC
-            // HDR live MPEG-TS playback. Field test 2026-05-08
-            // 21:49 confirmed the flashes are gone (`black_supp=2`
-            // detector hits over 2400+ frames, watchdog-recovered
-            // cleanly). But the ring also removed implicit rate
-            // limiting that the single-buffer architecture had been
-            // providing — mpv's videotoolbox-copy decoder is faster
-            // than the source rate, and with three slots to write
-            // into, mpv ran at decoder speed (~70fps for a 30fps
-            // source). Symptoms over a 45s playback window:
+            // HDR live MPEG-TS playback. But the ring also removed
+            // implicit rate limiting that the single-buffer
+            // architecture had been providing — mpv's videotoolbox-
+            // copy decoder is faster than the source rate, and with
+            // three slots to write into, mpv ran at decoder speed
+            // (~70fps for a 30fps source). Symptoms over a 45s
+            // playback window:
             //   - rss grew from 350MB → 1224MB (decoded UHD frames
             //     piling up in mpv's output queue waiting for audio
             //     to catch up)
@@ -2719,20 +2856,40 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //   - main thread hung 239-371ms three times under
             //     memory pressure
             //
-            // Skipping the entire render pass (not just the
-            // enqueue) means we don't call
-            // mpv_render_context_render, so mpv's frame stays in
-            // mpv's internal queue. mpv's `framedrop=vo` policy
-            // drops late frames at the VO layer when the queue
-            // fills, which rate-limits the upstream
-            // demuxer/decoder pipeline to AVSBDL's consumption
-            // rate. The watchdog at line ~2349 already follows the
-            // same pattern (refuses re-enqueue when not ready);
-            // this unifies the policy across the main path and the
-            // watchdog path — both refuse to push when AVSBDL is
-            // full.
+            // Skipping the entire render pass (not just the publish)
+            // means we don't call mpv_render_context_render, so mpv's
+            // frame stays in mpv's internal queue. mpv's
+            // `framedrop=vo` policy drops late frames at the VO layer
+            // when the queue fills, which rate-limits the upstream
+            // demuxer/decoder pipeline to AVSBDL's consumption rate.
             if let renderer = sampleBufferLayer?.sampleBufferRenderer,
                !renderer.isReadyForMoreMediaData {
+                backpressureSkipCount &+= 1
+                return
+            }
+
+            // v1.8 pacer backpressure (in addition to the AVSBDL
+            // readiness gate above, not a replacement for it): with
+            // render and present now decoupled, AVSBDL readiness
+            // alone no longer proves the pacer has consumed the
+            // previous render. The two gates cover different failure
+            // modes — the AVSBDL gate catches the layer's own queue
+            // saturation (composition can't drain at display rate),
+            // and this one catches "pacer hasn't ticked yet since
+            // the last publish." Both are needed. If mpv invokes us
+            // faster than the display-link pacer can present, do NOT
+            // call mpv_render_context_render again yet. Holding one
+            // pending frame restores the original framedrop=vo
+            // feedback loop: the mpv frame remains inside mpv until
+            // the pacer advances `lastPresentedFrameSerial`, so late
+            // frames can be dropped at the VO boundary instead of
+            // letting decode/demux run ahead of presentation.
+            os_unfair_lock_lock(&pacerLock)
+            let hasUnpresentedFrame = pendingPixelBuffer != nil
+                && pendingFormatDesc != nil
+                && pendingFrameSerial != lastPresentedFrameSerial
+            os_unfair_lock_unlock(&pacerLock)
+            if hasUnpresentedFrame {
                 backpressureSkipCount &+= 1
                 return
             }
@@ -2743,19 +2900,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // v1.7.x Step 5: advance the ring cursor and pick the
             // next slot. mpv writes to slot[renderBufferIndex],
-            // we hand THAT slot's pixel buffer to AVSBDL. By the
-            // time the cursor wraps back to this slot (after two
-            // other slots have been written + handed off), AVSBDL
+            // we publish THAT slot's pixel buffer to the pacer. By
+            // the time the cursor wraps back to this slot (after two
+            // other slots have been written + published), AVSBDL
             // has long since composed the previous reference and
             // released it. No producer/consumer race on the
-            // IOSurface — the bug Steps 3a/3b/4a were trying to
-            // mask is gone at the source.
+            // IOSurface.
             renderBufferIndex = (renderBufferIndex + 1) % fboSlots.count
             let renderPixelBuffer = fboSlots[renderBufferIndex].pixelBuffer
             let fbo = fboSlots[renderBufferIndex].fbo
 
             let renderStart = CACurrentMediaTime()
-            let presentationTime = CMClockGetTime(CMClockGetHostTimeClock())
             let fps = detectedFps
 
             // Make our GL context current on the render thread
@@ -2773,7 +2928,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // withUnsafeMutablePointer ensures the data pointers outlive the render call.
             var fboData = mpv_opengl_fbo(fbo: Int32(fbo), w: Int32(w), h: Int32(h), internal_format: 0)
             var flipY: CInt = 0  // Don't flip — CVPixelBuffer and AVSampleBufferDisplayLayer share the same top-down row order
-            var blockForTarget: CInt = 0  // Don't block — AVSampleBufferDisplayLayer manages timing
+            var blockForTarget: CInt = 0  // Don't block — the pacer manages display timing
             withUnsafeMutablePointer(to: &fboData) { fboPtr in
                 withUnsafeMutablePointer(to: &flipY) { flipPtr in
                     withUnsafeMutablePointer(to: &blockForTarget) { blockPtr in
@@ -2794,10 +2949,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let renderEnd = CACurrentMediaTime()
             let renderMs = (renderEnd - renderStart) * 1000.0
 
-            // Track frame timing for jitter analysis
+            // Track frame timing for jitter analysis. `lastRenderTime`
+            // is the previous render's completion time; the gap
+            // between renders is the relevant cadence indicator now
+            // (the pacer always enqueues at 60Hz, so present-side
+            // intervals are no longer informative).
             totalFrameCount += 1
-            if lastEnqueueTime > 0 {
-                let intervalMs = (renderEnd - lastEnqueueTime) * 1000.0
+            if lastRenderTime > 0 {
+                let intervalMs = (renderEnd - lastRenderTime) * 1000.0
                 frameIntervals.append(intervalMs)
                 if frameIntervals.count > frameSampleSize { frameIntervals.removeFirst() }
             }
@@ -2808,18 +2967,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Detect late frames
             if renderMs > 33.0 { lateFrameCount += 1 }
 
-            // Check display layer readiness before enqueue
-            let layerReady = sampleBufferLayer?.sampleBufferRenderer.isReadyForMoreMediaData ?? false
+            // Log AVSBDL state transitions so the next test log shows
+            // whether the layer is internally clearing or flagging
+            // requiresFlush during libmpv render stalls. Logged on
+            // transition only, so smooth playback produces zero
+            // noise.
             let layerStatus = sampleBufferLayer?.sampleBufferRenderer.status
-
-            // v1.7.x Issue A round 3: log AVSBDL state transitions so
-            // the next test log shows whether the layer is internally
-            // clearing or flagging requiresFlush during the libmpv
-            // render stalls (Archie's screen recording showed
-            // single-VSync black flashes that we believe correspond
-            // to layer-side auto-clear behavior, not anything mpv-
-            // side). Logged on transition only, so smooth playback
-            // produces zero noise.
             if let layer = sampleBufferLayer {
                 let currentStatus = layer.sampleBufferRenderer.status
                 if currentStatus != lastObservedLayerStatus {
@@ -2833,10 +2986,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // iOS 18 deprecated AVSampleBufferDisplayLayer.requiresFlushToResumeDecoding
                 // in favour of the renderer-side property of the same
                 // name, accessed via the layer's sampleBufferRenderer.
-                // Functionally identical, just on AVSampleBufferVideo
-                // Renderer (iOS 17+). We already use the renderer-
-                // side enqueue API throughout, so this matches our
-                // existing path.
                 let currentFlush = layer.sampleBufferRenderer.requiresFlushToResumeDecoding
                 if currentFlush != lastObservedRequiresFlush {
                     #if DEBUG
@@ -2847,11 +2996,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             // v1.6.8 lock-cycle fix: when the sample-buffer layer
-            // is in `.failed` state, skip the enqueue entirely —
-            // iOS will reject every buffer we hand it, and the
-            // render callback would otherwise spin uselessly,
-            // logging a 🔴 LAYER FAILED line per frame for the
-            // duration of the failure.
+            // is in `.failed` state, skip publishing entirely — the
+            // pacer will keep duplicating the last good frame (which
+            // AVSBDL will also reject, but harmlessly). In
+            // background with a failed layer we auto-pause mpv to
+            // stop wasted decode work. See full rationale below.
             //
             // Why this happens (the screen-lock case):
             //   1. User locks iPhone during live playback.
@@ -2871,50 +3020,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //      CPU stays warm, battery wasted.
             //
             // The fix: when we detect `.failed` AND we're in
-            // background, auto-pause mpv (set `pause=1`). This
-            // stops mpv's decode loop, so no more wasted CPU on
-            // frames that can't be displayed. The existing
-            // `willEnterForeground` handler unpauses via the
-            // shared `autoPausedOnBackground` flag and flushes
-            // the layer to recover, so the resume path is
-            // already wired up.
-            //
-            // Foreground failures (rare; e.g. transient decoder
-            // glitch with the screen on) just skip the enqueue —
-            // we don't pause mpv because the user is watching
-            // and a brief blank frame is preferable to a
-            // surprise pause they didn't ask for.
-            var enqueued = false
+            // background, auto-pause mpv (set `pause=1`). The
+            // existing `willEnterForeground` handler unpauses via
+            // the shared `autoPausedOnBackground` flag and flushes
+            // the layer to recover.
 
             // v1.7.x Issue A round 6 (Step 3a): black-frame detector.
             // mpv's VT path occasionally hands us a uniformly-zero
             // CVPixelBuffer in an otherwise smooth frame stream
             // (verified 2026-05-08, 17 events in 76s of UHD HEVC HDR
-            // playback). The detector below catches them before we
-            // wrap into a CMSampleBuffer; suppression skips the
-            // enqueue and leaves lastEnqueuedSampleBuffer untouched
-            // so the CADisplayLink watchdog re-enqueues the previous
-            // good frame on its next tick. Two-deep surround check
-            // ensures we don't suppress legitimate cuts to black.
-            // See block-level comment above the state declarations
-            // for the full rationale and source.
+            // playback). The detector catches them before we
+            // publish; suppression skips the publish and leaves the
+            // pacer's `lastEnqueuedCMSB` untouched so the next pacer
+            // tick re-enqueues the previous good frame. Two-deep
+            // surround check ensures we don't suppress legitimate
+            // cuts to black.
             let blackProbe = Self.detectBlackFrame(renderPixelBuffer)
             // Probe returned (-1, -1) on lock-failure / non-BGRA;
             // treat that as "don't suppress" (no false positives if
             // the probe itself fails).
             let probeValid = blackProbe.avg >= 0
-            // v1.7.x 3a-tighten (2026-05-08): loosened from avg<4
-            // and std<1 (pure codec-zero only) to avg<10 and std<8
-            // (codec-zero + partial-corruption with small carry-
-            // over slivers). Verification showed the bug produces
-            // both classes; the surround check below is what
-            // protects legitimate dark content. See block comment
-            // above the state declarations for the full rationale.
+            // Loosened from avg<4 and std<1 (pure codec-zero only)
+            // to avg<10 and std<8 (codec-zero + partial-corruption
+            // with small carry-over slivers).
             let isSuspectBlackFrame = probeValid
                 && blackProbe.avg < 10.0
                 && blackProbe.std < 8.0
                 && blackFramePrevAvgLuma > 25.0
                 && blackFramePrevPrevAvgLuma > 20.0
+
+            var published = false
 
             if layerStatus == .failed {
                 if isInBackground && markAutoPausedOnBackgroundIfNeeded() {
@@ -2927,19 +3062,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     print("[MPV-BG] Background: sampleBufferRenderer FAILED — auto-paused mpv to stop wasted decode work")
                     #endif
                 } else if !isInBackground {
-                    // v1.7.x diagnostic: foreground sample-buffer-layer
-                    // failures present as black-screen flashes during
-                    // playback (Archie 2026-05-08, UHD/high-bitrate).
-                    // Log every 30th occurrence so we capture the
-                    // pattern without flooding the log on a sustained
-                    // failure run. Includes layer-failure-error if
-                    // we can pull it from the renderer (iOS 17+ exposes
-                    // .error on the renderer).
                     layerFailedFrameCount &+= 1
                     if layerFailedFrameCount == 1 || layerFailedFrameCount % 30 == 0 {
                         let err = sampleBufferLayer?.sampleBufferRenderer.error?.localizedDescription ?? "nil"
                         #if DEBUG
-                        print("[MPV-LAYER] \(streamTag) FOREGROUND layer .failed (frame #\(layerFailedFrameCount), enqueue skipped) — error=\(err)")
+                        print("[MPV-LAYER] \(streamTag) FOREGROUND layer .failed (frame #\(layerFailedFrameCount), publish skipped) — error=\(err)")
                         #endif
                         DebugLogger.shared.log(
                             "🔴 [MPV-LAYER] foreground .failed tile=\(tileID ?? "single") frame=\(layerFailedFrameCount) error=\(err)",
@@ -2949,11 +3076,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
             } else if isSuspectBlackFrame {
                 // Suppress: don't build a CMSampleBuffer, don't
-                // enqueue, don't update lastEnqueuedSampleBuffer.
-                // The CADisplayLink watchdog will tick within
-                // ~16ms and re-enqueue the previously-cached good
-                // sample buffer with a fresh PTS, so the user sees
-                // the previous frame held instead of solid black.
+                // publish, don't update the pacer's pending frame.
+                // The pacer will re-stamp the previously-cached
+                // good sample buffer on its next tick, so the user
+                // sees the previous frame held instead of solid
+                // black.
                 blackFramesSuppressedCount &+= 1
                 #if DEBUG
                 if blackFramesSuppressedCount == 1 || blackFramesSuppressedCount % 10 == 0 {
@@ -2963,117 +3090,99 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // Note: we deliberately do NOT update the prev/prev-
                 // prev luma history with the suppressed frame. The
                 // surround check on the NEXT frame still compares
-                // against the last GOOD frame's luma, so a sustained
-                // codec-zero burst (rare but possible) would only
-                // suppress the first frame, not subsequent ones —
-                // which is correct: if the source actually went
-                // dark, we want frames after the first to update
-                // the comparison baseline.
-            } else if let sampleBuffer = Self.makeSampleBuffer(from: renderPixelBuffer, presentationTime: presentationTime) {
-                nonisolated(unsafe) let sb = sampleBuffer
-                sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
-                enqueued = true
-                // v1.7.x Issue A round 4: cache the latest enqueued
-                // buffer for the IOSurface re-attach watchdog. Stored
-                // under watchdogLock so the main-thread display-link
-                // tick can read it safely.
-                os_unfair_lock_lock(&watchdogLock)
-                lastEnqueuedSampleBuffer = sb
-                os_unfair_lock_unlock(&watchdogLock)
-                // v1.7.x Issue A round 6: update luma history for
-                // the next-frame surround check, ONLY on successful
-                // enqueue. Suppressed frames don't update history
-                // (see comment in the suppression branch above).
-                if probeValid {
-                    blackFramePrevPrevAvgLuma = blackFramePrevAvgLuma
-                    blackFramePrevAvgLuma = blackProbe.avg
-                }
-                // v1.7.x: clear the failed-count once we successfully
-                // enqueue a frame, so a transient blip doesn't carry
-                // the count forward into a future event.
-                if layerFailedFrameCount > 0 {
-                    #if DEBUG
-                    print("[MPV-LAYER] \(streamTag) layer recovered after \(layerFailedFrameCount) failed frames")
-                    #endif
-                    layerFailedFrameCount = 0
-                }
+                // against the last GOOD frame's luma.
             } else {
-                // v1.7.x: makeSampleBuffer returned nil. This is rare
-                // (CMSampleBuffer construction failure indicates either
-                // a corrupt pixel buffer from libmpv's render path or
-                // an OOM-class CoreMedia allocator failure). Log so we
-                // can correlate with user-visible black flashes.
-                makeSampleBufferNilCount &+= 1
-                if makeSampleBufferNilCount == 1 || makeSampleBufferNilCount % 30 == 0 {
-                    #if DEBUG
-                    print("[MPV-LAYER] \(streamTag) makeSampleBuffer returned nil (count=\(makeSampleBufferNilCount))")
-                    #endif
-                    DebugLogger.shared.log(
-                        "🟠 [MPV-LAYER] makeSampleBuffer nil tile=\(tileID ?? "single") count=\(makeSampleBufferNilCount)",
-                        category: "MPV-STREAM", level: .warning
+                // Resolve or refresh the cached CMFormatDescription
+                // for this pixel buffer. The format only changes on
+                // FBO recreate (resolution / pixel-format change);
+                // otherwise we reuse a single CMFormatDescription
+                // across all frames for this stream. Computing it
+                // once on the render path keeps the pacer's per-
+                // VSync work minimal.
+                let formatDesc: CMFormatDescription?
+                if let cached = cachedFormatDesc,
+                   cachedFormatDescPixelBuffer === renderPixelBuffer {
+                    formatDesc = cached
+                } else {
+                    var newDesc: CMFormatDescription?
+                    let status = CMVideoFormatDescriptionCreateForImageBuffer(
+                        allocator: kCFAllocatorDefault,
+                        imageBuffer: renderPixelBuffer,
+                        formatDescriptionOut: &newDesc
                     )
+                    if status == noErr {
+                        formatDesc = newDesc
+                        cachedFormatDesc = newDesc
+                        cachedFormatDescPixelBuffer = renderPixelBuffer
+                    } else {
+                        formatDesc = nil
+                    }
+                }
+
+                if let fd = formatDesc {
+                    // Publish to the pacer. The render thread is the
+                    // only writer; the pacer is the only reader. The
+                    // serial bump tells the pacer "this is a new
+                    // frame" so it can distinguish a fresh publish
+                    // from a still-pending one (between ticks).
+                    os_unfair_lock_lock(&pacerLock)
+                    pendingPixelBuffer = renderPixelBuffer
+                    pendingFormatDesc = fd
+                    pendingFrameSerial &+= 1
+                    os_unfair_lock_unlock(&pacerLock)
+                    published = true
+                    if probeValid {
+                        blackFramePrevPrevAvgLuma = blackFramePrevAvgLuma
+                        blackFramePrevAvgLuma = blackProbe.avg
+                    }
+                    // Clear the failed-count once we successfully
+                    // publish a frame, so a transient blip doesn't
+                    // carry the count forward into a future event.
+                    if layerFailedFrameCount > 0 {
+                        #if DEBUG
+                        print("[MPV-LAYER] \(streamTag) layer recovered after \(layerFailedFrameCount) failed frames")
+                        #endif
+                        layerFailedFrameCount = 0
+                    }
+                } else {
+                    // Format description creation failed. Rare —
+                    // indicates a corrupt pixel buffer or OOM-class
+                    // CoreMedia allocator failure.
+                    makeSampleBufferNilCount &+= 1
+                    if makeSampleBufferNilCount == 1 || makeSampleBufferNilCount % 30 == 0 {
+                        #if DEBUG
+                        print("[MPV-LAYER] \(streamTag) CMVideoFormatDescriptionCreateForImageBuffer failed (count=\(makeSampleBufferNilCount))")
+                        #endif
+                        DebugLogger.shared.log(
+                            "🟠 [MPV-LAYER] format-desc create failed tile=\(tileID ?? "single") count=\(makeSampleBufferNilCount)",
+                            category: "MPV-STREAM", level: .warning
+                        )
+                    }
                 }
             }
 
-            let enqueueTime = CACurrentMediaTime()
-            let intervalMs = lastEnqueueTime > 0 ? (enqueueTime - lastEnqueueTime) * 1000.0 : 0
+            let publishTime = CACurrentMediaTime()
             let expectedIntervalMs = fps > 0 ? 1000.0 / fps : 33.3
-            // v1.7.x Issue A: split present-time out of the existing
-            // renderMs (which only covers mpv_render_context_render +
-            // glFlush, ending at renderEnd). presentMs is everything
-            // between renderEnd and enqueueTime — i.e., the failed-
-            // layer check + makeSampleBuffer + AVSBDL.enqueue. Lets
-            // us tell layer-side stalls (CoreMedia/AVSBDL) apart from
-            // libmpv-side stalls. If render is slow → mpv. If present
-            // is slow → CoreMedia / AVSampleBufferDisplayLayer. If
-            // both are normal but interval is huge → mpv was silent
-            // (catch this via [MPV-CALLBACK-GAP]).
-            let presentMs = (enqueueTime - renderEnd) * 1000.0
+            let intervalMs = frameIntervals.last ?? 0
+            // Split render-time out from publish-time: presentMs is
+            // everything between the GPU work finishing and the
+            // pacer-handoff completing (mostly the failed-layer
+            // check, black-frame probe, and format-desc lookup).
+            let presentMs = (publishTime - renderEnd) * 1000.0
 
             // ── Per-frame diagnostics ──
-            // DEBUG-only, with tight frame caps. This block previously
-            // printed every frame for the first 120 frames (~4 seconds
-            // of playback at 30fps), which on Apple TV 4K with 2
-            // concurrent tiles meant ~60 print()s per second during
-            // startup — enough allocation churn to visibly stutter the
-            // UI and audio on thermally-throttled hardware. Now:
-            //   - Gated on #if DEBUG so release builds do zero work.
-            //   - First-frame ramp cut from 120 → 30 (1 second, enough
-            //     to catch pipeline warm-up anomalies).
-            //   - Anomaly prints remain (unbounded) because those are
-            //     the diagnostic signal we actually care about when
-            //     investigating lag.
+            // DEBUG-only, with tight frame caps.
             #if DEBUG
-            // Anomaly = something the developer actually wants to see.
-            // The old definition flagged `intervalMs < expected * 0.3`
-            // (i.e. frames arriving faster than expected) as an anomaly,
-            // but live MPEG-TS streams coalesce frames in bursts via
-            // the packetizer — sub-10ms intervals are the rule, not an
-            // exception, and the old threshold generated hundreds of
-            // ⚠️ lines per minute per tile. At 9 tiles that's thousands
-            // of string allocations + stdout writes per minute, enough
-            // to make the Xcode console laggy and noticeably affect the
-            // debug-build feel. Now: only flag LATE frames (interval >
-            // 2× expected) and hard failures (layer not ready / failed
-            // / enqueue rejected). Fast-arrival bursts are expected and
-            // no longer logged.
-            // v1.7.x Issue A: presentMs > 33 flags layer-side stalls
-            // (CoreMedia / AVSampleBufferDisplayLayer). With renderMs
-            // already gating libmpv-side stalls (see lateFrameCount
-            // increment above), this gives us per-frame breakdown of
-            // where the slow path is when an interval anomaly fires.
             let isAnomaly = intervalMs > 0 && (
                 intervalMs > expectedIntervalMs * 2.0 ||
                 presentMs > 33.0 ||
-                !layerReady || layerStatus == .failed || !enqueued
+                layerStatus == .failed || !published
             )
 
             if totalFrameCount <= 30 || isAnomaly {
                 let tag = isAnomaly ? "⚠️" : "🎞️"
-                // `streamTag` up front so log consumers can filter /
-                // group per channel (e.g. `grep "NBC Sports"` to see
-                // just that tile's frame history).
-                print("\(tag) \(streamTag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms present=\(String(format: "%.1f", presentMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) pts=\(String(format: "%.3f", CMTimeGetSeconds(presentationTime)))s ready=\(layerReady) enqueued=\(enqueued) status=\(layerStatus == .failed ? "FAILED" : "ok")")
+                let layerReady = sampleBufferLayer?.sampleBufferRenderer.isReadyForMoreMediaData ?? false
+                print("\(tag) \(streamTag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms present=\(String(format: "%.1f", presentMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) ready=\(layerReady) published=\(published) status=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
             #endif
 
@@ -3092,10 +3201,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let variance = frameIntervals.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / Double(frameIntervals.count)
                     return sqrt(variance)
                 }()
-                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | black_supp=\(blackFramesSuppressedCount) | bp_skip=\(backpressureSkipCount) | gaps=\(callbackGapMildCount)/\(callbackGapModerateCount)/\(callbackGapSevereCount)(mild/mod/sev) | audio_reconfigs=\(audioReconfigCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
+                let totalPacerTicks = pacerNewFrameCount + pacerDupCount
+                let dupPct: Double = totalPacerTicks > 0
+                    ? (Double(pacerDupCount) / Double(totalPacerTicks)) * 100.0
+                    : 0
+                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | pacer=\(pacerNewFrameCount)new/\(pacerDupCount)dup(\(String(format: "%.0f", dupPct))%dup)/\(pacerSkipCount)skip | black_supp=\(blackFramesSuppressedCount) | bp_skip=\(backpressureSkipCount) | gaps=\(callbackGapMildCount)/\(callbackGapModerateCount)/\(callbackGapSevereCount)(mild/mod/sev) | audio_reconfigs=\(audioReconfigCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
-
-            lastEnqueueTime = enqueueTime
         }
 
         func stop() {
@@ -5221,25 +5332,26 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }
 
         /// Convert CVPixelBuffer to CMSampleBuffer for AVSampleBufferDisplayLayer.
+        ///
+        /// v1.8: takes an explicit `formatDesc` so the caller can
+        /// cache it across frames. The format only changes when the
+        /// pixel-buffer pixel format / dimensions change (i.e. on
+        /// FBO recreate at resize time), so the pacer can build
+        /// 60 of these per second without re-running
+        /// CMVideoFormatDescriptionCreateForImageBuffer every tick.
         private static func makeSampleBuffer(
             from pixelBuffer: CVPixelBuffer,
+            formatDesc: CMFormatDescription,
             presentationTime: CMTime
         ) -> CMSampleBuffer? {
-            var formatDesc: CMFormatDescription?
-            let status = CMVideoFormatDescriptionCreateForImageBuffer(
-                allocator: kCFAllocatorDefault,
-                imageBuffer: pixelBuffer,
-                formatDescriptionOut: &formatDesc
-            )
-            guard status == noErr, let desc = formatDesc else { return nil }
-
-            // Duration is .invalid — mpv with video-sync=audio delivers frames
-            // at display refresh rate (~60fps) regardless of content FPS,
-            // duplicating frames as needed. Declaring a content-based duration
-            // (e.g. 33ms for 30fps) conflicts with the actual 16.5ms delivery
-            // interval, confusing the display layer. With .invalid duration,
-            // each frame shows until the next one is enqueued — matching exactly
-            // how mpv delivers them.
+            // Duration is .invalid — the pacer enqueues exactly one
+            // CMSampleBuffer per VSync, so the implicit "show until
+            // the next enqueue" semantics are exactly what we want:
+            // each frame lasts one VSync. Declaring an explicit
+            // duration would be wrong here — small scheduling jitter
+            // would create momentary gaps the layer might fill with
+            // black. `.invalid` is robust to pacer-tick jitter; the
+            // duplicate path keeps the layer fed.
             var timingInfo = CMSampleTimingInfo(
                 duration: .invalid,
                 presentationTimeStamp: presentationTime,
@@ -5250,7 +5362,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let createStatus = CMSampleBufferCreateReadyWithImageBuffer(
                 allocator: kCFAllocatorDefault,
                 imageBuffer: pixelBuffer,
-                formatDescription: desc,
+                formatDescription: formatDesc,
                 sampleTiming: &timingInfo,
                 sampleBufferOut: &sampleBuffer
             )
