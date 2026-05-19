@@ -80,12 +80,16 @@ final class ServerConnectionViewModel {
         if trimmedURL.isEmpty {
             let label: String = (serverType == .m3uPlaylist) ? "Playlist URL is required." : "Server URL is required."
             errors.append(.init(field: .baseURL, message: label))
-        } else if !looksLikeValidURL(trimmedURL) {
-            errors.append(.init(field: .baseURL, message: "URL must start with http:// or https://"))
+        } else if !looksLikeValidServerURL(trimmedURL) {
+            errors.append(.init(field: .baseURL, message: "Enter a server URL like dispatcharr.example.com or https://example.com"))
         }
         switch serverType {
         case .m3uPlaylist:
             // Optional EPG URL: validate format if provided, blank is OK.
+            // EPG URL keeps the strict scheme-required check because its
+            // downstream consumers (ChannelListView, ServerSyncView) call
+            // `URL(string:)` directly without the `http://`-prefix
+            // normalization the server baseURL gets in `normalizedURL`.
             let trimmedEPG = epgURL.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmedEPG.isEmpty && !looksLikeValidURL(trimmedEPG) {
                 errors.append(.init(field: .epgURL, message: "EPG URL must start with http:// or https://"))
@@ -120,14 +124,39 @@ final class ServerConnectionViewModel {
         return errors
     }
 
-    /// Cheap URL-shape check. Avoids `URL(string:)` because Foundation
-    /// happily accepts strings like `"asdf"` (relative URL). We want
-    /// to nudge users towards a full http(s) URL during onboarding.
+    /// Strict URL-shape check requiring an explicit http(s) scheme.
+    /// Avoids `URL(string:)`-only validation because Foundation happily
+    /// accepts strings like `"asdf"` (relative URL). Used for the M3U
+    /// EPG URL field, whose consumers don't run scheme normalization.
     private func looksLikeValidURL(_ raw: String) -> Bool {
         let lower = raw.lowercased()
         guard lower.hasPrefix("http://") || lower.hasPrefix("https://") else { return false }
         guard URL(string: raw)?.host?.isEmpty == false else { return false }
         return true
+    }
+
+    /// Lenient URL-shape check for the SERVER baseURL field. Accepts a
+    /// fully-formed `http(s)://` URL OR a bare host like
+    /// `dispatcharr.example.com` (no scheme). v1.7.3: requested so a
+    /// user can type the bare host on the Add Server screen without
+    /// the `https://` prefix. This matches what happens downstream
+    /// anyway: `normalizedURL` prepends `http://` to a scheme-less
+    /// host before any network call, and `withATSSchemeUpgrade`
+    /// retries `https://` if iOS's HSTS layer blocks the plain-HTTP
+    /// attempt. So accepting bare hosts here just lets the form match
+    /// the behavior the rest of the pipeline already supports.
+    ///
+    /// Validation for a bare host: speculatively prefix `http://` and
+    /// confirm the result parses with a non-empty host. Rejects empty
+    /// hosts and obviously-malformed input while letting
+    /// `dispatcharr.example.com`, `192.168.1.10`, and
+    /// `192.168.1.10:9191` through.
+    private func looksLikeValidServerURL(_ raw: String) -> Bool {
+        let lower = raw.lowercased()
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://") {
+            return URL(string: raw)?.host?.isEmpty == false
+        }
+        return URL(string: "http://" + raw)?.host?.isEmpty == false
     }
 
     /// Form field identity used by the validation system. v1.6.23.
