@@ -2566,6 +2566,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         @MainActor
         func startPacerIfNeeded() {
             guard displayLinkPacer == nil else { return }
+            // Don't start the pacer while in audio-only mode. The
+            // $isAudioOnly sink calls stopPacer() / startPacerIfNeeded()
+            // on transitions, but setupRenderer fires AFTER the sink's
+            // initial-value delivery, so without this guard the pacer
+            // would start unconditionally at viewDidLoad even if the
+            // stream was already known to be audio-only.
+            guard !progressStore.isAudioOnly else { return }
             let link = CADisplayLink(target: self, selector: #selector(handlePacerTick(_:)))
             // ProMotion-friendly: prefer 60Hz, allow 30-120 range so
             // iOS picks the display-aligned cadence. We want every
