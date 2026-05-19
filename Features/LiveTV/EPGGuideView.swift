@@ -1976,6 +1976,15 @@ struct EPGGuideView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var _epgCacheIsFresh = false
 
+/// The channel row that `resetFocus(in: guideFocusNS)` on tvOS
+    /// should land on. Set before each `.forceGuideFocus` reset to the
+    /// currently-playing channel (single-stream) or the last-added
+    /// tile's channel (multiview). Nil falls back to `channels.first`
+    /// — the historical default. Only set within the tvOS `.forceGuideFocus`
+    /// handler; always nil on iOS, so the inline `focusTargetID`
+    /// resolution falls through to `channels.first?.id`.
+    @State private var guideFocusTargetChannelID: String? = nil
+
     /// v1.7.x: transient toast string for staging actions ("Added X
     /// to Multiview", "Removed Y", "Max reached", etc.). Set by
     /// `handleMultiviewIntent`; auto-clears after ~2.5s via the
@@ -1986,22 +1995,6 @@ struct EPGGuideView: View {
     /// Programmatic focus target for a channel row's left-hand cell.
     /// Normally nil (focus engine drives navigation).
     @FocusState private var focusedChannelID: String?
-    /// Programmatic focus target for a specific program cell. Used
-    /// by `.forceGuideFocus` to land focus on the currently-playing
-    /// program of the first channel after the single-stream player
-    /// minimizes — without this, tvOS's spatial search from the
-    /// top-right mini position lands on a program 2–3 hours in the
-    /// future (because that's what's directly below the mini).
-    /// Setting this to a program's id claims focus on that cell.
-    // NOTE: `@FocusState private var focusedProgramID: String?` was
-    // removed alongside the `.focused(...)` binding on each program
-    // cell. Both formed a redundant focus-routing channel that
-    // created two competing focus targets per cell
-    // (`TVPressOverlay`'s `PressCatcherView` + the SwiftUI
-    // `.focused` binding), which manifested as specific program
-    // cells being permanently unreachable via Siri Remote D-pad.
-    // See `programCell(_:channelItem:nextProgramStart:)` for the
-    // full diagnosis and rationale.
 
     /// Namespace + imperative reset hook for the guide's focus
     /// scope. See ChannelListView's identical setup for the full
@@ -2011,6 +2004,7 @@ struct EPGGuideView: View {
     /// the mini by the time a plain `@FocusState` write can fire.
     @Namespace private var guideFocusNS
     @Environment(\.resetFocus) private var resetFocus
+
     #endif
 
     // Time window: 1h back + user-configured hours forward.
@@ -2229,8 +2223,16 @@ struct EPGGuideView: View {
                         Color.clear
                             .frame(height: 0)
                             .id("guide.top")
+                        // Resolve the focus target once before the
+                        // ForEach so the O(n) channels scan happens
+                        // once per render pass rather than once per
+                        // row. Each guideRow receives the pre-resolved
+                        // value and does a single O(1) equality check.
+                        let focusTargetID: String? = guideFocusTargetChannelID.flatMap { id in
+                            channels.first(where: { $0.id == id })?.id
+                        } ?? channels.first?.id
                         ForEach(channels) { channel in
-                            guideRow(for: channel, screenWidth: geo.size.width)
+                            guideRow(for: channel, screenWidth: geo.size.width, focusTargetID: focusTargetID)
                         }
                     } header: {
                         // ── Time header (pinned at top) ──
@@ -2337,26 +2339,45 @@ struct EPGGuideView: View {
             .onReceive(
                 NotificationCenter.default.publisher(for: .forceGuideFocus)
             ) { _ in
-                // Reclaim focus from the minimized mini-player via
-                // Apple's imperative focus-reset API. See
-                // ChannelListView's `.forceGuideFocus` handler for
-                // the full rationale — briefly: a plain
-                // `@FocusState` write (what this handler did
-                // pre-v1.6.4) was treated by tvOS as a focus
-                // REQUEST that the engine routinely rejected
-                // because it had already committed to the mini
-                // tile by the time the write landed. Calling
-                // `resetFocus(in:)` forces tvOS to re-evaluate
-                // focus within the scope and lands on the row
-                // carrying `.prefersDefaultFocus(true, in:)` —
-                // which is the top channel row.
-                //
-                // The 400ms delay covers the 350ms minimize spring
-                // animation; triggering during the animation lets
-                // tvOS ignore the reset because the mini tile's
-                // frame is still in flux.
+                // All work runs on the main actor so @MainActor-
+                // isolated singletons (MultiviewStore, NowPlayingManager)
+                // and @State mutations are accessed safely regardless
+                // of which thread NotificationCenter delivers on.
                 Task { @MainActor in
+                    // Resolve target: use the last-added multiview tile
+                    // (keyed by addedAt, not array order which can change
+                    // via drag-rearrange), then fall back to the single-
+                    // stream playing item, then nil → top row.
+                    let mvLastID = MultiviewStore.shared.tiles
+                        .max(by: { $0.addedAt < $1.addedAt })?.item.id
+                    let singleID = NowPlayingManager.shared.playingItem?.id
+                    let candidateID = mvLastID ?? singleID
+                    // Only store the target if it's actually present in
+                    // the current (possibly filtered) channel list —
+                    // otherwise leave it nil so the fallback to
+                    // channels.first in prefersDefaultFocus still fires.
+                    guideFocusTargetChannelID = candidateID.flatMap { id in
+                        channels.first(where: { $0.id == id })?.id
+                    }
+                    // The 400ms delay covers the 350ms minimize spring
+                    // animation; triggering during the animation lets
+                    // tvOS ignore the reset because the mini tile's
+                    // frame is still in flux.
                     try? await Task.sleep(nanoseconds: 400_000_000)
+                    // Scroll the guide to bring the target row into
+                    // view before handing focus to it. Re-validate
+                    // against channels here (post-sleep) in case the
+                    // list or filter changed during the 400ms delay —
+                    // scroll is skipped rather than targeting a missing
+                    // id. Falls back to top-row focus via resetFocus.
+                    let validatedScrollTargetID = guideFocusTargetChannelID.flatMap { id in
+                        channels.first(where: { $0.id == id })?.id
+                    }
+                    if let id = validatedScrollTargetID {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            proxy.scrollTo(id, anchor: .center)
+                        }
+                    }
                     resetFocus(in: guideFocusNS)
                 }
             }
@@ -2403,7 +2424,7 @@ struct EPGGuideView: View {
     // channel column's `zIndex(0.5)`. Any leftward overflow was
     // therefore invisible (covered by the opaque channel column),
     // which means this simplification loses no visible behaviour.
-    private func guideRow(for channel: ChannelDisplayItem, screenWidth: CGFloat) -> some View {
+    private func guideRow(for channel: ChannelDisplayItem, screenWidth: CGFloat, focusTargetID: String? = nil) -> some View {
         HStack(spacing: 0) {
             // Left: fixed-width channel column. Standalone UIView;
             // no overlap with program cells.
@@ -2421,11 +2442,14 @@ struct EPGGuideView: View {
                 // outer ScrollView to claim focus from a minimized
                 // mini player.
                 .focused($focusedChannelID, equals: channel.id)
-                // Mark the top row as the default-focus target so
-                // `resetFocus(in: guideFocusNS)` lands here. See
-                // the `.forceGuideFocus` handler on the outer
-                // ScrollView for the full rationale.
-                .prefersDefaultFocus(channel.id == channels.first?.id, in: guideFocusNS)
+                // Mark the playing channel as the default-focus
+                // target so `resetFocus(in: guideFocusNS)` lands
+                // there. `focusTargetID` is resolved once before the
+                // ForEach (O(n) total), so this comparison is O(1).
+                .prefersDefaultFocus(
+                    channel.id == focusTargetID,
+                    in: guideFocusNS
+                )
                 #endif
 
             // Right: program area, clipped to exactly the visible
