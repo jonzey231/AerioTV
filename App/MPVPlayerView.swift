@@ -1772,7 +1772,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // `canStartPictureInPictureAutomaticallyFromInline` and
             // `pipAutoEligible` aligned with the user's current
             // intent. `.receive(on: main)` so we touch the PiP
-            // controller on the same thread that owns it.
+            // controller and the pacer on the same thread that owns them.
             progressStore.$isAudioOnly
                 .receive(on: DispatchQueue.main)
                 .sink { [weak self] newValue in
@@ -1784,6 +1784,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     }
                     #endif
                     self?.updateAutoPiPEligibility()
+                    // v1.8: stop the frame pacer while in audio-only
+                    // mode — mpv sets `vid=no` so no frames will arrive,
+                    // and keeping a 60Hz CADisplayLink alive just to
+                    // duplicate a stale `lastEnqueuedCMSB` indefinitely
+                    // wastes CPU and battery. The pacer restarts when
+                    // audio-only is cleared (video resumes).
+                    if newValue {
+                        self?.stopPacer()
+                    } else {
+                        self?.startPacerIfNeeded()
+                    }
                 }
                 .store(in: &cancellables)
             #endif
@@ -3164,25 +3175,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let publishTime = CACurrentMediaTime()
             let expectedIntervalMs = fps > 0 ? 1000.0 / fps : 33.3
             let intervalMs = frameIntervals.last ?? 0
-            // Split render-time out from publish-time: presentMs is
-            // everything between the GPU work finishing and the
-            // pacer-handoff completing (mostly the failed-layer
-            // check, black-frame probe, and format-desc lookup).
-            let presentMs = (publishTime - renderEnd) * 1000.0
+            // publishMs covers everything from GPU work finishing to
+            // the pacer-handoff completing (failed-layer check,
+            // black-frame probe, format-desc lookup). This is
+            // typically sub-millisecond; it is NOT a measure of
+            // AVSBDL enqueue latency (the pacer handles that now).
+            let publishMs = (publishTime - renderEnd) * 1000.0
 
             // ── Per-frame diagnostics ──
             // DEBUG-only, with tight frame caps.
             #if DEBUG
             let isAnomaly = intervalMs > 0 && (
                 intervalMs > expectedIntervalMs * 2.0 ||
-                presentMs > 33.0 ||
                 layerStatus == .failed || !published
             )
 
             if totalFrameCount <= 30 || isAnomaly {
                 let tag = isAnomaly ? "⚠️" : "🎞️"
                 let layerReady = sampleBufferLayer?.sampleBufferRenderer.isReadyForMoreMediaData ?? false
-                print("\(tag) \(streamTag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms present=\(String(format: "%.1f", presentMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) ready=\(layerReady) published=\(published) status=\(layerStatus == .failed ? "FAILED" : "ok")")
+                print("\(tag) \(streamTag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms publish=\(String(format: "%.2f", publishMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) ready=\(layerReady) published=\(published) status=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
             #endif
 
