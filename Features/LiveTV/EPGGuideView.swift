@@ -728,12 +728,23 @@ final class GuideStore: ObservableObject {
         // Includes BOTH the channel's own tvg_id AND its bridged
         // EPGData.tvg_id (via Channel.epg_data_id) so the program
         // match loop below resolves either casing in a single
-        // dictionary lookup. Channel.tvg_id wins when both are
-        // present and differ.
-        var tvgIDToChannelIDBuild: [String: String] = [:]
+        // dictionary lookup.
+        //
+        // v1.7.3 (Issue #20, jdfrey1 2026-05-16): value type is
+        // `[String]` rather than `String` so a tvg-id shared by
+        // multiple channels (e.g. Teamarr's multi-source channels
+        // for one game: Arsenal-1, Arsenal-2, Arsenal-3 all
+        // pointing at one EPG entry) routes the matched programs
+        // to EVERY channel that shares the tvg-id, not just one
+        // winner. The previous `[String: String]` collapsed shared
+        // tvg-ids to whichever channel was iterated last, leaving
+        // the others with no Guide programs.
+        var tvgIDToChannelIDsBuild: [String: [String]] = [:]
         for ch in channels {
-            if let tvg = ch.tvgID, !tvg.isEmpty {
-                tvgIDToChannelIDBuild[tvg.lowercased()] = ch.id
+            guard let tvg = ch.tvgID, !tvg.isEmpty else { continue }
+            let key = tvg.lowercased()
+            if tvgIDToChannelIDsBuild[key]?.contains(ch.id) != true {
+                tvgIDToChannelIDsBuild[key, default: []].append(ch.id)
             }
         }
         var bridgedEntryCount = 0
@@ -742,15 +753,15 @@ final class GuideStore: ObservableObject {
                   let bridgedTvgID = epgDataIDToTvgID[epgID],
                   !bridgedTvgID.isEmpty else { continue }
             let key = bridgedTvgID.lowercased()
-            if tvgIDToChannelIDBuild[key] == nil {
-                tvgIDToChannelIDBuild[key] = ch.id
+            if tvgIDToChannelIDsBuild[key]?.contains(ch.id) != true {
+                tvgIDToChannelIDsBuild[key, default: []].append(ch.id)
                 bridgedEntryCount += 1
             }
         }
         if bridgedEntryCount > 0 {
             debugLog("📺 Dispatcharr: bridged \(bridgedEntryCount) channels via epg_data_id → EPGData.tvg_id")
         }
-        let tvgIDToChannelID = tvgIDToChannelIDBuild
+        let tvgIDToChannelIDs = tvgIDToChannelIDsBuild
         // Also build channel int ID → display ID mapping for fallback
         let intIDToChannelID: [Int: String] = Dictionary(
             channels.compactMap { ch in
@@ -767,7 +778,7 @@ final class GuideStore: ObservableObject {
         // `apps/epg/api_views.py::EPGGridAPIView`). Without this
         // mapping, every channel relying on Dummy EPG would appear
         // blank in the Aerio guide because the first-pass
-        // `tvgIDToChannelID` lookup misses and the `intIDToChannelID`
+        // `tvgIDToChannelIDs` lookup misses and the `intIDToChannelID`
         // fallback runs only when `prog.tvg_id` is absent. Lowercase
         // both sides for consistency with the tvgID map.
         let uuidToChannelID: [String: String] = Dictionary(
@@ -781,7 +792,7 @@ final class GuideStore: ObservableObject {
         // Try the EPG grid endpoint first — returns -1h to +24h in one request with
         // synthetic dummy programs for channels without EPG data.
         #if DEBUG
-        debugLog("📺 Dispatcharr: fetching EPG grid, tvgID map has \(tvgIDToChannelID.count) entries, intID map has \(intIDToChannelID.count) entries, uuid map has \(uuidToChannelID.count) entries")
+        debugLog("📺 Dispatcharr: fetching EPG grid, tvgID map has \(tvgIDToChannelIDs.count) entries, intID map has \(intIDToChannelID.count) entries, uuid map has \(uuidToChannelID.count) entries")
         #endif
         do {
             let gridPrograms = try await api.getEPGGrid()
@@ -794,24 +805,29 @@ final class GuideStore: ObservableObject {
                 guard let start = prog.startTime?.toDate(),
                       let end = prog.endTime?.toDate(),
                       end > windowStart && start < windowEnd else { continue }
-                let channelID: String?
+                // v1.7.3 (Issue #20): a single tvg-id can map to
+                // multiple channels (shared-EPG case); the program
+                // gets merged into every matched channel's program
+                // list. `intIDToChannelID` and `uuidToChannelID` are
+                // unique by construction so they stay single-channel.
+                let cids: [String]
                 if let tvg = prog.tvgID, !tvg.isEmpty {
                     let key = tvg.lowercased()
-                    if let cid = tvgIDToChannelID[key] {
-                        channelID = cid
+                    if let arr = tvgIDToChannelIDs[key], !arr.isEmpty {
+                        cids = arr
                     } else if let cid = uuidToChannelID[key] {
                         // Dummy EPG entry — the `tvg_id` IS the channel UUID.
-                        channelID = cid
+                        cids = [cid]
                         matchedViaUUID += 1
                     } else {
-                        channelID = nil
+                        cids = []
                     }
-                } else if let chInt = prog.channel {
-                    channelID = intIDToChannelID[chInt]
+                } else if let chInt = prog.channel, let cid = intIDToChannelID[chInt] {
+                    cids = [cid]
                 } else {
-                    channelID = nil
+                    cids = []
                 }
-                guard let cid = channelID else { continue }
+                if cids.isEmpty { continue }
                 matched += 1
                 let desc = prog.description.isEmpty ? prog.subTitle : prog.description
                 // v1.7.x: thread `programID` so ProgramInfoView can
@@ -820,10 +836,12 @@ final class GuideStore: ObservableObject {
                 // categories server-side, so without this the modal
                 // shows zero pills for any program that wasn't part
                 // of the now-airing enrichment fan-out.
-                let gp = GuideProgram(channelID: cid, title: prog.title,
-                                      description: desc, start: start, end: end,
-                                      category: "", programID: prog.programID)
-                mergeProgram(gp, for: cid)
+                for cid in cids {
+                    let gp = GuideProgram(channelID: cid, title: prog.title,
+                                          description: desc, start: start, end: end,
+                                          category: "", programID: prog.programID)
+                    mergeProgram(gp, for: cid)
+                }
             }
             #if DEBUG
             debugLog("📺 Dispatcharr: EPG grid matched \(matched) programs to channels (\(matchedViaUUID) via Dummy EPG UUID key)")
@@ -848,7 +866,7 @@ final class GuideStore: ObservableObject {
             Task { [self] in
                 await self.enrichDispatcharrCategories(gridPrograms: gridPrograms,
                                                         api: api,
-                                                        tvgIDToChannelID: tvgIDToChannelID,
+                                                        tvgIDToChannelIDs: tvgIDToChannelIDs,
                                                         uuidToChannelID: uuidToChannelID,
                                                         serverID: categoryServerID)
             }
@@ -870,21 +888,31 @@ final class GuideStore: ObservableObject {
                 guard let start = prog.startTime?.toDate(),
                       let end = prog.endTime?.toDate(),
                       end > windowStart && start < windowEnd else { continue }
-                let channelID: String?
+                // v1.7.3 (Issue #20): tvg-id may match multiple
+                // channels; fan the program out to every matched cid.
+                let cids: [String]
                 if let tvg = prog.tvgID, !tvg.isEmpty {
                     let key = tvg.lowercased()
-                    channelID = tvgIDToChannelID[key] ?? uuidToChannelID[key]
-                } else if let chInt = prog.channel {
-                    channelID = intIDToChannelID[chInt]
+                    if let arr = tvgIDToChannelIDs[key], !arr.isEmpty {
+                        cids = arr
+                    } else if let cid = uuidToChannelID[key] {
+                        cids = [cid]
+                    } else {
+                        cids = []
+                    }
+                } else if let chInt = prog.channel, let cid = intIDToChannelID[chInt] {
+                    cids = [cid]
                 } else {
-                    channelID = nil
+                    cids = []
                 }
-                guard let cid = channelID else { continue }
+                if cids.isEmpty { continue }
                 let desc = prog.description.isEmpty ? prog.subTitle : prog.description
-                let gp = GuideProgram(channelID: cid, title: prog.title,
-                                      description: desc, start: start, end: end,
-                                      category: "", programID: prog.programID)
-                mergeProgram(gp, for: cid)
+                for cid in cids {
+                    let gp = GuideProgram(channelID: cid, title: prog.title,
+                                          description: desc, start: start, end: end,
+                                          category: "", programID: prog.programID)
+                    mergeProgram(gp, for: cid)
+                }
             }
         }
 
@@ -895,21 +923,31 @@ final class GuideStore: ObservableObject {
                 guard let start = prog.startTime?.toDate(),
                       let end = prog.endTime?.toDate(),
                       end > windowStart && start < windowEnd else { continue }
-                let channelID: String?
+                // v1.7.3 (Issue #20): tvg-id may match multiple
+                // channels; fan the program out to every matched cid.
+                let cids: [String]
                 if let tvg = prog.tvgID, !tvg.isEmpty {
                     let key = tvg.lowercased()
-                    channelID = tvgIDToChannelID[key] ?? uuidToChannelID[key]
-                } else if let chInt = prog.channel {
-                    channelID = intIDToChannelID[chInt]
+                    if let arr = tvgIDToChannelIDs[key], !arr.isEmpty {
+                        cids = arr
+                    } else if let cid = uuidToChannelID[key] {
+                        cids = [cid]
+                    } else {
+                        cids = []
+                    }
+                } else if let chInt = prog.channel, let cid = intIDToChannelID[chInt] {
+                    cids = [cid]
                 } else {
-                    channelID = nil
+                    cids = []
                 }
-                guard let cid = channelID else { continue }
+                if cids.isEmpty { continue }
                 let desc = prog.description.isEmpty ? prog.subTitle : prog.description
-                let gp = GuideProgram(channelID: cid, title: prog.title,
-                                      description: desc, start: start, end: end,
-                                      category: "", programID: prog.programID)
-                mergeProgram(gp, for: cid)
+                for cid in cids {
+                    let gp = GuideProgram(channelID: cid, title: prog.title,
+                                          description: desc, start: start, end: end,
+                                          category: "", programID: prog.programID)
+                    mergeProgram(gp, for: cid)
+                }
             }
         }
 
@@ -1013,7 +1051,7 @@ final class GuideStore: ObservableObject {
     private func enrichDispatcharrCategories(
         gridPrograms: [DispatcharrCurrentProgram],
         api: DispatcharrAPI,
-        tvgIDToChannelID: [String: String],
+        tvgIDToChannelIDs: [String: [String]],
         uuidToChannelID: [String: String],
         serverID: String
     ) async {
@@ -1026,11 +1064,23 @@ final class GuideStore: ObservableObject {
                   let end = prog.endTime?.toDate(),
                   start <= now, end > now else { continue }
             let key = (prog.tvgID ?? "").lowercased()
-            guard !key.isEmpty,
-                  let cid = tvgIDToChannelID[key] ?? uuidToChannelID[key] else { continue }
-            if currentByChannelID[cid] == nil {
-                currentByChannelID[cid] = pid
-                programIDByChannelID[cid] = pid
+            guard !key.isEmpty else { continue }
+            // v1.7.3 (Issue #20): a single program can match multiple
+            // channels sharing the tvg-id; fan the categories out so
+            // all of them get the same currently-airing category tint.
+            let cids: [String]
+            if let arr = tvgIDToChannelIDs[key], !arr.isEmpty {
+                cids = arr
+            } else if let cid = uuidToChannelID[key] {
+                cids = [cid]
+            } else {
+                continue
+            }
+            for cid in cids {
+                if currentByChannelID[cid] == nil {
+                    currentByChannelID[cid] = pid
+                    programIDByChannelID[cid] = pid
+                }
             }
         }
         guard !currentByChannelID.isEmpty else {
@@ -1042,7 +1092,7 @@ final class GuideStore: ObservableObject {
             //     programID (Dummy EPG / string-id rows only)
             //   • programIDs were present but none mapped to a channel
             //     via tvgID/uuid lookup (mapping miss)
-            debugLog("📺 enrich SKIP: gridPrograms=\(gridPrograms.count) tvgMap=\(tvgIDToChannelID.count) uuidMap=\(uuidToChannelID.count); no currently-airing program matched all guards")
+            debugLog("📺 enrich SKIP: gridPrograms=\(gridPrograms.count) tvgMap=\(tvgIDToChannelIDs.count) uuidMap=\(uuidToChannelID.count); no currently-airing program matched all guards")
             return
         }
         debugLog("📺 Dispatcharr category enrichment: \(currentByChannelID.count) currently-airing programs; fetching /api/epg/programs/<id>/ at cap-of-4")
@@ -1295,13 +1345,20 @@ final class GuideStore: ObservableObject {
 
         // Build channel-lookup dictionaries on the MainActor. All
         // three are small (one entry per channel) and cheap.
-        let tvgIDToChannelID: [String: String] = Dictionary(
-            channels.compactMap { ch in
-                guard let tvg = ch.tvgID, !tvg.isEmpty else { return nil }
-                return (tvg.lowercased(), ch.id)
-            },
-            uniquingKeysWith: { first, _ in first }
-        )
+        //
+        // v1.7.3 (Issue #20, jdfrey1 2026-05-16): `tvgIDToChannelIDs`
+        // value is `[String]` rather than `String` so a tvg-id shared
+        // by multiple channels routes the matched programs to every
+        // channel that shares the tvg-id, not just the first iterated.
+        var tvgIDToChannelIDsBuild: [String: [String]] = [:]
+        for ch in channels {
+            guard let tvg = ch.tvgID, !tvg.isEmpty else { continue }
+            let key = tvg.lowercased()
+            if tvgIDToChannelIDsBuild[key]?.contains(ch.id) != true {
+                tvgIDToChannelIDsBuild[key, default: []].append(ch.id)
+            }
+        }
+        let tvgIDToChannelIDs = tvgIDToChannelIDsBuild
         let numberToChannelID: [String: String] = Dictionary(
             channels.map { ($0.number, $0.id) },
             uniquingKeysWith: { first, _ in first }
@@ -1344,27 +1401,37 @@ final class GuideStore: ObservableObject {
             for prog in parsed {
                 guard prog.endTime > windowStart && prog.startTime < windowEnd else { continue }
                 let key = prog.channelID.lowercased()
-                let channelID = tvgIDToChannelID[key]
-                    ?? numberToChannelID[prog.channelID]
-                    ?? uuidToChannelID[key]
-                guard let cid = channelID else {
+                // v1.7.3 (Issue #20): tvg-id may match multiple
+                // channels (shared-EPG case). `numberToChannelID`
+                // and `uuidToChannelID` stay single-channel because
+                // their keys are unique by construction.
+                let cids: [String]
+                if let arr = tvgIDToChannelIDs[key], !arr.isEmpty {
+                    cids = arr
+                } else if let cid = numberToChannelID[prog.channelID] {
+                    cids = [cid]
+                } else if let cid = uuidToChannelID[key] {
+                    cids = [cid]
+                } else {
                     missed += 1
                     continue
                 }
                 matched += 1
-                let gp = GuideProgram(channelID: cid, title: prog.title,
-                                      description: prog.description,
-                                      start: prog.startTime, end: prog.endTime,
-                                      category: prog.category)
                 // deferSort: true — a 98k-iteration loop over ~2,100
                 // channels means each channel gets ~46 inserts on
                 // average; sorting per insert is 46× more work than
                 // sorting each list once at the end.
-                GuideStore.mergeProgramInto(&dict, program: gp, for: cid, deferSort: true)
-                touchedChannelIDs.insert(cid)
-                // Track currently-airing program category.
-                if !prog.category.isEmpty, prog.startTime <= now, prog.endTime > now {
-                    currentCategoriesByChannelID[cid] = prog.category
+                for cid in cids {
+                    let gp = GuideProgram(channelID: cid, title: prog.title,
+                                          description: prog.description,
+                                          start: prog.startTime, end: prog.endTime,
+                                          category: prog.category)
+                    GuideStore.mergeProgramInto(&dict, program: gp, for: cid, deferSort: true)
+                    touchedChannelIDs.insert(cid)
+                    // Track currently-airing program category.
+                    if !prog.category.isEmpty, prog.startTime <= now, prog.endTime > now {
+                        currentCategoriesByChannelID[cid] = prog.category
+                    }
                 }
             }
             // Sort the lists we actually modified.
