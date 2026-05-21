@@ -33,11 +33,22 @@ final class WatchProgress {
     /// deep link that navigates to the series detail (not the episode,
     /// which has no standalone detail view of its own).
     var seriesID: String?
+    /// v1.7.3 (Issue #19): season + episode number for episode entries
+    /// (0 for movies). Identifies the episode within its series.
+    var seasonNumber: Int = 0
+    var episodeNumber: Int = 0
+    /// v1.7.3 (Issue #19): JSON `[UpNextEntry]` of the episodes that
+    /// follow this one, captured from the loaded series at play time.
+    /// When this episode finishes, the head is promoted into its own
+    /// `WatchProgress` so Continue Watching advances to the next episode,
+    /// and the remainder rides forward so a binge self-sustains without
+    /// re-fetching the series. Local-only (deliberately not iCloud-synced).
+    var upNextQueue: String?
 
     init(vodID: String, title: String, positionMs: Int32 = 0, durationMs: Int32 = 0,
          posterURL: String? = nil, vodType: String = "movie", updatedAt: Date = Date(),
          isFinished: Bool = false, streamURL: String? = nil, serverID: String? = nil,
-         seriesID: String? = nil) {
+         seriesID: String? = nil, seasonNumber: Int = 0, episodeNumber: Int = 0) {
         self.vodID = vodID
         self.title = title
         self.positionMs = positionMs
@@ -49,7 +60,24 @@ final class WatchProgress {
         self.streamURL = streamURL
         self.serverID = serverID
         self.seriesID = seriesID
+        self.seasonNumber = seasonNumber
+        self.episodeNumber = episodeNumber
     }
+}
+
+// MARK: - Up Next Queue Entry (Issue #19)
+
+/// Lightweight Codable snapshot of an upcoming episode, stored as a
+/// JSON array in `WatchProgress.upNextQueue`. Captured from the loaded
+/// series when an episode starts playing so Continue Watching can
+/// advance to the next episode on finish without a fresh series fetch.
+struct UpNextEntry: Codable {
+    let vodID: String
+    let title: String
+    let posterURL: String?
+    let streamURL: String?
+    let seasonNumber: Int
+    let episodeNumber: Int
 }
 
 // MARK: - Watch Progress Manager
@@ -77,12 +105,15 @@ enum WatchProgressManager {
     static func save(vodID: String, title: String, positionMs: Int32, durationMs: Int32,
                      posterURL: String? = nil, vodType: String = "movie", isFinished: Bool = false,
                      streamURL: String? = nil, serverID: String? = nil,
-                     seriesID: String? = nil) {
+                     seriesID: String? = nil,
+                     seasonNumber: Int? = nil, episodeNumber: Int? = nil,
+                     upNextQueue: String? = nil) {
         guard let context = modelContext else { return }
         let matches = matchingProgress(context: context, vodID: vodID)
         let existing = pickMatch(matches, serverID: serverID, claimLegacy: true)
 
         if let existing {
+            let wasFinished = existing.isFinished
             existing.positionMs = positionMs
             existing.durationMs = durationMs
             existing.updatedAt = Date()
@@ -91,13 +122,29 @@ enum WatchProgressManager {
             if let url = streamURL { existing.streamURL = url }
             if let sid = serverID { existing.serverID = sid }
             if let ser = seriesID { existing.seriesID = ser }
+            if let s = seasonNumber { existing.seasonNumber = s }
+            if let e = episodeNumber { existing.episodeNumber = e }
+            if let q = upNextQueue { existing.upNextQueue = q }
+            // v1.7.3 (Issue #19): when an episode first crosses into
+            // "finished", promote the next item in its up-next queue so
+            // the series stays in Continue Watching pointing at the next
+            // episode instead of disappearing.
+            if !wasFinished, isFinished, existing.vodType == "episode" {
+                advanceUpNext(from: existing, context: context)
+            }
         } else {
             let progress = WatchProgress(vodID: vodID, title: title, positionMs: positionMs,
                                          durationMs: durationMs, posterURL: posterURL,
                                          vodType: vodType, isFinished: isFinished,
                                          streamURL: streamURL, serverID: serverID,
-                                         seriesID: seriesID)
+                                         seriesID: seriesID,
+                                         seasonNumber: seasonNumber ?? 0,
+                                         episodeNumber: episodeNumber ?? 0)
+            progress.upNextQueue = upNextQueue
             context.insert(progress)
+            if isFinished, vodType == "episode" {
+                advanceUpNext(from: progress, context: context)
+            }
         }
         try? context.save()
         NotificationCenter.default.post(name: .watchProgressDidChange, object: nil)
@@ -140,6 +187,50 @@ enum WatchProgressManager {
         for row in toDelete { context.delete(row) }
         try? context.save()
         NotificationCenter.default.post(name: .watchProgressDidChange, object: nil)
+    }
+
+    // MARK: - Up Next (Issue #19)
+
+    /// Promote the next unwatched episode from a just-finished episode's
+    /// `upNextQueue` into its own `WatchProgress`, carrying the remaining
+    /// queue forward so a binge keeps surfacing the next episode in
+    /// Continue Watching without re-opening the series. Skips entries
+    /// already finished (out-of-order viewing). No-op at the end of the
+    /// queue, so the series then drops off Continue Watching as before.
+    /// The caller saves the context.
+    private static func advanceUpNext(from finished: WatchProgress, context: ModelContext) {
+        guard let json = finished.upNextQueue,
+              let data = json.data(using: .utf8),
+              var queue = try? JSONDecoder().decode([UpNextEntry].self, from: data),
+              !queue.isEmpty else { return }
+        let serverID = finished.serverID
+        let seriesID = finished.seriesID
+        while !queue.isEmpty {
+            let head = queue.removeFirst()
+            let rows = matchingProgress(context: context, vodID: head.vodID)
+                .filter { serverID == nil || $0.serverID == serverID || $0.serverID == nil }
+            if let row = rows.first {
+                // Already watched out of order: skip to the next entry.
+                if row.isFinished { continue }
+                // Already started or seeded: just refresh its forward queue.
+                row.upNextQueue = encodeQueue(queue)
+                return
+            }
+            let seeded = WatchProgress(
+                vodID: head.vodID, title: head.title, positionMs: 0, durationMs: 0,
+                posterURL: head.posterURL, vodType: "episode", isFinished: false,
+                streamURL: head.streamURL, serverID: serverID, seriesID: seriesID,
+                seasonNumber: head.seasonNumber, episodeNumber: head.episodeNumber)
+            seeded.upNextQueue = encodeQueue(queue)
+            context.insert(seeded)
+            return
+        }
+    }
+
+    private static func encodeQueue(_ queue: [UpNextEntry]) -> String? {
+        guard !queue.isEmpty,
+              let data = try? JSONEncoder().encode(queue) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     // MARK: - Private helpers

@@ -22,6 +22,14 @@
   tints. The feed is matched to your channels by `epg_channel_id` and
   reuses the existing tint pipeline. Stored per server; not synced,
   since XMLTV URLs can carry credentials.
+- **Continue Watching advances to the next episode.** When you finish
+  an episode of a series, Continue Watching (in-app and on the Apple TV
+  Top Shelf) now surfaces the next unwatched episode instead of dropping
+  the series, so you can keep going without searching for the show
+  again. The upcoming-episode list is captured from the series when
+  playback starts, so advancing needs no extra network fetch. The
+  existing long-press "Remove from Continue Watching" still clears a
+  show from the row. Reported by jdfrey1 (Issue #19).
 
 ### Changed
 

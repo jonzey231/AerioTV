@@ -604,10 +604,13 @@ struct VODDetailView: View {
         guard let url = ep.streamURL else { return }
         // Stash the parent series ID into WatchProgress before playback starts.
         // The Top Shelf extension uses this to build a deep link that
-        // navigates back to the series detail — the episode itself doesn't
+        // navigates back to the series detail. The episode itself doesn't
         // have a standalone detail view to return to.
         // v1.6.8 (Codex A1): pass serverID through too so resume positions
         // don't collide across servers that share an episode ID.
+        // v1.7.3 (Issue #19): also capture the rest of the series as an
+        // "up next" queue so Continue Watching advances to the next
+        // episode when this one finishes, with no later series fetch.
         WatchProgressManager.save(
             vodID: ep.id,
             title: ep.title,
@@ -616,7 +619,10 @@ struct VODDetailView: View {
             posterURL: ep.posterURL?.absoluteString,
             vodType: "episode",
             serverID: ep.serverID.uuidString,
-            seriesID: ep.seriesID
+            seriesID: ep.seriesID,
+            seasonNumber: ep.seasonNumber,
+            episodeNumber: ep.episodeNumber,
+            upNextQueue: upNextQueueJSON(after: ep)
         )
         Task {
             await resolveAndLaunch(
@@ -627,6 +633,29 @@ struct VODDetailView: View {
                 posterURL: ep.posterURL?.absoluteString
             )
         }
+    }
+
+    /// v1.7.3 (Issue #19): flatten the loaded series into the episodes
+    /// that come after `ep` (rest of the season, then later seasons),
+    /// capped to a sane lookahead, encoded as a JSON `[UpNextEntry]` for
+    /// `WatchProgress.upNextQueue`. Returns nil when the series isn't
+    /// loaded or `ep` is the final episode.
+    private func upNextQueueJSON(after ep: VODEpisode) -> String? {
+        guard let series = fullSeries else { return nil }
+        let ordered = series.seasons
+            .sorted { $0.seasonNumber < $1.seasonNumber }
+            .flatMap { $0.episodes.sorted { $0.episodeNumber < $1.episodeNumber } }
+        guard let idx = ordered.firstIndex(where: { $0.id == ep.id }),
+              idx + 1 < ordered.count else { return nil }
+        let tail = ordered[(idx + 1)...].prefix(50).map {
+            UpNextEntry(vodID: $0.id, title: $0.title,
+                        posterURL: $0.posterURL?.absoluteString,
+                        streamURL: $0.streamURL?.absoluteString,
+                        seasonNumber: $0.seasonNumber, episodeNumber: $0.episodeNumber)
+        }
+        guard !tail.isEmpty,
+              let data = try? JSONEncoder().encode(Array(tail)) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// Resolves any redirects in the proxy URL with auth headers before handing off to the player.

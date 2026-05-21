@@ -62,6 +62,7 @@ enum WhatsNewStore {
             bullets: [
                 "Compressed XMLTV guides are now supported. AerioTV can load gzipped .xml.gz EPG feeds, including large Gracenote-style guides, by streaming and decompressing them on the fly so your guide fills in without the app running out of memory. Only the programs for channels you actually have are kept",
                 "Xtream Codes: add an optional custom XMLTV URL per server to color-tint your channels by category (Sports, News, Movies, Kids)",
+                "Continue Watching now advances to the next episode of a series. When you finish an episode, the next one shows up automatically, so you don't have to search for the show again to keep going",
                 "Smoother live playback and channel changes. Flipping channels now swaps the stream in place instead of tearing down and rebuilding the player, with a new display-rate frame pacer steadying cadence",
                 "Apple TV: returning to the Guide after watching now puts focus back on the channel you were watching, not the top of the list",
                 "M3U playlists: favorites now stick across a playlist refresh",
