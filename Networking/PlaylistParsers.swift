@@ -27,6 +27,31 @@ struct M3UChannel: Identifiable {
 // MARK: - M3U Parser
 struct M3UParser {
 
+    /// Deterministic, reload-stable channel id for an M3U entry,
+    /// derived from the stream URL.
+    ///
+    /// v1.7.3: M3U channels previously took `ChannelDisplayItem.id`
+    /// from `M3UChannel.id`, a fresh `UUID()` regenerated on every
+    /// parse. Anything keyed by that id (favorites, now-playing
+    /// restore, multiview tile identity) therefore reset on each
+    /// playlist refresh. The stream URL is the stable per-channel
+    /// attribute, so we key off it instead.
+    ///
+    /// The URL is HASHED, not embedded: this id is persisted to
+    /// UserDefaults, mirrored to iCloud KVS, and written to the Top
+    /// Shelf keychain, and some M3U URLs carry credentials in the
+    /// path (the same reason we never log `streamURLs`). FNV-1a is
+    /// used rather than Swift's `Hasher`, whose seed is randomized
+    /// per launch and would not be stable across launches/devices.
+    static func stableChannelID(forStreamURL url: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in url.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+        return "m3u_" + String(hash, radix: 16)
+    }
+
     static func parse(content: String) -> [M3UChannel] {
         var channels: [M3UChannel] = []
         let lines = content.components(separatedBy: .newlines)

@@ -1877,10 +1877,22 @@ final class ChannelStore: ObservableObject {
             return (try? await XMLTVParser.fetchAndParse(url: epgURLParsed)) ?? []
         }()
 
+        // v1.7.3: derive a deterministic, reload-stable id from the
+        // stream URL so M3U favorites (and now-playing restore /
+        // multiview tile identity) survive a playlist refresh. The
+        // previous `ch.id.uuidString` was a fresh UUID every parse, so
+        // anything keyed by `ChannelDisplayItem.id` silently reset.
+        // Dedup by occurrence so a playlist that repeats a URL still
+        // yields distinct, stable ids. See `M3UParser.stableChannelID`.
+        var m3uIDOccurrence: [String: Int] = [:]
         var items: [ChannelDisplayItem] = parsed.enumerated().compactMap { (i, ch) in
             guard let streamURL = URL(string: ch.url) else { return nil }
+            let baseID = M3UParser.stableChannelID(forStreamURL: ch.url)
+            let occ = m3uIDOccurrence[baseID, default: 0]
+            m3uIDOccurrence[baseID] = occ + 1
+            let stableID = occ == 0 ? baseID : "\(baseID)-\(occ)"
             var item = ChannelDisplayItem(
-                id: ch.id.uuidString, name: ch.name,
+                id: stableID, name: ch.name,
                 // v1.7.x: `M3UChannel.channelNumber` is now the raw
                 // `tvg-chno` string, so decimal numbers like "2.1"
                 // pass through unchanged. Fall back to the 1-based
