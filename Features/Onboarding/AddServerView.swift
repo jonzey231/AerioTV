@@ -254,6 +254,11 @@ struct AddServerView: View {
                              text: $viewModel.password, icon: "lock.fill", isSecure: true)
                 infoBox(icon: "info.circle.fill",
                         message: "Enter your Xtream Codes server URL and credentials. Dispatcharr users: use your Dispatcharr URL with the Xtream Codes username and password from Dispatcharr's User settings.")
+                AppTextField("Custom XMLTV URL (optional)", placeholder: "https://example.com/xmltv.xml",
+                             text: $viewModel.xtreamXMLTVURL, icon: "calendar",
+                             keyboardType: .URL)
+                infoBox(icon: "paintpalette.fill",
+                        message: "Optional. Point at an XMLTV guide and AerioTV uses its category tags to add Sports/News/Movies/Kids color tints to your channels. Xtream Codes doesn't provide categories on its own. Leave blank to skip.")
 
             case .dispatcharrAPI:
                 AppTextField("Server URL", placeholder: "http://your-dispatcharr-server:9191",

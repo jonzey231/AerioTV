@@ -2281,6 +2281,19 @@ struct EditServerSheet: View {
                 } header: {
                     Text("Credentials").sectionHeaderStyle()
                 }
+                Section {
+                    TextField("Custom XMLTV URL (optional)",
+                              text: $server.xtreamXMLTVURL,
+                              prompt: Text(verbatim: "https://example.com/xmltv.xml"))
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("EPG Source").sectionHeaderStyle()
+                } footer: {
+                    Text("Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own. Leave blank to skip.")
+                }
             } else if server.type == .dispatcharrAPI {
                 Section {
                     // v1.7.x: credential mode picker. Mirrors
@@ -2545,6 +2558,13 @@ struct EditServerSheet: View {
                     tvEditSection("Credentials") {
                         tvEditField("Username", text: $server.username)
                         tvEditField("Password", text: $server.password, isSecure: true)
+                    }
+                    tvEditSection("EPG Source") {
+                        tvEditField("Custom XMLTV URL (optional)", text: $server.xtreamXMLTVURL)
+                        Text("Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own.")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.top, 4)
                     }
                 } else if server.type == .dispatcharrAPI {
                     Group {
@@ -2903,6 +2923,13 @@ struct EditServerPage: View {
                         tvSection("Credentials") {
                             tvField("Username", text: $server.username)
                             tvField("Password", text: $server.password, isSecure: true)
+                        }
+                        tvSection("EPG Source") {
+                            tvField("Custom XMLTV URL (optional)", text: $server.xtreamXMLTVURL)
+                            Text("Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own.")
+                                .font(.system(size: 22))
+                                .foregroundColor(.textTertiary)
+                                .padding(.top, 4)
                         }
                     } else if server.type == .dispatcharrAPI {
                         Group {

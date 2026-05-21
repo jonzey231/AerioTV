@@ -11,6 +11,7 @@ final class ServerConnectionViewModel {
     var password: String = ""
     var apiKey: String = ""       // Dispatcharr personal API key
     var dispatcharrXMLTVURL: String = "" // Optional XMLTV override for Dispatcharr (empty = use API)
+    var xtreamXMLTVURL: String = "" // Optional custom XMLTV for XC category tints (empty = none)
     var epgURL: String = ""       // Optional EPG URL for m3uPlaylist
     var localURL: String = ""     // LAN URL (e.g. http://192.168.1.10:9191)
     var localEPGURL: String = ""  // Local EPG URL for M3U when on LAN
@@ -463,6 +464,7 @@ final class ServerConnectionViewModel {
             localEPGURL: localEPGURL
         )
         server.dispatcharrXMLTVURL = dispatcharrXMLTVURL
+        server.xtreamXMLTVURL = xtreamXMLTVURL
         // v1.6.20: persist the auth header shape that worked during
         // verifyConnection so subsequent API calls and stream playback
         // skip re-discovery and immediately speak the right shape.
@@ -505,6 +507,7 @@ final class ServerConnectionViewModel {
         password = ""
         apiKey = ""
         dispatcharrXMLTVURL = ""
+        xtreamXMLTVURL = ""
         epgURL = ""
         localURL = ""
         localEPGURL = ""

@@ -1278,6 +1278,7 @@ final class ChannelStore: ObservableObject {
         // a SwiftData model; reading a property after an `await`
         // suspension risks a thread-context violation.
         let dispatcharrXMLTVOverride = server.dispatcharrXMLTVURL
+        let xtreamXMLTVOverride = server.xtreamXMLTVURL
         let categoryServerID = server.id.uuidString
         // v1.6.20: snapshot the auto-detected auth header mode + UA
         // so the off-main-thread API constructor uses the per-server
@@ -1675,6 +1676,16 @@ final class ChannelStore: ObservableObject {
         case .xtreamCodes:
             // Xtream: batch per-stream EPG (reuses enrichXtreamEPG)
             await enrichXtreamEPG(baseURL: baseURL, username: username, password: password)
+            // v1.7.3: optional custom XMLTV drives the channel-card
+            // category tints (Sports/News/Movies/Kids). Xtream's API
+            // exposes no per-program category, so this is the only way
+            // XC users get tints. No-op unless the user set a URL.
+            let xcXMLTV = xtreamXMLTVOverride.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !xcXMLTV.isEmpty, let xcURL = URL(string: xcXMLTV) {
+                await primeXtreamCategoriesFromXMLTV(url: xcURL, baseURL: baseURL,
+                                                     username: username, password: password,
+                                                     serverID: categoryServerID)
+            }
 
         case .m3uPlaylist:
             // M3U: XMLTV is already fully parsed during channel load — EPGCache is populated.
@@ -1787,6 +1798,51 @@ final class ChannelStore: ObservableObject {
             }
         }
         channels = updated
+    }
+
+    /// v1.7.3: fetch an Xtream server's optional custom XMLTV feed and
+    /// apply the currently-airing `<category>` per channel so the
+    /// channel-card color tints (Sports/News/Movies/Kids) light up.
+    /// Xtream's own API exposes no per-program category, so without a
+    /// custom XMLTV the tints never appear for XC. The parse is filtered
+    /// to the server's known epg_channel_ids to keep memory bounded on
+    /// large feeds, then categories route to the same
+    /// `applyXMLTVCategories` path Dispatcharr uses. No-op when nothing
+    /// matches.
+    private func primeXtreamCategoriesFromXMLTV(url: URL, baseURL: String,
+                                                username: String, password: String,
+                                                serverID: String) async {
+        let xAPI = XtreamCodesAPI(baseURL: baseURL, username: username, password: password)
+        guard let streams = try? await xAPI.getLiveStreams() else { return }
+        // epg_channel_id (lowercased) -> [app channel id (= String(stream_id))]
+        var channelIDsByEPGID: [String: [String]] = [:]
+        for s in streams {
+            guard let epgID = s.epgChannelID?.lowercased(), !epgID.isEmpty else { continue }
+            channelIDsByEPGID[epgID, default: []].append(String(s.streamID))
+        }
+        guard !channelIDsByEPGID.isEmpty else {
+            debugLog("📺 XC custom XMLTV: no channels carry an epg_channel_id; nothing to tint")
+            return
+        }
+        let knownIDs = Set(channelIDsByEPGID.keys)
+        guard let programs = try? await XMLTVParser.fetchAndParse(url: url, knownChannelIDs: knownIDs),
+              !programs.isEmpty else {
+            debugLog("📺 XC custom XMLTV: no matching programmes parsed from \(url.host ?? "?")")
+            return
+        }
+        let now = Date()
+        var catByChannelID: [String: String] = [:]
+        for p in programs where p.startTime <= now && p.endTime > now && !p.category.isEmpty {
+            if let cids = channelIDsByEPGID[p.channelID.lowercased()] {
+                for cid in cids { catByChannelID[cid] = p.category }
+            }
+        }
+        guard !catByChannelID.isEmpty else {
+            debugLog("📺 XC custom XMLTV: parsed \(programs.count) programmes but none currently airing with a category")
+            return
+        }
+        debugLog("📺 XC custom XMLTV: tinting \(catByChannelID.count) channels from custom XMLTV")
+        applyXMLTVCategories(catByChannelID, serverID: serverID)
     }
 
     // MARK: - Channel Sorting Helpers

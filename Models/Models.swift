@@ -139,6 +139,14 @@ final class ServerConnection {
     /// Aerio fetches EPG from this URL directly instead of Dispatcharr's
     /// /api/epg/* endpoints. Ignored for XC and M3U. Empty = use API.
     var dispatcharrXMLTVURL: String = ""
+    /// v1.7.3: optional per-Xtream-server custom XMLTV URL. When
+    /// non-empty, AerioTV fetches this XMLTV feed and uses its
+    /// `<category>` tags to drive the per-channel color tints
+    /// (Sports/News/Movies/Kids) that the Xtream API doesn't expose.
+    /// Local-only, NOT iCloud-synced (mirrors `dispatcharrXMLTVURL`;
+    /// XMLTV URLs can carry credentials in the path). Ignored for
+    /// Dispatcharr and M3U. Empty = no custom tint source.
+    var xtreamXMLTVURL: String = ""
     /// Preferred destination for new recordings on this server. Only
     /// meaningful for `.dispatcharrAPI` — XC/M3U servers ignore this and
     /// always record locally. Stored as rawValue for SwiftData stability.
