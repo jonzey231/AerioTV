@@ -57,6 +57,21 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.3",
+            title: "What's new in 1.7.3",
+            bullets: [
+                "Compressed XMLTV guides are now supported. AerioTV can load gzipped .xml.gz EPG feeds, including large Gracenote-style guides, by streaming and decompressing them on the fly so your guide fills in without the app running out of memory. Only the programs for channels you actually have are kept",
+                "Xtream Codes: add an optional custom XMLTV URL per server to color-tint your channels by category (Sports, News, Movies, Kids)",
+                "Smoother live playback and channel changes. Flipping channels now swaps the stream in place instead of tearing down and rebuilding the player, with a new display-rate frame pacer steadying cadence",
+                "Apple TV: returning to the Guide after watching now puts focus back on the channel you were watching, not the top of the list",
+                "M3U playlists: favorites now stick across a playlist refresh",
+                "Multiview staging from the Guide gained a Play button, and the Done button is now reachable on Apple TV",
+                "Fixed channels that share an EPG ID (tvg-id) so they all show their guide data, not just the first one",
+                "You can now enter a server address without typing https://"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.3")
+        ),
+        WhatsNewRelease(
             version: "1.7.2",
             title: "What's new in 1.7.2",
             bullets: [

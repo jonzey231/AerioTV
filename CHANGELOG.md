@@ -1,5 +1,62 @@
 # Changelog
 
+## v1.7.3 - 2026-05-20
+
+### Added
+
+- **Compressed XMLTV (`.xml.gz`) guide support.** AerioTV can now
+  ingest gzipped XMLTV EPG feeds, including large Gracenote-style
+  guides that are impractical uncompressed. The feed is downloaded,
+  stream-decompressed through Apple's Compression framework, and
+  parsed off an InputStream so the multi-hundred-MB (or multi-GB)
+  decompressed payload never materializes in memory. Gzip is detected
+  by the `.gz` extension, an `application/x-gzip` / `application/gzip`
+  content type, or the `1f 8b` magic bytes. A filter-during-parse
+  pass keeps only the programs for channels you actually have.
+- **Xtream Codes: optional custom XMLTV URL for category tints.**
+  Xtream Codes' API exposes no per-program category, so XC channels
+  never got the Sports / News / Movies / Kids color tints Dispatcharr
+  users have had since v1.6.4. A new optional per-server "Custom XMLTV
+  URL" field (on the Add and Edit Server screens, iOS and Apple TV)
+  lets you point at an XMLTV feed whose `<category>` tags drive the
+  tints. The feed is matched to your channels by `epg_channel_id` and
+  reuses the existing tint pipeline. Stored per server; not synced,
+  since XMLTV URLs can carry credentials.
+
+### Changed
+
+- **Smoother channel-flipping and live playback cadence.** Channel
+  changes now swap the stream into the existing player in place (mpv
+  `loadfile`) instead of tearing down and rebuilding the whole
+  player, removing the brief 30-then-60 fps wobble after a flip. Live
+  playback also moved from a stale-threshold watchdog to a
+  CADisplayLink-driven frame pacer running at the display refresh rate
+  (community PR #21).
+
+### Fixed
+
+- **M3U playlist favorites now survive a playlist reload.** M3U
+  channels were keyed by a random UUID regenerated on every parse, so
+  favoriting a channel never stuck across a refresh. Channel ids are
+  now derived deterministically from the stream URL (hashed, so no
+  credentials are stored), and favorites, now-playing restore, and
+  Multiview tile identity all persist. Xtream Codes and Dispatcharr
+  were unaffected (stable server ids).
+- **Apple TV: returning to the Guide focuses the channel you were
+  watching** instead of the top of the list (community PR #17).
+- **Channels that share an EPG ID (tvg-id) now all show their guide
+  data.** Previously only the first channel with a given tvg-id got
+  programs and the rest fell back to stale info. The match map now
+  fans one tvg-id out to every channel that uses it (relevant to
+  Teamarr-style multi-channel-per-event setups).
+- **Multiview staging from the Guide gained a Play button, and the
+  Done button is now reachable on Apple TV.** The staging banner now
+  sits in the spatial focus hierarchy on tvOS, so D-pad-up from the
+  guide rows reaches both buttons.
+- **Server addresses can be entered without a scheme.** The Add
+  Server screen now accepts a bare host like `dispatcharr.example.com`
+  in addition to a full `https://` URL.
+
 ## v1.7.2 - 2026-05-11
 
 ### Added
