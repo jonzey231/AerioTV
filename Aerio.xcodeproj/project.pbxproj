@@ -44,6 +44,8 @@
 		38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		38A0E8B8ABBD862D5012AC52 /* SyncCategoriesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */; };
 		3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
+		FA5005705700000000000002 /* FavoritesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA5005705700000000000001 /* FavoritesStore.swift */; };
+		FA5005705700000000000003 /* FavoritesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA5005705700000000000001 /* FavoritesStore.swift */; };
 		3C4D5E6F70891012ACE70020 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
 		3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
 		48336325ACADA131557D4C58 /* AppBehaviorsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */; };
@@ -249,6 +251,7 @@
 		5806A5B948B604B451A5F5C7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Pods-Aerio_iOS-acknowledgements.plist"; sourceTree = "<group>"; };
 		5957CC8A6CC0000B14ED47C5 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		FA5005705700000000000001 /* FavoritesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesStore.swift; sourceTree = "<group>"; };
 		628C021FBBB1C5C00F6640EA /* TVServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = TVServices.framework; path = System/Library/Frameworks/TVServices.framework; sourceTree = SDKROOT; };
 		62C0C151EAA6394D32003217 /* DeviceInfo.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DeviceInfo.swift; sourceTree = "<group>"; };
 		693A71F4A4429F56337992E6 /* StreamingAPIs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingAPIs.swift; sourceTree = "<group>"; };
@@ -688,6 +691,7 @@
 			isa = PBXGroup;
 			children = (
 				5957CC8A6CC0000B14ED47C5 /* HomeView.swift */,
+				FA5005705700000000000001 /* FavoritesStore.swift */,
 			);
 			path = Home;
 			sourceTree = "<group>";
@@ -950,6 +954,7 @@
 				EE1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
 				A8E322C238A7CE0B55BA3D4D /* AerioApp.swift in Sources */,
 				7D775CD7B45EE60B92377A6F /* HomeView.swift in Sources */,
+				FA5005705700000000000002 /* FavoritesStore.swift in Sources */,
 				C9B3A9A8801BC79552C8D496 /* LiquidGlass.swift in Sources */,
 				5DC1FF775CB2D3D2917F5D4A /* MediaServerAPIs.swift in Sources */,
 				1083DB8B620ABAC3ECAB3823 /* Models.swift in Sources */,
@@ -1034,6 +1039,7 @@
 				FF1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
 				CF38B25676730E71C9AD497A /* AerioApp.swift in Sources */,
 				3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */,
+				FA5005705700000000000003 /* FavoritesStore.swift in Sources */,
 				B0B4EE0F74D4863E74833446 /* LiquidGlass.swift in Sources */,
 				AD422FFDD689840F76B8A238 /* MediaServerAPIs.swift in Sources */,
 				30FA1CA916C8DDE2001C592F /* Models.swift in Sources */,
