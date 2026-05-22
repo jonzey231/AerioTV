@@ -1600,6 +1600,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var pacerNewFrameCount: Int64 = 0
         private var pacerDupCount: Int64 = 0
         private var pacerSkipCount: Int64 = 0
+        // v1.7.3 heat fix: host-clock seconds of the last AVSBDL
+        // enqueue (new frame OR duplicate). The keepalive-duplicate
+        // path only re-enqueues once `pacerKeepaliveSeconds` has
+        // elapsed, so a stalled or sub-display-rate stream re-stamps
+        // the held frame at ~10Hz instead of on every VSync (60Hz).
+        // New frames still enqueue immediately, so flowing content is
+        // unchanged. Re-enqueuing the held frame 60x/sec per tile on
+        // the main thread was pegging the CPU and overheating Apple TV
+        // (and janking focus, since the pacer runs on `.main`).
+        // Main-thread-only (handlePacerTick), so it needs no lock.
+        private var lastEnqueueHostSeconds: Double = 0
+        private static let pacerKeepaliveSeconds: Double = 0.1
 
         // v1.7.x Step 6 — backpressure skip counter. Incremented
         // each time `renderFrame` early-returns because
@@ -2633,20 +2645,27 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
                 renderer.enqueue(sb)
                 pacerNewFrameCount &+= 1
+                lastEnqueueHostSeconds = CMTimeGetSeconds(pts)
                 os_unfair_lock_lock(&pacerLock)
                 lastEnqueuedCMSB = sb
                 lastPresentedFrameSerial = pendingSerial
                 os_unfair_lock_unlock(&pacerLock)
             } else if let last = lastSB {
-                // No new frame since last tick — duplicate the
-                // last one with a fresh PTS + DisplayImmediately.
-                // AVSBDL rejects samples whose PTS exactly matches
-                // a previously-enqueued sample's PTS, so the PTS
-                // must be strictly later every tick (which it is,
-                // since we use the host clock).
+                // No new frame since last tick. The duplicate exists
+                // ONLY to keep CoreAnimation from dropping the held
+                // IOSurface during a libmpv render stall; it does NOT
+                // need to fire every VSync. v1.7.3 heat fix: throttle
+                // the keepalive to ~10Hz. Re-enqueuing the held frame
+                // 60x/sec per tile while mpv ran below display rate
+                // (a stalled or low-fps stream) pegged the main thread
+                // and overheated Apple TV. New frames above stay
+                // unthrottled, so flowing content is unchanged.
+                let nowSeconds = CMTimeGetSeconds(pts)
+                guard nowSeconds - lastEnqueueHostSeconds >= Self.pacerKeepaliveSeconds else { return }
                 guard let dup = Self.makeImmediateDisplayCopy(of: last, at: pts) else { return }
                 renderer.enqueue(dup)
                 pacerDupCount &+= 1
+                lastEnqueueHostSeconds = nowSeconds
                 os_unfair_lock_lock(&pacerLock)
                 lastEnqueuedCMSB = dup
                 os_unfair_lock_unlock(&pacerLock)
