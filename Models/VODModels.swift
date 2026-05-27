@@ -270,6 +270,11 @@ struct ContinueWatchingSection: View {
     let vodType: String   // "movie" or "episode"
     var headers: [String: String] = [:]
     var onPlay: ((WatchProgress) -> Void)?
+    /// Loaded series for the active server, used to resolve an episode's
+    /// parent show artwork + title for the card. The stored progress row
+    /// only carries the episode's own still + title, so the show poster
+    /// and name come from here (looked up by `seriesID`).
+    var series: [VODDisplayItem] = []
 
     @Query(
         filter: #Predicate<WatchProgress> { !$0.isFinished },
@@ -304,10 +309,20 @@ struct ContinueWatchingSection: View {
                         #endif
                     }()) {
                         ForEach(items) { progress in
+                            let display = resolveDisplay(progress)
+                            let fraction = progress.durationMs > 0
+                                ? Double(progress.positionMs) / Double(progress.durationMs)
+                                : 0
                             Button {
                                 onPlay?(progress)
                             } label: {
-                                ContinueWatchingCard(progress: progress, headers: headers)
+                                ContinueWatchingCard(
+                                    posterURLString: display.poster,
+                                    title: display.title,
+                                    subtitle: display.subtitle,
+                                    fraction: fraction,
+                                    headers: headers
+                                )
                             }
                             #if os(tvOS)
                             .buttonStyle(TVCardButtonStyle())
@@ -341,12 +356,40 @@ struct ContinueWatchingSection: View {
         }
     }
 
+    /// Resolve the card's artwork, title, and subtitle. For an episode we
+    /// look up the parent series (by `seriesID`) so the card shows the
+    /// show's poster + name with an "S1:E4 - Episode Title" subtitle,
+    /// instead of the episode's own still + title. Movies render as-is.
+    private func resolveDisplay(_ p: WatchProgress) -> (poster: String?, title: String, subtitle: String?) {
+        if p.vodType == "episode" {
+            let show = series.first { $0.id == p.seriesID }
+            let poster = show?.posterURL?.absoluteString ?? p.posterURL
+            let label = episodeLabel(season: p.seasonNumber, episode: p.episodeNumber)
+            if let show {
+                let parts = [label, p.title].filter { !$0.isEmpty }
+                return (poster, show.name, parts.isEmpty ? nil : parts.joined(separator: " - "))
+            }
+            // Series not loaded yet: keep the episode title up top, SxEy below.
+            return (poster, p.title, label.isEmpty ? nil : label)
+        }
+        return (p.posterURL, p.title, nil)
+    }
+
+    /// "S1:E4", or "E4" when the season is unknown, or "" when neither is set.
+    private func episodeLabel(season: Int, episode: Int) -> String {
+        if season > 0 && episode > 0 { return "S\(season):E\(episode)" }
+        if episode > 0 { return "E\(episode)" }
+        return ""
+    }
 }
 
 // MARK: - Continue Watching Card (extracted for tvOS @Environment(\.isFocused) support)
 
 private struct ContinueWatchingCard: View {
-    let progress: WatchProgress
+    let posterURLString: String?
+    let title: String
+    let subtitle: String?
+    let fraction: Double
     var headers: [String: String] = [:]
 
     #if os(tvOS)
@@ -361,8 +404,8 @@ private struct ContinueWatchingCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             ZStack(alignment: .bottom) {
-                // Poster
-                if let urlStr = progress.posterURL, let url = URL(string: urlStr) {
+                // Poster (series poster for episodes, movie poster for movies)
+                if let urlStr = posterURLString, let url = URL(string: urlStr) {
                     AuthPosterImage(url: url, headers: headers)
                         .aspectRatio(2/3, contentMode: .fill)
                         .frame(width: cardWidth, height: cardHeight)
@@ -380,9 +423,6 @@ private struct ContinueWatchingCard: View {
 
                 // Progress bar
                 GeometryReader { geo in
-                    let fraction = progress.durationMs > 0
-                        ? CGFloat(progress.positionMs) / CGFloat(progress.durationMs)
-                        : 0
                     VStack {
                         Spacer()
                         ZStack(alignment: .leading) {
@@ -391,7 +431,7 @@ private struct ContinueWatchingCard: View {
                                 .frame(height: 3)
                             RoundedRectangle(cornerRadius: 2)
                                 .fill(Color.accentPrimary)
-                                .frame(width: geo.size.width * min(fraction, 1.0), height: 3)
+                                .frame(width: geo.size.width * CGFloat(min(fraction, 1.0)), height: 3)
                         }
                     }
                 }
@@ -405,11 +445,21 @@ private struct ContinueWatchingCard: View {
             )
             #endif
 
-            Text(progress.title)
+            // Title line: series name for episodes, movie title for movies.
+            Text(title)
                 .font(.caption)
                 .foregroundColor(.textSecondary)
                 .lineLimit(1)
                 .frame(width: cardWidth, alignment: .leading)
+
+            // Subtitle line: "S1:E4 - Episode Title" for episodes.
+            if let subtitle, !subtitle.isEmpty {
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundColor(.textTertiary)
+                    .lineLimit(1)
+                    .frame(width: cardWidth, alignment: .leading)
+            }
         }
     }
 }

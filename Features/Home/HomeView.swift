@@ -4868,30 +4868,24 @@ private struct ChannelInfoBanner: View {
     /// Task state.
     @State private var bannerOpenedAt: Date?
 
-    /// Renders when EITHER (a) chrome is up — handles brand-new
-    /// stream starts (cold-launch / row-tap that bump
-    /// `chromeWakeToken`) and Menu/Back chrome summon, OR (b) we're
-    /// inside the 5s post-stream-start window — handles channel-
-    /// scroll where chrome stays hidden. Suppressed in multi-tile
-    /// multiview AND when the player isn't actively visible
-    /// (minimized to the corner mini, or stopped entirely) — the
-    /// banner is a "what just started playing in the player" cue,
-    /// so it shouldn't drift over to the TV Guide tab when the
-    /// user has dropped the player to the corner or closed it.
+    /// Renders ONLY inside the wall-clock-capped window that opens on
+    /// each stream start (`streamStartedToken`, bumped for every live
+    /// start: cold-launch, row-tap, and Siri Remote flip). Suppressed
+    /// in multi-tile multiview, when the player isn't actively
+    /// fullscreen (minimized to the corner mini or stopped), and while
+    /// the Stream Info overlay is open (on iPhone the two overlays share
+    /// the top-left corner and would overlap).
     ///
-    /// v1.6.18: also suppressed while the Stream Info overlay is
-    /// open. On iPhone the two overlays render at the same
-    /// top-left coordinates and would otherwise overlap — banner
-    /// would cover the stats card the user explicitly opened.
-    ///
-    /// v1.7.x: `bannerWindowActive` is gated by a wall-clock
-    /// freshness check on `bannerOpenedAt` so a stranded `true`
-    /// (Apple TV stream-start race observed 2026-05-08, banner
-    /// stuck visible until Menu/Back) can't keep the banner
-    /// permanently up. Even if the auto-hide Task is somehow
-    /// cancelled before its write lands, the wall-clock guard
-    /// expires at +5s and the banner stops rendering on the next
-    /// view evaluation.
+    /// v1.7.3: dropped the old `chromeIsVisible ||` coupling. That flag
+    /// could stick `true` on an Apple TV cold-launch / auto-resume chrome
+    /// desync and strand the banner visible for minutes (only Menu/Back,
+    /// which re-toggled the flag, cleared it). The banner was the sole
+    /// reader of `chromeIsVisible`, so driving it purely off the
+    /// wall-clock window makes it immune: the `.task` clears the window
+    /// at +5s and the `bannerOpenedAt` freshness check is the backstop
+    /// even if that task is cancelled. Chrome summoned via Menu already
+    /// shows the channel + program in the chrome itself, so the banner
+    /// is not needed there.
     private var shouldRender: Bool {
         let isSingleStream = multiviewStore.tiles.count <= 1
         let isFullscreenActive = nowPlaying.isActive && !nowPlaying.isMinimized
@@ -4900,7 +4894,7 @@ private struct ChannelInfoBanner: View {
             guard let openedAt = bannerOpenedAt else { return false }
             return Date().timeIntervalSince(openedAt) < Self.bannerWindowSeconds
         }()
-        return (nowPlaying.chromeIsVisible || bannerWindowFresh)
+        return bannerWindowFresh
             && isSingleStream
             && isFullscreenActive
             && !nowPlaying.streamInfoIsVisible
@@ -4986,7 +4980,6 @@ private struct ChannelInfoBanner: View {
                 // backstop.
             }
         }
-        .animation(.easeInOut(duration: 0.3), value: nowPlaying.chromeIsVisible)
         .animation(.easeInOut(duration: 0.3), value: bannerWindowActive)
         .animation(.easeInOut(duration: 0.3), value: multiviewStore.tiles.count)
     }

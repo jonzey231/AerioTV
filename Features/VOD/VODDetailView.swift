@@ -1,5 +1,8 @@
 import SwiftUI
 import SwiftData
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Series Detail Cache (v1.6.16.x)
 //
@@ -185,6 +188,28 @@ private enum MovieDetailCache {
 }
 
 // MARK: - VOD Detail View (Movie or Series)
+#if os(tvOS)
+/// Clears any leftover `additionalSafeAreaInsets` on the active window's
+/// root controller. The VOD player is presented as a full-screen cover
+/// whose `ignoresSafeArea` content can leave the root with a negative or
+/// collapsed top inset on tvOS, which pulls the tab bar up into the
+/// overscan and stays stuck until the app is relaunched. Resetting it
+/// forces the true title-safe inset to be re-read on the next layout pass.
+@MainActor
+private func aerioRestoreRootSafeAreaInsets() {
+    for scene in UIApplication.shared.connectedScenes {
+        guard let windowScene = scene as? UIWindowScene else { continue }
+        for window in windowScene.windows {
+            guard let root = window.rootViewController else { continue }
+            if root.additionalSafeAreaInsets != .zero {
+                root.additionalSafeAreaInsets = .zero
+            }
+            root.view.setNeedsLayout()
+        }
+    }
+}
+#endif
+
 struct VODDetailView: View {
     let item: VODDisplayItem
     @Query private var servers: [ServerConnection]
@@ -260,7 +285,15 @@ struct VODDetailView: View {
                 vodServerID: item.serverID.uuidString,
                 vodType: playingVodType
             )
-            .onDisappear { isPlaying = false }
+            .onDisappear {
+                isPlaying = false
+                #if os(tvOS)
+                // Restore the root safe area the full-screen cover can
+                // collapse on tvOS, otherwise the tab bar leaks off the
+                // top of the screen until the app is relaunched.
+                DispatchQueue.main.async { aerioRestoreRootSafeAreaInsets() }
+                #endif
+            }
         }
     }
 
@@ -987,15 +1020,17 @@ private struct TVEpisodeRowButton: View {
             .padding(.horizontal, 16).padding(.vertical, 10)
             #if os(tvOS)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(isFocused ? Color.elevatedBackground : Color.clear)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(isFocused ? Color.accentPrimary : .clear, lineWidth: 2)
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(isFocused ? Color.accentPrimary : .clear, lineWidth: 3)
             )
-            .scaleEffect(isFocused ? 1.02 : 1.0)
-            .animation(.easeInOut(duration: 0.15), value: isFocused)
+            .shadow(color: isFocused ? Color.accentPrimary.opacity(0.45) : .clear,
+                    radius: isFocused ? 16 : 0, y: 4)
+            .scaleEffect(isFocused ? 1.045 : 1.0)
+            .animation(.easeInOut(duration: 0.18), value: isFocused)
             #endif
         }
         #if os(tvOS)

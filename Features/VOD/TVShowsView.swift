@@ -340,7 +340,8 @@ struct TVShowsView: View {
                     ContinueWatchingSection(
                         vodType: "episode",
                         headers: dispatcharrHeaders,
-                        onPlay: { progress in resumeFromContinueWatching(progress) }
+                        onPlay: { progress in resumeFromContinueWatching(progress) },
+                        series: vodStore.series
                     )
 
                     LazyVGrid(columns: columns, spacing: gridRowSpacing) {

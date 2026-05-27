@@ -393,6 +393,7 @@ enum TVPlayerFocus: Hashable {
     case gearIcon     // options pill when controls are visible
     case playPause    // center play/pause button
     case optionsPanel // inside the options popup
+    case scrubber     // VOD timeline (focusable while chrome is visible)
 }
 #endif
 
@@ -504,7 +505,11 @@ private struct PlayerRootView: View {
     @State private var dragFraction: CGFloat = 0
 
     #if os(tvOS)
-    @State private var isScrubbing = false  // True while user holds left/right
+    @State private var isScrubbing = false         // True while previewing a scrub position
+    @State private var scrubTargetMs: Int32 = 0    // Preview playhead, committed on idle/Select
+    @State private var scrubLastDirection = 0      // -1 left, +1 right (drives hold acceleration)
+    @State private var scrubAccelCount = 0         // Consecutive same-direction steps
+    @State private var scrubCommitTask: Task<Void, Never>?
     #endif
 
     enum PlayState { case loading, playing, error }
@@ -642,15 +647,14 @@ private struct PlayerRootView: View {
                             }
                             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
                             scheduleControlsHide()
-                            if !isLive {
-                                if direction == .left {
-                                    progressStore.seekAction?(max(0, progressStore.currentMs - 10_000))
-                                } else if direction == .right {
-                                    let target = progressStore.durationMs > 0
-                                        ? min(progressStore.durationMs, progressStore.currentMs + 10_000)
-                                        : progressStore.currentMs + 10_000
-                                    progressStore.seekAction?(target)
-                                }
+                            // VOD: a left/right press from the hidden-chrome
+                            // state reveals the timeline (focus lands on the
+                            // scrubber via onChange(showControls)) and starts a
+                            // scrub preview. No seek fires until commit, so the
+                            // video keeps playing with no per-press buffer stall.
+                            if !isLive, isScrubberActive {
+                                if direction == .left { scrubStep(-1) }
+                                else if direction == .right { scrubStep(+1) }
                             }
                         }
                         .ignoresSafeArea()
@@ -849,8 +853,16 @@ private struct PlayerRootView: View {
         #if os(tvOS)
         .onChange(of: showControls) { _, visible in
             // Drive focus between the invisible background capture layer
-            // (when controls are hidden) and the gear icon (when visible).
-            tvFocus = visible ? .gearIcon : .background
+            // (chrome hidden) and the chrome itself. For VOD the timeline
+            // scrubber is the default landing spot so the user can scrub
+            // right away; live (no seekable timeline) and the mini player
+            // fall back to the Options pill.
+            if visible {
+                tvFocus = (!isLive && isScrubberActive) ? .scrubber : .gearIcon
+            } else {
+                tvFocus = .background
+                cancelScrub()
+            }
         }
         .onChange(of: showTVOptions) { _, showing in
             // Panel's own @FocusState + onAppear handles focus when opening.
@@ -897,7 +909,7 @@ private struct PlayerRootView: View {
                 resetFocus(in: playerFocusScope)
             }
         }
-        .onAppear { tvFocus = showControls ? .gearIcon : .background }
+        .onAppear { tvFocus = showControls ? ((!isLive && isScrubberActive) ? .scrubber : .gearIcon) : .background }
         // Handle Menu/Back and Play/Pause at the player level so they
         // work regardless of which element currently has focus.
         // GH #11: Back from fullscreen should always **reveal** the
@@ -1210,8 +1222,9 @@ private struct PlayerRootView: View {
     // MARK: - tvOS Scrubber (visual only — input handled by TVRemoteInputView)
 
     private var tvScrubberBar: some View {
-        let active = isScrubbing
-        let displayFraction: CGFloat = max(0, min(1, currentFraction))
+        let focused = (tvFocus == .scrubber)
+        let active = isScrubbing || focused
+        let displayFraction: CGFloat = max(0, min(1, tvDisplayFraction))
 
         return GeometryReader { geo in
             ZStack(alignment: .leading) {
@@ -1240,6 +1253,71 @@ private struct PlayerRootView: View {
         }
         .frame(height: 30)
         .animation(.easeInOut(duration: 0.15), value: active)
+    }
+
+    /// Fraction shown on the tvOS timeline: the live position normally,
+    /// the preview playhead while the user is scrubbing.
+    private var tvDisplayFraction: CGFloat {
+        guard progressStore.durationMs > 0 else { return 0 }
+        let ms = isScrubbing ? scrubTargetMs : progressStore.currentMs
+        return max(0, min(1, CGFloat(ms) / CGFloat(progressStore.durationMs)))
+    }
+
+    /// Move the scrub preview by one step. No seek happens here, so the
+    /// video keeps playing smoothly while scrubbing. Holding the same
+    /// direction accelerates (1x..12x) so a long movie is crossable; a
+    /// single tap nudges about 10 seconds.
+    private func scrubStep(_ dir: Int) {
+        guard progressStore.durationMs > 0 else { return }
+        controlsHideTask?.cancel()
+        if !isScrubbing {
+            isScrubbing = true
+            scrubTargetMs = progressStore.currentMs
+            scrubAccelCount = 0
+        }
+        if dir == scrubLastDirection { scrubAccelCount += 1 } else { scrubAccelCount = 0 }
+        scrubLastDirection = dir
+        let mult = Int32(min(12, 1 + scrubAccelCount / 2))
+        let step = Int64(10_000) * Int64(mult)
+        let target = Int64(scrubTargetMs) + Int64(dir) * step
+        scrubTargetMs = Int32(max(0, min(Int64(progressStore.durationMs), target)))
+        debugLog("🎚️ [VOD-SCRUB] step dir=\(dir) x\(mult) -> \(scrubTargetMs)/\(progressStore.durationMs)ms")
+        scheduleScrubCommit()
+    }
+
+    /// Auto-commit the scrub a beat after the user stops moving, so
+    /// "scrub to a spot and let go" buffers from there on its own.
+    private func scheduleScrubCommit() {
+        scrubCommitTask?.cancel()
+        scrubCommitTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 900_000_000)
+            guard !Task.isCancelled else { return }
+            commitScrub()
+        }
+    }
+
+    /// Seek to the preview position. One real seek, so mpv buffers from
+    /// there once. Idempotent so Select and the idle timer cannot
+    /// double-seek.
+    private func commitScrub() {
+        guard isScrubbing else { return }
+        let target = scrubTargetMs
+        isScrubbing = false
+        scrubLastDirection = 0
+        scrubAccelCount = 0
+        scrubCommitTask?.cancel()
+        debugLog("🎚️ [VOD-SCRUB] commit seek -> \(target)/\(progressStore.durationMs)ms")
+        progressStore.seekAction?(target)
+        scheduleControlsHide()
+    }
+
+    /// Abandon an in-progress scrub without seeking (Back, or chrome hide).
+    private func cancelScrub() {
+        guard isScrubbing else { return }
+        isScrubbing = false
+        scrubLastDirection = 0
+        scrubAccelCount = 0
+        scrubCommitTask?.cancel()
     }
     #endif
 
@@ -1414,12 +1492,28 @@ private struct PlayerRootView: View {
     private var vodControlsSection: some View {
         VStack(spacing: 8) {
             #if os(tvOS)
-            // tvOS: small play/pause indicator left of the scrubber
-            // (mirrors the live-progress variant). Non-focusable;
-            // hardware Play/Pause button drives the toggle.
+            // tvOS: small play/pause indicator left of the focusable
+            // timeline. The hardware Play/Pause button still drives the
+            // pause toggle; this row owns left/right scrubbing.
             HStack(spacing: 12) {
                 tvPlayPauseIndicator
                 tvScrubberBar
+            }
+            .focusable(showControls && !isLive && isScrubberActive)
+            .focused($tvFocus, equals: .scrubber)
+            .onMoveCommand { direction in
+                switch direction {
+                case .left:  scrubStep(-1)
+                case .right: scrubStep(+1)
+                case .up:    tvFocus = .gearIcon
+                default:     break
+                }
+            }
+            .onTapGesture {
+                // Select commits an in-progress scrub right away;
+                // otherwise it toggles play/pause like a video timeline.
+                if isScrubbing { commitScrub() }
+                else { progressStore.togglePauseAction?(); scheduleControlsHide() }
             }
             #else
             scrubberBar
