@@ -3480,6 +3480,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             setOption(mpv, "video-sync", "audio")
             setOption(mpv, "video-timing-offset", "0")
 
+            // v1.7.3: Force HDR sources to correct SDR. The libmpv GLES
+            // render path cannot emit HDR; left to its defaults mpv
+            // collapses a BT.2020/PQ (or HLG) source into our 8-bit BGRA
+            // FBO with no gamut or transfer conversion, which shows green
+            // and washed out on UHD HDR channels (Sky Sports Main Event
+            // UHD class; Discord report). Pinning the render target to
+            // BT.709 SDR makes mpv do the BT.2020 -> 709 gamut map and the
+            // HDR -> SDR tone-map itself, so HDR channels render with
+            // correct colors. No-op for SDR sources (709 -> 709), so this
+            // is safe to set unconditionally and needs no HDR detection.
+            // True HDR output is deferred to a future AVPlayer path that
+            // waits on a natively-playable Dispatcharr HLS (backlog #28).
+            setOption(mpv, "target-prim", "bt.709")
+            setOption(mpv, "target-trc", "bt.1886")  // SDR display EOTF; "bt.709" is not a valid trc value (rejected by mpv)
+            setOption(mpv, "tone-mapping", "bt.2390")
+
             // v1.7.x Issue A round 5 — anti-flash mitigations
             // targeting the FFmpeg-VideoToolbox bridge's silent-
             // failure path. Per the 2026-05-08 research pass
