@@ -1389,6 +1389,11 @@ struct ChannelRow: View {
         CGFloat(max(0.85, min(1.25, listScale)))
     }
     #endif
+
+    /// Issue #28: when off, the channel logo is hidden so the channel name
+    /// can use the full row width (the logo eats space and crops long names,
+    /// especially on iPhone). Cross-platform; defaults on.
+    @AppStorage("ui.showChannelLogos") private var showChannelLogos = true
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
     @State private var reminderTarget: EPGEntry?
@@ -1648,7 +1653,9 @@ struct ChannelRow: View {
                         .foregroundColor(.textTertiary)
                         .frame(width: 42, alignment: .trailing)
 
-                    CachedLogoImage(url: item.logoURL, width: 72, height: 48)
+                    if showChannelLogos {
+                        CachedLogoImage(url: item.logoURL, width: 72, height: 48)
+                    }
 
                     VStack(alignment: .leading, spacing: 4) {
                         Text(item.name)
@@ -1751,11 +1758,13 @@ struct ChannelRow: View {
                 .foregroundColor(.textTertiary)
                 .frame(width: (isWide ? 36 : 26) * s, alignment: .trailing)
 
-            CachedLogoImage(
-                url: item.logoURL,
-                width: (isWide ? 50 : 38) * s,
-                height: (isWide ? 34 : 26) * s
-            )
+            if showChannelLogos {
+                CachedLogoImage(
+                    url: item.logoURL,
+                    width: (isWide ? 50 : 38) * s,
+                    height: (isWide ? 34 : 26) * s
+                )
+            }
 
             VStack(alignment: .leading, spacing: (isWide ? 4 : 2) * s) {
                 Text(item.name)

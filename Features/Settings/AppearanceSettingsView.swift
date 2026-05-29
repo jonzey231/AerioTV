@@ -42,6 +42,8 @@ struct AppearanceSettingsView: View {
     // nuking every server's cached guide data.
     @AppStorage(CategoryColor.enabledKey) private var enableCategoryColors = true
     @AppStorage("tintChannelCards")       private var tintChannelCards = false
+    // Issue #28: hide channel logos so the channel name uses the full row width.
+    @AppStorage("ui.showChannelLogos")    private var showChannelLogos = true
 
     // MARK: - App Behaviors (moved)
     //
@@ -199,6 +201,18 @@ struct AppearanceSettingsView: View {
                 tvAppearanceSection("Preview") {
                     swatchPreview
                         .padding(.horizontal, 20)
+                }
+
+                // Channel List (issue #28)
+                tvAppearanceSection("Channel List") {
+                    TVSettingsToggleRow(
+                        icon: "tv.fill",
+                        iconColor: .accentPrimary,
+                        title: "Show Channel Logos",
+                        subtitle: "Turn off to hide channel logos so longer channel names get the full row width.",
+                        isOn: $showChannelLogos,
+                        onChange: { _ in }
+                    )
                 }
 
                 // Category Colors — folded in from the former
@@ -536,6 +550,26 @@ struct AppearanceSettingsView: View {
                         .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Preview").sectionHeaderStyle()
+                }
+                .listSectionSeparator(.hidden)
+
+                // MARK: Channel List (issue #28)
+                Section {
+                    Toggle(isOn: $showChannelLogos) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Show Channel Logos")
+                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                            Text("Turn off to hide channel logos so longer channel names get the full row width.")
+                                .font(.labelSmall).foregroundColor(.textTertiary)
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+                    .onChange(of: showChannelLogos) { _, _ in
+                        SyncManager.shared.pushPreferencesImmediate()
+                    }
+                } header: {
+                    Text("Channel List").sectionHeaderStyle()
                 }
                 .listSectionSeparator(.hidden)
 
