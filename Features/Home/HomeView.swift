@@ -3284,6 +3284,29 @@ struct MainTabView: View {
         attemptAutoResume()
     }
 
+    /// Issue #24: the sync orchestrator only runs on cold launch / server
+    /// change (`.task(id: orchestratorKey)`), so opening the app after it
+    /// sat backgrounded for hours left the guide stale and never refreshed
+    /// (only force-quitting, which forces a cold relaunch, re-synced). On
+    /// foreground, if the loaded EPG is older than the staleness window,
+    /// kick the same channels + guide refresh that pull-to-refresh uses
+    /// (`forceRefresh`, which deliberately does NOT re-pull VOD). Gated on
+    /// staleness so ordinary app-switching doesn't refetch every time.
+    private func refreshGuideIfStaleOnForeground(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
+        guard oldPhase != .active, newPhase == .active else { return }
+        guard !allServers.isEmpty else { return }
+        // Don't pile on top of an in-flight cold-launch / server-change sync.
+        guard !channelStore.isLoading, !channelStore.isEPGLoading else { return }
+        // 30 minutes: long enough that normal app-switching never refetches,
+        // short enough that "opened it after a few hours" always lands fresh.
+        let staleAfter: TimeInterval = 30 * 60
+        guard GuideStore.shared.isEPGStale(olderThan: staleAfter) else { return }
+        debugLog("🔄 Foreground guide refresh: EPG stale (>\(Int(staleAfter / 60))m old) — forcing channels + guide refresh")
+        let servers = allServers
+        let ctx = modelContext
+        Task { await channelStore.forceRefresh(servers: servers, modelContext: ctx) }
+    }
+
     /// Called whenever `initialSyncKey` changes. Dismisses the
     /// Loading Guide screen once the Live-TV-critical signals are
     /// done — channels loaded, EPG loaded, DVR reconciled. **VOD is
@@ -3958,6 +3981,7 @@ struct MainTabView: View {
             onResumeAttempt: { attemptAutoResume() },
             onScenePhaseChange: { old, new in
                 handleAutoResumeScenePhase(from: old, to: new)
+                refreshGuideIfStaleOnForeground(from: old, to: new)
             }
         ))
         // Background-work heartbeat logger. When `isAnyBackgroundWork`

@@ -65,6 +65,23 @@ final class GuideStore: ObservableObject {
     @Published var programs: [String: [GuideProgram]] = [:]  // channelID → programs
     @Published var isLoading = false
 
+    /// Wall-clock age of the currently-loaded EPG data: the newest
+    /// `fetchedAt` across loaded rows (set by `loadFromCache`) or `now`
+    /// after a successful network refresh (`fetchUpcoming`). Drives the
+    /// warm-foreground staleness check that fixes issue #24 (opening the
+    /// app after hours showed an old, never-refreshed guide). `nil` before
+    /// the first load.
+    var newestFetchedAt: Date?
+
+    /// True when the loaded EPG data is older than `olderThan` (or there is
+    /// none yet). Used on `scenePhase .active` to decide whether to kick a
+    /// guide refresh, since the orchestrator only runs on cold launch /
+    /// server change, not on warm foreground.
+    func isEPGStale(olderThan seconds: TimeInterval) -> Bool {
+        guard let newestFetchedAt else { return true }
+        return Date().timeIntervalSince(newestFetchedAt) > seconds
+    }
+
     // Batch mode: accumulate merges into a backing dict, publish once at end.
     private var _pendingPrograms: [String: [GuideProgram]] = [:]
     private var _isBatching = false
@@ -314,6 +331,11 @@ final class GuideStore: ObservableObject {
             // plus two log lines. The 97k-row fetch + dict build
             // already happened off-main.
             self.programs = loaded.dict
+            // Record how old the loaded data actually is (newest cached
+            // fetch), so the warm-foreground staleness check (issue #24)
+            // measures the real age of what the user is looking at, not
+            // just this session's network activity.
+            self.newestFetchedAt = Date().addingTimeInterval(-Double(loaded.newestFetchAgoSec))
             debugLog("📺 GuideStore.loadFromCache: loaded \(loaded.programCount) programs across \(loaded.dict.count) channels (server \(serverID))")
             debugLog("📺 GuideStore.loadFromCache: newest fetch \(loaded.newestFetchAgoSec)s ago, threshold \(Int(stalenessThreshold))s, fresh=\(loaded.isFresh)")
             self.lastLoadFromCacheResult = (serverID: serverID, isFresh: loaded.isFresh)
@@ -631,6 +653,9 @@ final class GuideStore: ObservableObject {
         let totalPrograms = programs.values.reduce(0) { $0 + $1.count }
         let channelsWithMultiple = programs.values.filter { $0.count > 1 }.count
         debugLog("📺 GuideStore done: \(totalPrograms) programs across \(programs.count) channels, \(channelsWithMultiple) channels have >1 program")
+        // A real network refresh landed, so the loaded data is current as of
+        // `now`. Resets the warm-foreground staleness clock (issue #24).
+        if didRefresh { newestFetchedAt = now }
         return didRefresh
     }
 
