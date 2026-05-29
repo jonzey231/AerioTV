@@ -113,6 +113,11 @@ struct AerioApp: App {
     /// already open and hot.
     let sharedModelContainer: ModelContainer
 
+    /// Process-wide handle to the SwiftData container so non-SwiftUI scenes
+    /// (the CarPlay scene) can fetch saved servers when the phone UI scene
+    /// has not run. Set once in init; read on the main thread thereafter.
+    nonisolated(unsafe) static var sharedContainer: ModelContainer?
+
     init() {
         // Ensure the Application Support directory exists before SwiftData/CoreData
         // tries to create the SQLite store there. On a fresh install the directory
@@ -137,6 +142,9 @@ struct AerioApp: App {
         ])
         do {
             self.sharedModelContainer = try ModelContainer(for: schema)
+            // Expose the container so the CarPlay scene can fetch servers
+            // and hydrate channels without the phone UI scene running.
+            Self.sharedContainer = self.sharedModelContainer
         } catch {
             fatalError("Could not initialize ModelContainer: \(error)")
         }
@@ -892,6 +900,21 @@ final class TVLANProbe: ObservableObject {
     // MARK: Probe core
 
     private func startProbeTask(candidates: [URL]) {
+        // Assume we are NOT on the LAN until this probe positively confirms
+        // it. Clearing the persisted detection flag up front means
+        // `effectiveBaseURL` defaults to the always-reachable external URL the
+        // instant a probe starts (launch, foreground, or network change),
+        // rather than routing streams to a possibly-now-unreachable LAN host
+        // for the multi-second life of a failing probe. The break this fixes:
+        // leaving home Wi-Fi for cellular (getting in the car) left the stale
+        // `true` in place, so playback hit the dead LAN URL until a manual
+        // Test Connection forced a reprobe. At home the probe re-confirms the
+        // LAN in well under a second, and the SSID fast-path keeps routing
+        // correct in the meantime whenever the SSID is known.
+        if UserDefaults.standard.bool(forKey: Self.detectedKey) {
+            UserDefaults.standard.set(false, forKey: Self.detectedKey)
+            lastDetected = false
+        }
         // Cancel any probe that's still running. The newer call's
         // result should win — a user tapping "Refresh" during a
         // slow in-flight probe shouldn't wait for the old one to

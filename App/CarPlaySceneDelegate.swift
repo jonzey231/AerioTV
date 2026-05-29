@@ -1,13 +1,31 @@
 #if canImport(CarPlay)
 import CarPlay
 import UIKit
+import Combine
+import SwiftData
 
-/// CarPlay scene delegate — provides audio-only channel browsing via CarPlay templates.
-/// Channels are read from the shared `ChannelStore`; playback is triggered via `NowPlayingManager`.
-/// All shared state access dispatches to the main thread to avoid data races.
-class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
+/// CarPlay scene delegate. Audio-first channel browsing via CarPlay
+/// templates, built to run STANDALONE: it hydrates its own channel list
+/// from the shared SwiftData container if the phone UI scene has not run,
+/// so connecting from a cold car (phone app never opened) still works.
+///
+/// `@MainActor`: CarPlay's template APIs are main-actor-isolated
+/// (CARPLAY_TEMPLATE_UI_ACTOR) and scene-delegate callbacks arrive on the
+/// main thread, so the whole delegate is main-actor and reads the shared
+/// `@MainActor` stores directly. (An earlier `DispatchQueue.main.sync`
+/// here deadlocked the main thread and crashed the app on connect.)
+/// Escaping closures (the store observer and CarPlay list handlers) are
+/// nonisolated but always invoked on main, so they hop back via
+/// `MainActor.assumeIsolated`.
+@MainActor
+final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
 
     private var interfaceController: CPInterfaceController?
+    // Held so the store observer can refresh their sections in place when
+    // a standalone channel load completes, instead of swapping the root.
+    private var favoritesTemplate: CPListTemplate?
+    private var groupsTemplate: CPListTemplate?
+    private var cancellables = Set<AnyCancellable>()
 
     // MARK: - Scene Lifecycle
 
@@ -16,157 +34,293 @@ class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate {
         didConnect interfaceController: CPInterfaceController
     ) {
         self.interfaceController = interfaceController
-        let tabBar = buildTabBar()
-        interfaceController.setRootTemplate(tabBar, animated: false, completion: nil)
+        #if DEBUG
+        print("[CarPlay] didConnect: scene connected, channels=\(ChannelStore.shared.channels.count) hasFavorites=\(FavoritesStore.shared.hasFavorites)")
+        #endif
+
+        // A car can be the only scene (phone app never opened), so mark the
+        // session, default it to audio-only, hydrate channels if the store
+        // is empty, and observe the store so the lists fill in once the
+        // load lands.
+        NowPlayingManager.shared.isCarPlayConnected = true
+        hydrateChannelsIfNeeded()
+        observeChannelStore()
+
+        let root = buildRootTemplate()
+        interfaceController.setRootTemplate(root, animated: false) { ok, err in
+            #if DEBUG
+            print("[CarPlay] setRootTemplate done ok=\(ok) err=\(String(describing: err))")
+            #endif
+        }
     }
 
     func templateApplicationScene(
         _ templateApplicationScene: CPTemplateApplicationScene,
         didDisconnectInterfaceController interfaceController: CPInterfaceController
     ) {
+        #if DEBUG
+        print("[CarPlay] didDisconnect: scene torn down")
+        #endif
         self.interfaceController = nil
+        favoritesTemplate = nil
+        groupsTemplate = nil
+        cancellables.removeAll()
+        NowPlayingManager.shared.isCarPlayConnected = false
     }
 
-    // MARK: - Tab Bar
+    // MARK: - Standalone hydration
 
-    private func buildTabBar() -> CPTabBarTemplate {
-        let favoritesTab = buildFavoritesTemplate()
-        let groupsTab = buildGroupsTemplate()
-        let nowPlayingTab = CPNowPlayingTemplate.shared
-
-        let tabBar = CPTabBarTemplate(templates: [favoritesTab, groupsTab, nowPlayingTab])
-        return tabBar
+    /// Kick off a channel load if nothing is loaded yet. Reads the saved
+    /// servers straight from the shared SwiftData container so this works
+    /// without the SwiftUI UI scene, which is what normally drives
+    /// `ChannelStore.refresh`. `refresh` is idempotent, so a later phone-UI
+    /// launch will not double-load.
+    private func hydrateChannelsIfNeeded() {
+        guard ChannelStore.shared.channels.isEmpty,
+              !ChannelStore.shared.isLoading,
+              let container = AerioApp.sharedContainer else { return }
+        let context = ModelContext(container)
+        let servers = (try? context.fetch(FetchDescriptor<ServerConnection>())) ?? []
+        guard !servers.isEmpty else { return }
+        ChannelStore.shared.refresh(servers: servers)
     }
 
-    // MARK: - Favorites Tab
+    /// Refresh the CarPlay lists in place whenever the channel list changes
+    /// (the standalone load above completing, or a server switch on the
+    /// phone while connected).
+    private func observeChannelStore() {
+        ChannelStore.shared.$channels
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshLists() }
+            }
+            .store(in: &cancellables)
+    }
 
-    private func buildFavoritesTemplate() -> CPListTemplate {
-        let items: [ChannelDisplayItem] = DispatchQueue.main.sync {
-            FavoritesStore.shared.favoriteItems
+    private func refreshLists() {
+        favoritesTemplate?.updateSections(favoritesSections())
+        groupsTemplate?.updateSections(groupsSections())
+        applyEmptyState(favoritesTemplate, kind: .favorites)
+        applyEmptyState(groupsTemplate, kind: .groups)
+    }
+
+    // MARK: - Root template
+
+    /// Choose the root: a Favorites/Groups tab bar when the user has saved
+    /// favorites, or the Groups list on its own when they have none. With no
+    /// favorites the Favorites tab would always be empty, so a tab bar whose
+    /// only useful tab is Groups is just an extra tap; dropping straight into
+    /// Groups is cleaner. The decision uses `FavoritesStore.hasFavorites`
+    /// (persisted IDs), so it is correct even on a cold connect where the
+    /// channel list has not resolved `favoriteItems` yet.
+    private func buildRootTemplate() -> CPTemplate {
+        let groups = makeGroupsTemplate()
+        groupsTemplate = groups
+
+        guard FavoritesStore.shared.hasFavorites else {
+            // No favorites: Groups is the whole experience, no tab bar.
+            favoritesTemplate = nil
+            #if DEBUG
+            print("[CarPlay] buildRootTemplate: no favorites -> Groups list as root, groups=\(ChannelStore.shared.orderedGroups.count)")
+            #endif
+            return groups
         }
+        #if DEBUG
+        print("[CarPlay] buildRootTemplate: tab bar (Favorites+Groups), favorites=\(FavoritesStore.shared.favoriteItems.count) groups=\(ChannelStore.shared.orderedGroups.count)")
+        #endif
 
-        let listItems = items.map { makeChannelItem($0) }
-        let section = CPListSection(items: listItems)
-        let template = CPListTemplate(title: "Favorites", sections: [section])
+        let favorites = makeFavoritesTemplate()
+        favoritesTemplate = favorites
+        // CPTabBarTemplate only accepts CPListTemplate / CPGridTemplate as
+        // tabs. CPNowPlayingTemplate is NOT valid here (it threw at
+        // validateTemplates); Now Playing is reached via CarPlay's built-in
+        // Now Playing button and the pushTemplate in playChannel.
+        return CPTabBarTemplate(templates: [favorites, groups])
+    }
+
+    private enum TabKind { case favorites, groups }
+
+    // MARK: - Favorites
+
+    private func makeFavoritesTemplate() -> CPListTemplate {
+        let template = CPListTemplate(title: "Favorites", sections: favoritesSections())
         template.tabSystemItem = .favorites
-        template.emptyViewTitleVariants = ["No Favorites"]
-        template.emptyViewSubtitleVariants = ["Star channels in the app to see them here"]
+        applyEmptyState(template, kind: .favorites)
         return template
     }
 
-    // MARK: - Groups Tab
+    private func favoritesSections() -> [CPListSection] {
+        let items = FavoritesStore.shared.favoriteItems.map { makeChannelItem($0) }
+        return [CPListSection(items: items)]
+    }
 
-    private func buildGroupsTemplate() -> CPListTemplate {
-        let (groups, channels): ([String], [ChannelDisplayItem]) = DispatchQueue.main.sync {
-            (ChannelStore.shared.orderedGroups, ChannelStore.shared.channels)
-        }
+    // MARK: - Groups
 
-        let groupItems: [CPListItem] = groups.map { groupName in
+    private func makeGroupsTemplate() -> CPListTemplate {
+        let template = CPListTemplate(title: "Groups", sections: groupsSections())
+        template.tabSystemItem = .more
+        applyEmptyState(template, kind: .groups)
+        return template
+    }
+
+    private func groupsSections() -> [CPListSection] {
+        let channels = ChannelStore.shared.channels
+        let groupItems: [CPListItem] = ChannelStore.shared.orderedGroups.map { groupName in
             let count = channels.filter { $0.group == groupName }.count
             let item = CPListItem(
                 text: groupName,
                 detailText: "\(count) channel\(count == 1 ? "" : "s")"
             )
             item.handler = { [weak self] _, completion in
-                self?.showChannelsInGroup(groupName, allChannels: channels)
+                MainActor.assumeIsolated { self?.showChannelsInGroup(groupName) }
                 completion()
             }
             item.accessoryType = .disclosureIndicator
             return item
         }
-
-        let section = CPListSection(items: groupItems)
-        let template = CPListTemplate(title: "Groups", sections: [section])
-        template.tabSystemItem = .more
-        template.emptyViewTitleVariants = ["No Channels"]
-        template.emptyViewSubtitleVariants = ["Add a server in the app first"]
-        return template
+        return [CPListSection(items: groupItems)]
     }
 
     /// Push a channel list for a specific group.
-    private func showChannelsInGroup(_ group: String, allChannels: [ChannelDisplayItem]) {
-        let channels = allChannels.filter { $0.group == group }
-        let listItems = channels.map { makeChannelItem($0) }
-        let section = CPListSection(items: listItems)
-        let template = CPListTemplate(title: group, sections: [section])
+    private func showChannelsInGroup(_ group: String) {
+        let channels = ChannelStore.shared.channels.filter { $0.group == group }
+        let items = channels.map { makeChannelItem($0) }
+        let template = CPListTemplate(title: group, sections: [CPListSection(items: items)])
         interfaceController?.pushTemplate(template, animated: true, completion: nil)
+    }
+
+    // MARK: - Empty / loading state
+
+    /// Reflect load state in the list's empty view so a cold connect shows
+    /// "Loading…" rather than "No Channels" while the standalone fetch runs.
+    private func applyEmptyState(_ template: CPListTemplate?, kind: TabKind) {
+        guard let template else { return }
+        if ChannelStore.shared.isLoading && ChannelStore.shared.channels.isEmpty {
+            template.emptyViewTitleVariants = ["Loading channels…"]
+            template.emptyViewSubtitleVariants = ["One moment"]
+        } else if ChannelStore.shared.channels.isEmpty {
+            template.emptyViewTitleVariants = ["No Channels"]
+            template.emptyViewSubtitleVariants = ["Open AerioTV on your phone and add a server"]
+        } else {
+            switch kind {
+            case .favorites:
+                template.emptyViewTitleVariants = ["No Favorites"]
+                template.emptyViewSubtitleVariants = ["Star channels in the app to see them here"]
+            case .groups:
+                template.emptyViewTitleVariants = ["No Groups"]
+                template.emptyViewSubtitleVariants = ["This server has no channel groups"]
+            }
+        }
+    }
+
+    // MARK: - Program info formatting
+
+    /// Secondary line for a channel row: the current program, how much of
+    /// it is left, then a short description, joined with a middle dot. The
+    /// order is deliberate so the most glanceable bits lead and CarPlay's
+    /// width truncation trims the description first, never the program or
+    /// the time. Falls back to the group name when no EPG is available.
+    ///
+    /// Note: the time-left value is computed when the list is built or
+    /// refreshed (cold-connect hydration, an EPG update, or navigating into
+    /// a group), not on a per-second ticker, so it can lag a few minutes
+    /// between refreshes.
+    private func programDetail(for channel: ChannelDisplayItem) -> String {
+        var parts: [String] = []
+        if let program = channel.currentProgram?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !program.isEmpty {
+            parts.append(program)
+        }
+        if let timeLeft = timeRemaining(until: channel.currentProgramEnd) {
+            parts.append(timeLeft)
+        }
+        if let desc = channel.currentProgramDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !desc.isEmpty {
+            parts.append(desc)
+        }
+        guard !parts.isEmpty else { return channel.group }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Human "time left" in the current program, or nil when there is no
+    /// end time or the program has effectively ended (under ~half a minute
+    /// left, or already past).
+    private func timeRemaining(until end: Date?) -> String? {
+        guard let end else { return nil }
+        let secondsLeft = end.timeIntervalSinceNow
+        guard secondsLeft > 30 else { return nil }
+        let minutesLeft = Int((secondsLeft / 60).rounded())
+        if minutesLeft < 60 {
+            return "\(minutesLeft) min left"
+        }
+        let hours = minutesLeft / 60
+        let mins = minutesLeft % 60
+        return mins == 0 ? "\(hours) hr left" : "\(hours)h \(mins)m left"
     }
 
     // MARK: - Channel Item Factory
 
     private func makeChannelItem(_ channel: ChannelDisplayItem) -> CPListItem {
-        let detail = channel.currentProgram ?? channel.group
-        let item = CPListItem(text: channel.name, detailText: detail)
+        let item = CPListItem(text: channel.name, detailText: programDetail(for: channel))
 
-        // Load channel logo asynchronously
+        // Load channel logo asynchronously. This Task inherits the
+        // delegate's @MainActor isolation; the LogoFetcher await suspends
+        // off-main, then setImage runs back on main. v1.6.23: route through
+        // LogoFetcher so the active server's auth headers apply.
         if let logoURL = channel.logoURL {
             Task {
                 guard !Task.isCancelled else { return }
-                // v1.6.23: route through LogoFetcher so the active
-                // server's auth headers are applied — fixes blank
-                // CarPlay channel logos on Dispatcharr-API mode.
                 if let data = try? await LogoFetcher.fetch(logoURL),
                    let image = UIImage(data: data) {
                     guard !Task.isCancelled else { return }
-                    let maxSize = CPListItem.maximumImageSize
-                    let scaled = image.scaledToFit(maxSize)
-                    await MainActor.run {
-                        item.setImage(scaled)
-                    }
+                    item.setImage(image.scaledToFit(CPListItem.maximumImageSize))
                 }
             }
         }
 
         item.handler = { [weak self] _, completion in
-            self?.playChannel(channel)
+            MainActor.assumeIsolated { self?.playChannel(channel) }
             completion()
         }
 
-        // Show now-playing indicator if this channel is active
-        let isPlaying: Bool = DispatchQueue.main.sync {
-            NowPlayingManager.shared.playingItem?.id == channel.id
-        }
-        if isPlaying {
+        if NowPlayingManager.shared.playingItem?.id == channel.id {
             item.isPlaying = true
         }
-
         return item
     }
 
     // MARK: - Playback
 
-    private func playChannel(_ channel: ChannelDisplayItem) {
+    private func playChannel(_ tappedChannel: ChannelDisplayItem) {
+        // Re-resolve against the live store so the seeded tile carries the
+        // CURRENT program (and start/end). The `ChannelDisplayItem` captured
+        // in the list item's handler is a snapshot from list-build time and
+        // can predate the EPG populating `currentProgram`, which is why the
+        // Now Playing screen showed the channel name with no program. The
+        // live store row has the up-to-date program; fall back to the tapped
+        // snapshot if the row is gone (e.g. mid-refresh).
+        let channel = ChannelStore.shared.channels.first { $0.id == tappedChannel.id } ?? tappedChannel
         guard !channel.streamURLs.isEmpty else { return }
+        #if DEBUG
+        print("[CarPlay] playChannel: \(channel.name) tappedProgram=\(tappedChannel.currentProgram ?? "nil") freshProgram=\(channel.currentProgram ?? "nil")")
+        #endif
 
-        // Start playback on main thread (PlayerSession and
-        // NowPlayingManager are both @MainActor). CarPlay delegate
-        // callbacks run on an arbitrary queue, so the hop is
-        // required.
-        DispatchQueue.main.async {
-            if PlaybackFeatureFlags.useUnifiedPlayback {
-                // Phase B routing: funnel through PlayerSession so
-                // the iPad UI (if the user unlocks mid-CarPlay
-                // session) sees this channel as tile 0 and
-                // multiview + lockscreen both stay in sync.
-                _ = PlayerSession.shared.begin(
-                    item: channel,
-                    server: ChannelStore.shared.activeServer
-                )
-            } else {
-                // Legacy path — direct write to NowPlayingManager.
-                let headers: [String: String] = {
-                    if let server = ChannelStore.shared.activeServer {
-                        return server.authHeaders
-                    }
-                    return ["Accept": "*/*"]
-                }()
-                NowPlayingManager.shared.startPlaying(channel, headers: headers)
-            }
+        if PlaybackFeatureFlags.useUnifiedPlayback {
+            // Phase B routing: funnel through PlayerSession so the iPad UI
+            // (if the user unlocks mid-CarPlay session) sees this channel as
+            // tile 0 and multiview + lockscreen stay in sync.
+            _ = PlayerSession.shared.begin(
+                item: channel,
+                server: ChannelStore.shared.activeServer
+            )
+        } else {
+            let headers = ChannelStore.shared.activeServer?.authHeaders ?? ["Accept": "*/*"]
+            NowPlayingManager.shared.startPlaying(channel, headers: headers)
         }
 
-        // Switch to Now Playing template
-        let nowPlaying = CPNowPlayingTemplate.shared
-        interfaceController?.pushTemplate(nowPlaying, animated: true, completion: nil)
+        // Surface Now Playing (pushing it is allowed even though it cannot
+        // be a tab).
+        interfaceController?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
     }
 }
 

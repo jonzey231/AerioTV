@@ -136,6 +136,10 @@ final class NowPlayingBridge {
         cc.togglePlayPauseCommand.removeTarget(nil)
         cc.changePlaybackPositionCommand.removeTarget(nil)
         cc.changePlaybackPositionCommand.isEnabled = false
+        cc.nextTrackCommand.removeTarget(nil)
+        cc.nextTrackCommand.isEnabled = false
+        cc.previousTrackCommand.removeTarget(nil)
+        cc.previousTrackCommand.isEnabled = false
         onPlay = nil
         onPause = nil
         onSeek = nil
@@ -196,8 +200,32 @@ final class NowPlayingBridge {
 
         cc.skipForwardCommand.isEnabled = false
         cc.skipBackwardCommand.isEnabled = false
-        cc.nextTrackCommand.isEnabled = false
-        cc.previousTrackCommand.isEnabled = false
+
+        // v1.7.x CarPlay: on live channels, the car's (and lock screen's)
+        // next/previous buttons flip channels. `changeChannel` has its own
+        // 300ms debounce against rapid hardware-press cascades. VOD keeps
+        // these disabled — there is no "next channel" for on-demand.
+        cc.nextTrackCommand.removeTarget(nil)
+        cc.previousTrackCommand.removeTarget(nil)
+        if isLive {
+            cc.nextTrackCommand.isEnabled = true
+            cc.previousTrackCommand.isEnabled = true
+            cc.nextTrackCommand.addTarget { _ in
+                DispatchQueue.main.async {
+                    NowPlayingManager.shared.changeChannel(direction: 1)
+                }
+                return .success
+            }
+            cc.previousTrackCommand.addTarget { _ in
+                DispatchQueue.main.async {
+                    NowPlayingManager.shared.changeChannel(direction: -1)
+                }
+                return .success
+            }
+        } else {
+            cc.nextTrackCommand.isEnabled = false
+            cc.previousTrackCommand.isEnabled = false
+        }
     }
 
     private func loadArtwork(from url: URL?) {
@@ -285,6 +313,15 @@ final class NowPlayingBridge {
                     self.publishInfo()
                     #if DEBUG
                     print("[NowPlaying] artwork: published thumbnail=\(Int(thumbnail.size.width))x\(Int(thumbnail.size.height)) source=\(Int(original.size.width))x\(Int(original.size.height))")
+                    // Read back the live center to PROVE the artwork actually
+                    // landed in MPNowPlayingInfoCenter (vs. a silent drop). If
+                    // hasArtworkKey=true the data is present and any missing
+                    // CarPlay/lockscreen image is a renderer/sim issue, not an
+                    // app publish bug. iOS-only read (the tvOS read-back bug
+                    // doesn't apply here; this whole path is #else of os(tvOS)).
+                    let liveCenter = MPNowPlayingInfoCenter.default().nowPlayingInfo
+                    let hasArt = liveCenter?[MPMediaItemPropertyArtwork] != nil
+                    print("[NowPlaying] artwork readback: center.count=\(liveCenter?.count ?? -1) hasArtworkKey=\(hasArt) artworkBounds=\((liveCenter?[MPMediaItemPropertyArtwork] as? MPMediaItemArtwork)?.bounds.size ?? .zero)")
                     #endif
                 }
                 #endif

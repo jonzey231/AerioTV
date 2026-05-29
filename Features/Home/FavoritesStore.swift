@@ -32,6 +32,14 @@ final class FavoritesStore: ObservableObject {
 
     func isFavorite(_ id: String) -> Bool { favoriteIDs.contains(id) }
 
+    /// True when the user has saved at least one favorite channel ID
+    /// (persisted under `favoriteChannelIDs`), independent of whether the
+    /// channel list has been hydrated into `favoriteItems` yet. CarPlay
+    /// reads this at connect to decide whether a Favorites tab is worth
+    /// showing, so the decision is correct even on a cold connect where
+    /// channels are still loading and `favoriteItems` is momentarily empty.
+    var hasFavorites: Bool { !favoriteIDs.isEmpty }
+
     func toggle(_ item: ChannelDisplayItem) {
         if favoriteIDs.contains(item.id) {
             favoriteIDs.remove(item.id)

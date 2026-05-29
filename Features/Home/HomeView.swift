@@ -2520,6 +2520,12 @@ final class NowPlayingManager: ObservableObject {
     @Published var playingItem: ChannelDisplayItem? = nil
     @Published var playingHeaders: [String: String] = [:]
     @Published var isMinimized: Bool = false
+
+    /// True while a CarPlay scene is connected (set by CarPlaySceneDelegate
+    /// on connect/disconnect). Drives the CarPlay branch in
+    /// MPVPlayerView.didEnterBackground so audio keeps playing in the car
+    /// with video suppressed. Always false off CarPlay and on tvOS.
+    @Published var isCarPlayConnected: Bool = false
     @Published var isLive: Bool = true
 
     /// `true` when `PlayerSession.mode == .multiview`. In that state

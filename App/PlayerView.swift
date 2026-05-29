@@ -784,6 +784,13 @@ private struct PlayerRootView: View {
         #endif
         .onAppear {
             scheduleControlsHide()
+            // If a car is already connected when the player mounts (the user
+            // opened the phone app mid-CarPlay session), default to
+            // audio-only, same as the fresh-connect handler below.
+            if NowPlayingManager.shared.isCarPlayConnected {
+                isAudioOnly = true
+                progressStore.isAudioOnly = true
+            }
         }
         // Add-stream picker. Presented on top of the live PlayerView
         // — deliberate: the current stream keeps playing under it, so
@@ -849,6 +856,15 @@ private struct PlayerRootView: View {
             guard newToken != nil, isLive else { return }
             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
             scheduleControlsHide()
+        }
+        // CarPlay sessions default to audio-only (the driver is not watching
+        // the phone). The existing Show Video toggle still overrides it for a
+        // passenger; disconnecting CarPlay returns to video. Drives the same
+        // isAudioOnly path the overflow toggle uses. No-op on tvOS (CarPlay
+        // never connects there).
+        .onChange(of: NowPlayingManager.shared.isCarPlayConnected) { _, connected in
+            isAudioOnly = connected
+            progressStore.isAudioOnly = connected
         }
         #if os(tvOS)
         .onChange(of: showControls) { _, visible in

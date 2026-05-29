@@ -25,10 +25,10 @@
 		1EB4A645E88DDFE6F211ADA4 /* Pods-Aerio_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Aerio_iOS-acknowledgements.markdown */; };
 		1FF8FD4B1DD11EAE3F154767 /* MoviesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF6E46AD7A6F742E358FBB43 /* MoviesView.swift */; };
 		20FAAE7F6DB7B9506F08F8E7 /* Pods-Aerio_iOS-dummy.m in Sources */ = {isa = PBXBuildFile; fileRef = 46BC9C3B09ACE5A89FC5C0E9 /* Pods-Aerio_iOS-dummy.m */; };
-		23CF3BDA1A62692EC1141F06 /* AerioTopShelf.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 980F01E6377A91F10236C4D5 /* AerioTopShelf.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		23CF3BDA1A62692EC1141F06 /* AerioTopShelf.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 980F01E6377A91F10236C4D5 /* AerioTopShelf.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2527936283FB11BD5201E1DA /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
 		27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
-		294AE2B45D4A82E38B1D09C4 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
+		294AE2B45D4A82E38B1D09C4 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Aerio.xcworkspace */; };
 		29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */; };
 		2B3C4D5E6F708901ACE70010 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
 		2B3C4D5E6F708901ACE70011 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
@@ -44,13 +44,11 @@
 		38A0E8B8ABBD862D5012AB52 /* DVRSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */; };
 		38A0E8B8ABBD862D5012AC52 /* SyncCategoriesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */; };
 		3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
-		FA5005705700000000000002 /* FavoritesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA5005705700000000000001 /* FavoritesStore.swift */; };
-		FA5005705700000000000003 /* FavoritesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA5005705700000000000001 /* FavoritesStore.swift */; };
 		3C4D5E6F70891012ACE70020 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
 		3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
 		48336325ACADA131557D4C58 /* AppBehaviorsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */; };
 		483F98D5B841C7C3E8491885 /* Pods_Aerio_tvOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 24C772C96083DF7C60C170B6 /* Pods_Aerio_tvOS.framework */; };
-		5585996EF79BB170CAD2D6F3 /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */; };
+		5585996EF79BB170CAD2D6F3 /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */; };
 		565A7DFCEC12544455827DB3 /* ReminderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 265A7DFCEC12544455827DB3 /* ReminderManager.swift */; };
 		58753215820D219D87D24402 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
 		5A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */; };
@@ -61,7 +59,7 @@
 		622B003E0D0A155E9FE7D9B7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
 		62AD11B70BF6B745FD727C8B /* AerioSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */; };
 		6308BAE1E16965A379092AE8 /* OnDemandView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CBF1B5E89BE18F8E73482B9 /* OnDemandView.swift */; };
-		65A50DB238B2354D5B81DE09 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
+		65A50DB238B2354D5B81DE09 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Aerio.xcworkspace */; };
 		665A7DFCEC12544455827DB3 /* ReminderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 265A7DFCEC12544455827DB3 /* ReminderManager.swift */; };
 		6A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */; };
 		6AFEBD1C481F02C363B48866 /* Manifest.lock in Resources */ = {isa = PBXBuildFile; fileRef = C8918F8C279C6028AA7BC86D /* Manifest.lock */; };
@@ -176,13 +174,17 @@
 		DBFAE2F87043F12BE1728B6D /* Manifest.lock in Resources */ = {isa = PBXBuildFile; fileRef = C8918F8C279C6028AA7BC86D /* Manifest.lock */; };
 		DD1234567890ABCDEF123456 /* DebugLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1234567890ABCDEF123456 /* DebugLogger.swift */; };
 		DE1234567890ABCDEF123456 /* NowPlayingBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */; };
+		CARPLAYSCENE000000000002 /* CarPlaySceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */; };
+		CARPLAYSCENE000000000003 /* CarPlaySceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */; };
 		E7C08D85CEAB0B3D8E268FBA /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */; };
 		EE1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */; };
-		EFE8847CEB70D953DD4D2BFB /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */; };
+		EFE8847CEB70D953DD4D2BFB /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */; };
 		F00D3696D62D7C9EF6E05244 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */; };
 		F11A12EB07CB46158E23B73E /* ProgramInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */; };
 		F1B2C3D4E5F6A70890BC2345 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
 		FA1AC2C2B4E0577B5456A002 /* ManageGroupsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1DD47CBF4B1FE912B0A001 /* ManageGroupsSheet.swift */; };
+		FA5005705700000000000002 /* FavoritesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA5005705700000000000001 /* FavoritesStore.swift */; };
+		FA5005705700000000000003 /* FavoritesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA5005705700000000000001 /* FavoritesStore.swift */; };
 		FD1AC2C2B4E0577B5456999F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
 		FD65778E5A378FA718D5D0E2 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C5D08BD1430E78C26390734 /* SettingsView.swift */; };
 		FF1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */; };
@@ -203,15 +205,15 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
-		7B2A520618A70CCBFEA93B87 /* Embed App Extensions */ = {
+		7B2A520618A70CCBFEA93B87 /* Embed Foundation Extensions */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
 			dstPath = "";
 			dstSubfolderSpec = 13;
 			files = (
-				23CF3BDA1A62692EC1141F06 /* AerioTopShelf.appex in Embed App Extensions */,
+				23CF3BDA1A62692EC1141F06 /* AerioTopShelf.appex in Embed Foundation Extensions */,
 			);
-			name = "Embed App Extensions";
+			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXCopyFilesBuildPhase section */
@@ -225,6 +227,7 @@
 		0EEF62484815637B5043D834 /* Pods-Aerio_tvOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_tvOS.debug.xcconfig"; path = "Target Support Files/Pods-Aerio_tvOS/Pods-Aerio_tvOS.debug.xcconfig"; sourceTree = "<group>"; };
 		0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DVRSettingsView.swift; sourceTree = "<group>"; };
 		0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SyncCategoriesSettingsView.swift; sourceTree = "<group>"; };
+		14605A25B0401FBE3A055716 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		1603AF9E4D31DB8BDC708C06 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NWHTTPClient.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPRouter.swift; sourceTree = "<group>"; };
@@ -251,7 +254,6 @@
 		5806A5B948B604B451A5F5C7 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		5813F2DEADFF09175AADA42D /* Pods-Aerio_iOS-acknowledgements.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Pods-Aerio_iOS-acknowledgements.plist"; sourceTree = "<group>"; };
 		5957CC8A6CC0000B14ED47C5 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
-		FA5005705700000000000001 /* FavoritesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesStore.swift; sourceTree = "<group>"; };
 		628C021FBBB1C5C00F6640EA /* TVServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = TVServices.framework; path = System/Library/Frameworks/TVServices.framework; sourceTree = SDKROOT; };
 		62C0C151EAA6394D32003217 /* DeviceInfo.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DeviceInfo.swift; sourceTree = "<group>"; };
 		693A71F4A4429F56337992E6 /* StreamingAPIs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingAPIs.swift; sourceTree = "<group>"; };
@@ -291,6 +293,7 @@
 		A660E9D8B5D23C804B590C79 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		AA1234567890ABCDEF123456 /* DebugLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogger.swift; sourceTree = "<group>"; };
 		AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingBridge.swift; sourceTree = "<group>"; };
+		CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarPlaySceneDelegate.swift; sourceTree = "<group>"; };
 		B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LocalRecordingSession.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSessionRefCount.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = IdleTimerRefCount.swift; sourceTree = "<group>"; };
@@ -338,10 +341,11 @@
 		F249D5C39D90BC11107F3420 /* Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist"; sourceTree = "<group>"; };
 		F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConnectionViewModel.swift; sourceTree = "<group>"; };
 		F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ReminderBannerView.swift; path = Shared/ReminderBannerView.swift; sourceTree = SOURCE_ROOT; };
+		FA5005705700000000000001 /* FavoritesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesStore.swift; sourceTree = "<group>"; };
 		FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppBehaviorsSettingsView.swift; sourceTree = "<group>"; };
 		MPV0000000000000000000001 /* MPVPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MPVPlayerView.swift; sourceTree = "<group>"; };
-		TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */ = {isa = PBXFileReference; lastKnownFileType = wrapper.workspace; path = Aerio.xcworkspace; sourceTree = "<group>"; };
-		TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
+		"TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Aerio.xcworkspace */ = {isa = PBXFileReference; lastKnownFileType = wrapper.workspace; path = Aerio.xcworkspace; sourceTree = "<group>"; };
+		"TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
 		WHATSNEW00000000000ACE000 /* WhatsNew.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -376,6 +380,14 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		11EC69739059FC54CFF03581 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				14605A25B0401FBE3A055716 /* Foundation.framework */,
+			);
+			name = iOS;
+			sourceTree = "<group>";
+		};
 		2E9487FE5F10365DAD5FCB23 /* LiveTV */ = {
 			isa = PBXGroup;
 			children = (
@@ -503,6 +515,7 @@
 				24C772C96083DF7C60C170B6 /* Pods_Aerio_tvOS.framework */,
 				B3AFC4A7E97E377CD9A5B995 /* tvOS */,
 				628C021FBBB1C5C00F6640EA /* TVServices.framework */,
+				11EC69739059FC54CFF03581 /* iOS */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -605,8 +618,8 @@
 		BD5262EA2F6792080036371D /* Recovered References */ = {
 			isa = PBXGroup;
 			children = (
-				TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */,
-				TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */,
+				"TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Aerio.xcworkspace */,
+				"TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */,
 			);
 			name = "Recovered References";
 			sourceTree = "<group>";
@@ -711,6 +724,7 @@
 			children = (
 				AA1234567890ABCDEF123456 /* DebugLogger.swift */,
 				AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */,
+				CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */,
 				MPV0000000000000000000001 /* MPVPlayerView.swift */,
 				08B4D4146C07D85405524861 /* AerioApp.swift */,
 				880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */,
@@ -776,7 +790,7 @@
 				3A1C44D789D61CA0731351C2 /* Sources */,
 				4CF6C7E91A8276F8960F3C7D /* Resources */,
 				5511B41648942BDE13D29B38 /* Frameworks */,
-				7B2A520618A70CCBFEA93B87 /* Embed App Extensions */,
+				7B2A520618A70CCBFEA93B87 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
@@ -812,7 +826,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
-				LastUpgradeCheck = 2640;
+				LastUpgradeCheck = 2650;
 			};
 			buildConfigurationList = E14095500FDB469BC6E1027E /* Build configuration list for PBXProject "Aerio" */;
 			developmentRegion = en;
@@ -950,6 +964,7 @@
 				FA1AC2C2B4E0577B5456A002 /* ManageGroupsSheet.swift in Sources */,
 				CC1234567890ABCDEF123456 /* DebugLogger.swift in Sources */,
 				CD1234567890ABCDEF123456 /* NowPlayingBridge.swift in Sources */,
+				CARPLAYSCENE000000000002 /* CarPlaySceneDelegate.swift in Sources */,
 				MPV0000000000000000000002 /* MPVPlayerView.swift in Sources */,
 				EE1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
 				A8E322C238A7CE0B55BA3D4D /* AerioApp.swift in Sources */,
@@ -1035,6 +1050,7 @@
 				0A23BE6E3373A83D3FEBC001 /* ManageGroupsSheet.swift in Sources */,
 				DD1234567890ABCDEF123456 /* DebugLogger.swift in Sources */,
 				DE1234567890ABCDEF123456 /* NowPlayingBridge.swift in Sources */,
+				CARPLAYSCENE000000000003 /* CarPlaySceneDelegate.swift in Sources */,
 				MPV0000000000000000000003 /* MPVPlayerView.swift in Sources */,
 				FF1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
 				CF38B25676730E71C9AD497A /* AerioApp.swift in Sources */,
@@ -1128,7 +1144,6 @@
 		01DDFCC8CB0708CA2ADEA45F /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = NO;
 				CODE_SIGN_ENTITLEMENTS = TopShelfExtension/AerioTopShelf.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -1209,7 +1224,6 @@
 		20D0A0B9A467AE7A9A157446 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = NO;
 				CODE_SIGN_ENTITLEMENTS = TopShelfExtension/AerioTopShelf.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -1442,7 +1456,7 @@
 				591F6D6387ED7CB4ED5CF6EA /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
+			defaultConfigurationName = Debug;
 		};
 		880EE68A9BBB3CA4912BB19D /* Build configuration list for PBXNativeTarget "Aerio_tvOS" */ = {
 			isa = XCConfigurationList;
@@ -1451,7 +1465,7 @@
 				0666C45943E3AC3A9A7BEE8B /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
+			defaultConfigurationName = Debug;
 		};
 		E14095500FDB469BC6E1027E /* Build configuration list for PBXProject "Aerio" */ = {
 			isa = XCConfigurationList;
@@ -1460,7 +1474,7 @@
 				58770CA2B53D8AA283368438 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
+			defaultConfigurationName = Debug;
 		};
 		ED8422D10957C4684885F7D5 /* Build configuration list for PBXNativeTarget "AerioTopShelf" */ = {
 			isa = XCConfigurationList;
@@ -1469,7 +1483,7 @@
 				01DDFCC8CB0708CA2ADEA45F /* Debug */,
 			);
 			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
+			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
 

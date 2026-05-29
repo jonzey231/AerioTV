@@ -433,13 +433,24 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     var initialTileCount: Int = 1
 
     func makeCoordinator() -> Coordinator {
+        // CarPlay drives audio-only playback, so suppress video from the very
+        // first frame at the mpv layer. Besides being the driver-safety
+        // default, this is what lets audio play at all on the iOS Simulator:
+        // its OpenGL ES path is broken (CVOpenGLESTextureCacheCreate fails),
+        // and with video up the VO can never drain frames, stalling the whole
+        // stream. makeCoordinator runs on the main thread, so reading the
+        // @MainActor NowPlayingManager via assumeIsolated is safe.
+        let videoSuppressed = MainActor.assumeIsolated {
+            NowPlayingManager.shared.isCarPlayConnected
+        }
         let c = Coordinator(urls: urls, headers: headers, isLive: isLive,
                             progressStore: progressStore, logStore: logStore,
                             onFatalError: onFatalError,
                             tileID: tileID,
                             initialIsAudioActive: isAudioActive,
                             initialShouldPause: shouldPause,
-                            initialTileCount: initialTileCount)
+                            initialTileCount: initialTileCount,
+                            initialVideoSuppressed: videoSuppressed)
         c.nowPlayingTitle = nowPlayingTitle
         c.nowPlayingSubtitle = nowPlayingSubtitle
         c.nowPlayingArtworkURL = nowPlayingArtworkURL
@@ -548,7 +559,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // reasons the audio / pause helpers are: single-stream
             // mode has its own lifecycle and doesn't go through
             // the multiview flip path.
-            context.coordinator.swapStreamIfChanged(to: urls, newTitle: nowPlayingTitle)
+            context.coordinator.swapStreamIfChanged(to: urls, newTitle: nowPlayingTitle, newSubtitle: nowPlayingSubtitle)
             // NOTE: no PiP wiring here. Multiview tiles do NOT
             // auto-PiP on background (eager-creating
             // AVPictureInPictureController during a multi-tile
@@ -825,8 +836,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         ///   - newTitle: the new channel's display name, for the
         ///     `MPNowPlayingInfoCenter` metadata. Empty string is
         ///     fine and leaves the existing title alone.
+        ///   - newSubtitle: the new channel's current program, shown
+        ///     as the Now Playing subtitle (lockscreen + CarPlay).
+        ///     Updated alongside the title so a channel flip doesn't
+        ///     leave the previous channel's program (or nil) stuck
+        ///     under the new channel name.
         @MainActor
-        fileprivate func swapStream(to newURL: URL, newTitle: String) {
+        fileprivate func swapStream(to newURL: URL, newTitle: String, newSubtitle: String?) {
             // Update the Coordinator's URL bookkeeping on the main
             // queue first so any subsequent reader (snap-to-live
             // reload, telemetry log line, retry path) sees the new
@@ -848,6 +864,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // lockscreen / Control Center video metadata path).
             if !newTitle.isEmpty {
                 nowPlayingTitle = newTitle
+                // Update the program subtitle in the same pass so a flip
+                // doesn't strand the previous channel's program (or nil)
+                // under the new channel name on the lockscreen / CarPlay.
+                nowPlayingSubtitle = newSubtitle
                 #if os(iOS)
                 reassertNowPlayingBridge()
                 #endif
@@ -878,14 +898,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// URLs during a teardown shouldn't accidentally tear the
         /// existing stream.
         @MainActor
-        fileprivate func swapStreamIfChanged(to newURLs: [URL], newTitle: String) {
+        fileprivate func swapStreamIfChanged(to newURLs: [URL], newTitle: String, newSubtitle: String?) {
             guard let newURL = newURLs.first else { return }
             // urls.first is the URL the Coordinator is currently
             // playing (or just issued a swap toward); compare on the
             // absolute string form to dodge any URL-equality quirks
             // around trailing slashes or query order.
             if urls.first?.absoluteString == newURL.absoluteString { return }
-            swapStream(to: newURL, newTitle: newTitle)
+            swapStream(to: newURL, newTitle: newTitle, newSubtitle: newSubtitle)
         }
 
         /// Called from `updateUIViewController`. Sends `mute=0` when
@@ -1632,6 +1652,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// directly, which would be an actor-isolation violation.
         /// See the audio-strategy branch in setupMPV for usage.
         private let initialTileCount: Int
+        /// CarPlay flag captured on the main actor at construction. When true,
+        /// `setupMPV` bakes `vid=no` in before `loadfile` so the video pipeline
+        /// never comes up: no decode, no GL present (which sidesteps the iOS
+        /// Simulator's broken OpenGL ES path that otherwise stalls the whole
+        /// stream, audio included), and no wasted power decoding video the
+        /// driver can't watch. The background/foreground lifecycle handlers
+        /// keep `vid=no` for the whole CarPlay session (they skip the usual
+        /// foreground video-restore while a car is connected).
+        private let initialVideoSuppressed: Bool
 
         init(urls: [URL], headers: [String: String], isLive: Bool,
              progressStore: PlayerProgressStore,
@@ -1640,7 +1669,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
              tileID: String? = nil,
              initialIsAudioActive: Bool = true,
              initialShouldPause: Bool = false,
-             initialTileCount: Int = 1) {
+             initialTileCount: Int = 1,
+             initialVideoSuppressed: Bool = false) {
             self.urls = urls
             self.headers = headers
             self.isLive = isLive
@@ -1651,6 +1681,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             self.initialIsAudioActive = initialIsAudioActive
             self.initialShouldPause = initialShouldPause
             self.initialTileCount = initialTileCount
+            self.initialVideoSuppressed = initialVideoSuppressed
             // Seed the `lastApplied*` debounce with the initial
             // values — setupMPV applies them via mpv_set_option
             // BEFORE mpv_initialize, so there's no need for
@@ -1980,6 +2011,27 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 return
             }
 
+            // (2b) CarPlay connected: keep audio for the car, suppress video
+            //      (the phone is backgrounded/locked while driving). The flag
+            //      is set by CarPlaySceneDelegate; it stays false off CarPlay
+            //      and on tvOS, so this is a no-op everywhere else. Sits with
+            //      the audio-only branch (all platforms) so it does not depend
+            //      on the iOS-only AirPlay block below.
+            // didEnterBackground is delivered on the main thread (the
+            // UIApplication lifecycle notification posts on main), so read the
+            // main-actor NowPlayingManager via assumeIsolated rather than an
+            // async hop, since we must decide synchronously before returning.
+            let carPlayConnected = MainActor.assumeIsolated {
+                NowPlayingManager.shared.isCarPlayConnected
+            }
+            if carPlayConnected {
+                #if DEBUG
+                print("[MPV-BG] Background: CarPlay connected, vid=no, audio continues")
+                #endif
+                mpv_set_property_string(mpv, "vid", "no")
+                return
+            }
+
             // (3) AirPlay route.
             let route = AVAudioSession.sharedInstance().currentRoute
             let airPlayAudio = route.outputs.contains(where: { $0.portType == .airPlay })
@@ -2066,7 +2118,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             print("[MPV-BG] Foreground: vid=\(vidStr ?? "nil"), isPiP=\(progressStore.isPiPActive), audioOnly=\(progressStore.isAudioOnly), autoPaused=\(autoPausedOnBackground), outputs=[\(outputs)]")
             #endif
             if vidStr == "no" {
-                mpv_set_property_string(mpv, "vid", "auto")
+                // Keep video suppressed while CarPlay is connected: the driver
+                // isn't watching the phone, and on a real device foregrounding
+                // (unlocking the phone mid-drive) would otherwise bring the
+                // whole video pipeline back up. This @objc handler is posted on
+                // the main thread, so reading the @MainActor NowPlayingManager
+                // via assumeIsolated is safe.
+                let carPlayConnected = MainActor.assumeIsolated {
+                    NowPlayingManager.shared.isCarPlayConnected
+                }
+                if !carPlayConnected {
+                    mpv_set_property_string(mpv, "vid", "auto")
+                }
             }
             mpv_free(vid)
 
@@ -3217,6 +3280,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy).
             checkError(mpv_set_option_string(mpv, "vo", "libmpv"))
             checkError(mpv_set_option_string(mpv, "profile", "fast"))  // Disable expensive post-processing for mobile
+
+            // CarPlay: never bring the video pipeline up. Set as a PRE-INIT
+            // option (not a runtime property) so no frame is ever decoded or
+            // handed to the GL presenter. This is the driver-safety default
+            // AND the reason audio plays in the iOS Simulator, whose OpenGL ES
+            // presenter fails (CVOpenGLESTextureCacheCreateTextureFromImage
+            // -6683) and would otherwise stall the demuxer/decoder waiting on a
+            // VO that can never drain. The lifecycle handlers keep it `no` for
+            // the whole CarPlay session.
+            if initialVideoSuppressed {
+                checkError(mpv_set_option_string(mpv, "vid", "no"))
+                #if DEBUG
+                print("[MPV-CARPLAY] setupMPV: vid=no (audio-only start, CarPlay)")
+                #endif
+            }
 
             #if targetEnvironment(simulator)
             checkError(mpv_set_option_string(mpv, "hwdec", "no"))
