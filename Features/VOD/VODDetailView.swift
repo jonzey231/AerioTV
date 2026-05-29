@@ -1034,7 +1034,9 @@ private struct TVEpisodeRowButton: View {
             #endif
         }
         #if os(tvOS)
-        .buttonStyle(TVNoHighlightButtonStyle())
+        // Row draws its own focus highlight above, so suppress the
+        // button style's ring to avoid a second nested rectangle.
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
         #else
         .buttonStyle(.plain)
@@ -1079,7 +1081,9 @@ private struct TVPlayButton: View {
             #endif
         }
         #if os(tvOS)
-        .buttonStyle(TVNoHighlightButtonStyle())
+        // Play CTA draws its own capsule focus highlight above, so
+        // suppress the button style's ring to avoid a nested rectangle.
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($isFocused)
         #else
         .buttonStyle(.plain)

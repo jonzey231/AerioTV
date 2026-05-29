@@ -12,6 +12,13 @@ import SwiftUI
 #if os(tvOS)
 struct TVNoHighlightButtonStyle: ButtonStyle {
     @Environment(\.isFocused) private var isFocused
+    /// When false, this style draws NO focus ring of its own and only
+    /// dims on press. Use it for buttons that already render their own
+    /// complete focus highlight (e.g. the VOD episode row and Play CTA)
+    /// so the focused control shows ONE ring, not this style's ring
+    /// nested inside the caller's. Defaults true to preserve every
+    /// existing call site.
+    var drawsFocusRing: Bool = true
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -24,8 +31,8 @@ struct TVNoHighlightButtonStyle: ButtonStyle {
                 // is invisible at TV viewing distance.
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .stroke(Color.accentPrimary,
-                            lineWidth: isFocused ? 2 : 0)
-                    .opacity(isFocused ? 1 : 0)
+                            lineWidth: (drawsFocusRing && isFocused) ? 2 : 0)
+                    .opacity((drawsFocusRing && isFocused) ? 1 : 0)
                     .animation(.easeInOut(duration: 0.15), value: isFocused)
             )
             .opacity(configuration.isPressed ? 0.7 : 1.0)

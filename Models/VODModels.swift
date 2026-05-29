@@ -275,6 +275,12 @@ struct ContinueWatchingSection: View {
     /// only carries the episode's own still + title, so the show poster
     /// and name come from here (looked up by `seriesID`).
     var series: [VODDisplayItem] = []
+    /// Optional "Open Series" action for episode cards. When provided,
+    /// long-pressing an episode card offers Open Series, which navigates
+    /// to that show's detail page (all seasons and episodes), the same
+    /// destination as selecting the series from the main grid. Movies and
+    /// not-yet-loaded series do not surface the option.
+    var onOpenSeries: ((VODDisplayItem) -> Void)?
 
     @Query(
         filter: #Predicate<WatchProgress> { !$0.isFinished },
@@ -313,6 +319,12 @@ struct ContinueWatchingSection: View {
                             let fraction = progress.durationMs > 0
                                 ? Double(progress.positionMs) / Double(progress.durationMs)
                                 : 0
+                            // Parent show for an episode card (nil for a
+                            // movie, or until the series list has loaded).
+                            // Drives the long-press "Open Series" action.
+                            let parentSeries: VODDisplayItem? = progress.vodType == "episode"
+                                ? series.first(where: { $0.id == progress.seriesID })
+                                : nil
                             Button {
                                 onPlay?(progress)
                             } label: {
@@ -330,6 +342,16 @@ struct ContinueWatchingSection: View {
                             .buttonStyle(.plain)
                             #endif
                             .contextMenu {
+                                // Episodes with a loaded parent series get an
+                                // Open Series action that jumps to the full
+                                // show page, same as picking it from the grid.
+                                if let parentSeries, let onOpenSeries {
+                                    Button {
+                                        onOpenSeries(parentSeries)
+                                    } label: {
+                                        Label("Open Series", systemImage: "rectangle.stack")
+                                    }
+                                }
                                 Button(role: .destructive) {
                                     // v1.6.8 (Codex A1): pass serverID so we
                                     // delete only this server's row when the
@@ -353,6 +375,14 @@ struct ContinueWatchingSection: View {
             }
             .padding(.top, 12)
             .padding(.bottom, 8)
+            #if os(tvOS)
+            // Make the whole rail one focus section so D-pad Down from
+            // the pills/header above lands on the first card here, rather
+            // than skipping to a grid poster sitting directly below it.
+            // tvOS focus weighs horizontal alignment heavily, so the
+            // leftmost card would otherwise be passed over.
+            .focusSection()
+            #endif
         }
     }
 

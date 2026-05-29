@@ -3195,6 +3195,25 @@ private struct GuideProgramButton: View {
         // Emby style: full row height, flat rectangle, no rounded corners
         .frame(width: width, height: rowHeight, alignment: .topLeading)
         .background(cellBackground)
+        #if os(tvOS)
+        // The focus highlight is the brighter cellBackground, but on
+        // category-tinted (and live) cells that is only a same-hue opacity
+        // bump (0.35/0.45 -> 0.55) and reads as "no change" at TV distance,
+        // so focus looked lost on colored cells even though it was correctly
+        // held (the cell's isFocused state tracks the focus engine fine; the
+        // tint delta is just invisible at TV distance). Add a category-
+        // independent cue: a light white brightening wash plus a crisp inset
+        // outline, both flat (no scale or shadow pop-out, matching the
+        // v1.6.21 guide styling) so focus reads on any tint.
+        .overlay {
+            if isFocused {
+                ZStack {
+                    Color.white.opacity(0.20)
+                    Rectangle().strokeBorder(Color.white, lineWidth: 4)
+                }
+            }
+        }
+        #endif
         .clipped()
     }
 

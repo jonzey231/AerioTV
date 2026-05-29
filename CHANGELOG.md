@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.7.3 - 2026-05-20
+## v1.7.3 - 2026-05-29
 
 ### Added
 
@@ -30,16 +30,17 @@
   playback starts, so advancing needs no extra network fetch. The
   existing long-press "Remove from Continue Watching" still clears a
   show from the row. Reported by jdfrey1 (Issue #19).
+- **Apple TV: open a series from Continue Watching.** Press and hold
+  Select on a series card in the Continue Watching row for an "Open
+  Series" action that jumps to the full show page with every season and
+  episode, the same destination as picking it from the grid.
 
 ### Changed
 
-- **Smoother channel-flipping and live playback cadence.** Channel
-  changes now swap the stream into the existing player in place (mpv
-  `loadfile`) instead of tearing down and rebuilding the whole
-  player, removing the brief 30-then-60 fps wobble after a flip. Live
-  playback also moved from a stale-threshold watchdog to a
-  CADisplayLink-driven frame pacer running at the display refresh rate
-  (community PR #21).
+- **Smoother channel-flipping.** Channel changes now swap the stream
+  into the existing player in place (mpv `loadfile`) instead of
+  tearing down and rebuilding the whole player, removing the brief
+  30-then-60 fps wobble after a flip.
 
 ### Fixed
 
@@ -64,6 +65,24 @@
 - **Server addresses can be entered without a scheme.** The Add
   Server screen now accepts a bare host like `dispatcharr.example.com`
   in addition to a full `https://` URL.
+- **HDR channels no longer render green and washed out on Apple TV.**
+  HDR (BT.2020 PQ or HLG) live channels are now tone-mapped to correct
+  SDR instead of being drawn with the wrong gamut and transfer
+  function. SDR channels are unaffected.
+- **Apple TV: the focused guide cell is always clearly marked.** On
+  category-tinted and currently-airing cells the focus highlight was
+  only a faint same-color shift and could look lost while scrolling
+  down; focused cells now get a clear outline so you can always tell
+  where you are, on any tint.
+- **Apple TV: the top navigation bar no longer gets stranded.**
+  Pressing Menu to leave On Demand, the DVR, or Settings could drop you
+  into the guide with the tab bar hidden and no way to move back up to
+  it; focus is now restored so the bar is reachable again.
+- **Apple TV: pressing Down from the Movies / Series selector lands on
+  Continue Watching** instead of skipping past it to a poster further
+  down the page.
+- **Apple TV: the focused episode row in a series shows a single
+  highlight** instead of two nested outlines.
 
 ## v1.7.2 - 2026-05-11
 

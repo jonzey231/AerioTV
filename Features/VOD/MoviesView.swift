@@ -408,6 +408,12 @@ struct MoviesView: View {
                         }
                     }
                     .padding(16)
+                    #if os(tvOS)
+                    // Grid is its own focus section so Down from the
+                    // Continue Watching rail lands here cleanly and Up
+                    // returns to the rail, rather than geometric jumps.
+                    .focusSection()
+                    #endif
                 }
             }
         }

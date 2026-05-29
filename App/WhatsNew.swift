@@ -63,12 +63,16 @@ enum WhatsNewStore {
                 "Compressed XMLTV guides are now supported. AerioTV can load gzipped .xml.gz EPG feeds, including large Gracenote-style guides, by streaming and decompressing them on the fly so your guide fills in without the app running out of memory. Only the programs for channels you actually have are kept",
                 "Xtream Codes: add an optional custom XMLTV URL per server to color-tint your channels by category (Sports, News, Movies, Kids)",
                 "Continue Watching now advances to the next episode of a series. When you finish an episode, the next one shows up automatically, so you don't have to search for the show again to keep going",
-                "Smoother live playback and channel changes. Flipping channels now swaps the stream in place instead of tearing down and rebuilding the player, with a new display-rate frame pacer steadying cadence",
+                "Smoother channel changes. Flipping channels now swaps the stream in place instead of tearing down and rebuilding the player, removing the brief frame-rate wobble after a flip",
+                "Apple TV: HDR channels (like UHD sports) no longer look green and washed out. They now display with correct colors, tone-mapped to SDR",
                 "Apple TV: returning to the Guide after watching now puts focus back on the channel you were watching, not the top of the list",
                 "M3U playlists: favorites now stick across a playlist refresh",
                 "Multiview staging from the Guide gained a Play button, and the Done button is now reachable on Apple TV",
                 "Fixed channels that share an EPG ID (tvg-id) so they all show their guide data, not just the first one",
-                "You can now enter a server address without typing https://"
+                "You can now enter a server address without typing https://",
+                "Apple TV: press and hold Select on a Continue Watching series for Open Series, jumping straight to all its seasons and episodes",
+                "Apple TV: the focused cell in the guide is now clearly outlined, so you can always tell where you are while scrolling, even on colored or live cells",
+                "Apple TV: fixed the top menu bar becoming unreachable after pressing Menu to leave On Demand, the DVR, or Settings"
             ],
             releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.3")
         ),

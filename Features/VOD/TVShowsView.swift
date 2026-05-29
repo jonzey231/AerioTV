@@ -341,7 +341,8 @@ struct TVShowsView: View {
                         vodType: "episode",
                         headers: dispatcharrHeaders,
                         onPlay: { progress in resumeFromContinueWatching(progress) },
-                        series: vodStore.series
+                        series: vodStore.series,
+                        onOpenSeries: { item in navPath.append(item) }
                     )
 
                     LazyVGrid(columns: columns, spacing: gridRowSpacing) {
@@ -357,6 +358,12 @@ struct TVShowsView: View {
                         }
                     }
                     .padding(16)
+                    #if os(tvOS)
+                    // Grid is its own focus section so Down from the
+                    // Continue Watching rail lands here cleanly and Up
+                    // returns to the rail, rather than geometric jumps.
+                    .focusSection()
+                    #endif
                 }
             }
         }

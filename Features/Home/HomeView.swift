@@ -4687,6 +4687,19 @@ struct MainTabView: View {
             let tabName = selectedTab.rawValue
             debugLog("🎮 Menu pressed: " + tabName + " tab → switch to Live TV")
             selectedTab = .liveTV
+            // tvOS: switching tabs programmatically while focus is buried
+            // in the outgoing tab's content strands focus in the Guide
+            // with no path back up to the (auto-hidden) tab bar, so Up goes
+            // dead, only Down works. Entering Live TV by selecting the tab
+            // doesn't strand it because focus passes through the tab bar
+            // on the way down. Re-post the guide's own focus claim so
+            // ChannelListView / EPGGuideView run resetFocus(in:
+            // guideFocusNS) and re-seat focus cleanly, which restores the
+            // up-path to the tab bar. Deferred so the tab switch and the
+            // guide's appearance settle before the focus reset fires.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+            }
         }
     }
     #endif
