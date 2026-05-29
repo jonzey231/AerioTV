@@ -631,6 +631,15 @@ struct SettingsView: View {
                         }
                         modelContext.delete(server)
                         try? modelContext.save()
+                        // Issue #25: wipe in-memory VOD so On Demand stops
+                        // showing the removed server's movies / series. Live
+                        // already clears (ChannelStore.refresh re-runs on the
+                        // server-list change), but VODStore's no-active-server
+                        // path returns without clearing, so stale, unplayable
+                        // entries lingered. The orchestrator re-fires on the
+                        // allServers change and repopulates VOD for whatever
+                        // server remains active (if any).
+                        VODStore.shared.clear()
                         // Push updated list to iCloud (server removed)
                         SyncManager.shared.pushServers(servers.filter { $0.id != server.id })
                         // Push the post-cascade WatchProgress set to

@@ -11,6 +11,12 @@ import Security
 @MainActor
 final class VODStore: ObservableObject {
 
+    /// Shared instance, mirroring `ChannelStore.shared` /
+    /// `NowPlayingManager.shared`. Lets non-Home views (Settings'
+    /// delete-playlist flow) reach VOD state without environment-object
+    /// plumbing. MainTabView observes this same instance.
+    static let shared = VODStore()
+
     @Published private(set) var movies: [VODDisplayItem] = []
     @Published private(set) var movieCategories: [VODCategory] = []
     @Published private(set) var isLoadingMovies = false
@@ -104,6 +110,27 @@ final class VODStore: ObservableObject {
     func refresh(servers: [ServerConnection]) {
         refreshMovies(servers: servers)
         refreshSeries(servers: servers)
+    }
+
+    /// Wipe all in-memory VOD state. Called when a playlist/server is
+    /// deleted so On Demand stops showing the removed server's movies and
+    /// series (issue #25: Live cleared via ChannelStore but VOD lingered,
+    /// surfacing stale entries that no longer played). The next active
+    /// server (if any) repopulates via `refresh()`; with no server
+    /// remaining, everything stays empty.
+    func clear() {
+        moviesTask?.cancel(); moviesTask = nil
+        seriesTask?.cancel(); seriesTask = nil
+        movieSearchTask?.cancel(); movieSearchTask = nil
+        seriesSearchTask?.cancel(); seriesSearchTask = nil
+        movies = []; movieCategories = []; moviesError = nil
+        isLoadingMovies = false; isRefillingMovies = false
+        series = []; seriesCategories = []; seriesError = nil
+        isLoadingSeries = false; isRefillingSeries = false
+        movieSearchResults = []; isSearchingMovies = false
+        seriesSearchResults = []; isSearchingSeries = false
+        currentMoviesServerID = nil; currentSeriesServerID = nil
+        lastMoviesServerName = nil; lastSeriesServerName = nil
     }
 
     func refreshMovies(servers: [ServerConnection]) {
@@ -2837,7 +2864,7 @@ struct MainTabView: View {
     #endif
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
     @ObservedObject private var favoritesStore = FavoritesStore.shared
-    @StateObject private var vodStore = VODStore()
+    @ObservedObject private var vodStore = VODStore.shared
     @ObservedObject private var channelStore = ChannelStore.shared
     /// Watches the shared GuideStore so the initial-sync loading cover
     /// can wait for the XMLTV parse (which populates category data and
