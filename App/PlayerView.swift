@@ -1397,12 +1397,19 @@ private struct PlayerRootView: View {
         // the bar keeps showing `scrubTargetMs`) until mpv's reported position
         // catches up to the seek. Clearing isScrubbing immediately makes the
         // bar snap to the stale pre-seek `currentMs` for a beat and then jump
-        // forward once mpv updates — the "playhead jumps around" symptom.
+        // forward once mpv updates (the "playhead jumps around" symptom).
+        //
+        // Convergence window is 4s: with keyframe seeks (hr-seek=no) mpv
+        // lands on the nearest keyframe, up to a GOP shy of the exact
+        // target, so a tight 1.5s test would never match and the playhead
+        // would stick at the target for the full backstop before snapping.
+        // 4s covers a typical streaming GOP, so the bar releases onto the
+        // real landing position as soon as playback resumes there.
         scrubSettleTask?.cancel()
         scrubSettleTask = Task { @MainActor in
-            for _ in 0..<100 {  // ~8s backstop at 80ms/iter
+            for _ in 0..<75 {  // ~6s backstop at 80ms/iter
                 if Task.isCancelled { return }
-                if abs(Int64(progressStore.currentMs) - Int64(target)) < 1_500 { break }
+                if abs(Int64(progressStore.currentMs) - Int64(target)) < 4_000 { break }
                 try? await Task.sleep(nanoseconds: 80_000_000)
             }
             guard !Task.isCancelled else { return }

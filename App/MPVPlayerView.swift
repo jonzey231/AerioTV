@@ -3427,8 +3427,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //        still waits for the first decodable keyframe
             //        (so you don't get garbled output) but won't add
             //        a synthetic buffer delay on top.
-            // VOD:  2s for smooth resume-after-seek.
-            checkError(mpv_set_option_string(mpv, "cache-pause-wait", isLive ? "0" : "2"))
+            // VOD:  1s, resume quickly after a seek. Was 2s; halved so
+            //        scrubbing buffers back faster (user feedback: "seeking
+            //        is slow to buffer"). Still enough prefill to ride out
+            //        the typical post-seek segment fetch on VOD/DVR.
+            checkError(mpv_set_option_string(mpv, "cache-pause-wait", isLive ? "0" : "1"))
 
             // ────────────────────────────────────────────────────────
             // Startup-speed options. These collectively shave ~1-2s
@@ -4033,6 +4036,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // VOD: larger buffer for seek-back
                 mpv_set_property_string(mpv, "demuxer-max-bytes", "50MiB")
                 mpv_set_property_string(mpv, "demuxer-max-back-bytes", "10MiB")
+                // Keyframe (non-exact) seeks for VOD + DVR scrubbing. The
+                // default seeks exactly to the requested timestamp, which
+                // means decoding from the prior keyframe forward to that
+                // frame before anything shows (the slow part of a scrub).
+                // hr-seek=no snaps to the nearest keyframe instead, so the
+                // picture comes back almost immediately; the landing is a
+                // GOP off the exact target, which is the right trade for a
+                // scrub (the scrub UI settles the playhead onto the real
+                // landing position). Live keeps the default (it never seeks).
+                mpv_set_property_string(mpv, "hr-seek", "no")
             }
 
             mpv_set_property_string(mpv, "framedrop", "decoder+vo")
