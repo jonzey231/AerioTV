@@ -50,12 +50,30 @@ struct MultiviewLayoutView<Content: View>: View {
     /// the front so it occupies the big rect and the rest stack small.
     private func tileLayout(in size: CGSize) -> (tiles: [MultiviewTile], rects: [CGRect]) {
         if let spotID = spotlightTileID,
-           let spotIdx = tiles.firstIndex(where: { $0.id == spotID }),
+           tiles.contains(where: { $0.id == spotID }),
            tiles.count > 1 {
-            var reordered = tiles
-            let chosen = reordered.remove(at: spotIdx)
-            reordered.insert(chosen, at: 0)
-            return (reordered, MultiviewGridMath.spotlightRects(for: reordered.count, in: size, spacing: spacing))
+            // Spotlight rects: [0] is the big tile, [1...] the small stack.
+            // Assign the big rect to the spotlighted tile IN PLACE and the
+            // small rects to the others in order, keeping the ForEach
+            // iteration order identical to the equal grid. That way the only
+            // thing that changes on toggle is each tile's frame, so they
+            // smoothly grow/shrink instead of reshuffling (which mis-diffs
+            // and looks glitchy with heavy video layers).
+            let spot = MultiviewGridMath.spotlightRects(for: tiles.count, in: size, spacing: spacing)
+            guard spot.count == tiles.count else {
+                return (tiles, MultiviewGridMath.rects(for: tiles.count, in: size, spacing: spacing))
+            }
+            var rects = [CGRect](repeating: .zero, count: tiles.count)
+            var nextSmall = 1
+            for (i, tile) in tiles.enumerated() {
+                if tile.id == spotID {
+                    rects[i] = spot[0]
+                } else {
+                    rects[i] = spot[nextSmall]
+                    nextSmall += 1
+                }
+            }
+            return (tiles, rects)
         }
         return (tiles, MultiviewGridMath.rects(for: tiles.count, in: size, spacing: spacing))
     }
@@ -120,7 +138,10 @@ struct MultiviewLayoutView<Content: View>: View {
                 // remove+insert and tore down + rebuilt the
                 // moved tile's MPVPlayerView Coordinator (causing
                 // an AudioUnit re-init "bonk" on the audio tile).
-                .animation(.easeInOut(duration: 0.28), value: tiles.map(\.id))
+                // Key on the id-order AND the spotlight selection so a
+                // spotlight toggle (which changes only frames, not order)
+                // still animates the grow/shrink. (#27)
+                .animation(.easeInOut(duration: 0.28), value: tiles.map(\.id) + [spotlightTileID ?? "_"])
             }
         }
     }
