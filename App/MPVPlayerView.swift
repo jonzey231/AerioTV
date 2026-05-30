@@ -388,6 +388,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     let urls: [URL]
     let headers: [String: String]
     let isLive: Bool
+    /// True only for an in-progress DVR recording (growing seekable
+    /// window). Single-stream recordings set this; live TV, VOD, and
+    /// multiview tiles leave it false. Drives the live-edge seek clamp
+    /// and keeps a transient end-of-playlist EOF from locking seeks.
+    var isDVR: Bool = false
     let nowPlayingTitle: String
     let nowPlayingSubtitle: String?
     let nowPlayingArtworkURL: URL?
@@ -447,6 +452,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             NowPlayingManager.shared.isCarPlayConnected
         }
         let c = Coordinator(urls: urls, headers: headers, isLive: isLive,
+                            isDVR: isDVR,
                             progressStore: progressStore, logStore: logStore,
                             onFatalError: onFatalError,
                             tileID: tileID,
@@ -587,6 +593,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var urls: [URL]
         private let headers: [String: String]
         private let isLive: Bool
+        /// In-progress DVR recording: a growing seekable window from the
+        /// recording start to the live edge. Seeks are clamped a few
+        /// seconds behind the edge so we never seek onto EOF, and a
+        /// transient end-of-playlist EOF does not lock further seeks.
+        private let isDVR: Bool
+        /// How far behind the reported playlist end (seconds) a DVR seek
+        /// is allowed to land. Seeking exactly to the live edge of an
+        /// in-progress HLS playlist lands on EOF and stalls; staying a
+        /// few seconds back keeps playback flowing into the live edge.
+        fileprivate static let dvrLiveEdgeGuardSec: Double = 6.0
         fileprivate let progressStore: PlayerProgressStore
         private let logStore: AttemptLogStore
         private let onFatalError: @MainActor @Sendable (String) -> Void
@@ -1666,6 +1682,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private let initialVideoSuppressed: Bool
 
         init(urls: [URL], headers: [String: String], isLive: Bool,
+             isDVR: Bool = false,
              progressStore: PlayerProgressStore,
              logStore: AttemptLogStore,
              onFatalError: @escaping @MainActor @Sendable (String) -> Void,
@@ -1677,6 +1694,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             self.urls = urls
             self.headers = headers
             self.isLive = isLive
+            self.isDVR = isDVR
             self.progressStore = progressStore
             self.logStore = logStore
             self.onFatalError = onFatalError
@@ -1704,9 +1722,28 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &newFlag)
             }
 
-            // Seek closure — VOD only. Guards against seek-after-EOF.
+            // Seek closure: VOD + DVR. Live TV has no seekable timeline.
             progressStore.seekAction = { [weak self] targetMs in
-                guard let self, !self.isLive, !self.playbackEnded, let mpv = self.activeMPVHandle() else { return }
+                guard let self, !self.isLive, let mpv = self.activeMPVHandle() else { return }
+                if self.isDVR {
+                    // DVR (in-progress recording): the seekable window grows
+                    // toward a moving live edge. Clamp the target a few
+                    // seconds behind the current playlist end so we never
+                    // seek onto EOF (which would otherwise lock every later
+                    // seek), and clear any transient end-of-playlist EOF so
+                    // the user can always scrub back from the live edge.
+                    self.playbackEnded = false
+                    var durSec: Double = 0
+                    mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &durSec)
+                    var target = Double(targetMs) / 1000.0
+                    if durSec > 0 { target = min(target, durSec - Coordinator.dvrLiveEdgeGuardSec) }
+                    target = max(0, target)
+                    let secs = String(format: "%.3f", target)
+                    self.mpvCommand(mpv, ["seek", secs, "absolute"])
+                    return
+                }
+                // Regular VOD: guard against seek-after-EOF.
+                guard !self.playbackEnded else { return }
                 let secs = String(format: "%.3f", Double(targetMs) / 1000.0)
                 self.mpvCommand(mpv, ["seek", secs, "absolute"])
             }
@@ -4800,6 +4837,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     self?.failoverOrError("Stopped before playback")
                 }
+            } else if isDVR {
+                // DVR (in-progress recording): an EOF here is the live edge
+                // catching up to the end of the currently-published HLS
+                // playlist, not a real end. Do NOT set playbackEnded (that
+                // would lock seeks); the seek clamp keeps us a few seconds
+                // back so this is rare, and when it does happen the user can
+                // still scrub away and mpv resumes as new segments arrive.
+                DebugLogger.shared.logPlayback(event: "DVR reached live edge")
+                logStore.append("ℹ️ MPV: DVR live edge")
             } else {
                 // VOD ended normally — not an error
                 playbackEnded = true

@@ -361,6 +361,12 @@ struct PlayerView: View {
     let title: String
     let headers: [String: String]
     let isLive: Bool
+    /// True when this is an in-progress DVR recording: a growing
+    /// seekable window from the recording's start to the live edge,
+    /// rather than a fixed-duration file. Drives the live-edge seek
+    /// clamp + LIVE timeline affordance. Always false for live TV and
+    /// regular VOD.
+    let isDVR: Bool
     let subtitle: String?
     let subtitleStart: Date?
     let subtitleEnd: Date?
@@ -374,7 +380,7 @@ struct PlayerView: View {
     let onClose: (() -> Void)?
 
     init(urls: [URL], title: String, headers: [String: String]? = nil,
-         isLive: Bool = true,
+         isLive: Bool = true, isDVR: Bool = false,
          subtitle: String? = nil, subtitleStart: Date? = nil, subtitleEnd: Date? = nil,
          artworkURL: URL? = nil,
          vodID: String? = nil, vodPosterURL: String? = nil,
@@ -385,6 +391,7 @@ struct PlayerView: View {
         self.title = title
         self.headers = headers ?? [:]
         self.isLive = isLive
+        self.isDVR = isDVR
         self.subtitle = subtitle
         self.subtitleStart = subtitleStart
         self.subtitleEnd = subtitleEnd
@@ -410,7 +417,7 @@ struct PlayerView: View {
     var body: some View {
         PlayerRootView(
             urls: urls, title: title, headers: headers,
-            isLive: isLive,
+            isLive: isLive, isDVR: isDVR,
             subtitle: subtitle, subtitleStart: subtitleStart, subtitleEnd: subtitleEnd,
             artworkURL: artworkURL,
             vodID: vodID, vodPosterURL: vodPosterURL, vodServerID: vodServerID,
@@ -446,6 +453,10 @@ private struct PlayerRootView: View {
     let title: String
     let headers: [String: String]
     let isLive: Bool
+    /// See `PlayerView.isDVR`. Mirrored here (the timeline math lives in
+    /// this view) and threaded into the Coordinator for the live-edge
+    /// seek clamp.
+    let isDVR: Bool
     let subtitle: String?
     let subtitleStart: Date?
     let subtitleEnd: Date?
@@ -577,7 +588,7 @@ private struct PlayerRootView: View {
         // side is black.
         MPVPlayerViewRepresentable(
             urls: urls, headers: headers,
-            isLive: isLive,
+            isLive: isLive, isDVR: isDVR,
             nowPlayingTitle: title,
             nowPlayingSubtitle: subtitle,
             nowPlayingArtworkURL: artworkURL,
@@ -1192,13 +1203,26 @@ private struct PlayerRootView: View {
 
     // MARK: - Timeline helpers
 
+    /// The right end of the seekable timeline, in ms.
+    ///
+    /// - Regular VOD: mpv's reported `duration` (a fixed file length).
+    /// - DVR (in-progress recording): the live edge of a growing HLS
+    ///   window. mpv's `duration` tracks the published-playlist extent,
+    ///   which only grows; flooring it at `currentMs` keeps the bar from
+    ///   ever sitting left of the playhead during a playlist-refresh
+    ///   wobble. The right edge therefore represents "live".
+    private var timelineEndMs: Int32 {
+        if isDVR { return max(progressStore.durationMs, progressStore.currentMs) }
+        return progressStore.durationMs
+    }
+
     /// For VOD: once player reports a non-zero duration.
     private var canSeekBackward: Bool {
-        progressStore.durationMs > 0 && progressStore.currentMs > 2_000
+        timelineEndMs > 0 && progressStore.currentMs > 2_000
     }
 
     private var canSeekForward: Bool {
-        progressStore.durationMs > 0 && progressStore.currentMs < progressStore.durationMs - 2_000
+        timelineEndMs > 0 && progressStore.currentMs < timelineEndMs - 2_000
     }
 
     private func formatMs(_ ms: Int32) -> String {
@@ -1214,19 +1238,19 @@ private struct PlayerRootView: View {
 
     /// Converts a scrubber fraction (0–1) to a target seek position in ms.
     private func fractionToMs(_ fraction: CGFloat) -> Int32 {
-        guard progressStore.durationMs > 0 else { return 0 }
-        return Int32(fraction * CGFloat(progressStore.durationMs))
+        guard timelineEndMs > 0 else { return 0 }
+        return Int32(fraction * CGFloat(timelineEndMs))
     }
 
     /// Converts the current playback position to a 0–1 scrubber fraction.
     private var currentFraction: CGFloat {
-        guard progressStore.durationMs > 0 else { return 0 }
-        return CGFloat(progressStore.currentMs) / CGFloat(progressStore.durationMs)
+        guard timelineEndMs > 0 else { return 0 }
+        return CGFloat(progressStore.currentMs) / CGFloat(timelineEndMs)
     }
 
     /// True when the timeline can accept drag/seek gestures.
     private var isScrubberActive: Bool {
-        progressStore.durationMs > 0
+        timelineEndMs > 0
     }
 
     private var scrubberBar: some View {
@@ -1319,9 +1343,9 @@ private struct PlayerRootView: View {
     /// Fraction shown on the tvOS timeline: the live position normally,
     /// the preview playhead while the user is scrubbing.
     private var tvDisplayFraction: CGFloat {
-        guard progressStore.durationMs > 0 else { return 0 }
+        guard timelineEndMs > 0 else { return 0 }
         let ms = isScrubbing ? scrubTargetMs : progressStore.currentMs
-        return max(0, min(1, CGFloat(ms) / CGFloat(progressStore.durationMs)))
+        return max(0, min(1, CGFloat(ms) / CGFloat(timelineEndMs)))
     }
 
     /// Move the scrub preview by one step. No seek happens here, so the
@@ -1329,7 +1353,7 @@ private struct PlayerRootView: View {
     /// direction accelerates (1x..12x) so a long movie is crossable; a
     /// single tap nudges about 10 seconds.
     private func scrubStep(_ dir: Int) {
-        guard progressStore.durationMs > 0 else { return }
+        guard timelineEndMs > 0 else { return }
         controlsHideTask?.cancel()
         scrubSettleTask?.cancel()  // a fresh scrub supersedes any post-seek settle
         if !isScrubbing {
@@ -1342,7 +1366,7 @@ private struct PlayerRootView: View {
         let mult = Int32(min(12, 1 + scrubAccelCount / 2))
         let step = Int64(10_000) * Int64(mult)
         let target = Int64(scrubTargetMs) + Int64(dir) * step
-        scrubTargetMs = Int32(max(0, min(Int64(progressStore.durationMs), target)))
+        scrubTargetMs = Int32(max(0, min(Int64(timelineEndMs), target)))
         debugLog("🎚️ [VOD-SCRUB] step dir=\(dir) x\(mult) -> \(scrubTargetMs)/\(progressStore.durationMs)ms")
         scheduleScrubCommit()
     }
@@ -1631,8 +1655,8 @@ private struct PlayerRootView: View {
 
                 // Skip forward 10 s (iOS only)
                 Button {
-                    let target = progressStore.durationMs > 0
-                        ? min(progressStore.durationMs, progressStore.currentMs + 10_000)
+                    let target = timelineEndMs > 0
+                        ? min(timelineEndMs, progressStore.currentMs + 10_000)
                         : progressStore.currentMs + 10_000
                     progressStore.seekAction?(target)
                     scheduleControlsHide()
@@ -1648,16 +1672,53 @@ private struct PlayerRootView: View {
                 Spacer()
                 #endif
 
-                Text(formatMs(progressStore.durationMs))
-                    #if os(tvOS)
-                    .font(.system(size: 18, weight: .medium, design: .monospaced))
-                    #else
-                    .font(.system(size: 11, weight: .medium, design: .monospaced))
-                    #endif
-                    .foregroundColor(.white.opacity(0.75))
-                    .frame(minWidth: 46, alignment: .trailing)
-                    .monospacedDigit()
+                timelineTrailingLabel
             }
+        }
+    }
+
+    /// Right-hand timeline readout. Regular VOD shows the total runtime.
+    /// DVR (in-progress recording) shows a LIVE pill: a filled red dot
+    /// when the playhead is riding the live edge, a hollow gray dot when
+    /// the user has scrubbed back into the window. The pill's right edge
+    /// is "live", so scrubbing all the way right (or tapping it on iOS)
+    /// returns to the live edge.
+    @ViewBuilder
+    private var timelineTrailingLabel: some View {
+        let displayMs: Int32 = isDragging ? fractionToMs(dragFraction)
+                             : (isScrubbing ? scrubTargetMs : progressStore.currentMs)
+        let atLive = timelineEndMs > 0 && displayMs >= timelineEndMs - 15_000
+        if isDVR {
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(atLive ? Color.red : Color.white.opacity(0.4))
+                    .frame(width: 8, height: 8)
+                Text("LIVE")
+                    #if os(tvOS)
+                    .font(.system(size: 18, weight: .semibold))
+                    #else
+                    .font(.system(size: 11, weight: .semibold))
+                    #endif
+                    .foregroundColor(atLive ? .white : .white.opacity(0.55))
+            }
+            .frame(minWidth: 46, alignment: .trailing)
+            #if !os(tvOS)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                progressStore.seekAction?(timelineEndMs)
+                scheduleControlsHide()
+            }
+            #endif
+        } else {
+            Text(formatMs(timelineEndMs))
+                #if os(tvOS)
+                .font(.system(size: 18, weight: .medium, design: .monospaced))
+                #else
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                #endif
+                .foregroundColor(.white.opacity(0.75))
+                .frame(minWidth: 46, alignment: .trailing)
+                .monospacedDigit()
         }
     }
 

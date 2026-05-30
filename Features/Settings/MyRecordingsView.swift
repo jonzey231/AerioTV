@@ -41,6 +41,10 @@ struct MyRecordingsView: View {
         let url: URL
         let title: String
         let headers: [String: String]
+        /// True for an in-progress recording streamed over HLS: the
+        /// player treats it as a growing DVR window (live-edge seek
+        /// clamp + LIVE timeline affordance) rather than a fixed file.
+        var isDVR: Bool = false
     }
 
     /// v1.6.10: Recordings are scoped to the currently-active playlist
@@ -217,7 +221,8 @@ struct MyRecordingsView: View {
                 urls: [item.url],
                 title: item.title,
                 headers: item.headers,
-                isLive: false
+                isLive: false,
+                isDVR: item.isDVR
             )
         }
         // Pull Dispatcharr server state whenever the view shows, then
@@ -590,8 +595,12 @@ struct MyRecordingsView: View {
         // both producing audio.
         // v1.6.23 — multiview-aware: route through PlayerSession.exit().
         PlayerSession.shared.exit()
+        // An in-progress recording streamed over HLS is a growing DVR
+        // window: drive the live-edge-aware timeline. Completed recordings
+        // and the legacy /file/ fallback are fixed files (plain VOD).
+        let isDVR = rec.isInProgress && urlSource == "server-hls"
         playingRecording = PlayingRecording(
-            id: rec.id, url: url, title: rec.programTitle, headers: headers
+            id: rec.id, url: url, title: rec.programTitle, headers: headers, isDVR: isDVR
         )
     }
 
