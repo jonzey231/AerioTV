@@ -3729,11 +3729,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // the first loadfile enqueue beats them to mpvQueue.
             // Pre-init is guaranteed to be in-config before
             // mpv_initialize returns.
+            // Issue #29: "Watch from Beginning" for an in-progress recording
+            // is signaled via a sentinel header (it rides the existing headers
+            // channel instead of threading a new param through five view
+            // layers). When present, start the HLS at the first segment
+            // instead of ffmpeg's default live edge, and never send the
+            // sentinel to the server.
+            let startFromBeginningHeader = "X-Aerio-Start-From-Beginning"
+            if headers[startFromBeginningHeader] == "1" {
+                checkError(mpv_set_option_string(mpv, "demuxer-lavf-o", "live_start_index=0"))
+                #if DEBUG
+                print("[MPV-DIAG] setupMPV: live_start_index=0 (watch recording from beginning)")
+                #endif
+            }
             if let ua = headers["User-Agent"], !ua.isEmpty {
                 checkError(mpv_set_option_string(mpv, "user-agent", ua))
             }
             let preInitCustomHeaders = headers.filter {
-                $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame
+                $0.key.caseInsensitiveCompare("User-Agent") != .orderedSame &&
+                $0.key.caseInsensitiveCompare(startFromBeginningHeader) != .orderedSame
             }
             if !preInitCustomHeaders.isEmpty {
                 let headerList = preInitCustomHeaders

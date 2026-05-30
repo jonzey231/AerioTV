@@ -564,14 +564,7 @@ struct MyRecordingsView: View {
         // legacy /file/ URL for older builds.
         let url: URL
         let urlSource: String
-        if fromStart, let fileURL = api.recordingPlaybackURL(id: remoteID) {
-            // Issue #29: force the /file/ endpoint so an in-progress recording
-            // plays from the beginning (a seekable partial file) rather than
-            // from the HLS live edge that `dispatcharrFileURL` points at while
-            // the recording is still capturing.
-            url = fileURL
-            urlSource = "file-from-start"
-        } else if let fileURL = rec.dispatcharrFileURL,
+        if let fileURL = rec.dispatcharrFileURL,
            !fileURL.isEmpty,
            let resolved = resolveRecordingURL(server: server, relative: fileURL) {
             url = resolved
@@ -583,7 +576,11 @@ struct MyRecordingsView: View {
             debugLog("⚠️ Cannot play server recording. URL construction failed for \(rec.programTitle)")
             return
         }
-        let headers = server.authHeaders
+        // Issue #29: "Watch from Beginning" uses the same HLS URL as Watch
+        // Live, but signals mpv (via a sentinel header that setupMPV consumes
+        // and strips) to start at the first segment instead of the live edge.
+        var headers = server.authHeaders
+        if fromStart { headers["X-Aerio-Start-From-Beginning"] = "1" }
         let headerKeys = headers.keys.sorted().joined(separator: ",")
         let inProgressTag = (rec.status == .recording) ? " [IN-PROGRESS]" : ""
         debugLog("▶️ Play server recording\(inProgressTag): id=\(remoteID) url=\(url.absoluteString) source=\(urlSource) headers=\(headerKeys)")
