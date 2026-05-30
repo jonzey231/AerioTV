@@ -328,6 +328,13 @@ struct MyRecordingsView: View {
                 } label: {
                     Label("Watch Live", systemImage: "play.fill")
                 }
+                // Issue #29: play the in-progress recording from the start
+                // (the /file/ partial) rather than the live edge.
+                Button {
+                    playServerRecording(rec, fromStart: true)
+                } label: {
+                    Label("Watch from Beginning", systemImage: "backward.end.fill")
+                }
             }
             Button {
                 stopRecording(rec)
@@ -544,7 +551,7 @@ struct MyRecordingsView: View {
     /// fetches inside the HLS playlist also re-route through
     /// `/api/channels/recordings/<id>/hls/<segment>` so the same
     /// headers carry through.
-    private func playServerRecording(_ rec: Recording) {
+    private func playServerRecording(_ rec: Recording, fromStart: Bool = false) {
         guard let server = servers.first(where: { $0.id.uuidString == rec.serverID }),
               server.type == .dispatcharrAPI,
               let api = apiForRecording(rec),
@@ -557,7 +564,14 @@ struct MyRecordingsView: View {
         // legacy /file/ URL for older builds.
         let url: URL
         let urlSource: String
-        if let fileURL = rec.dispatcharrFileURL,
+        if fromStart, let fileURL = api.recordingPlaybackURL(id: remoteID) {
+            // Issue #29: force the /file/ endpoint so an in-progress recording
+            // plays from the beginning (a seekable partial file) rather than
+            // from the HLS live edge that `dispatcharrFileURL` points at while
+            // the recording is still capturing.
+            url = fileURL
+            urlSource = "file-from-start"
+        } else if let fileURL = rec.dispatcharrFileURL,
            !fileURL.isEmpty,
            let resolved = resolveRecordingURL(server: server, relative: fileURL) {
             url = resolved
