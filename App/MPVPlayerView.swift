@@ -343,7 +343,10 @@ class MPVPlayerViewController: UIViewController {
         // regression than the gap. Reverted; the gap will be
         // addressed at the layout-rect level (`MultiviewGridMath`)
         // in a future pass instead.
-        sampleBufferLayer.videoGravity = .resizeAspect
+        // Issue #26: honor the persisted aspect mode at layer setup (the
+        // Coordinator's sink handles later changes). Defaults to .resizeAspect
+        // (Fit) when there's no coordinator yet or no persisted choice.
+        sampleBufferLayer.videoGravity = coordinator?.progressStore.aspectMode.videoGravity ?? .resizeAspect
         sampleBufferLayer.frame = view.bounds
         view.layer.addSublayer(sampleBufferLayer)
 
@@ -1737,6 +1740,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Audio route change — log AirPlay connect/disconnect
             NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChanged),
                                                    name: AVAudioSession.routeChangeNotification, object: nil)
+
+            // Issue #26: apply the chosen aspect mode to the display layer
+            // whenever it changes (and once on subscribe for the persisted
+            // initial value). Cross-platform — the AVSampleBufferDisplayLayer
+            // and its videoGravity exist on iOS and tvOS alike.
+            progressStore.$aspectMode
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] mode in
+                    MainActor.assumeIsolated {
+                        self?.viewController?.sampleBufferLayer.videoGravity = mode.videoGravity
+                    }
+                }
+                .store(in: &cancellables)
 
             #if os(iOS)
             // Audio-Only suppresses auto-PiP. Without this, swiping home

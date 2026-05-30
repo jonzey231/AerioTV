@@ -486,10 +486,15 @@ private struct iPadOverflowAdapter: View {
             sleepTimerEnd: sleepTimerEnd,
             showStreamInfo: showStreamInfo,
             isAudioOnly: progressStore.isAudioOnly,
+            aspectMode: progressStore.aspectMode,
             canRecord: canRecord,
             setAudioTrack: { [weak progressStore] in progressStore?.setAudioTrackAction?($0) },
             setSubtitleTrack: { [weak progressStore] in progressStore?.setSubtitleTrackAction?($0) },
             setSpeed: { [weak progressStore] in progressStore?.setSpeedAction?($0) },
+            setAspect: { [weak progressStore] in
+                progressStore?.aspectMode = $0
+                UserDefaults.standard.set($0.rawValue, forKey: "player.aspectMode")
+            },
             setSleepTimer: { newEnd in sleepTimerEnd = newEnd },
             toggleStreamInfo: { showStreamInfo.toggle() },
             toggleAudioOnly: { [weak progressStore] in

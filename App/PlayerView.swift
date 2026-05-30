@@ -155,6 +155,44 @@ struct StreamInfoCardView: View {
     }
 }
 
+// MARK: - Video Aspect Mode (issue #26)
+
+/// How the decoded video is sized inside the player, applied to the
+/// `AVSampleBufferDisplayLayer`'s `videoGravity`. `fit` is the default
+/// (letterbox, whole frame visible); `fill` crops to fill the screen
+/// while preserving aspect; `stretch` fills the screen ignoring aspect.
+enum VideoAspectMode: String, CaseIterable, Identifiable {
+    case fit
+    case fill
+    case stretch
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .fit:     return "Fit"
+        case .fill:    return "Fill"
+        case .stretch: return "Stretch"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .fit:     return "rectangle.arrowtriangle.2.inward"
+        case .fill:    return "rectangle.arrowtriangle.2.outward"
+        case .stretch: return "arrow.up.left.and.arrow.down.right"
+        }
+    }
+
+    var videoGravity: AVLayerVideoGravity {
+        switch self {
+        case .fit:     return .resizeAspect
+        case .fill:    return .resizeAspectFill
+        case .stretch: return .resize
+        }
+    }
+}
+
 // MARK: - Player Progress Store
 // @unchecked Sendable: all @Published mutations dispatched to main queue manually.
 final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
@@ -200,6 +238,12 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// background handler can keep mpv's audio decoder running when the
     /// user has explicitly opted into background audio. Default false.
     @Published var isAudioOnly: Bool = false
+    /// On-screen video sizing (issue #26). The Coordinator observes this and
+    /// applies the matching `videoGravity` to the display layer. Self-seeds
+    /// from UserDefaults so the user's choice survives across streams and
+    /// launches; the overflow menu's action writes the same key.
+    @Published var aspectMode: VideoAspectMode =
+        VideoAspectMode(rawValue: UserDefaults.standard.string(forKey: "player.aspectMode") ?? "") ?? .fit
     /// Stream technical info (codec, resolution, bitrate, etc.) sourced
     /// from mpv. Populated for live playback and read by the Stream
     /// Info overlay on every server type.
@@ -1771,6 +1815,7 @@ private struct PlayerRootView: View {
             sleepTimerEnd: sleepTimerEnd,
             showStreamInfo: showStreamInfo,
             isAudioOnly: isAudioOnly,
+            aspectMode: progressStore.aspectMode,
             // Legacy single-stream PlayerView doesn't have record-sheet
             // plumbing (it's only reached with the Developer-Settings
             // `playback.unified` flag flipped off, a diagnostic fallback).
@@ -1781,6 +1826,7 @@ private struct PlayerRootView: View {
             setAudioTrack: { [weak progressStore] in progressStore?.setAudioTrackAction?($0) },
             setSubtitleTrack: { [weak progressStore] in progressStore?.setSubtitleTrackAction?($0) },
             setSpeed: { [weak progressStore] in progressStore?.setSpeedAction?($0) },
+            setAspect: { progressStore.aspectMode = $0; UserDefaults.standard.set($0.rawValue, forKey: "player.aspectMode") },
             setSleepTimer: { sleepTimerEnd = $0 },
             toggleStreamInfo: { withAnimation(.easeInOut(duration: 0.2)) { showStreamInfo.toggle() } },
             toggleAudioOnly: {
@@ -2140,6 +2186,9 @@ struct PlayerOverflowMenu: View, Equatable {
     let sleepTimerEnd: Date?
     let showStreamInfo: Bool
     let isAudioOnly: Bool
+    /// Current on-screen aspect mode (issue #26), shown with a checkmark in
+    /// the Aspect Ratio submenu.
+    let aspectMode: VideoAspectMode
     /// When true, the menu shows a "Record Current Program" item that
     /// fires `recordAction`. Gated off the audio tile's live EPG state
     /// in the unified chrome so it hides for streams without EPG data.
@@ -2149,6 +2198,7 @@ struct PlayerOverflowMenu: View, Equatable {
     var setAudioTrack: ((Int) -> Void)?
     var setSubtitleTrack: ((Int) -> Void)?
     var setSpeed: ((Double) -> Void)?
+    var setAspect: ((VideoAspectMode) -> Void)?
     var setSleepTimer: ((Date?) -> Void)?
     var toggleStreamInfo: (() -> Void)?
     var toggleAudioOnly: (() -> Void)?
@@ -2167,6 +2217,7 @@ struct PlayerOverflowMenu: View, Equatable {
         lhs.sleepTimerEnd == rhs.sleepTimerEnd &&
         lhs.showStreamInfo == rhs.showStreamInfo &&
         lhs.isAudioOnly == rhs.isAudioOnly &&
+        lhs.aspectMode == rhs.aspectMode &&
         lhs.canRecord == rhs.canRecord
     }
 
@@ -2261,6 +2312,25 @@ struct PlayerOverflowMenu: View, Equatable {
                     } label: {
                         let speedLabel = speed == 1.0 ? "1x" : "\(String(format: "%g", speed))x"
                         Label("Speed: \(speedLabel)", systemImage: "gauge.with.dots.needle.67percent")
+                    }
+                }
+
+                // Aspect Ratio (issue #26) — live + VOD, hidden in audio-only.
+                if !isAudioOnly {
+                    Menu {
+                        ForEach(VideoAspectMode.allCases) { mode in
+                            Button {
+                                setAspect?(mode)
+                            } label: {
+                                if mode == aspectMode {
+                                    Label(mode.label, systemImage: "checkmark")
+                                } else {
+                                    Text(mode.label)
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Aspect: \(aspectMode.label)", systemImage: aspectMode.icon)
                     }
                 }
 
