@@ -554,6 +554,7 @@ private struct PlayerRootView: View {
     @State private var scrubLastDirection = 0      // -1 left, +1 right (drives hold acceleration)
     @State private var scrubAccelCount = 0         // Consecutive same-direction steps
     @State private var scrubCommitTask: Task<Void, Never>?
+    @State private var scrubSettleTask: Task<Void, Never>?  // Holds the playhead at the target until mpv catches up post-seek
     #endif
 
     enum PlayState { case loading, playing, error }
@@ -1330,6 +1331,7 @@ private struct PlayerRootView: View {
     private func scrubStep(_ dir: Int) {
         guard progressStore.durationMs > 0 else { return }
         controlsHideTask?.cancel()
+        scrubSettleTask?.cancel()  // a fresh scrub supersedes any post-seek settle
         if !isScrubbing {
             isScrubbing = true
             scrubTargetMs = progressStore.currentMs
@@ -1362,12 +1364,26 @@ private struct PlayerRootView: View {
     private func commitScrub() {
         guard isScrubbing else { return }
         let target = scrubTargetMs
-        isScrubbing = false
         scrubLastDirection = 0
         scrubAccelCount = 0
         scrubCommitTask?.cancel()
         debugLog("🎚️ [VOD-SCRUB] commit seek -> \(target)/\(progressStore.durationMs)ms")
         progressStore.seekAction?(target)
+        // Keep the playhead pinned at the target (isScrubbing stays true, so
+        // the bar keeps showing `scrubTargetMs`) until mpv's reported position
+        // catches up to the seek. Clearing isScrubbing immediately makes the
+        // bar snap to the stale pre-seek `currentMs` for a beat and then jump
+        // forward once mpv updates — the "playhead jumps around" symptom.
+        scrubSettleTask?.cancel()
+        scrubSettleTask = Task { @MainActor in
+            for _ in 0..<100 {  // ~8s backstop at 80ms/iter
+                if Task.isCancelled { return }
+                if abs(Int64(progressStore.currentMs) - Int64(target)) < 1_500 { break }
+                try? await Task.sleep(nanoseconds: 80_000_000)
+            }
+            guard !Task.isCancelled else { return }
+            isScrubbing = false
+        }
         scheduleControlsHide()
     }
 
@@ -1378,6 +1394,7 @@ private struct PlayerRootView: View {
         scrubLastDirection = 0
         scrubAccelCount = 0
         scrubCommitTask?.cancel()
+        scrubSettleTask?.cancel()
     }
     #endif
 
