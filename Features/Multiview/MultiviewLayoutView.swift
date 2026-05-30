@@ -138,10 +138,13 @@ struct MultiviewLayoutView<Content: View>: View {
                 // remove+insert and tore down + rebuilt the
                 // moved tile's MPVPlayerView Coordinator (causing
                 // an AudioUnit re-init "bonk" on the audio tile).
-                // Key on the id-order AND the spotlight selection so a
-                // spotlight toggle (which changes only frames, not order)
-                // still animates the grow/shrink. (#27)
-                .animation(.easeInOut(duration: 0.28), value: tiles.map(\.id) + [spotlightTileID ?? "_"])
+                // Animate tile add / remove / reorder, but NOT the spotlight
+                // toggle: animating the spotlight reflow leaves a transient
+                // black gap (a tile slides out of a region before the growing
+                // big tile expands to cover it). Keying only on the id-order
+                // means a spotlight toggle (same ids, only frames change)
+                // snaps instantly with no in-between frame and no gap. (#27)
+                .animation(.easeInOut(duration: 0.28), value: tiles.map(\.id))
             }
         }
     }
