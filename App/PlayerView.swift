@@ -558,6 +558,12 @@ private struct PlayerRootView: View {
     @StateObject private var progressStore = PlayerProgressStore()
     @State private var isDragging = false
     @State private var dragFraction: CGFloat = 0
+    // iOS: after a drag releases, hold the bar at the released position
+    // until mpv's reported position catches up (mirrors the tvOS
+    // scrubSettleTask), so the thumb doesn't snap back to the stale
+    // pre-seek spot and then jump forward.
+    @State private var dragSettling = false
+    @State private var dragSettleTask: Task<Void, Never>?
 
     #if os(tvOS)
     @State private var isScrubbing = false         // True while previewing a scrub position
@@ -1254,7 +1260,10 @@ private struct PlayerRootView: View {
     }
 
     private var scrubberBar: some View {
-        let displayFraction: CGFloat = isDragging ? dragFraction : max(0, min(1, currentFraction))
+        // Position holds at the drag fraction both while dragging AND while
+        // settling (post-release, until mpv catches up). Thumb SIZE keys off
+        // isDragging alone, so it shrinks the instant the finger lifts.
+        let displayFraction: CGFloat = (isDragging || dragSettling) ? dragFraction : max(0, min(1, currentFraction))
 
         return GeometryReader { geo in
             ZStack(alignment: .leading) {
@@ -1286,6 +1295,8 @@ private struct PlayerRootView: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard isScrubberActive else { return }
+                        dragSettleTask?.cancel()  // a fresh drag supersedes any settle
+                        dragSettling = false
                         isDragging = true
                         dragFraction = max(0, min(1, value.location.x / geo.size.width))
                         scheduleControlsHide()
@@ -1293,8 +1304,25 @@ private struct PlayerRootView: View {
                     .onEnded { value in
                         guard isScrubberActive else { return }
                         let f = max(0, min(1, value.location.x / geo.size.width))
-                        progressStore.seekAction?(fractionToMs(f))
+                        let target = fractionToMs(f)
+                        dragFraction = f
+                        progressStore.seekAction?(target)
                         withAnimation(.easeOut(duration: 0.15)) { isDragging = false }
+                        // Hold the bar at the released position until mpv's
+                        // reported position lands within a GOP of the target
+                        // (keyframe seeks land a little short), then release
+                        // it onto the real position instead of snapping back.
+                        dragSettling = true
+                        dragSettleTask?.cancel()
+                        dragSettleTask = Task { @MainActor in
+                            for _ in 0..<75 {  // ~6s backstop at 80ms/iter
+                                if Task.isCancelled { return }
+                                if abs(Int64(progressStore.currentMs) - Int64(target)) < 4_000 { break }
+                                try? await Task.sleep(nanoseconds: 80_000_000)
+                            }
+                            guard !Task.isCancelled else { return }
+                            dragSettling = false
+                        }
                     }
             )
             #endif
