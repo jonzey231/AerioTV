@@ -119,6 +119,13 @@ final class MultiviewStore: ObservableObject {
     /// exit multiview — exiting fullscreen brings the grid back.
     @Published var fullscreenTileID: String?
 
+    /// Issue #27: if non-nil, the grid renders this tile large with the
+    /// remaining tiles stacked small alongside it (a "spotlight" layout,
+    /// like the 3-stream layout) instead of the equal grid. All tiles stay
+    /// visible and playing. Set/cleared by the per-tile "Spotlight" menu
+    /// action; distinct from `fullscreenTileID`, which hides the others.
+    @Published var spotlightTileID: String?
+
     /// tvOS relocate mode: when non-nil, the container's D-pad
     /// remap kicks in so arrow keys swap `relocatingTileID` with
     /// its neighbor at the pressed direction. Click commits
@@ -208,6 +215,7 @@ final class MultiviewStore: ObservableObject {
         tiles.removeAll()
         audioTileID = nil
         fullscreenTileID = nil
+        spotlightTileID = nil
         relocatingTileID = nil
         if count > 0 {
             DebugLogger.shared.log(
@@ -560,6 +568,9 @@ final class MultiviewStore: ObservableObject {
         if fullscreenTileID == id {
             fullscreenTileID = nil
         }
+        if spotlightTileID == id {
+            spotlightTileID = nil
+        }
         if relocatingTileID == id {
             relocatingTileID = nil
         }
@@ -603,6 +614,7 @@ final class MultiviewStore: ObservableObject {
         tiles = []
         audioTileID = nil
         fullscreenTileID = nil
+        spotlightTileID = nil
         relocatingTileID = nil
         isPiPActive = false
         // Clear the progress-store registry so the chrome overlay

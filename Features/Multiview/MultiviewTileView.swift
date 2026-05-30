@@ -388,6 +388,19 @@ struct MultiviewTileView: View {
             )
         }
 
+        // Issue #27: spotlight this tile (big tile + others stacked small).
+        // Mutually exclusive with fullscreen.
+        let isSpotlit = store.spotlightTileID == tile.id
+        Button {
+            store.spotlightTileID = isSpotlit ? nil : tile.id
+            if !isSpotlit { store.fullscreenTileID = nil }
+        } label: {
+            Label(
+                isSpotlit ? "Remove Spotlight" : "Spotlight",
+                systemImage: isSpotlit ? "rectangle.split.3x1" : "rectangle.inset.filled"
+            )
+        }
+
         if progressStore.audioTracks.count > 1 {
             Button {
                 Task { @MainActor in showAudioTrackMenu = true }
@@ -1083,6 +1096,13 @@ struct MultiviewTileView: View {
         let isFullscreen = store.fullscreenTileID == tile.id
         Button(isFullscreen ? "Exit Full-Screen" : "Full-Screen in Grid") {
             store.fullscreenTileID = isFullscreen ? nil : tile.id
+        }
+
+        // Issue #27: spotlight this tile (big + others stacked small).
+        let isSpotlit = store.spotlightTileID == tile.id
+        Button(isSpotlit ? "Remove Spotlight" : "Spotlight") {
+            store.spotlightTileID = isSpotlit ? nil : tile.id
+            if !isSpotlit { store.fullscreenTileID = nil }
         }
 
         if progressStore.audioTracks.count > 1 {

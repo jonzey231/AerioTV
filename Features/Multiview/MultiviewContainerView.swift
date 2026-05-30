@@ -1203,7 +1203,7 @@ struct MultiviewContainerView: View {
             // they're already at live edge.
             MultiviewTileView(tile: fullscreenTile, store: store)
         } else {
-            let grid = MultiviewLayoutView(tiles: store.tiles, spacing: tileSpacing) { tile in
+            let grid = MultiviewLayoutView(tiles: store.tiles, spacing: tileSpacing, spotlightTileID: store.spotlightTileID) { tile in
                 #if os(tvOS)
                 MultiviewTileView(tile: tile, store: store, isSoleTile: isSole)
                     .prefersDefaultFocus(store.audioTileID == tile.id, in: focusNS)

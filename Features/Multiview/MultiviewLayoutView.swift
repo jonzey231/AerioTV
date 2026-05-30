@@ -26,16 +26,38 @@ import SwiftUI
 struct MultiviewLayoutView<Content: View>: View {
     let tiles: [MultiviewTile]
     let spacing: CGFloat
+    /// Issue #27: when set (and present in `tiles`), render the spotlight
+    /// layout with this tile large and the rest stacked small. nil = the
+    /// normal equal grid.
+    let spotlightTileID: String?
     @ViewBuilder var content: (MultiviewTile) -> Content
 
     init(
         tiles: [MultiviewTile],
         spacing: CGFloat = MultiviewGridMath.defaultSpacing,
+        spotlightTileID: String? = nil,
         @ViewBuilder content: @escaping (MultiviewTile) -> Content
     ) {
         self.tiles = tiles
         self.spacing = spacing
+        self.spotlightTileID = spotlightTileID
         self.content = content
+    }
+
+    /// Resolve the tile order and per-tile rects for the current container
+    /// size. Normally an equal grid; when a spotlight tile is set (and still
+    /// present, with more than one tile), the spotlighted tile is moved to
+    /// the front so it occupies the big rect and the rest stack small.
+    private func tileLayout(in size: CGSize) -> (tiles: [MultiviewTile], rects: [CGRect]) {
+        if let spotID = spotlightTileID,
+           let spotIdx = tiles.firstIndex(where: { $0.id == spotID }),
+           tiles.count > 1 {
+            var reordered = tiles
+            let chosen = reordered.remove(at: spotIdx)
+            reordered.insert(chosen, at: 0)
+            return (reordered, MultiviewGridMath.spotlightRects(for: reordered.count, in: size, spacing: spacing))
+        }
+        return (tiles, MultiviewGridMath.rects(for: tiles.count, in: size, spacing: spacing))
     }
 
     var body: some View {
@@ -63,17 +85,18 @@ struct MultiviewLayoutView<Content: View>: View {
                 content(sole)
                     .frame(width: geom.size.width, height: geom.size.height)
             } else {
-                let rects = MultiviewGridMath.rects(
-                    for: tiles.count,
-                    in: geom.size,
-                    spacing: spacing
-                )
+                // Issue #27: when a tile is spotlighted, `tileLayout` reorders
+                // a local copy so it lands on the big rect and uses the
+                // spotlight rect set. Tile identity is keyed by id below, so
+                // the chosen tile animates into the large slot and the others
+                // reflow small. The store's own tile order is untouched.
+                let layout = tileLayout(in: geom.size)
                 ZStack(alignment: .topLeading) {
                     // Zip is safe: if tiles.count > 9 the math clamps to 9
                     // and zip will truncate — we'd rather drop a tile
                     // visually than index-OOB crash. The store itself caps
                     // at 9 via `MultiviewStore.maxTiles`.
-                    ForEach(Array(zip(tiles, rects).enumerated()), id: \.element.0.id) { _, pair in
+                    ForEach(Array(zip(layout.tiles, layout.rects).enumerated()), id: \.element.0.id) { _, pair in
                         let (tile, rect) = pair
                         content(tile)
                             .frame(width: rect.width, height: rect.height)

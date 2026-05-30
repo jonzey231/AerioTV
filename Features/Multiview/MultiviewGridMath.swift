@@ -167,6 +167,31 @@ enum MultiviewGridMath {
         }
     }
 
+    /// Issue #27: spotlight layout. One large tile on the left (2/3 width,
+    /// full height) with the remaining tiles stacked in the right-hand
+    /// column. `rect[0]` is the big one; the caller places the spotlighted
+    /// tile there and the rest in order. This generalizes `layout3` (which is
+    /// exactly this shape at count == 3) to any tile count.
+    static func spotlightRects(
+        for count: Int,
+        in container: CGSize,
+        spacing: CGFloat = defaultSpacing
+    ) -> [CGRect] {
+        guard count > 0, container.width > 0, container.height > 0 else { return [] }
+        let n = min(count, 9)
+        if n == 1 { return layout1(container) }
+        let bigW = (container.width - spacing) * 2 / 3
+        let smallW = container.width - bigW - spacing
+        let smallCount = n - 1
+        let smallH = (container.height - spacing * CGFloat(smallCount - 1)) / CGFloat(smallCount)
+        var rects: [CGRect] = [CGRect(x: 0, y: 0, width: bigW, height: container.height)]
+        for i in 0..<smallCount {
+            let y = (smallH + spacing) * CGFloat(i)
+            rects.append(CGRect(x: bigW + spacing, y: y, width: smallW, height: smallH))
+        }
+        return rects
+    }
+
     // MARK: - Per-N layouts
 
     private static func layout1(_ c: CGSize) -> [CGRect] {
