@@ -1338,6 +1338,11 @@ private struct PlayerRootView: View {
         }
         .frame(height: 30)
         .animation(.easeInOut(duration: 0.15), value: active)
+        // Glide the thumb/fill between scrub steps instead of teleporting,
+        // so a held scrub reads as one continuous sweep rather than a
+        // sequence of 10s jumps (user feedback: "super jumpy"). Tuned just
+        // under the step cadence so it keeps up under fast acceleration.
+        .animation(.easeOut(duration: 0.16), value: tvDisplayFraction)
     }
 
     /// Fraction shown on the tvOS timeline: the live position normally,
@@ -1372,11 +1377,13 @@ private struct PlayerRootView: View {
     }
 
     /// Auto-commit the scrub a beat after the user stops moving, so
-    /// "scrub to a spot and let go" buffers from there on its own.
+    /// "scrub to a spot and let go" buffers from there on its own. 650ms
+    /// is long enough to ride out the gaps between held d-pad repeats but
+    /// short enough that the seek fires promptly once the user lets go.
     private func scheduleScrubCommit() {
         scrubCommitTask?.cancel()
         scrubCommitTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 900_000_000)
+            try? await Task.sleep(nanoseconds: 650_000_000)
             guard !Task.isCancelled else { return }
             commitScrub()
         }
@@ -1682,6 +1689,80 @@ private struct PlayerRootView: View {
                 timelineTrailingLabel
             }
         }
+        // YouTube-style scrub readout: a floating bubble above the bar
+        // showing exactly where a scrub will land + how far that is from
+        // the live/current position. Overlay (not a row) so it never
+        // shifts the timeline; it fades in only while scrubbing.
+        .overlay(alignment: .top) { scrubReadout }
+        .animation(.easeInOut(duration: 0.18), value: scrubReadoutActive)
+    }
+
+    /// The position the scrub readout + landing reflect: the preview
+    /// target while the user is actively scrubbing, otherwise the live
+    /// playback position. iOS drives it from the drag fraction, tvOS
+    /// from the step preview.
+    private var scrubReadoutTargetMs: Int32 {
+        #if os(tvOS)
+        return isScrubbing ? scrubTargetMs : progressStore.currentMs
+        #else
+        return isDragging ? fractionToMs(dragFraction) : progressStore.currentMs
+        #endif
+    }
+
+    /// True while the user is moving the playhead (drag on iOS, step on
+    /// tvOS) and the readout bubble should be shown.
+    private var scrubReadoutActive: Bool {
+        #if os(tvOS)
+        return isScrubbing
+        #else
+        return isDragging
+        #endif
+    }
+
+    /// "+2:30" / "-0:45": the signed offset of the scrub target from the
+    /// current playback position, for the readout's secondary line.
+    private func signedDelta(_ ms: Int64) -> String {
+        let sign = ms < 0 ? "-" : "+"
+        return sign + formatMs(Int32(min(Int64(Int32.max), abs(ms))))
+    }
+
+    @ViewBuilder
+    private var scrubReadout: some View {
+        if scrubReadoutActive {
+            let target = scrubReadoutTargetMs
+            let delta = Int64(target) - Int64(progressStore.currentMs)
+            VStack(spacing: 2) {
+                Text(formatMs(target))
+                    #if os(tvOS)
+                    .font(.system(size: 30, weight: .bold, design: .monospaced))
+                    #else
+                    .font(.system(size: 17, weight: .bold, design: .monospaced))
+                    #endif
+                    .foregroundColor(.white)
+                    .monospacedDigit()
+                Text(signedDelta(delta))
+                    #if os(tvOS)
+                    .font(.system(size: 16, weight: .semibold, design: .monospaced))
+                    #else
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    #endif
+                    .foregroundColor(delta < 0 ? Color.orange : Color.green)
+                    .monospacedDigit()
+            }
+            #if os(tvOS)
+            .padding(.horizontal, 22).padding(.vertical, 12)
+            #else
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            #endif
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(Color.white.opacity(0.15), lineWidth: 1))
+            #if os(tvOS)
+            .offset(y: -78)
+            #else
+            .offset(y: -52)
+            #endif
+            .transition(.opacity.combined(with: .scale(scale: 0.9)))
+        }
     }
 
     /// Right-hand timeline readout. Regular VOD shows the total runtime.
@@ -1692,8 +1773,9 @@ private struct PlayerRootView: View {
     /// returns to the live edge.
     @ViewBuilder
     private var timelineTrailingLabel: some View {
-        let displayMs: Int32 = isDragging ? fractionToMs(dragFraction)
-                             : (isScrubbing ? scrubTargetMs : progressStore.currentMs)
+        // scrubReadoutTargetMs already resolves the active scrub/drag
+        // preview per-platform (tvOS step state vs iOS drag fraction).
+        let displayMs = scrubReadoutTargetMs
         let atLive = timelineEndMs > 0 && displayMs >= timelineEndMs - 15_000
         if isDVR {
             HStack(spacing: 5) {
