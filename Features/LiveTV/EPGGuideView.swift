@@ -2529,22 +2529,26 @@ struct EPGGuideView: View {
                     guideFocusTargetChannelID = valid
                     debugLog("🧭 [GuideFocus] forceGuideFocus(epg) → mvLast=\(mvLastID ?? "nil") single=\(singleID ?? "nil") valid=\(valid ?? "nil") count=\(channels.count)")
                     guard let valid else { resetFocus(in: guideFocusNS); return }
-                    // The channel cell is now a real focusable (GuideChannelButton
-                    // is a Button on tvOS), so the .focused($focusedChannelID)
-                    // binding on channelCell actually works. resetFocus pulls
-                    // focus off the minimized mini tile into the guide; then we
-                    // scroll the watched channel into view and drive
-                    // focusedChannelID directly, re-asserting in a short readback
-                    // loop until the engine reports it stuck (a single write can
-                    // be dropped while the row is still realizing).
+                    // Scroll the watched channel into view, then resetFocus to
+                    // pull focus off the minimized mini tile back into the guide.
+                    //
+                    // We deliberately do NOT try to land focus on the watched
+                    // channel's exact program cell here. In this grid the only
+                    // focusable per row is the per-program-cell TVPressOverlay
+                    // (a UIKit PressCatcherView); a row-level @FocusState
+                    // (focusedChannelID) is bound to the non-focusable channel
+                    // label, so writing it is a no-op (it read back nil on
+                    // device). The clean alternative, binding @FocusState to the
+                    // program cell, was tried before and REVERTED because it
+                    // created a second competing focus target that made some
+                    // cells unreachable by the D-pad (see the GuideProgramButton
+                    // note above and Shared/TVPressGesture.swift). So focus
+                    // lands on whatever cell the engine picks near the scrolled
+                    // position; the user sees their channel and can D-pad from
+                    // there. List mode (ChannelListView, real focusable buttons)
+                    // restores focus exactly; the grid is the accepted tradeoff.
                     resetFocus(in: guideFocusNS)
-                    for attempt in 0..<8 {
-                        proxy.scrollTo(valid, anchor: .center)
-                        focusedChannelID = valid
-                        try? await Task.sleep(nanoseconds: 70_000_000)
-                        debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(valid) got=\(focusedChannelID ?? "nil")")
-                        if focusedChannelID == valid { break }
-                    }
+                    proxy.scrollTo(valid, anchor: .center)
                 }
             }
             #endif
@@ -3029,52 +3033,22 @@ private struct GuideChannelButton: View {
     let channel: ChannelDisplayItem
     let onSelect: (ChannelDisplayItem) -> Void
     @EnvironmentObject private var favoritesStore: FavoritesStore
-    #if os(tvOS)
-    /// Local highlight state. The channel cell is now a real focusable
-    /// (see body), which is what lets the guide programmatically restore
-    /// focus to a specific channel via the `.focused($focusedChannelID)`
-    /// binding on `channelCell`.
-    @FocusState private var isChannelFocused: Bool
-    #endif
 
     var body: some View {
         #if os(tvOS)
-        // Focusable channel cell. Earlier this was a deliberately
-        // non-focusable label so focus stayed on program cells while
-        // scrolling. But that made it IMPOSSIBLE to restore focus to a
-        // specific channel (return-from-player, Menu-to-top): the
-        // `.focused`/`.prefersDefaultFocus` bindings on `channelCell` were
-        // attached to a non-focusable view and silently did nothing. Making
-        // the cell a real Button (mirroring how List-mode rows work) lets
-        // those bindings function. Select plays the channel; long-press
-        // manages favorites. Tradeoff: the channel column now takes part in
-        // D-pad navigation.
-        Button { onSelect(channel) } label: {
-            channelLabel
-                .overlay(alignment: .topTrailing) {
-                    if favoritesStore.isFavorite(channel.id) {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 14))
-                            .foregroundColor(.statusWarning)
-                            .padding(6)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(isChannelFocused ? Color.accentPrimary.opacity(0.30) : Color.clear)
-        }
-        .buttonStyle(.plain)
-        .focused($isChannelFocused)
-        .contextMenu {
-            Button {
-                favoritesStore.toggle(channel)
-            } label: {
+        // Non-focusable label on tvOS — users select program cells to play.
+        // This prevents focus from jumping to the channel column when scrolling down.
+        // tvOS long-press overlay lets users still manage favorites from here
+        // without having to switch to List view.
+        channelLabel
+            .overlay(alignment: .topTrailing) {
                 if favoritesStore.isFavorite(channel.id) {
-                    Label("Remove from Favorites", systemImage: "star.slash")
-                } else {
-                    Label("Add to Favorites", systemImage: "star")
+                    Image(systemName: "star.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(.statusWarning)
+                        .padding(6)
                 }
             }
-        }
         #else
         channelLabel
             .overlay(alignment: .topTrailing) {
