@@ -1346,7 +1346,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// through that completion so the required ordering
         /// (render_context_free completes BEFORE terminate_destroy) is
         /// preserved without a fixed timer.
-        private func teardownRenderResourcesAsync(completion: @escaping () -> Void) {
+        private func teardownRenderResourcesAsync(completion: @escaping @Sendable () -> Void) {
             stopWatchdogOnMain()
             #if DEBUG
             print("🧹 [Teardown] \(streamTag) renderQueue.async DISPATCH (off-main stop() path)")
