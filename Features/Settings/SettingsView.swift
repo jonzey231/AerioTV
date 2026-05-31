@@ -1510,6 +1510,15 @@ struct ServerDetailView: View {
     /// playlist's corrupted cache without nuking the others.
     @State private var showPurgeConfirmation = false
     @State private var isPurgingEPG = false
+    /// "Refresh Everything" (nuclear) UX. Unlike "Refresh EPG Data"
+    /// (which only purges this playlist's EPGProgram rows), this clears
+    /// EVERY cache: all guide data + the in-memory per-channel EPG actor
+    /// cache + all On Demand state, then reloads channels (so newly-added
+    /// channels appear), the guide, and On Demand from scratch. Added
+    /// after a user hit a stuck-guide state that survived "Refresh EPG
+    /// Data", clearing cache, and force-quitting repeatedly.
+    @State private var showRefreshAllConfirmation = false
+    @State private var isRefreshingAll = false
     #if os(iOS)
     @ObservedObject private var networkMonitor = NetworkMonitor.shared
     @State private var ssidRefreshed = false
@@ -1821,6 +1830,43 @@ struct ServerDetailView: View {
                          : "Clears this playlist's cached guide data. The fresh fetch will run automatically the next time you make this playlist active.")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
+
+                // MARK: Refresh Everything (nuclear)
+                //
+                // The heavier sibling of "Refresh EPG Data". That action only
+                // purges this playlist's EPGProgram rows; if a channel or the
+                // guide gets wedged, stale state can survive in the in-memory
+                // EPGCache actor and the On Demand store. This button clears
+                // ALL of it and reloads from scratch, so a user never has to
+                // resort to force-quitting and clearing cache by hand.
+                Section {
+                    Button(role: .destructive) {
+                        showRefreshAllConfirmation = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            if isRefreshingAll {
+                                ProgressView().scaleEffect(0.8)
+                                    .frame(width: 14)
+                            } else {
+                                Image(systemName: "arrow.clockwise.circle")
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                            Text(isRefreshingAll ? "Refreshing Everything…" : "Refresh Everything")
+                                .font(.bodyMedium)
+                            Spacer()
+                        }
+                        .foregroundColor(isRefreshingAll ? .textSecondary : .statusWarning)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                    .disabled(isRefreshingAll || isPurgingEPG)
+                } header: {
+                    Text("Full Refresh").sectionHeaderStyle()
+                } footer: {
+                    Text(server.isActive
+                         ? "Clears every cache (channels, guide data, and On Demand) and reloads this playlist from scratch. Use this if newly-added channels, guide data, or movies and shows are missing or stale after changes on the server."
+                         : "Clears every cache (channels, guide data, and On Demand). This playlist reloads automatically the next time you make it active.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
             }
             #if os(iOS)
             .listStyle(.insetGrouped)
@@ -1866,6 +1912,41 @@ struct ServerDetailView: View {
             Text(server.isActive
                  ? "All cached guide data for \"\(server.name)\" will be cleared and reloaded from the server. This may take a few minutes on large playlists."
                  : "All cached guide data for \"\(server.name)\" will be cleared. The next time you make this playlist active, fresh guide data will load automatically.")
+        }
+        // Refresh Everything: nuke every cache, then reload. Strictly more
+        // thorough than "Refresh EPG Data" so a wedged guide / missing
+        // channels can't survive it.
+        .alert("Refresh Everything?", isPresented: $showRefreshAllConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Refresh", role: .destructive) {
+                Task {
+                    isRefreshingAll = true
+                    // 1. Purge ALL guide data: every EPGProgram row in
+                    //    SwiftData plus GuideStore's in-memory state and
+                    //    load-idempotency flags (via invalidateCache).
+                    await GuideStore.shared.purgeAllPrograms(modelContext: modelContext)
+                    // 2. Clear the per-channel "upcoming" actor cache.
+                    //    "Refresh EPG Data" leaves this in place, which is
+                    //    how stale guide data can survive that action.
+                    await EPGCache.shared.invalidateAll()
+                    // 3. Drop all On Demand (movies + series) state.
+                    VODStore.shared.clear()
+                    // 4. Reload from scratch for the active playlist:
+                    //    channels are re-fetched (newly-added channels
+                    //    appear), the guide is rebuilt and re-cached, and
+                    //    On Demand repopulates. Non-active playlists just
+                    //    keep the cleared state and reload on activation.
+                    if server.isActive {
+                        await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
+                        VODStore.shared.refresh(servers: Array(servers))
+                    }
+                    isRefreshingAll = false
+                }
+            }
+        } message: {
+            Text(server.isActive
+                 ? "Clears all cached channels, guide data, and On Demand, then reloads \"\(server.name)\" from scratch. Use this if channels or guide data are missing or stale. May take a few minutes on large playlists."
+                 : "Clears all cached channels, guide data, and On Demand. \"\(server.name)\" reloads automatically the next time you make it active.")
         }
     }
 
