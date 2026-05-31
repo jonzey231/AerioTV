@@ -1255,51 +1255,117 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
-        /// Drains renderQueue, clears libmpv's update callback, and frees all
-        /// render-thread-owned GL resources. Safe to call multiple times: once
-        /// the first caller nils the resources, subsequent calls become no-ops.
-        private func teardownRenderResourcesOnRenderQueue() {
-            // v1.7.x Issue A round 4: tear down the IOSurface re-attach
-            // watchdog first. The display link is main-thread; since
-            // teardownRenderResourcesOnRenderQueue can be called from
-            // either main (via stop()) or mpvQueue (via MPV_EVENT_
-            // SHUTDOWN), we dispatch to main to invalidate. assumed
-            // safe — invalidate is idempotent and the lock-protected
-            // buffer release inside stopWatchdog is also idempotent.
+        /// The actual GL teardown work. MUST be invoked on `renderQueue`
+        /// (either via `renderQueue.sync` or `renderQueue.async`). Clears
+        /// libmpv's update callback, frees the FBO ring, flushes the texture
+        /// cache, and frees the render context. Idempotent: once the first
+        /// caller nils `mpvGL`/`eaglContext`, subsequent calls become no-ops.
+        ///
+        /// `mpv_render_context_free` is the expensive call here. Per libmpv's
+        /// render.h contract it can block until the core releases the render
+        /// context, and when the demuxer thread is parked on a network read of
+        /// a not-yet-published live HLS segment the core stays busy, so the
+        /// free can stall for seconds. That is fine on `mpvQueue` (the
+        /// MPV_EVENT_SHUTDOWN path) but NOT on the main thread, which is why
+        /// stop() runs this async off-main (see teardownRenderResourcesAsync).
+        private func performRenderTeardownBody() {
+            if let gl = mpvGL {
+                mpv_render_context_set_update_callback(gl, nil, nil)
+            }
+
+            if let ctx = eaglContext {
+                EAGLContext.setCurrent(ctx)
+                if !fboSlots.isEmpty {
+                    #if DEBUG
+                    print("[MPV-FBO] \(streamTag) destroy \(fboSlots.count)-deep pool (teardown, was \(fboWidth)x\(fboHeight))")
+                    #endif
+                    for i in 0..<fboSlots.count {
+                        if fboSlots[i].fbo != 0 {
+                            glDeleteFramebuffers(1, &fboSlots[i].fbo)
+                        }
+                    }
+                    fboSlots = []
+                    renderBufferIndex = 0
+                }
+                if let cache = textureCache { CVOpenGLESTextureCacheFlush(cache, 0) }
+                EAGLContext.setCurrent(nil)
+            }
+
+            textureCache = nil
+            eaglContext = nil
+
+            if let gl = mpvGL {
+                mpvGL = nil
+                #if DEBUG
+                print("🧹 [Teardown] \(streamTag) mpv_render_context_free BEGIN (may block on stalled core)")
+                let freeStart = CACurrentMediaTime()
+                #endif
+                mpv_render_context_free(gl)
+                #if DEBUG
+                print("🧹 [Teardown] \(streamTag) mpv_render_context_free END after \(String(format: "%.0f", (CACurrentMediaTime() - freeStart) * 1000))ms")
+                #endif
+            }
+        }
+
+        /// Stops the IOSurface re-attach watchdog. Dispatched to main (the
+        /// display link is main-thread). Idempotent: invalidate and the
+        /// lock-protected buffer release inside stopWatchdog are both safe to
+        /// call repeatedly. Shared by every teardown path.
+        private func stopWatchdogOnMain() {
             Task { @MainActor [weak self] in
                 self?.stopWatchdog()
             }
-            // renderQueue -> mpvQueue is async-only, so this sync is deadlock-free
-            // from both stop() (main thread) and MPV_EVENT_SHUTDOWN (mpvQueue).
+        }
+
+        /// SYNCHRONOUS render teardown. Used ONLY by the MPV_EVENT_SHUTDOWN
+        /// handler, which runs on `mpvQueue` where blocking on a stalled
+        /// `mpv_render_context_free` is acceptable. Do NOT call this from the
+        /// main thread (it would freeze the UI for in-progress HLS streams);
+        /// the main-thread stop() path uses teardownRenderResourcesAsync.
+        ///
+        /// renderQueue -> mpvQueue is async-only, so this sync is deadlock-free
+        /// from mpvQueue.
+        private func teardownRenderResourcesOnRenderQueue() {
+            stopWatchdogOnMain()
+            #if DEBUG
+            print("🧹 [Teardown] \(streamTag) renderQueue.sync BEGIN (mpvQueue/SHUTDOWN path)")
+            let t0 = CACurrentMediaTime()
+            #endif
             renderQueue.sync { [self] in
-                if let gl = mpvGL {
-                    mpv_render_context_set_update_callback(gl, nil, nil)
-                }
+                performRenderTeardownBody()
+            }
+            #if DEBUG
+            print("🧹 [Teardown] \(streamTag) renderQueue.sync END after \(String(format: "%.0f", (CACurrentMediaTime() - t0) * 1000))ms")
+            #endif
+        }
 
-                if let ctx = eaglContext {
-                    EAGLContext.setCurrent(ctx)
-                    if !fboSlots.isEmpty {
-                        #if DEBUG
-                        print("[MPV-FBO] \(streamTag) destroy \(fboSlots.count)-deep pool (teardown, was \(fboWidth)x\(fboHeight))")
-                        #endif
-                        for i in 0..<fboSlots.count {
-                            if fboSlots[i].fbo != 0 {
-                                glDeleteFramebuffers(1, &fboSlots[i].fbo)
-                            }
-                        }
-                        fboSlots = []
-                        renderBufferIndex = 0
-                    }
-                    if let cache = textureCache { CVOpenGLESTextureCacheFlush(cache, 0) }
-                    EAGLContext.setCurrent(nil)
-                }
-
-                textureCache = nil
-                eaglContext = nil
-
-                if let gl = mpvGL {
-                    mpvGL = nil
-                    mpv_render_context_free(gl)
+        /// ASYNCHRONOUS render teardown. Used by stop() (main thread). Runs the
+        /// GL teardown on `renderQueue` so the potentially-blocking
+        /// `mpv_render_context_free` never pins the main thread, then invokes
+        /// `completion` on `mpvQueue`. stop() chains `mpv_terminate_destroy`
+        /// through that completion so the required ordering
+        /// (render_context_free completes BEFORE terminate_destroy) is
+        /// preserved without a fixed timer.
+        private func teardownRenderResourcesAsync(completion: @escaping () -> Void) {
+            stopWatchdogOnMain()
+            #if DEBUG
+            print("🧹 [Teardown] \(streamTag) renderQueue.async DISPATCH (off-main stop() path)")
+            #endif
+            renderQueue.async { [weak self] in
+                guard let self else { return }
+                #if DEBUG
+                print("🧹 [Teardown] \(self.streamTag) renderQueue.async BEGIN body")
+                let t0 = CACurrentMediaTime()
+                #endif
+                self.performRenderTeardownBody()
+                #if DEBUG
+                print("🧹 [Teardown] \(self.streamTag) renderQueue.async END body after \(String(format: "%.0f", (CACurrentMediaTime() - t0) * 1000))ms → terminate_destroy on mpvQueue")
+                #endif
+                // Hop to mpvQueue for the destroy step. renderQueue -> mpvQueue
+                // is async-only (never sync the other direction), so this is
+                // deadlock-free.
+                self.mpvQueue.async {
+                    completion()
                 }
             }
         }
@@ -3228,13 +3294,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     retain.release()
                 }
 
-                teardownRenderResourcesOnRenderQueue()
-
-                // Send quit — mpv will fire MPV_EVENT_SHUTDOWN on mpvQueue.
+                // Send `quit` FIRST, before tearing down render resources.
+                // `quit` makes mpv abort in-flight I/O and unwind the demuxer,
+                // so when the (potentially-blocking) mpv_render_context_free
+                // runs a moment later the core is already winding down and
+                // returns promptly. The prior order (teardown then quit) meant
+                // the render-context free ran while a stalled lavf/HLS demuxer
+                // thread was still parked on a network read of a not-yet-
+                // published live segment; the core couldn't service the free,
+                // and because the free ran inside renderQueue.sync ON THE MAIN
+                // THREAD it pinned the UI for up to network-timeout seconds
+                // (the >5s watchdog freeze when leaving an in-progress DVR HLS
+                // recording). A normal live MPEG-TS channel never hit this
+                // because its demuxer is on a continuously-flowing socket, not
+                // parked waiting for a future segment, so the free returned
+                // immediately regardless of order.
+                //
+                // quit is non-blocking (queues an MPV_EVENT_SHUTDOWN on the
+                // event thread), so issuing it from the main thread is safe.
                 mpvCommand(mpv, ["quit"])
 
-                // Give mpv a moment to shut down cleanly, then force-destroy.
-                mpvQueue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                // Tear down render resources OFF the main thread on renderQueue,
+                // then run mpv_terminate_destroy on mpvQueue once the render
+                // context free has completed. This preserves the required
+                // ordering (render_context_free BEFORE terminate_destroy)
+                // without the old fixed 0.5s timer, and never blocks main.
+                //
+                // takeMPVHandle() nils state.mpv, so if MPV_EVENT_SHUTDOWN's
+                // handler reaches its own terminate_destroy first this becomes
+                // a no-op (and vice versa); exactly one path destroys.
+                teardownRenderResourcesAsync { [weak self] in
                     if let m = self?.takeMPVHandle() {
                         mpv_terminate_destroy(m)
                     }
@@ -3494,6 +3583,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // a truly dead host is unchanged — URL-list failover
             // still fires within 30s.
             setOption(mpv, "network-timeout", "30")
+
+            // `demuxer-termination-timeout=2`: bound how long mpv
+            // waits for the demuxer thread to terminate when we quit /
+            // destroy the player. mpv's default is 0.1s, but a
+            // lavf/HLS demuxer parked on a network read of a
+            // not-yet-published live segment (an IN-PROGRESS DVR HLS
+            // recording) can ignore the abort until its own read
+            // returns, which is governed by network-timeout (30s). We
+            // keep network-timeout at 30s so a cold WAN/TLS connect
+            // still has headroom (see above), but cap the TEARDOWN
+            // wait separately at 2s so leaving such a stream can never
+            // pin mpv's destroy path for the full network-timeout. The
+            // main thread is already protected by tearing the render
+            // context down off-main + sending `quit` before the free
+            // (see stop()); this is belt-and-suspenders so the
+            // background mpv_terminate_destroy also returns promptly.
+            // Routed through setOption so a build that rejects it is
+            // logged rather than silently ignored.
+            setOption(mpv, "demuxer-termination-timeout", "2")
 
             // ────────────────────────────────────────────────────────
             // Live low-latency tuning. Layered on top of `profile=fast`
