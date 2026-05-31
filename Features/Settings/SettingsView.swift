@@ -1902,6 +1902,13 @@ struct ServerDetailView: View {
                         isActiveServer: server.isActive,
                         modelContext: modelContext
                     )
+                    // Also drop the in-memory per-channel "upcoming" actor
+                    // cache. Without this, purging the SwiftData rows still
+                    // left stale guide data sitting in EPGCache, so a wedged
+                    // guide could survive "Refresh EPG Data". (This is a
+                    // 30-minute in-memory cache that repopulates lazily, so
+                    // clearing it for all servers is harmless.)
+                    await EPGCache.shared.invalidateAll()
                     if server.isActive {
                         await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
                     }
