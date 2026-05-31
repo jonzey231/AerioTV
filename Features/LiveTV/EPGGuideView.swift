@@ -2483,6 +2483,15 @@ struct EPGGuideView: View {
                         debugLog("🧭 [GuideFocus] assert(top) attempt=\(attempt) set=\(target) got=\(focusedChannelID ?? "nil")")
                         if focusedChannelID == target { break }
                     }
+                    // The focus engine reveal-scrolls the freshly focused row
+                    // and can stop a row short of the absolute top, leaving the
+                    // first channel hidden just above the viewport (the device
+                    // test showed ch2 at the top with ch1 hidden). Let the
+                    // engine settle, then force the top so ch1 is the topmost
+                    // visible row.
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    proxy.scrollTo("guide.top", anchor: .top)
+                    debugLog("🧭 [GuideFocus] scrollToTop(epg) final force-top, focus=\(focusedChannelID ?? "nil")")
                 }
                 #else
                 withAnimation(.easeInOut(duration: 0.25)) {

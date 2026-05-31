@@ -672,6 +672,12 @@ struct ChannelListView: View {
                             debugLog("🧭 [GuideFocus] assert(top) attempt=\(attempt) set=\(target) got=\(focusedGuideRowID ?? "nil")")
                             if focusedGuideRowID == target { break }
                         }
+                        // Force the absolute top after the focus engine's
+                        // reveal-scroll settles, so the first row is not left
+                        // hidden just above the viewport.
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                        proxy.scrollTo("guide.top", anchor: .top)
+                        debugLog("🧭 [GuideFocus] scrollToTop(list) final force-top, focus=\(focusedGuideRowID ?? "nil")")
                     }
                 }
                 .onReceive(
