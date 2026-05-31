@@ -2529,21 +2529,26 @@ struct EPGGuideView: View {
                     guideFocusTargetChannelID = valid
                     debugLog("🧭 [GuideFocus] forceGuideFocus(epg) → mvLast=\(mvLastID ?? "nil") single=\(singleID ?? "nil") valid=\(valid ?? "nil") count=\(channels.count)")
                     guard let valid else { resetFocus(in: guideFocusNS); return }
-                    // resetFocus first to pull focus off the minimized mini tile
-                    // into the guide scope, then drive the exact target row via
-                    // @FocusState. resetFocus by itself lands on the topmost
-                    // realized row (the prior attempt landed on ch108 instead of
-                    // the watched ch118), so we instant-scroll the target to
-                    // center to realize it and re-assert focusedChannelID until
-                    // the engine accepts it.
+                    // Scroll the watched channel into view, then resetFocus to
+                    // pull focus off the minimized mini tile back into the guide.
+                    //
+                    // We deliberately do NOT try to land focus on the watched
+                    // channel's exact program cell here. In this grid the only
+                    // focusable per row is the per-program-cell TVPressOverlay
+                    // (a UIKit PressCatcherView); a row-level @FocusState
+                    // (focusedChannelID) is bound to the non-focusable channel
+                    // label, so writing it is a no-op (it read back nil on
+                    // device). The clean alternative, binding @FocusState to the
+                    // program cell, was tried before and REVERTED because it
+                    // created a second competing focus target that made some
+                    // cells unreachable by the D-pad (see the GuideProgramButton
+                    // note above and Shared/TVPressGesture.swift). So focus
+                    // lands on whatever cell the engine picks near the scrolled
+                    // position; the user sees their channel and can D-pad from
+                    // there. List mode (ChannelListView, real focusable buttons)
+                    // restores focus exactly; the grid is the accepted tradeoff.
                     resetFocus(in: guideFocusNS)
-                    for attempt in 0..<8 {
-                        proxy.scrollTo(valid, anchor: .center)
-                        focusedChannelID = valid
-                        try? await Task.sleep(nanoseconds: 70_000_000)
-                        debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(valid) got=\(focusedChannelID ?? "nil")")
-                        if focusedChannelID == valid { break }
-                    }
+                    proxy.scrollTo(valid, anchor: .center)
                 }
             }
             #endif
