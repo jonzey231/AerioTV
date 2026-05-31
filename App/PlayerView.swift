@@ -564,6 +564,10 @@ private struct PlayerRootView: View {
     // pre-seek spot and then jump forward.
     @State private var dragSettling = false
     @State private var dragSettleTask: Task<Void, Never>?
+    /// iOS full-screen button: when true the player has forced the window
+    /// into landscape (overriding a portrait rotation-lock). Released when
+    /// toggled off or when the player closes.
+    @State private var forcedLandscape = false
 
     #if os(tvOS)
     @State private var isScrubbing = false         // True while previewing a scrub position
@@ -748,6 +752,9 @@ private struct PlayerRootView: View {
         .offset(y: max(0, dragOffset))
         .opacity(1.0 - min(0.4, dragOffset / 400))
         #if os(iOS)
+        // Release a forced-landscape lock when the player closes so the
+        // rest of the app returns to the device's own orientation.
+        .onDisappear { if forcedLandscape { requestOrientation(landscape: false) } }
         .gesture(
             DragGesture()
                 .onChanged { value in
@@ -1905,6 +1912,17 @@ private struct PlayerRootView: View {
 
                     HStack(spacing: 10) {
                         #if os(iOS)
+                        // Full-screen / force-landscape toggle. Lets users who
+                        // lock their device to portrait force landscape playback
+                        // without turning off their rotation lock. Tap again to
+                        // release back to the device orientation.
+                        liquidButton(systemName: forcedLandscape
+                                     ? "arrow.down.right.and.arrow.up.left"
+                                     : "arrow.up.left.and.arrow.down.right",
+                                     tint: .white) {
+                            forcedLandscape.toggle()
+                            requestOrientation(landscape: forcedLandscape)
+                        }
                         // Overflow menu — all secondary controls
                         playerOverflowMenu
                         #endif
@@ -2207,6 +2225,23 @@ private struct PlayerRootView: View {
     private var streamInfoOverlay: some View {
         StreamInfoCardView(info: progressStore.streamInfo)
     }
+
+    #if os(iOS)
+    /// Force the window orientation. `landscape` rotates into (and pins)
+    /// landscape even when the device is rotation-locked to portrait,
+    /// because the app's Info.plist permits landscape. Passing false
+    /// releases the lock back to the device's own orientation. iOS 16+.
+    /// On iPad-on-Mac this is a no-op (Mac windows do not rotate; use the
+    /// window's full-screen control there).
+    private func requestOrientation(landscape: Bool) {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
+        let mask: UIInterfaceOrientationMask = landscape ? .landscape : .allButUpsideDown
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
+            debugLog("🔄 requestGeometryUpdate(landscape=\(landscape)) error=\(error.localizedDescription)")
+        }
+    }
+    #endif
 
     private func liquidButton(
         systemName: String,
