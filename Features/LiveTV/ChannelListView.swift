@@ -653,40 +653,36 @@ struct ChannelListView: View {
                 .onReceive(
                     NotificationCenter.default.publisher(for: .guideScrollToTop)
                 ) { _ in
-                    // Menu on the guide = "take me to the very top channel".
-                    // Scrolling alone doesn't stick on tvOS (the focus engine
-                    // snaps the list back to keep the focused row visible), so
-                    // point the default-focus at the first row and reset focus
-                    // onto it. Scroll first, give the LazyVStack a beat to
-                    // realize the top row, THEN reset focus so it lands.
+                    // Menu on the guide = jump focus to the very top channel.
+                    // resetFocus alone does not honor prefersDefaultFocus here
+                    // (it lands on whatever row is topmost-realized after the
+                    // scroll), so drive the @FocusState target directly: instant
+                    // scroll the top row into view to realize it, then re-assert
+                    // focusedGuideRowID until the engine accepts it (a single
+                    // write is dropped while the row is still laying out).
                     Task { @MainActor in
-                        guideFocusTargetID = filteredChannels.first?.id
-                        debugLog("🧭 [GuideFocus] scrollToTop(list) → target=\(guideFocusTargetID ?? "nil") count=\(filteredChannels.count)")
-                        withAnimation(.easeInOut(duration: 0.2)) {
+                        let target = filteredChannels.first?.id
+                        guideFocusTargetID = target
+                        debugLog("🧭 [GuideFocus] scrollToTop(list) → target=\(target ?? "nil") count=\(filteredChannels.count)")
+                        guard let target else { return }
+                        for attempt in 0..<8 {
                             proxy.scrollTo("guide.top", anchor: .top)
+                            focusedGuideRowID = target
+                            try? await Task.sleep(nanoseconds: 70_000_000)
+                            debugLog("🧭 [GuideFocus] assert(top) attempt=\(attempt) set=\(target) got=\(focusedGuideRowID ?? "nil")")
+                            if focusedGuideRowID == target { break }
                         }
-                        try? await Task.sleep(nanoseconds: 130_000_000)
-                        resetFocus(in: guideFocusNS)
                     }
                 }
                 .onReceive(
                     NotificationCenter.default.publisher(for: .forceGuideFocus)
                 ) { _ in
-                    // Return-from-player: land focus on the channel the user
-                    // was just watching. `resetFocus(in:)` is the only
-                    // reliable way to pull focus off the minimized mini tile;
-                    // it re-evaluates the scope and lands on the row flagged
-                    // `.prefersDefaultFocus(true)`, which we point at the
-                    // watched channel via guideFocusTargetID.
-                    //
-                    // Ordering matters and was the bug in the prior attempt:
-                    // the old code scrolled (a 250ms ANIMATED scroll) and then
-                    // reset focus on the very next line, so the reset fired
-                    // while the target row was still animating into place and
-                    // often not yet realized in the LazyVStack. The engine
-                    // then fell back to the top row. Now: scroll, wait for the
-                    // row to realize, THEN reset, with a second reset after the
-                    // scroll fully settles as a backstop.
+                    // Return-from-player: land focus on the channel the user was
+                    // just watching. resetFocus pulls focus off the minimized
+                    // mini tile into the guide scope but lands on the topmost
+                    // realized row, not the watched channel, so after that we
+                    // instant-scroll the target to center and re-assert
+                    // focusedGuideRowID until the engine accepts it.
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 400_000_000)  // minimize spring
                         let resolved = nowPlaying.playingItem?.id ?? nowPlaying.lastPlayedChannelID
@@ -695,15 +691,15 @@ struct ChannelListView: View {
                         }
                         guideFocusTargetID = valid
                         debugLog("🧭 [GuideFocus] forceGuideFocus(list) → playing=\(nowPlaying.playingItem?.id ?? "nil") last=\(nowPlaying.lastPlayedChannelID ?? "nil") valid=\(valid ?? "nil") count=\(filteredChannels.count)")
-                        if let valid {
+                        guard let valid else { resetFocus(in: guideFocusNS); return }
+                        resetFocus(in: guideFocusNS)
+                        for attempt in 0..<8 {
                             proxy.scrollTo(valid, anchor: .center)
+                            focusedGuideRowID = valid
+                            try? await Task.sleep(nanoseconds: 70_000_000)
+                            debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(valid) got=\(focusedGuideRowID ?? "nil")")
+                            if focusedGuideRowID == valid { break }
                         }
-                        // Let the scrolled-to row realize/lay out before reset.
-                        try? await Task.sleep(nanoseconds: 160_000_000)
-                        resetFocus(in: guideFocusNS)
-                        // Backstop reset once the list has fully settled.
-                        try? await Task.sleep(nanoseconds: 240_000_000)
-                        resetFocus(in: guideFocusNS)
                     }
                 }
             }

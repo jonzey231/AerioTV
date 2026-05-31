@@ -2464,17 +2464,25 @@ struct EPGGuideView: View {
             ) { _ in
                 #if os(tvOS)
                 // Menu on the guide = jump focus to the very top channel.
-                // On tvOS a bare scroll snaps back to keep the focused row
-                // visible, so point default-focus at the first channel and
-                // reset onto it after the top row has realized.
+                // resetFocus alone does NOT honor prefersDefaultFocus in this
+                // grid (it lands on whatever row is topmost-realized after the
+                // scroll, e.g. ch16 instead of ch1), so we drive the
+                // @FocusState target directly: instant-scroll the top row into
+                // view to realize it, then re-assert focusedChannelID until the
+                // engine accepts it (a single write is dropped while the row is
+                // still laying out). The readback log shows what actually stuck.
                 Task { @MainActor in
-                    guideFocusTargetChannelID = channels.first?.id
-                    debugLog("🧭 [GuideFocus] scrollToTop(epg) → target=\(guideFocusTargetChannelID ?? "nil") count=\(channels.count)")
-                    withAnimation(.easeInOut(duration: 0.2)) {
+                    let target = channels.first?.id
+                    guideFocusTargetChannelID = target
+                    debugLog("🧭 [GuideFocus] scrollToTop(epg) → target=\(target ?? "nil") count=\(channels.count)")
+                    guard let target else { return }
+                    for attempt in 0..<8 {
                         proxy.scrollTo("guide.top", anchor: .top)
+                        focusedChannelID = target
+                        try? await Task.sleep(nanoseconds: 70_000_000)
+                        debugLog("🧭 [GuideFocus] assert(top) attempt=\(attempt) set=\(target) got=\(focusedChannelID ?? "nil")")
+                        if focusedChannelID == target { break }
                     }
-                    try? await Task.sleep(nanoseconds: 130_000_000)
-                    resetFocus(in: guideFocusNS)
                 }
                 #else
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -2511,19 +2519,22 @@ struct EPGGuideView: View {
                     }
                     guideFocusTargetChannelID = valid
                     debugLog("🧭 [GuideFocus] forceGuideFocus(epg) → mvLast=\(mvLastID ?? "nil") single=\(singleID ?? "nil") valid=\(valid ?? "nil") count=\(channels.count)")
-                    // Scroll the target row into view, then give the
-                    // LazyVStack a beat to realize it BEFORE resetting focus.
-                    // The prior attempt reset focus on the line right after an
-                    // animated scrollTo, so the reset fired before the row was
-                    // realized and fell back to the top. A backstop reset
-                    // follows once the scroll has fully settled.
-                    if let valid {
+                    guard let valid else { resetFocus(in: guideFocusNS); return }
+                    // resetFocus first to pull focus off the minimized mini tile
+                    // into the guide scope, then drive the exact target row via
+                    // @FocusState. resetFocus by itself lands on the topmost
+                    // realized row (the prior attempt landed on ch108 instead of
+                    // the watched ch118), so we instant-scroll the target to
+                    // center to realize it and re-assert focusedChannelID until
+                    // the engine accepts it.
+                    resetFocus(in: guideFocusNS)
+                    for attempt in 0..<8 {
                         proxy.scrollTo(valid, anchor: .center)
+                        focusedChannelID = valid
+                        try? await Task.sleep(nanoseconds: 70_000_000)
+                        debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(valid) got=\(focusedChannelID ?? "nil")")
+                        if focusedChannelID == valid { break }
                     }
-                    try? await Task.sleep(nanoseconds: 160_000_000)
-                    resetFocus(in: guideFocusNS)
-                    try? await Task.sleep(nanoseconds: 240_000_000)
-                    resetFocus(in: guideFocusNS)
                 }
             }
             #endif
