@@ -3294,25 +3294,23 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     retain.release()
                 }
 
-                // Send `quit` FIRST, before tearing down render resources.
-                // `quit` makes mpv abort in-flight I/O and unwind the demuxer,
-                // so when the (potentially-blocking) mpv_render_context_free
-                // runs a moment later the core is already winding down and
-                // returns promptly. The prior order (teardown then quit) meant
-                // the render-context free ran while a stalled lavf/HLS demuxer
-                // thread was still parked on a network read of a not-yet-
-                // published live segment; the core couldn't service the free,
-                // and because the free ran inside renderQueue.sync ON THE MAIN
-                // THREAD it pinned the UI for up to network-timeout seconds
-                // (the >5s watchdog freeze when leaving an in-progress DVR HLS
-                // recording). A normal live MPEG-TS channel never hit this
-                // because its demuxer is on a continuously-flowing socket, not
-                // parked waiting for a future segment, so the free returned
-                // immediately regardless of order.
+                // Send `quit` FIRST so mpv begins aborting in-flight I/O and
+                // unwinding the demuxer before the render teardown runs, which
+                // lets the (potentially-blocking) mpv_render_context_free
+                // return promptly instead of waiting on a parked core.
                 //
-                // quit is non-blocking (queues an MPV_EVENT_SHUTDOWN on the
-                // event thread), so issuing it from the main thread is safe.
-                mpvCommand(mpv, ["quit"])
+                // CRITICAL: this MUST be the ASYNC command. mpv_command (the
+                // sync `mpvCommand` helper) blocks the caller until the core
+                // services it, and an in-progress HLS recording's lavf demuxer
+                // is parked on a network read of a not-yet-published live
+                // segment, so a synchronous quit on the MAIN THREAD froze the
+                // UI for up to network-timeout seconds (the >5s watchdog freeze
+                // leaving an in-progress DVR recording). mpv_command_async
+                // queues quit and returns immediately; it is acted on once the
+                // core's read returns. A normal live MPEG-TS channel never hit
+                // the sync block because its demuxer is on a continuously-
+                // flowing socket, not parked on a future segment.
+                mpvCommandAsync(mpv, ["quit"])
 
                 // Tear down render resources OFF the main thread on renderQueue,
                 // then run mpv_terminate_destroy on mpvQueue once the render
@@ -5707,6 +5705,28 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             if result < 0 {
                 print("[MPV-ERR] command \(args) failed: \(String(cString: mpv_error_string(result)))")
+            }
+            #endif
+        }
+
+        /// Fire-and-forget variant. `mpv_command` (used by `mpvCommand`) is
+        /// SYNCHRONOUS: it blocks the caller until the core services the
+        /// command. When the core is parked in a blocking demuxer read (an
+        /// in-progress HLS recording waiting for the next live segment), a
+        /// synchronous command issued from the main thread freezes the UI for
+        /// up to network-timeout seconds. `mpv_command_async` queues the
+        /// command and returns immediately, so the main thread never blocks;
+        /// the command is acted on whenever the core's read returns. Use this
+        /// for teardown-path commands like `quit`. The reply event is ignored.
+        private func mpvCommandAsync(_ mpv: OpaquePointer, _ args: [String]) {
+            let cargs = args.map { strdup($0) }
+            var pointers = cargs.map { UnsafePointer($0) as UnsafePointer<CChar>? }
+            pointers.append(nil)
+            let result = mpv_command_async(mpv, 0, &pointers)
+            for ptr in cargs { free(ptr) }
+            #if DEBUG
+            if result < 0 {
+                print("[MPV-ERR] async command \(args) failed: \(String(cString: mpv_error_string(result)))")
             }
             #endif
         }
