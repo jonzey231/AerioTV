@@ -2105,6 +2105,16 @@ struct EPGGuideView: View {
     /// Normally nil (focus engine drives navigation).
     @FocusState private var focusedChannelID: String?
 
+    /// Programmatic focus target keyed by PROGRAM id. The program cells are
+    /// the real focusable elements in the grid (the channel column stays a
+    /// non-focusable label, which keeps D-pad navigation on the programs).
+    /// Each cell binds `.focused($focusedProgramID, equals: prog.id)`, so
+    /// the return-from-player / Menu-to-top handlers can land focus on a
+    /// specific channel's now-airing program by setting this. Driving a
+    /// SwiftUI-native focusable (the cells are now `.focusable()`, not a
+    /// UIKit press overlay) is what finally makes the restore work.
+    @FocusState private var focusedProgramID: String?
+
     /// Namespace + imperative reset hook for the guide's focus
     /// scope. See ChannelListView's identical setup for the full
     /// rationale — `resetFocus(in:)` is the only reliable way to
@@ -2472,26 +2482,27 @@ struct EPGGuideView: View {
                 // engine accepts it (a single write is dropped while the row is
                 // still laying out). The readback log shows what actually stuck.
                 Task { @MainActor in
-                    let target = channels.first?.id
-                    guideFocusTargetChannelID = target
-                    debugLog("🧭 [GuideFocus] scrollToTop(epg) → target=\(target ?? "nil") count=\(channels.count)")
-                    guard let target else { return }
+                    let topChannel = channels.first?.id
+                    // Focus the top channel's program cell (the focusable
+                    // element), not the channel label.
+                    let target = topChannel.flatMap { focusTargetProgramID(forChannel: $0) }
+                    debugLog("🧭 [GuideFocus] scrollToTop(epg) → channel=\(topChannel ?? "nil") prog=\(target ?? "nil") count=\(channels.count)")
+                    guard let target else { proxy.scrollTo("guide.top", anchor: .top); return }
                     for attempt in 0..<8 {
                         proxy.scrollTo("guide.top", anchor: .top)
-                        focusedChannelID = target
+                        focusedProgramID = target
                         try? await Task.sleep(nanoseconds: 70_000_000)
-                        debugLog("🧭 [GuideFocus] assert(top) attempt=\(attempt) set=\(target) got=\(focusedChannelID ?? "nil")")
-                        if focusedChannelID == target { break }
+                        debugLog("🧭 [GuideFocus] assert(top) attempt=\(attempt) set=\(target) got=\(focusedProgramID ?? "nil")")
+                        if focusedProgramID == target { break }
                     }
-                    // The focus engine reveal-scrolls the freshly focused row
+                    // The focus engine reveal-scrolls the freshly focused cell
                     // and can stop a row short of the absolute top, leaving the
-                    // first channel hidden just above the viewport (the device
-                    // test showed ch2 at the top with ch1 hidden). Let the
+                    // first channel hidden just above the viewport. Let the
                     // engine settle, then force the top so ch1 is the topmost
                     // visible row.
                     try? await Task.sleep(nanoseconds: 300_000_000)
                     proxy.scrollTo("guide.top", anchor: .top)
-                    debugLog("🧭 [GuideFocus] scrollToTop(epg) final force-top, focus=\(focusedChannelID ?? "nil")")
+                    debugLog("🧭 [GuideFocus] scrollToTop(epg) final force-top, focus=\(focusedProgramID ?? "nil")")
                 }
                 #else
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -2529,26 +2540,23 @@ struct EPGGuideView: View {
                     guideFocusTargetChannelID = valid
                     debugLog("🧭 [GuideFocus] forceGuideFocus(epg) → mvLast=\(mvLastID ?? "nil") single=\(singleID ?? "nil") valid=\(valid ?? "nil") count=\(channels.count)")
                     guard let valid else { resetFocus(in: guideFocusNS); return }
-                    // Scroll the watched channel into view, then resetFocus to
-                    // pull focus off the minimized mini tile back into the guide.
-                    //
-                    // We deliberately do NOT try to land focus on the watched
-                    // channel's exact program cell here. In this grid the only
-                    // focusable per row is the per-program-cell TVPressOverlay
-                    // (a UIKit PressCatcherView); a row-level @FocusState
-                    // (focusedChannelID) is bound to the non-focusable channel
-                    // label, so writing it is a no-op (it read back nil on
-                    // device). The clean alternative, binding @FocusState to the
-                    // program cell, was tried before and REVERTED because it
-                    // created a second competing focus target that made some
-                    // cells unreachable by the D-pad (see the GuideProgramButton
-                    // note above and Shared/TVPressGesture.swift). So focus
-                    // lands on whatever cell the engine picks near the scrolled
-                    // position; the user sees their channel and can D-pad from
-                    // there. List mode (ChannelListView, real focusable buttons)
-                    // restores focus exactly; the grid is the accepted tradeoff.
+                    // Focus the watched channel's program cell (the focusable
+                    // element). The cells are now SwiftUI-native focusables (no
+                    // UIKit overlay, no competing target), so driving
+                    // focusedProgramID actually moves focus. resetFocus first
+                    // pulls focus off the minimized mini tile into the guide;
+                    // then scroll the channel into view and re-assert
+                    // focusedProgramID until the engine reports it stuck.
+                    let target = focusTargetProgramID(forChannel: valid)
                     resetFocus(in: guideFocusNS)
-                    proxy.scrollTo(valid, anchor: .center)
+                    guard let target else { return }
+                    for attempt in 0..<8 {
+                        proxy.scrollTo(valid, anchor: .center)
+                        focusedProgramID = target
+                        try? await Task.sleep(nanoseconds: 70_000_000)
+                        debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(target) got=\(focusedProgramID ?? "nil")")
+                        if focusedProgramID == target { break }
+                    }
                 }
             }
             #endif
@@ -2662,6 +2670,18 @@ struct EPGGuideView: View {
         GuideChannelButton(channel: channel, onSelect: onSelectChannel)
     }
 
+    #if os(tvOS)
+    /// The program id to focus for a channel: the now-airing program if
+    /// known, else the first available. Program cells are the focusable
+    /// elements, so restoring focus to a channel means focusing one of its
+    /// program cells.
+    private func focusTargetProgramID(forChannel channelID: String) -> String? {
+        let progs = guideStore.programs[channelID] ?? []
+        let now = Date()
+        return (progs.first { $0.start <= now && now < $0.end } ?? progs.first)?.id
+    }
+    #endif
+
     // MARK: - Time Header
     private var timeHeaderRow: some View {
         ZStack(alignment: .leading) {
@@ -2766,6 +2786,22 @@ struct EPGGuideView: View {
         let screenX = channelColumnWidth + horizontalOffset + x
         let leadingClip = max(0, channelColumnWidth - screenX)
 
+        // The program cell now owns the `.focused(focusedProgramID, equals:)`
+        // binding internally (on its single SwiftUI-native focusable). There
+        // is no longer a competing UIKit overlay, so the binding is safe and
+        // is what the focus-restore handlers drive. tvOS passes the binding;
+        // iOS uses the no-binding init.
+        #if os(tvOS)
+        return GuideProgramButton(
+            prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
+            leadingClip: leadingClip,
+            shortTimeFormatter: shortTimeFormatter,
+            onSelect: onSelectChannel,
+            onMultiviewIntent: { handleMultiviewIntent(channel: $0) },
+            focusedProgramID: $focusedProgramID
+        )
+        .offset(x: x, y: 0)
+        #else
         return GuideProgramButton(
             prog: prog, channelItem: channelItem, width: width, rowHeight: rowHeight,
             leadingClip: leadingClip,
@@ -2774,28 +2810,7 @@ struct EPGGuideView: View {
             onMultiviewIntent: { handleMultiviewIntent(channel: $0) }
         )
         .offset(x: x, y: 0)
-        // NOTE: `.focused($focusedProgramID, equals: prog.id)` was
-        // previously attached here on tvOS as a programmatic focus
-        // hook for `.forceGuideFocus` (mini-player minimize → land
-        // focus on the first channel's "now" cell). It has been
-        // removed because it silently created a second focus
-        // target on top of the `TVPressOverlay`'s
-        // `PressCatcherView` (see
-        // `Shared/TVPressGesture.swift:43` — "Do NOT also add
-        // `.focusable()` / `.focused()` to cellContent — the
-        // overlay UIView is the focusable element. Having both
-        // would create two competing focus targets"). The dual
-        // targets manifested as specific program cells being
-        // unreachable via Siri Remote D-pad: the tvOS focus
-        // engine saw two focusable regions per cell and routed
-        // inconsistently, skipping some cells entirely (a small
-        // set of cells on certain channels at certain times).
-        // The minor regression: after mini-player minimize, focus
-        // now lands on whatever cell the tvOS focus engine picks
-        // by default rather than the first channel's live cell
-        // specifically. The user can D-pad to reach their
-        // intended cell — acceptable tradeoff versus some cells
-        // being permanently unreachable.
+        #endif
     }
 
     // MARK: - Time Indicator Line
@@ -3164,6 +3179,12 @@ private struct GuideProgramButton: View {
     /// The parent does the wipe-on-first-entry, the add / remove
     /// toggle, and the toast.
     let onMultiviewIntent: (ChannelDisplayItem) -> Void
+    #if os(tvOS)
+    /// Parent's program-focus binding. The cell binds
+    /// `.focused(focusedProgramID, equals: prog.id)` so the guide can
+    /// programmatically focus this cell for focus restore.
+    var focusedProgramID: FocusState<String?>.Binding
+    #endif
     // Access ReminderManager directly — @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
     private var reminderManager: ReminderManager { .shared }
@@ -3196,10 +3217,10 @@ private struct GuideProgramButton: View {
     @AppStorage("guideScale") private var guideScale: Double = 1.0
     #endif
     #if os(tvOS)
-    // @State (not @FocusState) because a transparent UIKit overlay
-    // (TVPressOverlay) is what actually owns focus on tvOS now; it
-    // pushes focus changes back into this binding via onFocusChange.
-    @State private var isFocused: Bool = false
+    // The cell is now a SwiftUI-native focusable, so its focus drives this
+    // @FocusState directly (the old UIKit TVPressOverlay is gone). Used for
+    // the cell highlight.
+    @FocusState private var isFocused: Bool
     #endif
 
     private var hasReminder: Bool {
@@ -3353,41 +3374,27 @@ private struct GuideProgramButton: View {
 
     var body: some View {
         #if os(tvOS)
-        // NOTE: On tvOS, wrapping the cell in a SwiftUI Button makes the
-        // Siri Remote's select-click fire the primary action on release,
-        // which swallows .onLongPressGesture — the user reported
-        // long-press simply played the channel. Using .focusable() +
-        // .onTapGesture + .onLongPressGesture gives us both gestures
-        // without the Button eating the press event.
-        // SwiftUI's tvOS long-press APIs all fire on press release or
-        // are marked unavailable (see Shared/TVPressGesture.swift for
-        // the audit). `TVPressOverlay` is a transparent, focusable UIKit
-        // overlay whose `pressesBegan` starts a Timer that fires
-        // `onLongPress` at exactly 0.35s while still pressed, and whose
-        // `pressesEnded` fires `onTap` if the timer hadn't fired yet.
-        // The overlay preserves SwiftUI layout because it does not wrap
-        // or reparent `cellContent`.
         cellContent
-            .overlay(
-                TVPressOverlay(
-                    minimumPressDuration: 0.35,
-                    isFocused: $isFocused,
-                    onTap: {
-                        // v1.7.x: when the Guide is in staging mode,
-                        // Select on a cell adds / removes the channel
-                        // from the multiview pile instead of playing
-                        // it. The parent's `handleMultiviewIntent`
-                        // owns the toggle logic; we just forward the
-                        // channel.
-                        if multiviewStore.isStagingFromGuide {
-                            onMultiviewIntent(channelItem)
-                        } else {
-                            onSelect(channelItem)
-                        }
-                    },
-                    onLongPress: { showCtxDialog = true }
-                )
-            )
+            // tvOS: SwiftUI-native focusable cell (not a UIKit press overlay,
+            // not a Button). `.focusable()` + `.focused` let the guide restore
+            // focus to a specific program cell (return-from-player,
+            // Menu-to-top), which the old UIKit overlay could not support
+            // because SwiftUI focus APIs cannot drive a UIKit focus object. A
+            // Button would swallow the long-press (its action fires on
+            // release), so tap and long-press stay separate gestures, as on
+            // iOS. isFocused drives the highlight; focusedProgramID is the
+            // programmatic restore target.
+            .focusable()
+            .focused($isFocused)
+            .focused(focusedProgramID, equals: prog.id)
+            .onTapGesture {
+                if multiviewStore.isStagingFromGuide {
+                    onMultiviewIntent(channelItem)
+                } else {
+                    onSelect(channelItem)
+                }
+            }
+            .onLongPressGesture(minimumDuration: 0.4) { showCtxDialog = true }
             .confirmationDialog(prog.title,
                                 isPresented: $showCtxDialog,
                                 titleVisibility: .visible) {
