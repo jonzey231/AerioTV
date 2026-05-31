@@ -167,6 +167,17 @@ struct ChannelListView: View {
     /// after the claim so subsequent D-pad navigation isn't pinned.
     @FocusState private var focusedGuideRowID: String?
 
+    /// Explicit row that the next `resetFocus(in: guideFocusNS)` should
+    /// land on, driving `.prefersDefaultFocus`. Set by the Menu/Back
+    /// handlers right before they reset focus:
+    ///   - `.guideScrollToTop` (Menu on the guide) sets it to the FIRST
+    ///     channel, so Menu actually moves focus to the top row, not just
+    ///     scrolls the list (which tvOS would snap back to the focused row).
+    ///   - `.forceGuideFocus` (return from the player) sets it to the
+    ///     channel that was playing, so focus lands where the user left off.
+    /// Nil falls through to the playing/last-played/first heuristic.
+    @State private var guideFocusTargetID: String?
+
     /// Namespace for imperative focus reset. Used together with
     /// `resetFocus(in:)` and `.prefersDefaultFocus(...)` on the top
     /// channel row — when the mini-player minimizes and the
@@ -626,7 +637,8 @@ struct ChannelListView: View {
                             // makes sure the playing row is
                             // actually visible when focus lands.
                             .prefersDefaultFocus(
-                                item.id == (nowPlaying.playingItem?.id
+                                item.id == (guideFocusTargetID
+                                            ?? nowPlaying.playingItem?.id
                                             ?? nowPlaying.lastPlayedChannelID
                                             ?? filteredChannels.first?.id),
                                 in: guideFocusNS
@@ -641,51 +653,56 @@ struct ChannelListView: View {
                 .onReceive(
                     NotificationCenter.default.publisher(for: .guideScrollToTop)
                 ) { _ in
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        proxy.scrollTo("guide.top", anchor: .top)
+                    // Menu on the guide = "take me to the very top channel".
+                    // Scrolling alone doesn't stick on tvOS (the focus engine
+                    // snaps the list back to keep the focused row visible), so
+                    // point the default-focus at the first row and reset focus
+                    // onto it. Scroll first, give the LazyVStack a beat to
+                    // realize the top row, THEN reset focus so it lands.
+                    Task { @MainActor in
+                        guideFocusTargetID = filteredChannels.first?.id
+                        debugLog("🧭 [GuideFocus] scrollToTop(list) → target=\(guideFocusTargetID ?? "nil") count=\(filteredChannels.count)")
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            proxy.scrollTo("guide.top", anchor: .top)
+                        }
+                        try? await Task.sleep(nanoseconds: 130_000_000)
+                        resetFocus(in: guideFocusNS)
                     }
                 }
                 .onReceive(
                     NotificationCenter.default.publisher(for: .forceGuideFocus)
                 ) { _ in
-                    // Reclaim focus from the minimized mini player
-                    // via Apple's documented imperative focus-reset
-                    // hook. `resetFocus(in:)` is the ONLY reliable
-                    // way to move focus when tvOS's engine has
-                    // already committed to another focusable view
-                    // (the mini tile): a plain `@FocusState` write
-                    // is treated as a request that the engine may
-                    // reject. `resetFocus` forces a re-evaluation
-                    // within the scope and lands on the row with
-                    // `.prefersDefaultFocus(true, in: ...)` — i.e.
-                    // the top channel row.
+                    // Return-from-player: land focus on the channel the user
+                    // was just watching. `resetFocus(in:)` is the only
+                    // reliable way to pull focus off the minimized mini tile;
+                    // it re-evaluates the scope and lands on the row flagged
+                    // `.prefersDefaultFocus(true)`, which we point at the
+                    // watched channel via guideFocusTargetID.
                     //
-                    // The 400ms delay covers the 350ms minimize
-                    // spring animation. Triggering during the
-                    // animation lets tvOS ignore the reset because
-                    // the mini tile's frame is still in flux; waiting
-                    // until after the animation commits is what makes
-                    // the reset stick.
+                    // Ordering matters and was the bug in the prior attempt:
+                    // the old code scrolled (a 250ms ANIMATED scroll) and then
+                    // reset focus on the very next line, so the reset fired
+                    // while the target row was still animating into place and
+                    // often not yet realized in the LazyVStack. The engine
+                    // then fell back to the top row. Now: scroll, wait for the
+                    // row to realize, THEN reset, with a second reset after the
+                    // scroll fully settles as a backstop.
                     Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 400_000_000)
-                        // v1.6.18: scroll the currently-playing row
-                        // (or last-played, on full multiview exit)
-                        // into view BEFORE we hand focus to it. The
-                        // `.prefersDefaultFocus` flag picks the
-                        // right row, but if it's offscreen when
-                        // focus lands the user sees an
-                        // apparently-arbitrary jump. Scrolling
-                        // first makes the focus landing match what
-                        // the user expects: "I was watching this
-                        // channel; now I see it highlighted in the
-                        // guide where I left it."
-                        let targetID = nowPlaying.playingItem?.id ?? nowPlaying.lastPlayedChannelID
-                        if let targetID,
-                           filteredChannels.contains(where: { $0.id == targetID }) {
-                            withAnimation(.easeInOut(duration: 0.25)) {
-                                proxy.scrollTo(targetID, anchor: .center)
-                            }
+                        try? await Task.sleep(nanoseconds: 400_000_000)  // minimize spring
+                        let resolved = nowPlaying.playingItem?.id ?? nowPlaying.lastPlayedChannelID
+                        let valid = resolved.flatMap { id in
+                            filteredChannels.contains(where: { $0.id == id }) ? id : nil
                         }
+                        guideFocusTargetID = valid
+                        debugLog("🧭 [GuideFocus] forceGuideFocus(list) → playing=\(nowPlaying.playingItem?.id ?? "nil") last=\(nowPlaying.lastPlayedChannelID ?? "nil") valid=\(valid ?? "nil") count=\(filteredChannels.count)")
+                        if let valid {
+                            proxy.scrollTo(valid, anchor: .center)
+                        }
+                        // Let the scrolled-to row realize/lay out before reset.
+                        try? await Task.sleep(nanoseconds: 160_000_000)
+                        resetFocus(in: guideFocusNS)
+                        // Backstop reset once the list has fully settled.
+                        try? await Task.sleep(nanoseconds: 240_000_000)
                         resetFocus(in: guideFocusNS)
                     }
                 }

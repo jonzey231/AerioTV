@@ -2462,9 +2462,25 @@ struct EPGGuideView: View {
             .onReceive(
                 NotificationCenter.default.publisher(for: .guideScrollToTop)
             ) { _ in
+                #if os(tvOS)
+                // Menu on the guide = jump focus to the very top channel.
+                // On tvOS a bare scroll snaps back to keep the focused row
+                // visible, so point default-focus at the first channel and
+                // reset onto it after the top row has realized.
+                Task { @MainActor in
+                    guideFocusTargetChannelID = channels.first?.id
+                    debugLog("🧭 [GuideFocus] scrollToTop(epg) → target=\(guideFocusTargetChannelID ?? "nil") count=\(channels.count)")
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        proxy.scrollTo("guide.top", anchor: .top)
+                    }
+                    try? await Task.sleep(nanoseconds: 130_000_000)
+                    resetFocus(in: guideFocusNS)
+                }
+                #else
                 withAnimation(.easeInOut(duration: 0.25)) {
                     proxy.scrollTo("guide.top", anchor: .top)
                 }
+                #endif
             }
             #if os(tvOS)
             .focusScope(guideFocusNS)
@@ -2479,37 +2495,34 @@ struct EPGGuideView: View {
                     // Resolve target: use the last-added multiview tile
                     // (keyed by addedAt, not array order which can change
                     // via drag-rearrange), then fall back to the single-
-                    // stream playing item, then nil → top row.
+                    // stream playing item, then nil for the top row.
                     let mvLastID = MultiviewStore.shared.tiles
                         .max(by: { $0.addedAt < $1.addedAt })?.item.id
                     let singleID = NowPlayingManager.shared.playingItem?.id
                     let candidateID = mvLastID ?? singleID
-                    // Only store the target if it's actually present in
-                    // the current (possibly filtered) channel list —
-                    // otherwise leave it nil so the fallback to
-                    // channels.first in prefersDefaultFocus still fires.
-                    guideFocusTargetChannelID = candidateID.flatMap { id in
-                        channels.first(where: { $0.id == id })?.id
-                    }
                     // The 400ms delay covers the 350ms minimize spring
-                    // animation; triggering during the animation lets
-                    // tvOS ignore the reset because the mini tile's
-                    // frame is still in flux.
+                    // animation; triggering during it lets tvOS ignore the
+                    // reset because the mini tile's frame is still in flux.
                     try? await Task.sleep(nanoseconds: 400_000_000)
-                    // Scroll the guide to bring the target row into
-                    // view before handing focus to it. Re-validate
-                    // against channels here (post-sleep) in case the
-                    // list or filter changed during the 400ms delay —
-                    // scroll is skipped rather than targeting a missing
-                    // id. Falls back to top-row focus via resetFocus.
-                    let validatedScrollTargetID = guideFocusTargetChannelID.flatMap { id in
+                    // Re-validate against the current (possibly filtered)
+                    // channel list AFTER the delay, in case it changed.
+                    let valid = candidateID.flatMap { id in
                         channels.first(where: { $0.id == id })?.id
                     }
-                    if let id = validatedScrollTargetID {
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            proxy.scrollTo(id, anchor: .center)
-                        }
+                    guideFocusTargetChannelID = valid
+                    debugLog("🧭 [GuideFocus] forceGuideFocus(epg) → mvLast=\(mvLastID ?? "nil") single=\(singleID ?? "nil") valid=\(valid ?? "nil") count=\(channels.count)")
+                    // Scroll the target row into view, then give the
+                    // LazyVStack a beat to realize it BEFORE resetting focus.
+                    // The prior attempt reset focus on the line right after an
+                    // animated scrollTo, so the reset fired before the row was
+                    // realized and fell back to the top. A backstop reset
+                    // follows once the scroll has fully settled.
+                    if let valid {
+                        proxy.scrollTo(valid, anchor: .center)
                     }
+                    try? await Task.sleep(nanoseconds: 160_000_000)
+                    resetFocus(in: guideFocusNS)
+                    try? await Task.sleep(nanoseconds: 240_000_000)
                     resetFocus(in: guideFocusNS)
                 }
             }
