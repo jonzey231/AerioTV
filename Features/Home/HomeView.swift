@@ -216,7 +216,15 @@ final class VODStore: ObservableObject {
                         lastPublishTime = now
                     }
                 }
-            } catch {}
+            } catch {
+                // Don't swallow silently. Skip logging when the task was
+                // cancelled (expected on every query change), but surface a
+                // real network/parse failure so an empty result set is
+                // diagnosable instead of mysterious.
+                if !Task.isCancelled {
+                    debugLog("🔎 [Search] movie search stream error: \(error.localizedDescription)")
+                }
+            }
             if !Task.isCancelled {
                 movieSearchResults = results
                 isSearchingMovies = false
@@ -269,7 +277,13 @@ final class VODStore: ObservableObject {
                         lastPublishTime = now
                     }
                 }
-            } catch {}
+            } catch {
+                // Surface real failures; stay quiet on the expected
+                // query-change cancellation (see movie search above).
+                if !Task.isCancelled {
+                    debugLog("🔎 [Search] series search stream error: \(error.localizedDescription)")
+                }
+            }
             if !Task.isCancelled {
                 seriesSearchResults = results
                 isSearchingSeries = false

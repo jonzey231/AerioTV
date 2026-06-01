@@ -620,6 +620,11 @@ final class EPGProgram {
         let now = Date()
         guard now >= startTime else { return 0 }
         let total = endTime.timeIntervalSince(startTime)
+        // Guard against a zero (or negative) span: an EPG program with
+        // start == end would make elapsed / total produce inf/NaN, which
+        // then feeds a progress-bar width and triggers SwiftUI layout
+        // warnings / a broken bar. Treat a non-positive span as no progress.
+        guard total > 0 else { return 0 }
         let elapsed = now.timeIntervalSince(startTime)
         return min(1.0, elapsed / total)
     }
