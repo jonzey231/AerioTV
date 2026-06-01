@@ -3682,11 +3682,35 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             setOption(mpv, "initial-audio-sync", "no")
             setOption(mpv, "vd-lavc-fast", "yes")
             setOption(mpv, "vd-lavc-skiploopfilter", "nonref")
-            setOption(
-                mpv,
-                "stream-lavf-o",
-                "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2"
-            )
+            // Split by isLive. Live MPEG-TS is pure forward streaming and
+            // never seeks, so reconnect_streamed=1 (FFmpeg's "this source is
+            // a non-seekable stream, recover by re-issuing the request")
+            // is correct there. VOD/DVR are the opposite: they MUST issue
+            // HTTP range requests to read an index away from byte 0 (an MKV
+            // Cues block near EOF, or a trailing mp4 moov). reconnect_streamed
+            // is the wrong recovery policy for a file you need to seek, and
+            // against the Dispatcharr VOD proxy it cannot cleanly re-seek to
+            // the right byte offset, so a range read that stalls or 500s
+            // wedges the demuxer (observed on device: input_rate=0 right
+            // after the first frame, no second frame). For VOD we drop
+            // reconnect_streamed and add multiple_requests=1 so one
+            // persistent HTTP/1.1 connection is reused across range GETs.
+            // FFmpeg otherwise opens a NEW connection per range request,
+            // which churns the proxy's per-connection VOD session and is the
+            // likely cause of the read stalling after the moov fetch.
+            if isLive {
+                setOption(
+                    mpv,
+                    "stream-lavf-o",
+                    "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2"
+                )
+            } else {
+                setOption(
+                    mpv,
+                    "stream-lavf-o",
+                    "reconnect=1,reconnect_delay_max=5,multiple_requests=1"
+                )
+            }
             // `network-timeout=30` — raised from 10s. The tighter
             // timeout triggered `tls: IO error: Operation timed out`
             // on a user's WAN route when their LAN probe hadn't
@@ -4272,6 +4296,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // scrub (the scrub UI settles the playhead onto the real
                 // landing position). Live keeps the default (it never seeks).
                 mpv_set_property_string(mpv, "hr-seek", "no")
+                // Satisfy small back-seeks (the demuxer's own moov/index
+                // re-reads, and short scrub-backs) from the in-memory cache
+                // instead of re-hitting the network with a fresh range GET.
+                // Fewer range requests against the Dispatcharr VOD proxy means
+                // fewer chances to trip the stall this whole block is fixing.
+                mpv_set_property_string(mpv, "demuxer-seekable-cache", "yes")
             }
 
             mpv_set_property_string(mpv, "framedrop", "decoder+vo")
