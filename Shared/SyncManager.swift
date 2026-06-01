@@ -892,17 +892,19 @@ final class SyncManager: ObservableObject {
               let type    = ServerType(rawValue: typeRaw),
               let baseURL = dict["baseURL"] as? String else { return nil }
 
-        // `_password` / `_apiKey` are read here purely for **legacy
-        // adoption**. v1.6.12 stopped writing them to KVS (see
-        // `serialize` for the rationale), but a payload pushed by
-        // an older client — or by a still-pre-v1.6.12 device on the
-        // same Apple ID — will still carry them. When found, the
-        // existing `mergeRemoteServers` path persists them into the
-        // local + iCloud Keychain copies, and the launch-time
-        // purge task in `AerioApp` then overwrites the cloud KVS
-        // with a credential-free payload. So the plaintext flows
-        // through this code one last time on each device's first
-        // upgraded launch and never again.
+        // `_password` / `_apiKey` carry credentials across devices via the
+        // KVS payload. History: v1.6.12 briefly stopped writing them (relying
+        // on iCloud Keychain alone), but v1.6.23 RESTORED the carry after
+        // field reports that Keychain-only sync failed for users without
+        // iCloud Keychain enabled on a second device (commonly Apple TV): the
+        // server metadata synced and the playlist rendered, but every API call
+        // returned 401 with no recovery short of re-typing the key. There is
+        // no longer a purge task. When present, `mergeRemoteServers` adopts
+        // these into the local + iCloud Keychain copies. The carry is gated on
+        // `SyncCategory.credentials.isEnabled` in `serialize`, and KVS is
+        // encrypted in transit and at rest by Apple and scoped to the user's
+        // own private iCloud container (a weaker store than Keychain, kept as a
+        // deliberate fallback so credential sync works without iCloud Keychain).
         return SyncedServer(
             id: id, name: name, type: type, baseURL: baseURL,
             username:      dict["username"]  as? String ?? "",

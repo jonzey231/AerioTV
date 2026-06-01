@@ -1371,17 +1371,17 @@ struct RootView: View {
     ///     iCloud copy while credential sync is enabled, but fall
     ///     back to the local copy when sync is off.
     ///
-    /// v1.6.12 update: KVS plaintext is no longer written by this
-    ///   version. `SyncManager.serialize` stopped emitting
-    ///   `_password` / `_apiKey` keys, and a sibling launch task
-    ///   (`purgeKVSPlaintextCredentialsIfNeeded`, below) actively
-    ///   overwrites the cloud KVS with a credential-free payload on
-    ///   first upgraded launch. Older clients (pre-v1.6.12) will
-    ///   keep pushing plaintext until they roll forward, but we
-    ///   don't read that plaintext on the next round-trip — the
-    ///   already-running migration above means our local Keychain
-    ///   is canonical and we only need KVS for non-secret
-    ///   server-list metadata.
+    /// History: v1.6.12 stopped writing `_password` / `_apiKey` to KVS and
+    ///   relied on iCloud Keychain (kSecAttrSynchronizable) to carry
+    ///   credentials cross-device. That broke for users without iCloud
+    ///   Keychain on a second device (commonly Apple TV), so v1.6.23 RESTORED
+    ///   the KVS credential carry in `SyncManager.serialize` and added
+    ///   `republishServersWithCredentialsIfNeeded` (below) to overwrite the
+    ///   credential-stripped payload v1.6.12 left in KVS. This Keychain
+    ///   migration still runs so iCloud Keychain stays populated where it IS
+    ///   available; the KVS carry is the reliable fallback where it is not.
+    ///   (There is no purge task; an earlier revision referenced a
+    ///   `purgeKVSPlaintextCredentialsIfNeeded` that no longer exists.)
     private func migrateCredentialsToICloudKeychainIfNeeded() {
         let flagKey = "kvsToKeychainMigrationDoneV1"
         if UserDefaults.standard.bool(forKey: flagKey) { return }
