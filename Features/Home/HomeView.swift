@@ -2042,7 +2042,13 @@ final class ChannelStore: ObservableObject {
         async let categoriesFetch = xAPI.getLiveCategories()
         let streams    = try await streamsFetch
         let categories = (try? await categoriesFetch) ?? []
-        let catOrder   = Dictionary(uniqueKeysWithValues: categories.enumerated().map { ($1.id, $0) })
+        // `uniquingKeysWith: { first, _ in first }` so a provider that returns
+        // two categories sharing an id (misconfigured / reseller Xtream panels)
+        // collapses the duplicate instead of trapping the channel load on a
+        // duplicate-key fatal error. First occurrence wins. Mirrors the same
+        // defense in sortChannels above.
+        let catOrder   = Dictionary(categories.enumerated().map { ($1.id, $0) },
+                                    uniquingKeysWith: { first, _ in first })
         let usedCatIDs = Set(streams.compactMap { $0.categoryID })
         var groupOrder = categories.filter { usedCatIDs.contains($0.id) }.map { $0.name }
         if streams.contains(where: { ($0.categoryID ?? "").isEmpty }) { groupOrder.append("Uncategorized") }
@@ -2120,7 +2126,11 @@ final class ChannelStore: ObservableObject {
             throw error
         }
 
-        let groupNameByID = Dictionary(uniqueKeysWithValues: dGroups.map { ($0.id, $0.name) })
+        // uniquingKeysWith so duplicate group ids (or a malformed paginated
+        // response that repeats a row) collapse instead of trapping the load
+        // on a duplicate-key fatal error. First occurrence wins.
+        let groupNameByID = Dictionary(dGroups.map { ($0.id, $0.name) },
+                                       uniquingKeysWith: { first, _ in first })
         let usedGroupIDs  = Set(dChannels.compactMap { $0.channelGroupID })
         let channelsWithGroup = dChannels.filter { $0.channelGroupID != nil }.count
         let channelsWithoutGroup = dChannels.filter { $0.channelGroupID == nil }.count
