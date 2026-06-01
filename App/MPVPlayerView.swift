@@ -1520,6 +1520,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // renderPending: accessed from mpv callback thread + render thread — use lock
         private var renderPending = false
         private var renderLock = os_unfair_lock()
+        #if DEBUG
+        // TEMP instrumentation (single-stream black-screen diag): trace the
+        // first N update-callbacks and render attempts so the log shows
+        // whether the loop is driven and where renderAndPresent bails.
+        private var scheduleTraceCount = 0
+        private var renderTraceCount = 0
+        #endif
 
         // Stream info refresh timer (2s interval for volatile stats).
         // Runs on its own low-priority queue — NEVER on renderQueue (would block frame delivery).
@@ -2823,6 +2830,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         /// Called from mpv's update callback — schedules render on background thread.
         func scheduleRender() {
+            #if DEBUG
+            scheduleTraceCount &+= 1
+            if scheduleTraceCount <= 20 {
+                print("[RENDER-TRACE] \(streamTag) scheduleRender #\(scheduleTraceCount)")
+            }
+            #endif
             // v1.7.x Issue A: log silences in the mpv update-callback
             // stream. Normal callback cadence on a smooth stream is
             // ~16-33ms (matches the frame interval), with up to ~5ms
@@ -2925,8 +2938,23 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             renderPending = false
             os_unfair_lock_unlock(&renderLock)
 
-            guard let mpvGL, let eaglContext else { return }
-            guard !fboSlots.isEmpty else { return }
+            #if DEBUG
+            renderTraceCount &+= 1
+            let rTrace = renderTraceCount <= 40
+            #endif
+
+            guard let mpvGL, let eaglContext else {
+                #if DEBUG
+                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: no mpvGL/eaglContext") }
+                #endif
+                return
+            }
+            guard !fboSlots.isEmpty else {
+                #if DEBUG
+                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: fboSlots empty") }
+                #endif
+                return
+            }
 
             // v1.7.x Step 6 — apply backpressure on
             // AVSampleBufferDisplayLayer's renderer. When the
@@ -2973,13 +3001,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // full.
             if let renderer = sampleBufferLayer?.sampleBufferRenderer,
                !renderer.isReadyForMoreMediaData {
+                #if DEBUG
+                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: backpressure (layer not ready)") }
+                #endif
                 backpressureSkipCount &+= 1
                 return
             }
 
             let w = fboWidth
             let h = fboHeight
-            guard w > 0, h > 0 else { return }
+            guard w > 0, h > 0 else {
+                #if DEBUG
+                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: w/h zero (\(w)x\(h))") }
+                #endif
+                return
+            }
 
             // v1.7.x Step 5: advance the ring cursor and pick the
             // next slot. mpv writes to slot[renderBufferIndex],
@@ -3007,7 +3043,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // C `mpv_render_update_flag` enum, not a numeric — convert via
             // `.rawValue` before the bitwise AND with the UInt64 mask.)
             let updateFlags = mpv_render_context_update(mpvGL)
-            guard (updateFlags & UInt64(MPV_RENDER_UPDATE_FRAME.rawValue)) != 0 else { return }
+            guard (updateFlags & UInt64(MPV_RENDER_UPDATE_FRAME.rawValue)) != 0 else {
+                #if DEBUG
+                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: no FRAME flag (updateFlags=\(updateFlags))") }
+                #endif
+                return
+            }
+            #if DEBUG
+            if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) CONSUMING frame into \(w)x\(h)") }
+            #endif
 
             // Tell mpv to render into our FBO (GPU handles color conversion, scaling, OSD).
             // withUnsafeMutablePointer ensures the data pointers outlive the render call.
