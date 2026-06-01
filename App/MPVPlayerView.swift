@@ -2522,6 +2522,24 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             fboHeight = height
             renderBufferIndex = 0
 
+            // Self-heal the libmpv render-update-callback startup race. The
+            // render loop is driven ONLY by mpv's update callback. If mpv
+            // produced its first frame before this FBO ring existed,
+            // renderAndPresent() bailed at the `!fboSlots.isEmpty` guard
+            // WITHOUT consuming that frame and without rescheduling. With
+            // vo=libmpv on a NON-LIVE single file (VOD / local recording) there
+            // is no continuous demuxer traffic to re-fire the callback, so mpv
+            // holds the unconsumed frame, never signals again, and playback
+            // stalls: black screen, timeline frozen at 0:00, FBO stuck at the
+            // initial size. Live streams self-heal because packets keep
+            // arriving. Kick one render now that the ring is ready:
+            // renderAndPresent re-reads mpv_render_context_update(), so it
+            // consumes the still-pending frame if there is one (which then lets
+            // mpv advance and reach PLAYBACK_RESTART, rebuilding the ring to
+            // native size), and is a harmless no-op via the
+            // MPV_RENDER_UPDATE_FRAME guard if there is nothing pending.
+            renderQueue.async { [weak self] in self?.renderAndPresent() }
+
             #if DEBUG
             // v1.7.x Issue A: include rebuild-gap so we can see how
             // long the layer was presenting nothing if this is a
