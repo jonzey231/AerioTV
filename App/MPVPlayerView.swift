@@ -933,17 +933,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         @MainActor
         fileprivate func applyAudioFocusIfChanged(_ isActive: Bool) {
             guard lastAppliedAudioFocus != isActive else { return }
-            // No `tiles.count <= 1` short-circuit here. A prior revision
-            // skipped the mpv write whenever there was a single tile, assuming
-            // the sole tile is always audio-active and was set up with mute=no.
-            // That broke the 2->1 collapse: when the user removes the AUDIO
-            // tile, MultiviewStore auto-promotes the surviving (previously
-            // non-audio, so mute=yes) tile to audio (isActive false->true), but
-            // the skip left it mute=yes in mpv, i.e. silent playback. The guard
-            // above already drops steady-state re-fires (isActive ==
-            // lastAppliedAudioFocus), and the lastWrittenAID / lastWrittenMute
-            // caches below dedupe the actual property writes, so always running
-            // the write path here is both correct and cheap.
+            // N<=1 short-circuit. At a single tile there is no audio-focus
+            // competition, and crucially we must NOT issue an mpv property
+            // write here for a freshly-loaded single-stream player: a write
+            // during mpv's asynchronous initialize -> loadfile window can fail
+            // the load (MPV_ERROR_LOADING_FAILED). Removing this skip is what
+            // made VOD and recordings "not play at all" while multiview (N>1,
+            // which never reaches this branch) kept working. The lone player is
+            // set up with aid=auto + mute=no at options time, so skipping is
+            // correct for genuine single-stream startup.
+            //
+            // EXCEPTION: the 2->1 collapse. When the user removes the AUDIO
+            // tile, MultiviewStore promotes the surviving (previously
+            // non-audio, mute=yes) tile to audio. That survivor's stream is
+            // already loaded and playing, so a mute write is safe now; without
+            // it the survivor stays silent. We detect this case via
+            // lastWrittenMute == 1 (only a tile that was muted as a non-audio
+            // multiview tile has that set; a fresh single-stream player has
+            // lastWrittenMute == nil), and unmute it.
+            if MultiviewStore.shared.tiles.count <= 1 {
+                lastAppliedAudioFocus = isActive
+                if isActive, lastWrittenMute == 1 {
+                    mpvQueue.async { [weak self] in
+                        guard let self, let mpv = self.activeMPVHandle() else { return }
+                        var flag: Int32 = 0
+                        mpv_set_property(mpv, "mute", MPV_FORMAT_FLAG, &flag)
+                        self.lastWrittenMute = 0
+                    }
+                }
+                return
+            }
             lastAppliedAudioFocus = isActive
             DebugLogger.shared.log(
                 "[MV-Audio] mpv audio=\(isActive ? "on" : "off") tile=\(tileID ?? "single")",
