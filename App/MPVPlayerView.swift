@@ -5284,6 +5284,28 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             print("[\(ts)] \(t) [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: estimated=\(String(format: "%.1f", estimatedFPS))/container=\(String(format: "%.1f", containerFPS))/display=\(String(format: "%.1f", displayFPS)), hwdec=\(hwdecCurrent)")
             print("[\(ts)] \(t) [MPV-FRAME] render: \(String(format: "%.1f", avgRenderMs))ms avg / \(String(format: "%.1f", maxRenderMs))ms max, interval: \(String(format: "%.1f", avgInterval))ms avg [\(String(format: "%.1f", minInterval))-\(String(format: "%.1f", maxInterval))ms], jitter: \(String(format: "%.2f", jitterMs))ms, late: \(lateFrames)/\(frameCount), layer: \(layerStatus)")
             print("[\(ts)] \(t) [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(String(format: "%.0f", demuxerInputBytesPerSec / 1024))KB/s, paused_for_cache: \(pausedForCache != 0)")
+            // v1.7.4 VOD-stall diagnostic (measure, don't guess). The
+            // "first frame then mpv stops reading" fingerprint (input_rate=0,
+            // paused_for_cache=false, isPlaying=true) is what mpv shows when
+            // the video-sync=audio MASTER CLOCK never starts, i.e. the audio
+            // output never opens. Read the clock/audio/seek state straight
+            // from mpv so one session is conclusive: current-ao empty or
+            // core-idle=1 while pause=0 => the audio unit never started (the
+            // audio-clock stall); vid=no => video was suppressed; seeking=1
+            // forever => a wedged seek. Cheap reads on this off-main path.
+            var diagCoreIdle: Int32 = -1
+            mpv_get_property(mpv, "core-idle", MPV_FORMAT_FLAG, &diagCoreIdle)
+            var diagPause: Int32 = -1
+            mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &diagPause)
+            var diagSeeking: Int32 = -1
+            mpv_get_property(mpv, "seeking", MPV_FORMAT_FLAG, &diagSeeking)
+            var diagDemuxIdle: Int32 = -1
+            mpv_get_property(mpv, "demuxer-cache-idle", MPV_FORMAT_FLAG, &diagDemuxIdle)
+            let diagAO = getMPVString(mpv, "current-ao") ?? "nil"
+            let diagAid = getMPVString(mpv, "aid") ?? "nil"
+            let diagAcodec = getMPVString(mpv, "audio-codec-name") ?? "nil"
+            let diagVid = getMPVString(mpv, "vid") ?? "nil"
+            print("[\(ts)] \(t) [MPV-STALLDIAG] core-idle=\(diagCoreIdle) pause=\(diagPause) seeking=\(diagSeeking) demux-idle=\(diagDemuxIdle) current-ao=\(diagAO) aid=\(diagAid) acodec=\(diagAcodec) vid=\(diagVid)")
             // v1.7.x Step 8: drop the video-pts read and the
             // self-computed `a-v` field. mpv's `avsync` property is
             // the canonical sync metric on this render path; see the
