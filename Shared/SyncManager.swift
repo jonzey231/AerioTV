@@ -788,15 +788,30 @@ final class SyncManager: ObservableObject {
         let key = server.apiKey.isEmpty ? server.effectiveApiKey : server.apiKey
         let id  = server.id.uuidString
 
+        // Only drop the in-memory copy AFTER the credential is safely
+        // persisted to the LOCAL keychain (the canonical store that
+        // effectivePassword/effectiveApiKey fall back to). The previous code
+        // cleared unconditionally, so a failed Keychain write lost the
+        // credential entirely. The synchronizable (iCloud) write may fail
+        // independently, e.g. iCloud Keychain disabled, without data loss
+        // because the local copy remains, so it does not gate the clear.
         if !pw.isEmpty {
-            KeychainHelper.save(pw, for: "password_\(id)")
+            let localOK = KeychainHelper.save(pw, for: "password_\(id)")
             KeychainHelper.save(pw, for: "password_\(id)", synchronizable: true)
-            server.password = ""
+            if localOK {
+                server.password = ""
+            } else {
+                debugLog("🔵 SyncManager.saveCredentialsSynced: local password Keychain save FAILED, keeping in-memory copy")
+            }
         }
         if !key.isEmpty {
-            KeychainHelper.save(key, for: "apiKey_\(id)")
+            let localOK = KeychainHelper.save(key, for: "apiKey_\(id)")
             KeychainHelper.save(key, for: "apiKey_\(id)", synchronizable: true)
-            server.apiKey = ""
+            if localOK {
+                server.apiKey = ""
+            } else {
+                debugLog("🔵 SyncManager.saveCredentialsSynced: local apiKey Keychain save FAILED, keeping in-memory copy")
+            }
         }
     }
 

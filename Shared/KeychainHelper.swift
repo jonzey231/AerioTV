@@ -20,9 +20,6 @@ enum KeychainHelper {
     static func save(_ value: String, for key: String, synchronizable: Bool = false) -> Bool {
         guard let data = value.data(using: .utf8) else { return false }
 
-        // Delete any existing item first so SecItemAdd always succeeds.
-        delete(key, synchronizable: synchronizable)
-
         var query: [CFString: Any] = [
             kSecClass:         kSecClassGenericPassword,
             kSecAttrService:   service,
@@ -35,7 +32,31 @@ enum KeychainHelper {
         if synchronizable {
             query[kSecAttrSynchronizable] = true
         }
-        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
+
+        // Atomic upsert: try to add, and update IN PLACE if the item already
+        // exists. The previous implementation deleted first and then added,
+        // which left a window where the credential did not exist and was lost
+        // entirely if SecItemAdd then failed (the caller cleared its in-memory
+        // copy assuming the save succeeded).
+        let addStatus = SecItemAdd(query as CFDictionary, nil)
+        if addStatus == errSecSuccess { return true }
+        guard addStatus == errSecDuplicateItem else { return false }
+
+        // Existing item: update just the value, matching on the item's
+        // identity (class / service / account [+ synchronizable]).
+        var matchQuery: [CFString: Any] = [
+            kSecClass:       kSecClassGenericPassword,
+            kSecAttrService: service,
+            kSecAttrAccount: key
+        ]
+        if synchronizable {
+            matchQuery[kSecAttrSynchronizable] = true
+        }
+        let updateStatus = SecItemUpdate(
+            matchQuery as CFDictionary,
+            [kSecValueData: data] as CFDictionary
+        )
+        return updateStatus == errSecSuccess
     }
 
     // MARK: - Load
