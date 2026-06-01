@@ -144,7 +144,7 @@ enum MPVLibraryWarmup {
         let mpvStart = Date()
         guard let mpv = mpv_create() else {
             #if DEBUG
-            print("[MPV-WARMUP] mpv_create failed — warm-up skipped (thermal=\(thermalAtStart))")
+            debugLog("[MPV-WARMUP] mpv_create failed — warm-up skipped (thermal=\(thermalAtStart))")
             #endif
             return
         }
@@ -213,9 +213,9 @@ enum MPVLibraryWarmup {
         let thermalAtEnd = thermalStateString(ProcessInfo.processInfo.thermalState)
         if initResult < 0 {
             let err = String(cString: mpv_error_string(initResult))
-            print("[MPV-WARMUP] done in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms, thermal=\(thermalAtStart)→\(thermalAtEnd)) — initialize returned error: \(err)")
+            debugLog("[MPV-WARMUP] done in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms, thermal=\(thermalAtStart)→\(thermalAtEnd)) — initialize returned error: \(err)")
         } else {
-            print("[MPV-WARMUP] process-wide init complete in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms, thermal=\(thermalAtStart)→\(thermalAtEnd)) — first channel tap will hit the warm path")
+            debugLog("[MPV-WARMUP] process-wide init complete in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms, thermal=\(thermalAtStart)→\(thermalAtEnd)) — first channel tap will hit the warm path")
         }
         #endif
     }
@@ -354,7 +354,7 @@ class MPVPlayerViewController: UIViewController {
         // above for the lazy-init rationale.
 
         #if DEBUG
-        print("[MPV-DIAG] viewDidLoad: frame=\(view.frame), inWindow=\(view.window != nil)")
+        debugLog("[MPV-DIAG] viewDidLoad: frame=\(view.frame), inWindow=\(view.window != nil)")
         // v1.7.x Issue A round 3: log the AVSBDL initial config so
         // the next test reveals whether anything about the layer
         // setup (controlTimebase, color decoration policy, etc.) is
@@ -364,7 +364,7 @@ class MPVPlayerViewController: UIViewController {
         var rate: Double = -1
         if let tb { rate = CMTimebaseGetRate(tb) }
         let timebaseDesc: String = tb == nil ? "nil" : "set(rate=\(rate))"
-        print("[AVSBDL-INIT] videoGravity=\(sampleBufferLayer.videoGravity.rawValue) frame=\(sampleBufferLayer.frame) controlTimebase=\(timebaseDesc) opaque=\(sampleBufferLayer.isOpaque)")
+        debugLog("[AVSBDL-INIT] videoGravity=\(sampleBufferLayer.videoGravity.rawValue) frame=\(sampleBufferLayer.frame) controlTimebase=\(timebaseDesc) opaque=\(sampleBufferLayer.isOpaque)")
         #endif
 
         coordinator?.setupRenderer(layer: view.layer)
@@ -526,7 +526,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             context.coordinator.viewController = vc
             context.coordinator.updateAutoPiPEligibility()
             #if DEBUG
-            print("[MPV-PIP] makeUIViewController: tileID=\(tileID ?? "single") coord=\(ObjectIdentifier(context.coordinator)) audioOnly=\(context.coordinator.progressStore.isAudioOnly)")
+            debugLog("[MPV-PIP] makeUIViewController: tileID=\(tileID ?? "single") coord=\(ObjectIdentifier(context.coordinator)) audioOnly=\(context.coordinator.progressStore.isAudioOnly)")
             #endif
         }
         #endif
@@ -1068,7 +1068,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let totalMs = (writeTime - intentTime) * 1000.0
                 if totalMs > 50 {
                     #if DEBUG
-                    print("[MV-Audio] \(self.streamTag) focus=\(isActive ? "ACQUIRE" : "RELEASE") strategy=\(strategy) N=\(tileCount) queueLat=\(String(format: "%.1f", queueLatencyMs))ms writeLat=\(String(format: "%.1f", writeLatencyMs))ms total=\(String(format: "%.1f", totalMs))ms")
+                    debugLog("[MV-Audio] \(self.streamTag) focus=\(isActive ? "ACQUIRE" : "RELEASE") strategy=\(strategy) N=\(tileCount) queueLat=\(String(format: "%.1f", queueLatencyMs))ms writeLat=\(String(format: "%.1f", writeLatencyMs))ms total=\(String(format: "%.1f", totalMs))ms")
                     #endif
                 }
             }
@@ -1150,12 +1150,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let dwell = pauseStartedAt.map { Date().timeIntervalSince($0) } ?? 0
                 if dwell < Self.snapToLiveMinPauseSeconds {
                     #if DEBUG
-                    print("[MPV-DIAG] \(streamTag) unpause after \(String(format: "%.2f", dwell))s — skipping snap-to-live (brief pause, cache still fresh)")
+                    debugLog("[MPV-DIAG] \(streamTag) unpause after \(String(format: "%.2f", dwell))s — skipping snap-to-live (brief pause, cache still fresh)")
                     #endif
                 } else {
                     let url = urls[currentIndex]
                     #if DEBUG
-                    print("[MPV-DIAG] \(streamTag) unpause → reload live stream (snap to live edge, dwell=\(String(format: "%.1f", dwell))s)")
+                    debugLog("[MPV-DIAG] \(streamTag) unpause → reload live stream (snap to live edge, dwell=\(String(format: "%.1f", dwell))s)")
                     #endif
                     logStore.append("↻ MPV: unpause live → snap to live edge")
                     mpvQueue.async { [weak self] in
@@ -1293,7 +1293,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 EAGLContext.setCurrent(ctx)
                 if !fboSlots.isEmpty {
                     #if DEBUG
-                    print("[MPV-FBO] \(streamTag) destroy \(fboSlots.count)-deep pool (teardown, was \(fboWidth)x\(fboHeight))")
+                    debugLog("[MPV-FBO] \(streamTag) destroy \(fboSlots.count)-deep pool (teardown, was \(fboWidth)x\(fboHeight))")
                     #endif
                     for i in 0..<fboSlots.count {
                         if fboSlots[i].fbo != 0 {
@@ -1313,12 +1313,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if let gl = mpvGL {
                 mpvGL = nil
                 #if DEBUG
-                print("🧹 [Teardown] \(streamTag) mpv_render_context_free BEGIN (may block on stalled core)")
+                debugLog("🧹 [Teardown] \(streamTag) mpv_render_context_free BEGIN (may block on stalled core)")
                 let freeStart = CACurrentMediaTime()
                 #endif
                 mpv_render_context_free(gl)
                 #if DEBUG
-                print("🧹 [Teardown] \(streamTag) mpv_render_context_free END after \(String(format: "%.0f", (CACurrentMediaTime() - freeStart) * 1000))ms")
+                debugLog("🧹 [Teardown] \(streamTag) mpv_render_context_free END after \(String(format: "%.0f", (CACurrentMediaTime() - freeStart) * 1000))ms")
                 #endif
             }
         }
@@ -1344,14 +1344,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private func teardownRenderResourcesOnRenderQueue() {
             stopWatchdogOnMain()
             #if DEBUG
-            print("🧹 [Teardown] \(streamTag) renderQueue.sync BEGIN (mpvQueue/SHUTDOWN path)")
+            debugLog("🧹 [Teardown] \(streamTag) renderQueue.sync BEGIN (mpvQueue/SHUTDOWN path)")
             let t0 = CACurrentMediaTime()
             #endif
             renderQueue.sync { [self] in
                 performRenderTeardownBody()
             }
             #if DEBUG
-            print("🧹 [Teardown] \(streamTag) renderQueue.sync END after \(String(format: "%.0f", (CACurrentMediaTime() - t0) * 1000))ms")
+            debugLog("🧹 [Teardown] \(streamTag) renderQueue.sync END after \(String(format: "%.0f", (CACurrentMediaTime() - t0) * 1000))ms")
             #endif
         }
 
@@ -1365,17 +1365,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private func teardownRenderResourcesAsync(completion: @escaping @Sendable () -> Void) {
             stopWatchdogOnMain()
             #if DEBUG
-            print("🧹 [Teardown] \(streamTag) renderQueue.async DISPATCH (off-main stop() path)")
+            debugLog("🧹 [Teardown] \(streamTag) renderQueue.async DISPATCH (off-main stop() path)")
             #endif
             renderQueue.async { [weak self] in
                 guard let self else { return }
                 #if DEBUG
-                print("🧹 [Teardown] \(self.streamTag) renderQueue.async BEGIN body")
+                debugLog("🧹 [Teardown] \(self.streamTag) renderQueue.async BEGIN body")
                 let t0 = CACurrentMediaTime()
                 #endif
                 self.performRenderTeardownBody()
                 #if DEBUG
-                print("🧹 [Teardown] \(self.streamTag) renderQueue.async END body after \(String(format: "%.0f", (CACurrentMediaTime() - t0) * 1000))ms → terminate_destroy on mpvQueue")
+                debugLog("🧹 [Teardown] \(self.streamTag) renderQueue.async END body after \(String(format: "%.0f", (CACurrentMediaTime() - t0) * 1000))ms → terminate_destroy on mpvQueue")
                 #endif
                 // Hop to mpvQueue for the destroy step. renderQueue -> mpvQueue
                 // is async-only (never sync the other direction), so this is
@@ -1912,9 +1912,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 .sink { [weak self] newValue in
                     #if DEBUG
                     if let self {
-                        print("[MPV-PIP] isAudioOnly sink fired: newValue=\(newValue) coord=\(ObjectIdentifier(self))")
+                        debugLog("[MPV-PIP] isAudioOnly sink fired: newValue=\(newValue) coord=\(ObjectIdentifier(self))")
                     } else {
-                        print("[MPV-PIP] isAudioOnly sink fired: newValue=\(newValue) coord=<deallocated>")
+                        debugLog("[MPV-PIP] isAudioOnly sink fired: newValue=\(newValue) coord=<deallocated>")
                     }
                     #endif
                     self?.updateAutoPiPEligibility()
@@ -1946,7 +1946,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let audioOnly = progressStore.isAudioOnly
             guard let vc = viewController else {
                 #if DEBUG
-                print("[MPV-PIP] updateAutoPiPEligibility: viewController=nil audioOnly=\(audioOnly) — deferred (VC not wired yet)")
+                debugLog("[MPV-PIP] updateAutoPiPEligibility: viewController=nil audioOnly=\(audioOnly) — deferred (VC not wired yet)")
                 #endif
                 pipController = nil
                 pipAutoEligible = false
@@ -1976,7 +1976,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     self.pipController = nil
                     self.pipAutoEligible = false
                     #if DEBUG
-                    print("[MPV-PIP] updateAutoPiPEligibility: audioOnly=true → tore down PiP controller")
+                    debugLog("[MPV-PIP] updateAutoPiPEligibility: audioOnly=true → tore down PiP controller")
                     #endif
                     // Re-assert the now-playing bridge. Tearing down the
                     // AVPictureInPictureController implicitly revokes iOS's
@@ -2014,9 +2014,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     self.pipAutoEligible = (pip != nil)
                     #if DEBUG
                     if let pip {
-                        print("[MPV-PIP] updateAutoPiPEligibility: audioOnly=false → armed pip=\(ObjectIdentifier(pip)) pipAutoEligible=true")
+                        debugLog("[MPV-PIP] updateAutoPiPEligibility: audioOnly=false → armed pip=\(ObjectIdentifier(pip)) pipAutoEligible=true")
                     } else {
-                        print("[MPV-PIP] updateAutoPiPEligibility: audioOnly=false → PiP unsupported on this device")
+                        debugLog("[MPV-PIP] updateAutoPiPEligibility: audioOnly=false → PiP unsupported on this device")
                     }
                     #endif
                 }
@@ -2057,7 +2057,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let live = isLive
             let ps = progressStore
             #if DEBUG
-            print("[MPV-PIP] reassertNowPlayingBridge: title=\"\(title)\" live=\(live)")
+            debugLog("[MPV-PIP] reassertNowPlayingBridge: title=\"\(title)\" live=\(live)")
             #endif
             NowPlayingBridge.shared.configure(
                 title: title,
@@ -2107,7 +2107,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // (1) PiP engaged.
             if progressStore.isPiPActive {
                 #if DEBUG
-                print("[MPV-BG] Background: PiP active, keeping vid+audio")
+                debugLog("[MPV-BG] Background: PiP active, keeping vid+audio")
                 #endif
                 return
             }
@@ -2150,13 +2150,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let multiviewActive = multiviewTileCount > 1
             if pipAutoEligible, !multiviewActive {
                 #if DEBUG
-                print("[MPV-BG] Background: auto-PiP eligible, keeping vid live")
+                debugLog("[MPV-BG] Background: auto-PiP eligible, keeping vid live")
                 #endif
                 return
             }
             #if DEBUG
             if pipAutoEligible, multiviewActive {
-                print("[MPV-BG] Background: pipAutoEligible=true but multiview tiles=\(multiviewTileCount) — falling through to default pause-on-background path")
+                debugLog("[MPV-BG] Background: pipAutoEligible=true but multiview tiles=\(multiviewTileCount) — falling through to default pause-on-background path")
             }
             #endif
 
@@ -2164,7 +2164,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //     lockscreen via NowPlayingBridge.
             if progressStore.isAudioOnly {
                 #if DEBUG
-                print("[MPV-BG] Background: audio-only, vid=no, audio continues (lockscreen + Dynamic Island)")
+                debugLog("[MPV-BG] Background: audio-only, vid=no, audio continues (lockscreen + Dynamic Island)")
                 #endif
                 mpv_set_property_string(mpv, "vid", "no")
                 return
@@ -2185,7 +2185,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
             if carPlayConnected {
                 #if DEBUG
-                print("[MPV-BG] Background: CarPlay connected, vid=no, audio continues")
+                debugLog("[MPV-BG] Background: CarPlay connected, vid=no, audio continues")
                 #endif
                 mpv_set_property_string(mpv, "vid", "no")
                 return
@@ -2197,7 +2197,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             #if DEBUG
             let outputs = route.outputs.map { "\($0.portName)(\($0.portType.rawValue))" }.joined(separator: ", ")
-            print("[MPV-BG] Background: airPlayAudio=\(airPlayAudio), isPiP=\(progressStore.isPiPActive), audioOnly=\(progressStore.isAudioOnly), outputs=[\(outputs)]")
+            debugLog("[MPV-BG] Background: airPlayAudio=\(airPlayAudio), isPiP=\(progressStore.isPiPActive), audioOnly=\(progressStore.isAudioOnly), outputs=[\(outputs)]")
             #endif
 
             if airPlayAudio {
@@ -2261,7 +2261,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                    layer.sampleBufferRenderer.status == .failed {
                     #if DEBUG
                     let err = layer.sampleBufferRenderer.error?.localizedDescription ?? "?"
-                    print("[MPV-BG] Foreground: sampleBufferRenderer FAILED (\(err)) — flushing to recover")
+                    debugLog("[MPV-BG] Foreground: sampleBufferRenderer FAILED (\(err)) — flushing to recover")
                     #endif
                     layer.sampleBufferRenderer.flush()
                 }
@@ -2274,7 +2274,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             let route = AVAudioSession.sharedInstance().currentRoute
             let outputs = route.outputs.map { "\($0.portName)(\($0.portType.rawValue))" }.joined(separator: ", ")
-            print("[MPV-BG] Foreground: vid=\(vidStr ?? "nil"), isPiP=\(progressStore.isPiPActive), audioOnly=\(progressStore.isAudioOnly), autoPaused=\(autoPausedOnBackground), outputs=[\(outputs)]")
+            debugLog("[MPV-BG] Foreground: vid=\(vidStr ?? "nil"), isPiP=\(progressStore.isPiPActive), audioOnly=\(progressStore.isAudioOnly), autoPaused=\(autoPausedOnBackground), outputs=[\(outputs)]")
             #endif
             if vidStr == "no" {
                 // Keep video suppressed while CarPlay is connected: the driver
@@ -2323,7 +2323,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             #if DEBUG
-            print("[MPV-AIRPLAY] Route changed: reason=\(reasonStr), airPlay=\(hasAirPlay), outputs=\(outputs)")
+            debugLog("[MPV-AIRPLAY] Route changed: reason=\(reasonStr), airPlay=\(hasAirPlay), outputs=\(outputs)")
             #endif
 
             // If AirPlay just connected and we're in the background with vid disabled, re-enable
@@ -2334,7 +2334,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 mpv_free(vid)
                 if vidStr == "no" {
                     #if DEBUG
-                    print("[MPV-AIRPLAY] AirPlay connected while vid=no, re-enabling video")
+                    debugLog("[MPV-AIRPLAY] AirPlay connected while vid=no, re-enabling video")
                     #endif
                     mpv_set_property_string(mpv, "vid", "auto")
                 }
@@ -2442,7 +2442,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // the rebuild gap.
             if !fboSlots.isEmpty {
                 #if DEBUG
-                print("[MPV-FBO] \(streamTag) destroy \(fboSlots.count)-deep pool (recreate path, was \(fboWidth)x\(fboHeight))")
+                debugLog("[MPV-FBO] \(streamTag) destroy \(fboSlots.count)-deep pool (recreate path, was \(fboWidth)x\(fboHeight))")
                 #endif
                 fboDestroyedAt = CFAbsoluteTimeGetCurrent()
                 for i in 0..<fboSlots.count {
@@ -2471,7 +2471,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                     kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb)
                 guard let pixelBuffer = pb else {
                     #if DEBUG
-                    print("[MPV-ERR] CVPixelBufferCreate failed for slot \(slotIdx)")
+                    debugLog("[MPV-ERR] CVPixelBufferCreate failed for slot \(slotIdx)")
                     #endif
                     // Roll back any partial slots already created.
                     for i in 0..<newSlots.count {
@@ -2491,7 +2491,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 )
                 guard texResult == kCVReturnSuccess, let glTexture = texture else {
                     #if DEBUG
-                    print("[MPV-ERR] CVOpenGLESTextureCacheCreateTextureFromImage failed for slot \(slotIdx): \(texResult)")
+                    debugLog("[MPV-ERR] CVOpenGLESTextureCacheCreateTextureFromImage failed for slot \(slotIdx): \(texResult)")
                     #endif
                     for i in 0..<newSlots.count {
                         if newSlots[i].fbo != 0 {
@@ -2511,7 +2511,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let fbStatus = glCheckFramebufferStatus(GLenum(GL_FRAMEBUFFER))
                 if fbStatus != GL_FRAMEBUFFER_COMPLETE {
                     #if DEBUG
-                    print("[MPV-ERR] FBO incomplete for slot \(slotIdx): \(fbStatus)")
+                    debugLog("[MPV-ERR] FBO incomplete for slot \(slotIdx): \(fbStatus)")
                     #endif
                 }
                 glBindFramebuffer(GLenum(GL_FRAMEBUFFER), 0)
@@ -2536,7 +2536,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
             let fboIDs = fboSlots.map { String($0.fbo) }.joined(separator: ",")
             let texNames = fboSlots.map { String(CVOpenGLESTextureGetName($0.texture)) }.joined(separator: ",")
-            print("[MPV-FBO] \(streamTag) created \(fboSlots.count)-deep pool \(width)x\(height) fbos=[\(fboIDs)] tex=[\(texNames)]\(rebuildSuffix)")
+            debugLog("[MPV-FBO] \(streamTag) created \(fboSlots.count)-deep pool \(width)x\(height) fbos=[\(fboIDs)] tex=[\(texNames)]\(rebuildSuffix)")
             #endif
         }
 
@@ -2664,7 +2664,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // v1.7.x Issue A: tag matches [MPV-FBO] destroy/created
             // pair so a `grep "[MPV-FBO]"` reads the full FBO
             // lifecycle for one stream in chronological order.
-            print("[MPV-FBO] \(streamTag) queued \(w)x\(h)")
+            debugLog("[MPV-FBO] \(streamTag) queued \(w)x\(h)")
             // v1.7.x: log the cap-selection decision so a UHD stream
             // capped to FHD vs allowed-native is visible at a glance.
             // native vs render mismatch == we downscaled.
@@ -2672,7 +2672,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let native = "\(videoNativeWidth)x\(videoNativeHeight)"
                 let rendered = "\(w)x\(h)"
                 let downscaled = (w < videoNativeWidth || h < videoNativeHeight)
-                print("[MPV-RESIZE] \(streamTag) native=\(native) render=\(rendered) downscaled=\(downscaled)")
+                debugLog("[MPV-RESIZE] \(streamTag) native=\(native) render=\(rendered) downscaled=\(downscaled)")
             }
             #endif
         }
@@ -2760,7 +2760,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // the console during a sustained stall.
             if watchdogReenqueueCount == 1 || watchdogReenqueueCount % 60 == 0 {
                 let staleMs = staleAge * 1000.0
-                print("[AVSBDL-WATCHDOG] \(streamTag) re-enqueue #\(watchdogReenqueueCount) (stale=\(String(format: "%.0f", staleMs))ms)")
+                debugLog("[AVSBDL-WATCHDOG] \(streamTag) re-enqueue #\(watchdogReenqueueCount) (stale=\(String(format: "%.0f", staleMs))ms)")
             }
             #endif
         }
@@ -2880,7 +2880,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     } else {
                         sinceAudioReconfig = "n/a"
                     }
-                    print("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms \(severity) audio_pts=\(String(format: "%.3f", audioPts))s avsync=\(String(format: "%+.4f", avsyncProp))s(positive=video_behind, mpv-internal) since_audio_reconfig=\(sinceAudioReconfig) (libmpv internal stall — decoder/demuxer/render-context, not our render path)")
+                    debugLog("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms \(severity) audio_pts=\(String(format: "%.3f", audioPts))s avsync=\(String(format: "%+.4f", avsyncProp))s(positive=video_behind, mpv-internal) since_audio_reconfig=\(sinceAudioReconfig) (libmpv internal stall — decoder/demuxer/render-context, not our render path)")
                     #endif
                 }
             }
@@ -3048,7 +3048,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let from = Self.statusName(lastObservedLayerStatus)
                     let to = Self.statusName(currentStatus)
                     #if DEBUG
-                    print("[AVSBDL-STATUS] \(streamTag) renderer.status: \(from) → \(to)")
+                    debugLog("[AVSBDL-STATUS] \(streamTag) renderer.status: \(from) → \(to)")
                     #endif
                     lastObservedLayerStatus = currentStatus
                 }
@@ -3062,7 +3062,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let currentFlush = layer.sampleBufferRenderer.requiresFlushToResumeDecoding
                 if currentFlush != lastObservedRequiresFlush {
                     #if DEBUG
-                    print("[AVSBDL-FLUSH] \(streamTag) requiresFlushToResumeDecoding: \(lastObservedRequiresFlush) → \(currentFlush)")
+                    debugLog("[AVSBDL-FLUSH] \(streamTag) requiresFlushToResumeDecoding: \(lastObservedRequiresFlush) → \(currentFlush)")
                     #endif
                     lastObservedRequiresFlush = currentFlush
                 }
@@ -3146,7 +3146,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         mpv_set_property(mpvHandle, "pause", MPV_FORMAT_FLAG, &pauseFlag)
                     }
                     #if DEBUG
-                    print("[MPV-BG] Background: sampleBufferRenderer FAILED — auto-paused mpv to stop wasted decode work")
+                    debugLog("[MPV-BG] Background: sampleBufferRenderer FAILED — auto-paused mpv to stop wasted decode work")
                     #endif
                 } else if !isInBackground {
                     // v1.7.x diagnostic: foreground sample-buffer-layer
@@ -3161,7 +3161,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     if layerFailedFrameCount == 1 || layerFailedFrameCount % 30 == 0 {
                         let err = sampleBufferLayer?.sampleBufferRenderer.error?.localizedDescription ?? "nil"
                         #if DEBUG
-                        print("[MPV-LAYER] \(streamTag) FOREGROUND layer .failed (frame #\(layerFailedFrameCount), enqueue skipped) — error=\(err)")
+                        debugLog("[MPV-LAYER] \(streamTag) FOREGROUND layer .failed (frame #\(layerFailedFrameCount), enqueue skipped) — error=\(err)")
                         #endif
                         DebugLogger.shared.log(
                             "🔴 [MPV-LAYER] foreground .failed tile=\(tileID ?? "single") frame=\(layerFailedFrameCount) error=\(err)",
@@ -3179,7 +3179,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 blackFramesSuppressedCount &+= 1
                 #if DEBUG
                 if blackFramesSuppressedCount == 1 || blackFramesSuppressedCount % 10 == 0 {
-                    print("[BLACK-DETECT] \(streamTag) suppressed black frame #\(blackFramesSuppressedCount) (avg=\(String(format: "%.2f", blackProbe.avg)) std=\(String(format: "%.2f", blackProbe.std)) prev=\(String(format: "%.0f", blackFramePrevAvgLuma)) prev_prev=\(String(format: "%.0f", blackFramePrevPrevAvgLuma)))")
+                    debugLog("[BLACK-DETECT] \(streamTag) suppressed black frame #\(blackFramesSuppressedCount) (avg=\(String(format: "%.2f", blackProbe.avg)) std=\(String(format: "%.2f", blackProbe.std)) prev=\(String(format: "%.0f", blackFramePrevAvgLuma)) prev_prev=\(String(format: "%.0f", blackFramePrevPrevAvgLuma)))")
                 }
                 #endif
                 // Note: we deliberately do NOT update the prev/prev-
@@ -3215,7 +3215,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // the count forward into a future event.
                 if layerFailedFrameCount > 0 {
                     #if DEBUG
-                    print("[MPV-LAYER] \(streamTag) layer recovered after \(layerFailedFrameCount) failed frames")
+                    debugLog("[MPV-LAYER] \(streamTag) layer recovered after \(layerFailedFrameCount) failed frames")
                     #endif
                     layerFailedFrameCount = 0
                 }
@@ -3228,7 +3228,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 makeSampleBufferNilCount &+= 1
                 if makeSampleBufferNilCount == 1 || makeSampleBufferNilCount % 30 == 0 {
                     #if DEBUG
-                    print("[MPV-LAYER] \(streamTag) makeSampleBuffer returned nil (count=\(makeSampleBufferNilCount))")
+                    debugLog("[MPV-LAYER] \(streamTag) makeSampleBuffer returned nil (count=\(makeSampleBufferNilCount))")
                     #endif
                     DebugLogger.shared.log(
                         "🟠 [MPV-LAYER] makeSampleBuffer nil tile=\(tileID ?? "single") count=\(makeSampleBufferNilCount)",
@@ -3295,12 +3295,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // `streamTag` up front so log consumers can filter /
                 // group per channel (e.g. `grep "NBC Sports"` to see
                 // just that tile's frame history).
-                print("\(tag) \(streamTag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms present=\(String(format: "%.1f", presentMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) pts=\(String(format: "%.3f", CMTimeGetSeconds(presentationTime)))s ready=\(layerReady) enqueued=\(enqueued) status=\(layerStatus == .failed ? "FAILED" : "ok")")
+                debugLog("\(tag) \(streamTag) [FRAME #\(totalFrameCount)] render=\(String(format: "%.1f", renderMs))ms present=\(String(format: "%.1f", presentMs))ms interval=\(String(format: "%.1f", intervalMs))ms expected=\(String(format: "%.1f", expectedIntervalMs))ms fps=\(String(format: "%.1f", fps)) pts=\(String(format: "%.3f", CMTimeGetSeconds(presentationTime)))s ready=\(layerReady) enqueued=\(enqueued) status=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
             #endif
 
             if layerStatus == .failed, let err = sampleBufferLayer?.sampleBufferRenderer.error {
-                print("🔴 \(streamTag) [LAYER FAILED] \(err.localizedDescription)")
+                debugLog("🔴 \(streamTag) [LAYER FAILED] \(err.localizedDescription)")
             }
 
             // Periodic summary every 300 frames
@@ -3314,7 +3314,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let variance = frameIntervals.reduce(0.0) { $0 + ($1 - mean) * ($1 - mean) } / Double(frameIntervals.count)
                     return sqrt(variance)
                 }()
-                print("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | black_supp=\(blackFramesSuppressedCount) | bp_skip=\(backpressureSkipCount) | gaps=\(callbackGapMildCount)/\(callbackGapModerateCount)/\(callbackGapSevereCount)(mild/mod/sev) | audio_reconfigs=\(audioReconfigCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
+                debugLog("📊 \(streamTag) [FRAME SUMMARY #\(totalFrameCount)] render=\(String(format: "%.1f", avgRender))ms avg / \(String(format: "%.1f", maxRender))ms max | interval=\(String(format: "%.1f", avgInt))ms avg | jitter=\(String(format: "%.2f", jitter))ms | late=\(lateFrameCount) | coalesced=\(coalescedFrameCount) | watchdog_reenq=\(watchdogReenqueueCount) | black_supp=\(blackFramesSuppressedCount) | bp_skip=\(backpressureSkipCount) | gaps=\(callbackGapMildCount)/\(callbackGapModerateCount)/\(callbackGapSevereCount)(mild/mod/sev) | audio_reconfigs=\(audioReconfigCount) | fps_detected=\(String(format: "%.2f", detectedFps)) | layer=\(layerStatus == .failed ? "FAILED" : "ok")")
             }
 
             lastEnqueueTime = enqueueTime
@@ -3404,7 +3404,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private func setupMPV() {
             setupStartTime = Date()
             #if DEBUG
-            print("[MPV-DIAG] setupMPV: creating mpv instance...")
+            debugLog("[MPV-DIAG] setupMPV: creating mpv instance...")
             // Per-phase timing markers. Each checkpoint logs the
             // delta since the previous one, so we can pinpoint which
             // phase is eating the ~2s first-tile cost. `phaseStart`
@@ -3415,7 +3415,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let now = Date()
                 let ms = Int(now.timeIntervalSince(phaseStart) * 1000)
                 let totalMs = Int(now.timeIntervalSince(setupT0) * 1000)
-                print("[MPV-PHASE] \(streamTag) \(name): \(ms)ms (total=\(totalMs)ms)")
+                debugLog("[MPV-PHASE] \(streamTag) \(name): \(ms)ms (total=\(totalMs)ms)")
                 phaseStart = now
             }
             #endif
@@ -3472,7 +3472,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if initialVideoSuppressed {
                 checkError(mpv_set_option_string(mpv, "vid", "no"))
                 #if DEBUG
-                print("[MPV-CARPLAY] setupMPV: vid=no (audio-only start, CarPlay)")
+                debugLog("[MPV-CARPLAY] setupMPV: vid=no (audio-only start, CarPlay)")
                 #endif
             }
 
@@ -3925,7 +3925,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if headers[startFromBeginningHeader] == "1" {
                 checkError(mpv_set_option_string(mpv, "demuxer-lavf-o", "live_start_index=0"))
                 #if DEBUG
-                print("[MPV-DIAG] setupMPV: live_start_index=0 (watch recording from beginning)")
+                debugLog("[MPV-DIAG] setupMPV: live_start_index=0 (watch recording from beginning)")
                 #endif
             }
             if let ua = headers["User-Agent"], !ua.isEmpty {
@@ -3944,20 +3944,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             #if DEBUG
             markPhase("pre_init_options")
-            print("[MPV-DIAG] setupMPV: options set, calling mpv_initialize...")
+            debugLog("[MPV-DIAG] setupMPV: options set, calling mpv_initialize...")
             // Header forensics — log each key + value length so we can
             // confirm what mpv actually sees per tile (and catch the
             // case where a 2nd tile's headers get mangled / cleared).
             // Values are NEVER logged — API keys live in there.
             let uaLen = headers["User-Agent"]?.count ?? 0
             let uaPreview = headers["User-Agent"]?.prefix(40) ?? "none"
-            print("[MPV-DIAG]   hdr UA=\(uaPreview) (\(uaLen)b)")
+            debugLog("[MPV-DIAG]   hdr UA=\(uaPreview) (\(uaLen)b)")
             for (k, v) in preInitCustomHeaders.sorted(by: { $0.key < $1.key }) {
                 let lenBytes = v.utf8.count
-                print("[MPV-DIAG]   hdr \(k)=<redacted> (\(lenBytes)b)")
+                debugLog("[MPV-DIAG]   hdr \(k)=<redacted> (\(lenBytes)b)")
             }
-            print("[MPV-DIAG]   tile=\(tileID ?? "single") urls=\(urls.count) first_url_len=\(urls.first?.absoluteString.count ?? 0)")
-            print("[MPV-DIAG]   \(ProcessMetrics.summaryLine())")
+            debugLog("[MPV-DIAG]   tile=\(tileID ?? "single") urls=\(urls.count) first_url_len=\(urls.first?.absoluteString.count ?? 0)")
+            debugLog("[MPV-DIAG]   \(ProcessMetrics.summaryLine())")
             #endif
 
             // ── Initialize ──
@@ -3971,7 +3971,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let errStr = String(cString: mpv_error_string(initResult))
                 logStore.append("✗ MPV: initialization failed — \(errStr)")
                 #if DEBUG
-                print("[MPV-ERR] mpv_initialize failed: \(errStr)")
+                debugLog("[MPV-ERR] mpv_initialize failed: \(errStr)")
                 #endif
                 mpv_terminate_destroy(mpv)
                 self.mpv = nil
@@ -3982,7 +3982,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             #if DEBUG
             let initMs = Date().timeIntervalSince(initStart) * 1000
-            print("[MPV-DIAG] setupMPV: mpv_initialize succeeded ✓ (\(String(format: "%.0f", initMs))ms)")
+            debugLog("[MPV-DIAG] setupMPV: mpv_initialize succeeded ✓ (\(String(format: "%.0f", initMs))ms)")
             markPhase("mpv_initialize")
             #endif
 
@@ -4039,7 +4039,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let errStr = String(cString: mpv_error_string(renderCreateResult))
                 logStore.append("✗ MPV: render context creation failed — \(errStr)")
                 #if DEBUG
-                print("[MPV-ERR] mpv_render_context_create failed: \(errStr)")
+                debugLog("[MPV-ERR] mpv_render_context_create failed: \(errStr)")
                 #endif
                 mpv_terminate_destroy(mpv)
                 self.mpv = nil
@@ -4049,7 +4049,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             #if DEBUG
-            print("[MPV-DIAG] setupMPV: OpenGL ES render context created ✓")
+            debugLog("[MPV-DIAG] setupMPV: OpenGL ES render context created ✓")
             #endif
 
             // When mpv has a new frame, schedule render on background thread.
@@ -4239,8 +4239,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let totalSetupMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
             #if DEBUG
             let cacheStr = String(format: "%.1f", cachingSecs)
-            print("[MPV-DIAG] ✓ mpv fully initialized: vo=libmpv (OpenGL ES render), hwdec=videotoolbox-copy (requested)")
-            print("[MPV-DIAG]   cache=\(cacheStr)s, readahead=\(cacheStr)s, isLive=\(isLive), setup_time=\(String(format: "%.0f", totalSetupMs))ms")
+            debugLog("[MPV-DIAG] ✓ mpv fully initialized: vo=libmpv (OpenGL ES render), hwdec=videotoolbox-copy (requested)")
+            debugLog("[MPV-DIAG]   cache=\(cacheStr)s, readahead=\(cacheStr)s, isLive=\(isLive), setup_time=\(String(format: "%.0f", totalSetupMs))ms")
             #endif
 
             // ── Per-tile timeline summary ──
@@ -4271,7 +4271,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 "isLive=\(isLive) " +
                 ProcessMetrics.summaryLine()
             #if DEBUG
-            print(timelineLine)
+            debugLog(timelineLine)
             #endif
             DebugLogger.shared.log(timelineLine, category: "MPV-STREAM", level: .info)
         }
@@ -4314,9 +4314,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                            url: url.absoluteString)
 
             #if DEBUG
-            print("[MPV-DIAG] -- Starting playback --")
-            print("[MPV-DIAG] URL: \(safeURL)")
-            print("[MPV-DIAG] isLive=\(isLive), attempt=\(currentIndex + 1)/\(urls.count)")
+            debugLog("[MPV-DIAG] -- Starting playback --")
+            debugLog("[MPV-DIAG] URL: \(safeURL)")
+            debugLog("[MPV-DIAG] isLive=\(isLive), attempt=\(currentIndex + 1)/\(urls.count)")
             #endif
 
             mpvCommand(mpv, ["loadfile", url.absoluteString, "replace"])
@@ -4362,7 +4362,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         self.lastAudioReconfigAt = CFAbsoluteTimeGetCurrent()
                         self.audioReconfigCount &+= 1
                         #if DEBUG
-                        print("[MPV-DIAG] \(self.streamTag) Event: audio-reconfig #\(self.audioReconfigCount)")
+                        debugLog("[MPV-DIAG] \(self.streamTag) Event: audio-reconfig #\(self.audioReconfigCount)")
                         #endif
 
                     case MPV_EVENT_LOG_MESSAGE:
@@ -4428,7 +4428,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             // next decode without our help.
                             if text.contains("Initializing texture for hardware decoding failed") && self.claimHwdecFallbackIfNeeded() {
                                 let elapsedMs = self.setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
-                                print("[MPV-DECODE] \(self.streamTag) defensive fallback fired (mpv re-promoted to videotoolbox?) — reapplying videotoolbox-copy at +\(String(format: "%.0f", elapsedMs))ms from setup")
+                                debugLog("[MPV-DECODE] \(self.streamTag) defensive fallback fired (mpv re-promoted to videotoolbox?) — reapplying videotoolbox-copy at +\(String(format: "%.0f", elapsedMs))ms from setup")
                                 mpv_set_property_string(mpv, "hwdec", "videotoolbox-copy")
                             }
                             #if DEBUG
@@ -4467,15 +4467,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             // etc.) is stripped of Xtream-style
                             // path-credentials and query-param
                             // credentials before reaching the console.
+                            // mpv's log text already ends in a newline; drop
+                            // it so debugLog (which appends its own) does not
+                            // leave a blank line between entries. The old call
+                            // used print(..., terminator: "") for this; debugLog
+                            // takes no terminator, so trim instead.
                             let safeText = DebugLogger.sanitize(text)
-                            print("[\(self.logTimestamp)] \(self.streamTag) [MPV-LOG] [\(prefix)] \(level): \(safeText)", terminator: "")
+                                .trimmingCharacters(in: .newlines)
+                            debugLog("[\(self.logTimestamp)] \(self.streamTag) [MPV-LOG] [\(prefix)] \(level): \(safeText)")
                             #endif
                         }
                         break
 
                     case MPV_EVENT_SHUTDOWN:
                         #if DEBUG
-                        print("[MPV-DIAG] Event: shutdown")
+                        debugLog("[MPV-DIAG] Event: shutdown")
                         #endif
                         self.stopStreamInfoTimer()
                         // Claim shutdown ownership atomically using the same gate
@@ -4582,9 +4588,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             var avsync: Double = 0
                             mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsync)
                             let t = self.streamTag
-                            print("\(t) [MPV-DIAG] Event: playback-restart — cache=\(String(format: "%.2f", cacheDur))s, avsync=\(String(format: "%.4f", avsync))s")
-                            print("\(t) [MPV-STREAM] video=\(info.videoCodec) \(info.width)×\(info.height) \(info.pixelFormat), hwdec=\(info.hwdec)")
-                            print("\(t) [MPV-STREAM] audio=\(info.audioCodec) \(info.sampleRate)Hz \(info.channels)ch")
+                            debugLog("\(t) [MPV-DIAG] Event: playback-restart — cache=\(String(format: "%.2f", cacheDur))s, avsync=\(String(format: "%.4f", avsync))s")
+                            debugLog("\(t) [MPV-STREAM] video=\(info.videoCodec) \(info.width)×\(info.height) \(info.pixelFormat), hwdec=\(info.hwdec)")
+                            debugLog("\(t) [MPV-STREAM] audio=\(info.audioCodec) \(info.sampleRate)Hz \(info.channels)ch")
                             #endif
                         }
                         break
@@ -4592,7 +4598,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     default:
                         #if DEBUG
                         if let name = mpv_event_name(event.pointee.event_id) {
-                            print("[MPV-DIAG] Event: \(String(cString: name))")
+                            debugLog("[MPV-DIAG] Event: \(String(cString: name))")
                         }
                         #endif
                         break
@@ -4605,7 +4611,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             logStore.append("ℹ️ MPV state: opening")
             DebugLogger.shared.logPlayback(event: "opening")
             #if DEBUG
-            print("[MPV-DIAG] State: opening (start-file)")
+            debugLog("[MPV-DIAG] State: opening (start-file)")
             #endif
         }
 
@@ -4671,7 +4677,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             #if DEBUG
-            print("[MPV-RECONFIG] \(streamTag) #\(videoReconfigCount) gap=\(gap) size=\(w)x\(h) pixfmt=\(pixfmt) colormatrix=\(colormatrix) codec=\(videoCodec) hwdec=\(hwdec) fbo=\(fboState) decoderErr_since_last: pps=\(ppsErrorWindow) nalu=\(naluErrorWindow) vt_null=\(vtNullBufferWindow) hwdec_err=\(hwdecErrorWindow)")
+            debugLog("[MPV-RECONFIG] \(streamTag) #\(videoReconfigCount) gap=\(gap) size=\(w)x\(h) pixfmt=\(pixfmt) colormatrix=\(colormatrix) codec=\(videoCodec) hwdec=\(hwdec) fbo=\(fboState) decoderErr_since_last: pps=\(ppsErrorWindow) nalu=\(naluErrorWindow) vt_null=\(vtNullBufferWindow) hwdec_err=\(hwdecErrorWindow)")
             #endif
 
             // Reset per-window counters. Cumulative totals stay.
@@ -4689,7 +4695,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 totalBufferingDuration += bufDuration
                 bufferEnteredTime = nil
                 #if DEBUG
-                print("[MPV-DIAG]   ↳ Buffer resolved in \(String(format: "%.1f", bufDuration))s (total: \(String(format: "%.1f", totalBufferingDuration))s)")
+                debugLog("[MPV-DIAG]   ↳ Buffer resolved in \(String(format: "%.1f", bufDuration))s (total: \(String(format: "%.1f", totalBufferingDuration))s)")
                 #endif
             }
 
@@ -4702,7 +4708,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
                 #if DEBUG
                 let totalStartMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
-                print("\(streamTag) [MPV-DIAG]   ↳ First frame rendered (total time from setup: \(String(format: "%.0f", totalStartMs))ms)")
+                debugLog("\(streamTag) [MPV-DIAG]   ↳ First frame rendered (total time from setup: \(String(format: "%.0f", totalStartMs))ms)")
 
                 // Dump stream & cache info at first frame
                 if let mpv {
@@ -4726,9 +4732,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let fileFormat = getMPVString(mpv, "file-format") ?? "?"
 
                     let t = streamTag
-                    print("\(t) [MPV-STREAM] format=\(fileFormat), video=\(videoCodec) \(videoW)×\(videoH) \(videoFormat), hwdec=\(hwdecCurrent)")
-                    print("\(t) [MPV-STREAM] audio=\(audioCodec) \(sampleRate)Hz \(channels)ch \(audioParams)")
-                    print("\(t) [MPV-STREAM] cache_at_start=\(String(format: "%.2f", cacheDur))s, paused_for_cache=\(pauseForCache != 0)")
+                    debugLog("\(t) [MPV-STREAM] format=\(fileFormat), video=\(videoCodec) \(videoW)×\(videoH) \(videoFormat), hwdec=\(hwdecCurrent)")
+                    debugLog("\(t) [MPV-STREAM] audio=\(audioCodec) \(sampleRate)Hz \(channels)ch \(audioParams)")
+                    debugLog("\(t) [MPV-STREAM] cache_at_start=\(String(format: "%.2f", cacheDur))s, paused_for_cache=\(pauseForCache != 0)")
                 }
                 #endif
 
@@ -4762,7 +4768,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
                 #if DEBUG
                 let debugTileID = tileID ?? "single"
-                print("[NowPlaying-Gate] \(streamTag) 2s stability scheduled (tileID=\(debugTileID), title=\"\(title)\")")
+                debugLog("[NowPlaying-Gate] \(streamTag) 2s stability scheduled (tileID=\(debugTileID), title=\"\(title)\")")
                 #endif
 
                 let ps2 = progressStore
@@ -4770,7 +4776,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
                     guard let self, !self.nowPlayingConfigured else {
                         #if DEBUG
-                        print("[NowPlaying-Gate] 2s fire: self=nil or already configured")
+                        debugLog("[NowPlaying-Gate] 2s fire: self=nil or already configured")
                         #endif
                         return
                     }
@@ -4779,14 +4785,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     mpvQ.async { [weak self] in
                         guard let self, let mpv = self.activeMPVHandle() else {
                             #if DEBUG
-                            print("[NowPlaying-Gate] mpvQ fire: self/mpv nil or shutting down")
+                            debugLog("[NowPlaying-Gate] mpvQ fire: self/mpv nil or shutting down")
                             #endif
                             return
                         }
                         var idle: Int64 = 0
                         mpv_get_property(mpv, "core-idle", MPV_FORMAT_FLAG, &idle)
                         #if DEBUG
-                        print("[NowPlaying-Gate] mpvQ fire: core-idle=\(idle)")
+                        debugLog("[NowPlaying-Gate] mpvQ fire: core-idle=\(idle)")
                         #endif
                         guard idle == 0 else { return }
 
@@ -4810,7 +4816,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             #if DEBUG
                             let sessionMode = PlayerSession.shared.mode
                             let audioID = MultiviewStore.shared.audioTileID ?? "nil"
-                            print("[NowPlaying-Gate] shouldDrive=\(canDrive) tileID=\(self.tileID ?? "single") sessionMode=\(sessionMode) audioTileID=\(audioID)")
+                            debugLog("[NowPlaying-Gate] shouldDrive=\(canDrive) tileID=\(self.tileID ?? "single") sessionMode=\(sessionMode) audioTileID=\(audioID)")
                             #endif
                             guard canDrive else { return }
                             self.nowPlayingConfigured = true
@@ -4846,7 +4852,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let reason = endFile.reason
 
             #if DEBUG
-            print("[MPV-DIAG] State: end-file (reason=\(reason), error=\(endFile.error))")
+            debugLog("[MPV-DIAG] State: end-file (reason=\(reason), error=\(endFile.error))")
             #endif
 
             // `MPV_END_FILE_REASON_STOP` fires when WE intentionally
@@ -4867,7 +4873,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // bookkeeping noise from the handoff.
             if reason == MPV_END_FILE_REASON_STOP {
                 #if DEBUG
-                print("[MPV-DIAG] end-file STOP (intentional — no retry)")
+                debugLog("[MPV-DIAG] end-file STOP (intentional — no retry)")
                 #endif
                 return
             }
@@ -4952,7 +4958,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         "⏳ MPV: \(retryKind) \(errLabel.lowercased()) — retry \(retryNum)/\(maxR) in \(String(format: "%.1f", delay))s"
                     )
                     #if DEBUG
-                    print("[MPV-DIAG] \(streamTag) \(errLabel) — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
+                    debugLog("[MPV-DIAG] \(streamTag) \(errLabel) — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
                     #endif
                     let retryURL = urls[currentIndex]
                     DispatchQueue.global(qos: .userInitiated)
@@ -4974,7 +4980,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 if elapsed < 0.5 {
                     logStore.append("⚠️ MPV: instant end (<0.5s) — skipping to next URL")
                     #if DEBUG
-                    print("[MPV-DIAG] Instant end (\(String(format: "%.0f", elapsed * 1000))ms) — failing over")
+                    debugLog("[MPV-DIAG] Instant end (\(String(format: "%.0f", elapsed * 1000))ms) — failing over")
                     #endif
                     sameURLRetryCount = 0
                     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -4985,7 +4991,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let retryNum = sameURLRetryCount
                     logStore.append("⚠️ MPV: premature end (<5s) — retrying same URL (\(retryNum)/\(maxSameURLRetries))")
                     #if DEBUG
-                    print("[MPV-DIAG] Premature end (\(String(format: "%.1f", elapsed))s) — retrying same URL (\(retryNum)/\(maxSameURLRetries))")
+                    debugLog("[MPV-DIAG] Premature end (\(String(format: "%.1f", elapsed))s) — retrying same URL (\(retryNum)/\(maxSameURLRetries))")
                     #endif
                     let retryURL = urls[currentIndex]
                     DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.8) { [weak self] in
@@ -5044,7 +5050,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let elapsedMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
                     let prev = lastHwdecCurrentObserved.isEmpty ? "(initial)" : lastHwdecCurrentObserved
                     #if DEBUG
-                    print("[MPV-DECODE] \(streamTag) hwdec-current: \(prev) → \(value) at +\(String(format: "%.0f", elapsedMs))ms from setup")
+                    debugLog("[MPV-DECODE] \(streamTag) hwdec-current: \(prev) → \(value) at +\(String(format: "%.0f", elapsedMs))ms from setup")
                     #endif
                     lastHwdecCurrentObserved = value
                 }
@@ -5086,7 +5092,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         playbackStartTime = Date()
                         logStore.append("✓ MPV time advanced: \(ms)ms")
                         #if DEBUG
-                        print("[MPV-DIAG] First time change: \(ms)ms — playback started")
+                        debugLog("[MPV-DIAG] First time change: \(ms)ms — playback started")
                         #endif
                     }
 
@@ -5146,14 +5152,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         if let mpv = self.activeMPVHandle() {
                             mpv_get_property(mpv, "demuxer-cache-duration", MPV_FORMAT_DOUBLE, &cacheDur)
                         }
-                        print("[MPV-DIAG]   ↳ Buffering started (event #\(bufferEventCount)), cache_at_stall=\(String(format: "%.2f", cacheDur))s, underruns_so_far=\(self.audioUnderrunCount)")
+                        debugLog("[MPV-DIAG]   ↳ Buffering started (event #\(bufferEventCount)), cache_at_stall=\(String(format: "%.2f", cacheDur))s, underruns_so_far=\(self.audioUnderrunCount)")
                         #endif
                     } else if let entered = bufferEnteredTime {
                         let bufDuration = Date().timeIntervalSince(entered)
                         totalBufferingDuration += bufDuration
                         bufferEnteredTime = nil
                         #if DEBUG
-                        print("[MPV-DIAG]   ↳ Buffer resolved in \(String(format: "%.1f", bufDuration))s (total: \(String(format: "%.1f", totalBufferingDuration))s)")
+                        debugLog("[MPV-DIAG]   ↳ Buffer resolved in \(String(format: "%.1f", bufDuration))s (total: \(String(format: "%.1f", totalBufferingDuration))s)")
                         #endif
                     }
                 }
@@ -5280,10 +5286,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Example: `grep "NBC Sports" logs.txt | grep jitter`
             // gives you that one stream's jitter timeline.
             let t = streamTag
-            print("[\(ts)] \(t) [MPV-DIAG] time=\(ms)ms isPlaying=\(isPlaying) callbacks/\(isLive ? 15 : 5)s=\(timeChangeCount)")
-            print("[\(ts)] \(t) [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: estimated=\(String(format: "%.1f", estimatedFPS))/container=\(String(format: "%.1f", containerFPS))/display=\(String(format: "%.1f", displayFPS)), hwdec=\(hwdecCurrent)")
-            print("[\(ts)] \(t) [MPV-FRAME] render: \(String(format: "%.1f", avgRenderMs))ms avg / \(String(format: "%.1f", maxRenderMs))ms max, interval: \(String(format: "%.1f", avgInterval))ms avg [\(String(format: "%.1f", minInterval))-\(String(format: "%.1f", maxInterval))ms], jitter: \(String(format: "%.2f", jitterMs))ms, late: \(lateFrames)/\(frameCount), layer: \(layerStatus)")
-            print("[\(ts)] \(t) [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(String(format: "%.0f", demuxerInputBytesPerSec / 1024))KB/s, paused_for_cache: \(pausedForCache != 0)")
+            debugLog("[\(ts)] \(t) [MPV-DIAG] time=\(ms)ms isPlaying=\(isPlaying) callbacks/\(isLive ? 15 : 5)s=\(timeChangeCount)")
+            debugLog("[\(ts)] \(t) [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: estimated=\(String(format: "%.1f", estimatedFPS))/container=\(String(format: "%.1f", containerFPS))/display=\(String(format: "%.1f", displayFPS)), hwdec=\(hwdecCurrent)")
+            debugLog("[\(ts)] \(t) [MPV-FRAME] render: \(String(format: "%.1f", avgRenderMs))ms avg / \(String(format: "%.1f", maxRenderMs))ms max, interval: \(String(format: "%.1f", avgInterval))ms avg [\(String(format: "%.1f", minInterval))-\(String(format: "%.1f", maxInterval))ms], jitter: \(String(format: "%.2f", jitterMs))ms, late: \(lateFrames)/\(frameCount), layer: \(layerStatus)")
+            debugLog("[\(ts)] \(t) [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(String(format: "%.0f", demuxerInputBytesPerSec / 1024))KB/s, paused_for_cache: \(pausedForCache != 0)")
             // v1.7.4 VOD-stall diagnostic (measure, don't guess). The
             // "first frame then mpv stops reading" fingerprint (input_rate=0,
             // paused_for_cache=false, isPlaying=true) is what mpv shows when
@@ -5305,14 +5311,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let diagAid = getMPVString(mpv, "aid") ?? "nil"
             let diagAcodec = getMPVString(mpv, "audio-codec-name") ?? "nil"
             let diagVid = getMPVString(mpv, "vid") ?? "nil"
-            print("[\(ts)] \(t) [MPV-STALLDIAG] core-idle=\(diagCoreIdle) pause=\(diagPause) seeking=\(diagSeeking) demux-idle=\(diagDemuxIdle) current-ao=\(diagAO) aid=\(diagAid) acodec=\(diagAcodec) vid=\(diagVid)")
+            debugLog("[\(ts)] \(t) [MPV-STALLDIAG] core-idle=\(diagCoreIdle) pause=\(diagPause) seeking=\(diagSeeking) demux-idle=\(diagDemuxIdle) current-ao=\(diagAO) aid=\(diagAid) acodec=\(diagAcodec) vid=\(diagVid)")
             // v1.7.x Step 8: drop the video-pts read and the
             // self-computed `a-v` field. mpv's `avsync` property is
             // the canonical sync metric on this render path; see the
             // comment block at the avsync read above for the full
             // rationale. `audio_pts` is still included because it's
             // the only useful absolute time anchor on this path.
-            print("[\(ts)] \(t) [MPV-AUDIO] audio_pts=\(String(format: "%.2f", audioPts))s avsync=\(String(format: "%+.4f", avsync))s(positive=video_behind, mpv-internal) underruns=\(audioUnderrunCount) audio_reconfigs=\(audioReconfigCount) buf_events=\(bufferEventCount) buf_time=\(String(format: "%.1f", totalBufferingDuration))s")
+            debugLog("[\(ts)] \(t) [MPV-AUDIO] audio_pts=\(String(format: "%.2f", audioPts))s avsync=\(String(format: "%+.4f", avsync))s(positive=video_behind, mpv-internal) underruns=\(audioUnderrunCount) audio_reconfigs=\(audioReconfigCount) buf_events=\(bufferEventCount) buf_time=\(String(format: "%.1f", totalBufferingDuration))s")
             // One-line per-stream summary — the "tl;dr" that's
             // easiest to grep when scanning 9 concurrent tiles'
             // logs. Mirrors the key numbers from the verbose lines
@@ -5321,7 +5327,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // replaces the bogus self-computed `a-v`. Includes
             // container-fps and gap-class counts so steady-state
             // cadence health is visible at a glance.
-            print("[\(ts)] \(t) [STREAM-SUMMARY] fps=\(String(format: "%.1f", estimatedFPS))/cont=\(String(format: "%.1f", containerFPS)) interval=\(String(format: "%.1f", avgInterval))ms jitter=\(String(format: "%.1f", jitterMs))ms late=\(lateFrames)/\(frameCount) vo_drops=+\(deltaVideoDrops) dec_drops=+\(deltaDecoderDrops) underruns=\(audioUnderrunCount) avsync=\(String(format: "%+.3f", avsync))s gaps=\(callbackGapMildCount)/\(callbackGapModerateCount)/\(callbackGapSevereCount)(mild/mod/sev) cache=\(String(format: "%.1f", cacheDuration))s hwdec=\(hwdecCurrent) layer=\(layerStatus)")
+            debugLog("[\(ts)] \(t) [STREAM-SUMMARY] fps=\(String(format: "%.1f", estimatedFPS))/cont=\(String(format: "%.1f", containerFPS)) interval=\(String(format: "%.1f", avgInterval))ms jitter=\(String(format: "%.1f", jitterMs))ms late=\(lateFrames)/\(frameCount) vo_drops=+\(deltaVideoDrops) dec_drops=+\(deltaDecoderDrops) underruns=\(audioUnderrunCount) avsync=\(String(format: "%+.3f", avsync))s gaps=\(callbackGapMildCount)/\(callbackGapModerateCount)/\(callbackGapSevereCount)(mild/mod/sev) cache=\(String(format: "%.1f", cacheDuration))s hwdec=\(hwdecCurrent) layer=\(layerStatus)")
             #endif
 
             DebugLogger.shared.log(
@@ -5344,7 +5350,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let metricsLine = ProcessMetrics.summaryLine()
             let tile = tileID ?? "single"
             #if DEBUG
-            print("[\(ts)] [MPV-PERF] tile=\(tile) \(metricsLine)")
+            debugLog("[\(ts)] [MPV-PERF] tile=\(tile) \(metricsLine)")
             #endif
             DebugLogger.shared.log("tile=\(tile) \(metricsLine)",
                                     category: "MPV-Perf", level: .perf)
@@ -5371,12 +5377,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let nextURL = urls[currentIndex]
                 let idx = currentIndex
                 #if DEBUG
-                print("[MPV-DIAG] Failover: waiting 300ms before attempt \(idx + 1)/\(urls.count)")
+                debugLog("[MPV-DIAG] Failover: waiting 300ms before attempt \(idx + 1)/\(urls.count)")
                 #endif
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.3) { [weak self] in
                     guard let self else { return }
                     #if DEBUG
-                    print("[MPV-DIAG] Failover: starting attempt \(idx + 1)")
+                    debugLog("[MPV-DIAG] Failover: starting attempt \(idx + 1)")
                     #endif
                     self.play(url: nextURL)
                 }
@@ -5384,7 +5390,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 hasPerformedWarmupRetry = true
                 logStore.append("⏳ MPV: proxy warming up — retrying in 2s…")
                 #if DEBUG
-                print("[MPV-DIAG] Warmup retry: waiting 2s before retry")
+                debugLog("[MPV-DIAG] Warmup retry: waiting 2s before retry")
                 #endif
                 DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 2.0) { [weak self] in
                     guard let self else { return }
@@ -5392,7 +5398,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     self.anyAttemptStarted = false
                     self.logStore.append("🔄 MPV: warm-up retry")
                     #if DEBUG
-                    print("[MPV-DIAG] Warmup retry: starting")
+                    debugLog("[MPV-DIAG] Warmup retry: starting")
                     #endif
                     self.play(url: self.urls[0])
                 }
@@ -5771,7 +5777,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             for ptr in cargs { free(ptr) }
             #if DEBUG
             if result < 0 {
-                print("[MPV-ERR] command \(args) failed: \(String(cString: mpv_error_string(result)))")
+                debugLog("[MPV-ERR] command \(args) failed: \(String(cString: mpv_error_string(result)))")
             }
             #endif
         }
@@ -5793,7 +5799,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             for ptr in cargs { free(ptr) }
             #if DEBUG
             if result < 0 {
-                print("[MPV-ERR] async command \(args) failed: \(String(cString: mpv_error_string(result)))")
+                debugLog("[MPV-ERR] async command \(args) failed: \(String(cString: mpv_error_string(result)))")
             }
             #endif
         }
@@ -5801,7 +5807,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private func checkError(_ status: CInt) {
             if status < 0 {
                 #if DEBUG
-                print("[MPV-ERR] \(String(cString: mpv_error_string(status)))")
+                debugLog("[MPV-ERR] \(String(cString: mpv_error_string(status)))")
                 #endif
             }
         }
@@ -5819,7 +5825,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let status = mpv_set_option_string(mpv, name, value)
             if status < 0 {
                 #if DEBUG
-                print("[MPV-ERR] option \"\(name)\"=\"\(value)\" rejected: \(String(cString: mpv_error_string(status)))")
+                debugLog("[MPV-ERR] option \"\(name)\"=\"\(value)\" rejected: \(String(cString: mpv_error_string(status)))")
                 #endif
             }
             return status
@@ -5828,9 +5834,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private func logOption(_ name: String, _ status: CInt) {
             #if DEBUG
             if status < 0 {
-                print("[MPV-OPT] ✗ \(name): \(String(cString: mpv_error_string(status)))")
+                debugLog("[MPV-OPT] ✗ \(name): \(String(cString: mpv_error_string(status)))")
             } else {
-                print("[MPV-OPT] ✓ \(name)")
+                debugLog("[MPV-OPT] ✓ \(name)")
             }
             #endif
         }
@@ -5972,7 +5978,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 if let vc = viewController {
                     vc.sampleBufferLayer.sampleBufferRenderer.flush(removingDisplayedImage: false)
                     #if DEBUG
-                    print("[MPV-PIP] willStop: flushed sampleBufferRenderer (kept displayed image)")
+                    debugLog("[MPV-PIP] willStop: flushed sampleBufferRenderer (kept displayed image)")
                     #endif
                 }
             }
@@ -6035,7 +6041,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             failedToStartPictureInPictureWithError error: Error
         ) {
             #if DEBUG
-            print("[MPV-PIP] failedToStart: \(error.localizedDescription) (\(error as NSError))")
+            debugLog("[MPV-PIP] failedToStart: \(error.localizedDescription) (\(error as NSError))")
             #endif
         }
 

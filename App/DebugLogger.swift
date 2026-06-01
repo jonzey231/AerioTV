@@ -3,12 +3,28 @@ import Foundation
 import UIKit
 #endif
 
-/// Debug-only print wrapper — compiles to nothing in release builds.
+#if DEBUG
+/// Serial queue that absorbs Debug console writes OFF the calling thread.
+/// A synchronous `print()` blocks the caller whenever the Xcode console pipe
+/// backs up. On mpv's event-drain loop (`mpvQueue`) and render thread that
+/// backpressure stalls mpv's core: its bounded event queue fills, the core
+/// thread blocks trying to enqueue the next event, and a VOD/DVR file demuxer
+/// stops reading (the Debug-only "first frame then freeze" that does NOT exist
+/// in Release, where every debugLog compiles to nothing). Deferring only the
+/// write keeps every mpv thread non-blocking; the serial queue preserves order.
+private let _debugConsoleQueue = DispatchQueue(label: "com.aerio.debugconsole", qos: .utility)
+#endif
+
+/// Debug-only print wrapper. Compiles to nothing in release builds.
 /// Replaces scattered emoji `print()` calls so they never leak in production.
+/// The string is built synchronously (cheap) but WRITTEN asynchronously, so a
+/// blocked console pipe can never stall the caller's thread (see the queue
+/// comment above for why that matters on the mpv threads).
 @inline(__always)
 func debugLog(_ message: @autoclosure () -> String) {
     #if DEBUG
-    print(message())
+    let line = message()
+    _debugConsoleQueue.async { print(line) }
     #endif
 }
 
