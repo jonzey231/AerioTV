@@ -2749,7 +2749,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // display-rate pump (NOT a busy spin), and it stops the instant a
             // frame lands and steady-state callbacks take over.
             if lastEnqueueTime == 0 {
-                scheduleRender()
+                // Dispatch renderAndPresent DIRECTLY on renderQueue, NOT via
+                // scheduleRender(). This tick runs on the MAIN thread, and
+                // scheduleRender does gap-logging that calls mpv_get_property
+                // synchronously; on a busy core that blocked the main thread
+                // (a >5s freeze when pumping at display rate). The direct
+                // dispatch keeps every mpv call on renderQueue. renderAndPresent
+                // is a cheap no-op when no frame is pending, so the paced
+                // 60fps cadence is fine; it self-stops once a frame lands
+                // (lastEnqueueTime becomes > 0).
+                renderQueue.async { [weak self] in self?.renderAndPresent() }
                 return
             }
             let now = CACurrentMediaTime()
