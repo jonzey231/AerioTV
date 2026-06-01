@@ -2735,6 +2735,23 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// those paths.
         @MainActor
         @objc private func handleWatchdogTick(_ link: CADisplayLink) {
+            // Bootstrap render pump. With vo=libmpv the render loop is driven
+            // ONLY by mpv's update callback, which on a NON-LIVE file (VOD /
+            // recording) fires roughly once at startup. If that single edge is
+            // missed or mistimed, the first frame is never consumed via
+            // mpv_render_context_render, so mpv stalls and the screen stays
+            // black with the clock frozen at 0:00 (live streams self-heal
+            // because their callback fires continuously). Until the first real
+            // frame has been presented (lastEnqueueTime stays 0), drive a
+            // render attempt on every display tick. scheduleRender coalesces on
+            // renderPending and renderAndPresent is a cheap no-op when the FBO
+            // is not ready or no frame is pending, so this is a paced
+            // display-rate pump (NOT a busy spin), and it stops the instant a
+            // frame lands and steady-state callbacks take over.
+            if lastEnqueueTime == 0 {
+                scheduleRender()
+                return
+            }
             let now = CACurrentMediaTime()
             let lastEnq = lastEnqueueTime
             let staleAge = now - lastEnq
@@ -2933,22 +2950,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
             guard !fboSlots.isEmpty else {
                 #if DEBUG
-                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: fboSlots empty (re-arm)") }
+                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: fboSlots empty") }
                 #endif
-                // The render loop is driven only by mpv's update callback,
-                // which on a non-live file is sparse (often a single startup
-                // edge). If a frame edge arrives before the FBO ring exists,
-                // bailing here would lose it for good: mpv holds the frame,
-                // never re-signals, and the clock stays frozen at 0:00 (black).
-                // Re-arm through scheduleRender so the pending frame is consumed
-                // once setupFBO commits the ring. This is bounded, never a spin:
-                // scheduleRender coalesces on renderPending (one outstanding
-                // re-dispatch), setupFBO runs on this same serial renderQueue so
-                // the re-armed render is FIFO-ordered after the ring exists, and
-                // the no-FRAME-flag bail below deliberately does NOT re-arm.
-                // Live/multiview is unaffected: it only transits this window
-                // once at startup.
-                scheduleRender()
                 return
             }
 
