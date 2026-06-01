@@ -1520,13 +1520,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // renderPending: accessed from mpv callback thread + render thread — use lock
         private var renderPending = false
         private var renderLock = os_unfair_lock()
-        #if DEBUG
-        // TEMP instrumentation (single-stream black-screen diag): trace the
-        // first N update-callbacks and render attempts so the log shows
-        // whether the loop is driven and where renderAndPresent bails.
-        private var scheduleTraceCount = 0
-        private var renderTraceCount = 0
-        #endif
 
         // Stream info refresh timer (2s interval for volatile stats).
         // Runs on its own low-priority queue — NEVER on renderQueue (would block frame delivery).
@@ -2735,32 +2728,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// those paths.
         @MainActor
         @objc private func handleWatchdogTick(_ link: CADisplayLink) {
-            // Bootstrap render pump. With vo=libmpv the render loop is driven
-            // ONLY by mpv's update callback, which on a NON-LIVE file (VOD /
-            // recording) fires roughly once at startup. If that single edge is
-            // missed or mistimed, the first frame is never consumed via
-            // mpv_render_context_render, so mpv stalls and the screen stays
-            // black with the clock frozen at 0:00 (live streams self-heal
-            // because their callback fires continuously). Until the first real
-            // frame has been presented (lastEnqueueTime stays 0), drive a
-            // render attempt on every display tick. scheduleRender coalesces on
-            // renderPending and renderAndPresent is a cheap no-op when the FBO
-            // is not ready or no frame is pending, so this is a paced
-            // display-rate pump (NOT a busy spin), and it stops the instant a
-            // frame lands and steady-state callbacks take over.
-            if lastEnqueueTime == 0 {
-                // Dispatch renderAndPresent DIRECTLY on renderQueue, NOT via
-                // scheduleRender(). This tick runs on the MAIN thread, and
-                // scheduleRender does gap-logging that calls mpv_get_property
-                // synchronously; on a busy core that blocked the main thread
-                // (a >5s freeze when pumping at display rate). The direct
-                // dispatch keeps every mpv call on renderQueue. renderAndPresent
-                // is a cheap no-op when no frame is pending, so the paced
-                // 60fps cadence is fine; it self-stops once a frame lands
-                // (lastEnqueueTime becomes > 0).
-                renderQueue.async { [weak self] in self?.renderAndPresent() }
-                return
-            }
             let now = CACurrentMediaTime()
             let lastEnq = lastEnqueueTime
             let staleAge = now - lastEnq
@@ -2838,12 +2805,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         /// Called from mpv's update callback — schedules render on background thread.
         func scheduleRender() {
-            #if DEBUG
-            scheduleTraceCount &+= 1
-            if scheduleTraceCount <= 20 {
-                print("[RENDER-TRACE] \(streamTag) scheduleRender #\(scheduleTraceCount)")
-            }
-            #endif
             // v1.7.x Issue A: log silences in the mpv update-callback
             // stream. Normal callback cadence on a smooth stream is
             // ~16-33ms (matches the frame interval), with up to ~5ms
@@ -2946,23 +2907,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             renderPending = false
             os_unfair_lock_unlock(&renderLock)
 
-            #if DEBUG
-            renderTraceCount &+= 1
-            let rTrace = renderTraceCount <= 40
-            #endif
-
-            guard let mpvGL, let eaglContext else {
-                #if DEBUG
-                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: no mpvGL/eaglContext") }
-                #endif
-                return
-            }
-            guard !fboSlots.isEmpty else {
-                #if DEBUG
-                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: fboSlots empty") }
-                #endif
-                return
-            }
+            guard let mpvGL, let eaglContext else { return }
+            guard !fboSlots.isEmpty else { return }
 
             // v1.7.x Step 6 — apply backpressure on
             // AVSampleBufferDisplayLayer's renderer. When the
@@ -3009,21 +2955,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // full.
             if let renderer = sampleBufferLayer?.sampleBufferRenderer,
                !renderer.isReadyForMoreMediaData {
-                #if DEBUG
-                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: backpressure (layer not ready)") }
-                #endif
                 backpressureSkipCount &+= 1
                 return
             }
 
             let w = fboWidth
             let h = fboHeight
-            guard w > 0, h > 0 else {
-                #if DEBUG
-                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: w/h zero (\(w)x\(h))") }
-                #endif
-                return
-            }
+            guard w > 0, h > 0 else { return }
 
             // v1.7.x Step 5: advance the ring cursor and pick the
             // next slot. mpv writes to slot[renderBufferIndex],
@@ -3051,15 +2989,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // C `mpv_render_update_flag` enum, not a numeric — convert via
             // `.rawValue` before the bitwise AND with the UInt64 mask.)
             let updateFlags = mpv_render_context_update(mpvGL)
-            guard (updateFlags & UInt64(MPV_RENDER_UPDATE_FRAME.rawValue)) != 0 else {
-                #if DEBUG
-                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: no FRAME flag (updateFlags=\(updateFlags))") }
-                #endif
-                return
-            }
-            #if DEBUG
-            if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) CONSUMING frame into \(w)x\(h)") }
-            #endif
+            guard (updateFlags & UInt64(MPV_RENDER_UPDATE_FRAME.rawValue)) != 0 else { return }
 
             // Tell mpv to render into our FBO (GPU handles color conversion, scaling, OSD).
             // withUnsafeMutablePointer ensures the data pointers outlive the render call.
@@ -3202,17 +3132,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // both classes; the surround check below is what
             // protects legitimate dark content. See block comment
             // above the state declarations for the full rationale.
-            // Never suppress the FIRST frame (none enqueued yet). The
-            // flash-suppression below only makes sense between two real frames;
-            // for the very first frame there is no genuine prior frame (the
-            // prev-luma is just the 128 placeholder, which spuriously satisfies
-            // the surround check). Suppressing the first frame both leaves the
-            // player black AND keeps the bootstrap render pump running forever
-            // (lastEnqueueTime never leaves 0), which starves the mpv core. So
-            // always present the first frame, then let flash-suppression run
-            // on subsequent frames.
             let isSuspectBlackFrame = probeValid
-                && lastEnqueueTime > 0
                 && blackProbe.avg < 10.0
                 && blackProbe.std < 8.0
                 && blackFramePrevAvgLuma > 25.0
@@ -3682,35 +3602,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             setOption(mpv, "initial-audio-sync", "no")
             setOption(mpv, "vd-lavc-fast", "yes")
             setOption(mpv, "vd-lavc-skiploopfilter", "nonref")
-            // Split by isLive. Live MPEG-TS is pure forward streaming and
-            // never seeks, so reconnect_streamed=1 (FFmpeg's "this source is
-            // a non-seekable stream, recover by re-issuing the request")
-            // is correct there. VOD/DVR are the opposite: they MUST issue
-            // HTTP range requests to read an index away from byte 0 (an MKV
-            // Cues block near EOF, or a trailing mp4 moov). reconnect_streamed
-            // is the wrong recovery policy for a file you need to seek, and
-            // against the Dispatcharr VOD proxy it cannot cleanly re-seek to
-            // the right byte offset, so a range read that stalls or 500s
-            // wedges the demuxer (observed on device: input_rate=0 right
-            // after the first frame, no second frame). For VOD we drop
-            // reconnect_streamed and add multiple_requests=1 so one
-            // persistent HTTP/1.1 connection is reused across range GETs.
-            // FFmpeg otherwise opens a NEW connection per range request,
-            // which churns the proxy's per-connection VOD session and is the
-            // likely cause of the read stalling after the moov fetch.
-            if isLive {
-                setOption(
-                    mpv,
-                    "stream-lavf-o",
-                    "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2"
-                )
-            } else {
-                setOption(
-                    mpv,
-                    "stream-lavf-o",
-                    "reconnect=1,reconnect_delay_max=5,multiple_requests=1"
-                )
-            }
+            setOption(
+                mpv,
+                "stream-lavf-o",
+                "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2"
+            )
             // `network-timeout=30` — raised from 10s. The tighter
             // timeout triggered `tls: IO error: Operation timed out`
             // on a user's WAN route when their LAN probe hadn't
@@ -4296,12 +4192,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // scrub (the scrub UI settles the playhead onto the real
                 // landing position). Live keeps the default (it never seeks).
                 mpv_set_property_string(mpv, "hr-seek", "no")
-                // Satisfy small back-seeks (the demuxer's own moov/index
-                // re-reads, and short scrub-backs) from the in-memory cache
-                // instead of re-hitting the network with a fresh range GET.
-                // Fewer range requests against the Dispatcharr VOD proxy means
-                // fewer chances to trip the stall this whole block is fixing.
-                mpv_set_property_string(mpv, "demuxer-seekable-cache", "yes")
             }
 
             mpv_set_property_string(mpv, "framedrop", "decoder+vo")
