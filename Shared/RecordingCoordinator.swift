@@ -152,7 +152,16 @@ final class RecordingCoordinator: ObservableObject {
 
     /// Stops a local recording, finalizes the file, updates model state.
     func stopLocalRecording(_ recording: Recording, modelContext: ModelContext) async {
-        guard let session = activeSessions.removeValue(forKey: recording.id) else { return }
+        guard let session = activeSessions.removeValue(forKey: recording.id) else {
+            // Diagnostic for the "Stop doesn't stop" report: if no session is
+            // tracked here when Stop is pressed, the underlying URLSession may
+            // still be writing (orphaned), which is why deleting the file was
+            // needed to halt it. This distinguishes "session not found" from
+            // "stop ran but didn't cancel the task" in logs.
+            debugLog("🔴 stopLocalRecording: NO active session for id=\(recording.id) (already stopped or orphaned) - active keys=\(activeSessions.keys.map { $0.uuidString.prefix(8) })")
+            return
+        }
+        debugLog("🔴 stopLocalRecording: stopping active session id=\(recording.id)")
         await session.stop()
 
         let written = await session.getBytesWritten()
