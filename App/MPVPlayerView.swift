@@ -933,20 +933,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         @MainActor
         fileprivate func applyAudioFocusIfChanged(_ isActive: Bool) {
             guard lastAppliedAudioFocus != isActive else { return }
-            // N=1 short-circuit: at a single tile there is no audio-focus
-            // competition — the one tile is always the audio tile, and
-            // the mpv options `aid=auto` + `mute=no` were set at setup.
-            // SwiftUI still fires `updateUIViewController` on every state
-            // change, which re-calls this path with `isActive=true` each
-            // time; the redundant mpvQueue dispatch + AudioUnit reconfig
-            // shows up in the hot path as wasted work that isn't moving
-            // audio anywhere. Record the state so when a 2nd tile arrives
-            // and genuine audio-focus transitions begin, the debounce
-            // guard above has the right baseline. Skip the mpv write.
-            if MultiviewStore.shared.tiles.count <= 1 {
-                lastAppliedAudioFocus = isActive
-                return
-            }
+            // No `tiles.count <= 1` short-circuit here. A prior revision
+            // skipped the mpv write whenever there was a single tile, assuming
+            // the sole tile is always audio-active and was set up with mute=no.
+            // That broke the 2->1 collapse: when the user removes the AUDIO
+            // tile, MultiviewStore auto-promotes the surviving (previously
+            // non-audio, so mute=yes) tile to audio (isActive false->true), but
+            // the skip left it mute=yes in mpv, i.e. silent playback. The guard
+            // above already drops steady-state re-fires (isActive ==
+            // lastAppliedAudioFocus), and the lastWrittenAID / lastWrittenMute
+            // caches below dedupe the actual property writes, so always running
+            // the write path here is both correct and cheap.
             lastAppliedAudioFocus = isActive
             DebugLogger.shared.log(
                 "[MV-Audio] mpv audio=\(isActive ? "on" : "off") tile=\(tileID ?? "single")",
@@ -1779,59 +1776,83 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             self.lastAppliedPause = initialShouldPause
             super.init()
 
-            // Toggle play/pause
+            // Toggle play/pause. The mpv get/set run on mpvQueue: mpv property
+            // calls can block until the core services them, and these closures
+            // fire from SwiftUI taps on the MAIN thread, so calling mpv inline
+            // would freeze the UI whenever the core is parked in a blocking
+            // demuxer read (a stalled HLS / DVR stream). That is the same
+            // main-thread-block class the stop() path was rewritten to avoid.
+            // (Also: MPV_FORMAT_FLAG reads/writes a C int, i.e. Int32, not
+            // Swift's 64-bit Int, which previously over-read the pointer.)
             progressStore.togglePauseAction = { [weak self] in
-                guard let self, let mpv = self.activeMPVHandle() else { return }
-                var flag: Int = 0
-                mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
-                var newFlag: Int = flag == 0 ? 1 : 0
-                mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &newFlag)
+                self?.mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    var flag: Int32 = 0
+                    mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
+                    var newFlag: Int32 = flag == 0 ? 1 : 0
+                    mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &newFlag)
+                }
             }
 
             // Seek closure: VOD + DVR. Live TV has no seekable timeline.
+            // Runs on mpvQueue (off main) so a scrub never blocks the UI when
+            // the core is stalled; this also puts playbackEnded access on the
+            // same queue as the EOF event handler that sets it.
             progressStore.seekAction = { [weak self] targetMs in
-                guard let self, !self.isLive, let mpv = self.activeMPVHandle() else { return }
-                if self.isDVR {
-                    // DVR (in-progress recording): the seekable window grows
-                    // toward a moving live edge. Clamp the target a few
-                    // seconds behind the current playlist end so we never
-                    // seek onto EOF (which would otherwise lock every later
-                    // seek), and clear any transient end-of-playlist EOF so
-                    // the user can always scrub back from the live edge.
-                    self.playbackEnded = false
-                    var durSec: Double = 0
-                    mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &durSec)
-                    var target = Double(targetMs) / 1000.0
-                    if durSec > 0 { target = min(target, durSec - Coordinator.dvrLiveEdgeGuardSec) }
-                    target = max(0, target)
-                    let secs = String(format: "%.3f", target)
+                guard let self, !self.isLive else { return }
+                self.mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    if self.isDVR {
+                        // DVR (in-progress recording): the seekable window grows
+                        // toward a moving live edge. Clamp the target a few
+                        // seconds behind the current playlist end so we never
+                        // seek onto EOF (which would otherwise lock every later
+                        // seek), and clear any transient end-of-playlist EOF so
+                        // the user can always scrub back from the live edge.
+                        self.playbackEnded = false
+                        var durSec: Double = 0
+                        mpv_get_property(mpv, "duration", MPV_FORMAT_DOUBLE, &durSec)
+                        var target = Double(targetMs) / 1000.0
+                        if durSec > 0 { target = min(target, durSec - Coordinator.dvrLiveEdgeGuardSec) }
+                        target = max(0, target)
+                        let secs = String(format: "%.3f", target)
+                        self.mpvCommand(mpv, ["seek", secs, "absolute"])
+                        return
+                    }
+                    // Regular VOD: guard against seek-after-EOF.
+                    guard !self.playbackEnded else { return }
+                    let secs = String(format: "%.3f", Double(targetMs) / 1000.0)
                     self.mpvCommand(mpv, ["seek", secs, "absolute"])
-                    return
                 }
-                // Regular VOD: guard against seek-after-EOF.
-                guard !self.playbackEnded else { return }
-                let secs = String(format: "%.3f", Double(targetMs) / 1000.0)
-                self.mpvCommand(mpv, ["seek", secs, "absolute"])
             }
 
-            // Playback speed
+            // Playback speed. mpv write on mpvQueue; UI state on main.
             progressStore.setSpeedAction = { [weak self] speed in
-                guard let self, let mpv = self.activeMPVHandle() else { return }
-                mpv_set_property_string(mpv, "speed", String(format: "%.2f", speed))
+                guard let self else { return }
+                self.mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    mpv_set_property_string(mpv, "speed", String(format: "%.2f", speed))
+                }
                 DispatchQueue.main.async { self.progressStore.speed = speed }
             }
 
-            // Audio track selection (0 = auto)
+            // Audio track selection (0 = auto). mpv write on mpvQueue.
             progressStore.setAudioTrackAction = { [weak self] trackID in
-                guard let self, let mpv = self.activeMPVHandle() else { return }
-                mpv_set_property_string(mpv, "aid", trackID == 0 ? "auto" : "\(trackID)")
+                guard let self else { return }
+                self.mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    mpv_set_property_string(mpv, "aid", trackID == 0 ? "auto" : "\(trackID)")
+                }
                 DispatchQueue.main.async { self.progressStore.currentAudioTrackID = trackID }
             }
 
-            // Subtitle track selection (0 = off)
+            // Subtitle track selection (0 = off). mpv write on mpvQueue.
             progressStore.setSubtitleTrackAction = { [weak self] trackID in
-                guard let self, let mpv = self.activeMPVHandle() else { return }
-                mpv_set_property_string(mpv, "sid", trackID == 0 ? "no" : "\(trackID)")
+                guard let self else { return }
+                self.mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    mpv_set_property_string(mpv, "sid", trackID == 0 ? "no" : "\(trackID)")
+                }
                 DispatchQueue.main.async { self.progressStore.currentSubtitleTrackID = trackID }
             }
 
@@ -4783,9 +4804,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                 onPlay:  { ps2.togglePauseAction?() },
                                 onPause: { ps2.togglePauseAction?() },
                                 onSeek: live ? nil : { [weak self] time in
-                                    guard let self, let mpv = self.activeMPVHandle() else { return }
-                                    let secs = String(format: "%.3f", time)
-                                    self.mpvCommand(mpv, ["seek", secs, "absolute"])
+                                    // Remote / lock-screen seek callbacks fire on
+                                    // the main thread; hop to mpvQueue so a stalled
+                                    // core can never freeze the UI (see seekAction).
+                                    self?.mpvQueue.async { [weak self] in
+                                        guard let self, let mpv = self.activeMPVHandle() else { return }
+                                        let secs = String(format: "%.3f", time)
+                                        self.mpvCommand(mpv, ["seek", secs, "absolute"])
+                                    }
                                 }
                             )
                         }
