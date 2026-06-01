@@ -1835,13 +1835,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         if durSec > 0 { target = min(target, durSec - Coordinator.dvrLiveEdgeGuardSec) }
                         target = max(0, target)
                         let secs = String(format: "%.3f", target)
-                        self.mpvCommand(mpv, ["seek", secs, "absolute"])
+                        self.mpvCommandAsync(mpv, ["seek", secs, "absolute"])
                         return
                     }
                     // Regular VOD: guard against seek-after-EOF.
                     guard !self.playbackEnded else { return }
                     let secs = String(format: "%.3f", Double(targetMs) / 1000.0)
-                    self.mpvCommand(mpv, ["seek", secs, "absolute"])
+                    self.mpvCommandAsync(mpv, ["seek", secs, "absolute"])
                 }
             }
 
@@ -2070,7 +2070,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 onSeek: live ? nil : { [weak self] time in
                     guard let self, let mpv = self.activeMPVHandle() else { return }
                     let secs = String(format: "%.3f", time)
-                    self.mpvCommand(mpv, ["seek", secs, "absolute"])
+                    self.mpvCommandAsync(mpv, ["seek", secs, "absolute"])
                 }
             )
         }
@@ -4835,7 +4835,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                     self?.mpvQueue.async { [weak self] in
                                         guard let self, let mpv = self.activeMPVHandle() else { return }
                                         let secs = String(format: "%.3f", time)
-                                        self.mpvCommand(mpv, ["seek", secs, "absolute"])
+                                        self.mpvCommandAsync(mpv, ["seek", secs, "absolute"])
                                     }
                                 }
                             )
@@ -5791,6 +5791,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// command and returns immediately, so the main thread never blocks;
         /// the command is acted on whenever the core's read returns. Use this
         /// for teardown-path commands like `quit`. The reply event is ignored.
+        ///
+        /// ALSO used for every `seek` (resume, scrub, remote/lock-screen).
+        /// Seeks are issued on `mpvQueue`, the same serial queue that
+        /// `readEvents` drains mpv's bounded event queue on. A SYNCHRONOUS
+        /// `mpv_command("seek")` there can deadlock: the core sets
+        /// `seeking=yes`, then blocks trying to post events while our drain
+        /// loop is parked inside the very same synchronous call, so the seek
+        /// never completes (observed as `seeking=1`, `current-ao=nil`, frozen
+        /// playback on a VOD/DVR resume). It is timing-sensitive, so it only
+        /// surfaced in slower Debug builds. The async variant returns at once,
+        /// the drain keeps running, and the core finishes the seek normally.
+        /// No caller needs the seek to complete synchronously (the UI tracks
+        /// `time-pos` via the property observers; PLAYBACK_RESTART fires when
+        /// the seek lands).
         private func mpvCommandAsync(_ mpv: OpaquePointer, _ args: [String]) {
             let cargs = args.map { strdup($0) }
             var pointers = cargs.map { UnsafePointer($0) as UnsafePointer<CChar>? }
