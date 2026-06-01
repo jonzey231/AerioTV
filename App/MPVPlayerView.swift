@@ -2529,24 +2529,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             fboHeight = height
             renderBufferIndex = 0
 
-            // Self-heal the libmpv render-update-callback startup race. The
-            // render loop is driven ONLY by mpv's update callback. If mpv
-            // produced its first frame before this FBO ring existed,
-            // renderAndPresent() bailed at the `!fboSlots.isEmpty` guard
-            // WITHOUT consuming that frame and without rescheduling. With
-            // vo=libmpv on a NON-LIVE single file (VOD / local recording) there
-            // is no continuous demuxer traffic to re-fire the callback, so mpv
-            // holds the unconsumed frame, never signals again, and playback
-            // stalls: black screen, timeline frozen at 0:00, FBO stuck at the
-            // initial size. Live streams self-heal because packets keep
-            // arriving. Kick one render now that the ring is ready:
-            // renderAndPresent re-reads mpv_render_context_update(), so it
-            // consumes the still-pending frame if there is one (which then lets
-            // mpv advance and reach PLAYBACK_RESTART, rebuilding the ring to
-            // native size), and is a harmless no-op via the
-            // MPV_RENDER_UPDATE_FRAME guard if there is nothing pending.
-            renderQueue.async { [weak self] in self?.renderAndPresent() }
-
             #if DEBUG
             // v1.7.x Issue A: include rebuild-gap so we can see how
             // long the layer was presenting nothing if this is a
@@ -2951,8 +2933,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
             guard !fboSlots.isEmpty else {
                 #if DEBUG
-                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: fboSlots empty") }
+                if rTrace { print("[RENDER-TRACE] \(streamTag) render #\(renderTraceCount) BAIL: fboSlots empty (re-arm)") }
                 #endif
+                // The render loop is driven only by mpv's update callback,
+                // which on a non-live file is sparse (often a single startup
+                // edge). If a frame edge arrives before the FBO ring exists,
+                // bailing here would lose it for good: mpv holds the frame,
+                // never re-signals, and the clock stays frozen at 0:00 (black).
+                // Re-arm through scheduleRender so the pending frame is consumed
+                // once setupFBO commits the ring. This is bounded, never a spin:
+                // scheduleRender coalesces on renderPending (one outstanding
+                // re-dispatch), setupFBO runs on this same serial renderQueue so
+                // the re-armed render is FIFO-ordered after the ring exists, and
+                // the no-FRAME-flag bail below deliberately does NOT re-arm.
+                // Live/multiview is unaffected: it only transits this window
+                // once at startup.
+                scheduleRender()
                 return
             }
 
