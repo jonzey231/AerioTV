@@ -328,7 +328,11 @@ final class VODService {
             }
             return VODMovie(
                 id: String(item.streamID), name: item.name,
-                posterURL: item.streamIcon.flatMap { URL(string: $0) }, backdropURL: nil,
+                // resolveURL validates the server-provided image URL (rejects
+                // loopback / link-local / private-network hosts that aren't the
+                // user's own server) the same way the Dispatcharr path does,
+                // closing the SSRF gap where the raw URL(string:) trusted it.
+                posterURL: item.streamIcon.flatMap { resolveURL($0, base: server.baseURL) }, backdropURL: nil,
                 rating: item.rating ?? "", plot: item.plot ?? "",
                 genre: item.genre ?? "", releaseDate: item.releaseDate ?? "",
                 duration: "", cast: item.cast ?? "", director: item.director ?? "", imdbID: "",
@@ -360,7 +364,7 @@ final class VODService {
             }
             return VODSeries(
                 id: String(item.seriesID), name: item.name,
-                posterURL: item.cover.flatMap { URL(string: $0) }, backdropURL: nil,
+                posterURL: item.cover.flatMap { resolveURL($0, base: server.baseURL) }, backdropURL: nil,
                 rating: item.rating ?? "", plot: item.plot ?? "",
                 genre: item.genre ?? "", releaseDate: item.releaseDate ?? "",
                 cast: item.cast ?? "", director: item.director ?? "",
@@ -387,7 +391,7 @@ final class VODService {
                     title: ep.title ?? "Episode \(ep.episodeNum ?? 0)",
                     seasonNumber: seasonNum, episodeNumber: ep.episodeNum ?? 0,
                     plot: ep.info?.plot ?? "", duration: ep.info?.duration ?? "",
-                    posterURL: ep.info?.movieImage.flatMap { URL(string: $0) },
+                    posterURL: ep.info?.movieImage.flatMap { resolveURL($0, base: server.baseURL) },
                     streamURL: URL(string: urlStr),
                     containerExtension: ext, serverID: server.id
                 )
@@ -403,7 +407,7 @@ final class VODService {
         let info = detail.info
         return VODSeries(
             id: seriesID, name: info?.name ?? "Unknown",
-            posterURL: info?.cover.flatMap { URL(string: $0) }, backdropURL: nil,
+            posterURL: info?.cover.flatMap { resolveURL($0, base: server.baseURL) }, backdropURL: nil,
             rating: info?.rating ?? "", plot: info?.plot ?? "",
             genre: info?.genre ?? "", releaseDate: info?.firstAirDate ?? "",
             cast: info?.cast ?? "", director: info?.director ?? "",
@@ -727,9 +731,12 @@ final class VODService {
             // anyway, but the explicit non-empty check is more
             // defensive).
             let episodePoster: URL? = {
+                // Route through resolveImageURL (same as the backdrops below)
+                // so a TMDB path is rewritten and an absolute URL is validated
+                // against the SSRF guard, instead of trusting raw URL(string:).
                 if let img = ep.customProperties?.movieImage,
                    !img.isEmpty,
-                   let url = URL(string: img) {
+                   let url = resolveImageURL(img, base: base) {
                     return url
                 }
                 return existing?.posterURL
