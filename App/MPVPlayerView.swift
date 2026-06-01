@@ -3602,11 +3602,37 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             setOption(mpv, "initial-audio-sync", "no")
             setOption(mpv, "vd-lavc-fast", "yes")
             setOption(mpv, "vd-lavc-skiploopfilter", "nonref")
-            setOption(
-                mpv,
-                "stream-lavf-o",
-                "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2"
-            )
+            // Split by isLive. Live MPEG-TS is pure forward streaming and
+            // never seeks, so reconnect_streamed=1 (FFmpeg's "this is a
+            // non-seekable live source, recover by re-issuing the request")
+            // is correct for it. VOD/DVR are the opposite: a seekable file
+            // whose demuxer MUST range-seek to read an index away from byte 0
+            // (an MKV SeekHead/Cues/Tags near EOF, or a trailing mp4 moov).
+            // With reconnect_streamed=1, when the Dispatcharr proxy stalls or
+            // 500s that near-EOF range, FFmpeg retries it forever instead of
+            // failing fast, so mpv's open-time index seek never completes:
+            // seeking=1 stuck, input_rate=0, audio output never opens, one
+            // frame then frozen (root-caused from the [MPV-STALLDIAG] line).
+            // For VOD/DVR drop reconnect_streamed so a non-servable index read
+            // fails fast and the matroska demuxer falls back to linear
+            // playback from byte 0 (Cues are only needed to SEEK, not to
+            // start), and add multiple_requests=1 to reuse one HTTP/1.1
+            // connection across range GETs instead of churning a fresh proxy
+            // VOD session per range. Do NOT add reconnect_on_http_error: a
+            // genuine 500 should surface, not loop.
+            if isLive {
+                setOption(
+                    mpv,
+                    "stream-lavf-o",
+                    "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2"
+                )
+            } else {
+                setOption(
+                    mpv,
+                    "stream-lavf-o",
+                    "reconnect=1,reconnect_delay_max=2,multiple_requests=1"
+                )
+            }
             // `network-timeout=30` — raised from 10s. The tighter
             // timeout triggered `tls: IO error: Operation timed out`
             // on a user's WAN route when their LAN probe hadn't
@@ -3923,7 +3949,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // sentinel to the server.
             let startFromBeginningHeader = "X-Aerio-Start-From-Beginning"
             if headers[startFromBeginningHeader] == "1" {
-                checkError(mpv_set_option_string(mpv, "demuxer-lavf-o", "live_start_index=0"))
+                // demuxer-lavf-o is a single-value REPLACE, not additive, so
+                // include fflags=+discardcorrupt (set above for all streams)
+                // here too; otherwise the watch-from-beginning path silently
+                // drops corrupt-packet discarding.
+                checkError(mpv_set_option_string(mpv, "demuxer-lavf-o", "fflags=+discardcorrupt,live_start_index=0"))
                 #if DEBUG
                 debugLog("[MPV-DIAG] setupMPV: live_start_index=0 (watch recording from beginning)")
                 #endif
@@ -4192,6 +4222,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // scrub (the scrub UI settles the playhead onto the real
                 // landing position). Live keeps the default (it never seeks).
                 mpv_set_property_string(mpv, "hr-seek", "no")
+                // Serve small back-seeks (the demuxer's own moov/index
+                // re-reads and short scrub-backs) from the in-memory cache
+                // instead of re-hitting the Dispatcharr proxy with a fresh
+                // range GET. Fewer ranged requests against the proxy means
+                // fewer chances to trip the near-EOF range stall the
+                // stream-lavf-o split above guards against.
+                mpv_set_property_string(mpv, "demuxer-seekable-cache", "yes")
             }
 
             mpv_set_property_string(mpv, "framedrop", "decoder+vo")
