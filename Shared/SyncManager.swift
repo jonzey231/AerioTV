@@ -1216,9 +1216,16 @@ final class SyncManager: ObservableObject {
         let wpKey = watchProgressKVSKey
         let rKey = reminderKVSKey
 
-        // Read KVS off the main thread — reads are thread-safe (local cache).
-        // Merge still runs on MainActor (required by @MainActor isolation).
-        Task.detached(priority: .utility) {
+        // Reads AND merges run on the main actor. KVS reads must be on the
+        // main queue (this file's threading rules; the old code read inside
+        // Task.detached on a utility thread, which worked only by hitting the
+        // local cache and contradicted the documented invariant). The
+        // [String: Any] KVS payloads are not Sendable, so they cannot cross
+        // back to a detached task anyway. The merges are SwiftData-heavy, so
+        // we Task.yield() between each one to let the main runloop drain
+        // queued UI work (doing all four back-to-back once showed a ~1.8s
+        // launch hang: channel-fetch callbacks, SwiftUI re-renders, etc.).
+        Task { @MainActor in
             let servers   = NSUbiquitousKeyValueStore.default.array(forKey: sKey) as? [[String: Any]]
             let prefs     = NSUbiquitousKeyValueStore.default.dictionary(forKey: pKey)
             let wp        = NSUbiquitousKeyValueStore.default.array(forKey: wpKey) as? [[String: Any]]
@@ -1229,19 +1236,14 @@ final class SyncManager: ObservableObject {
                 return
             }
 
-            // Hop to MainActor for EACH merge step separately so the
-            // main runloop can drain any queued UI work between them.
-            // A single `MainActor.run { ... }` block that did all four
-            // merges back-to-back showed up as a ~1.8s main-thread
-            // hang on app launch; splitting gives the runloop room to
-            // pump events (channel-fetch completion callbacks,
-            // SwiftUI re-renders, etc.) between the SwiftData-heavy
-            // watch-progress upsert and the reminder merge.
-            await MainActor.run { SyncManager.shared.doMerge(servers: servers, isInitial: false) }
-            await MainActor.run { SyncManager.shared.doApplyPreferences(prefs: prefs) }
-            await MainActor.run { SyncManager.shared.mergeRemoteWatchProgress(wp) }
-            await MainActor.run { SyncManager.shared.mergeRemoteReminders(reminders) }
-            await MainActor.run { debugLog("🔵 SyncManager.pullFromCloud: merge complete") }
+            SyncManager.shared.doMerge(servers: servers, isInitial: false)
+            await Task.yield()
+            SyncManager.shared.doApplyPreferences(prefs: prefs)
+            await Task.yield()
+            SyncManager.shared.mergeRemoteWatchProgress(wp)
+            await Task.yield()
+            SyncManager.shared.mergeRemoteReminders(reminders)
+            debugLog("🔵 SyncManager.pullFromCloud: merge complete")
         }
     }
 
