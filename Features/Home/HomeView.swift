@@ -353,7 +353,7 @@ final class VODStore: ObservableObject {
             // v1.6.20: per-server auth shape capture.
             let authMode = server.dispatcharrHeaderMode
             let userAgent = server.effectiveUserAgent
-            debugLog("🎬 VODStore.loadMovies: dispatcharr baseURL=\(baseURL), hasKey=\(!apiKey.isEmpty)")
+            debugLog("🎬 VODStore.loadMovies: dispatcharr baseURL=\(DebugLogger.sanitize(baseURL)), hasKey=\(!apiKey.isEmpty)")
             let api     = DispatcharrAPI(baseURL: baseURL, auth: .apiKey(apiKey),
                                          userAgent: userAgent, authMode: authMode)
 
@@ -1091,7 +1091,7 @@ final class ChannelStore: ObservableObject {
         // the per-server shape that Test Connection discovered.
         let authMode = server.dispatcharrHeaderMode
         let userAgent = server.effectiveUserAgent
-        debugLog("🔷 ChannelStore.load: snapshot done (type=\(type), baseURL=\(baseURL), hasPw=\(!password.isEmpty), hasKey=\(!apiKey.isEmpty))")
+        debugLog("🔷 ChannelStore.load: snapshot done (type=\(type), baseURL=\(DebugLogger.sanitize(baseURL)), hasPw=\(!password.isEmpty), hasKey=\(!apiKey.isEmpty))")
 
         // Fast reachability probe (only on a cold load). A dead Docker
         // container, a wrong host, or a stopped VPN would otherwise

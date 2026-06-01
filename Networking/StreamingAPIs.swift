@@ -346,11 +346,27 @@ struct XtreamCodesAPI {
             return head.hasPrefix("<!doctype html") || head.hasPrefix("<html") || head.hasPrefix("<head")
         }()
         if contentType.contains("text/html") || bodyLooksHTML {
+            // Show only scheme://host:port/path (no query, no userinfo) in this
+            // user-facing message. The Xtream endpoint carries username and
+            // password in the query string, and this error text can be
+            // screenshotted or pasted into a bug report; host+path is what the
+            // user needs to verify the endpoint (the common mistake is a wrong
+            // port or path, not the credentials).
+            let safeURL: String = {
+                guard let u = http.url,
+                      var comps = URLComponents(url: u, resolvingAgainstBaseURL: false)
+                else { return "the URL" }
+                comps.query = nil
+                comps.fragment = nil
+                comps.user = nil
+                comps.password = nil
+                return comps.string ?? "the URL"
+            }()
             throw APIError.decodingError(NSError(
                 domain: "XtreamCodesAPI",
                 code: -10,
                 userInfo: [NSLocalizedDescriptionKey:
-                    "The server returned a web page instead of Xtream Codes API data. Double-check the Server URL — it should point to the Xtream-compatible endpoint (often a different port than the web admin). Verify by opening \(http.url?.absoluteString ?? "the URL") in a browser: you should see JSON, not a login page."
+                    "The server returned a web page instead of Xtream Codes API data. Double-check the Server URL. It should point to the Xtream-compatible endpoint (often a different port than the web admin). Verify by opening \(safeURL) in a browser: you should see JSON, not a login page."
                 ]
             ))
         }

@@ -588,7 +588,7 @@ struct MyRecordingsView: View {
         if fromStart { headers["X-Aerio-Start-From-Beginning"] = "1" }
         let headerKeys = headers.keys.sorted().joined(separator: ",")
         let inProgressTag = (rec.status == .recording) ? " [IN-PROGRESS]" : ""
-        debugLog("▶️ Play server recording\(inProgressTag): id=\(remoteID) url=\(url.absoluteString) source=\(urlSource) headers=\(headerKeys)")
+        debugLog("▶️ Play server recording\(inProgressTag): id=\(remoteID) url=\(DebugLogger.sanitize(url.absoluteString)) source=\(urlSource) headers=\(headerKeys)")
         // v1.6.18 — see `playRecording` above for the rationale.
         // Same fix shape: stop the live stream before mounting the
         // recording's fullScreenCover so two mpv instances aren't

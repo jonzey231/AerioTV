@@ -71,7 +71,7 @@ enum HTTPRouter {
         do {
             return try await session.data(from: url)
         } catch let error as NSError where shouldFallbackToNWConnection(error: error) {
-            debugLog("HTTPRouter: URLSession failed for \(url.absoluteString) (code=\(error.code) \(error.localizedDescription)) → NWConnection fallback")
+            debugLog("HTTPRouter: URLSession failed for \(DebugLogger.sanitize(url.absoluteString)) (code=\(error.code) \(error.localizedDescription)) → NWConnection fallback")
             do {
                 return try await NWHTTPClient.data(from: url,
                                                    timeout: effectiveNWTimeout(using: session))
@@ -93,7 +93,7 @@ enum HTTPRouter {
         do {
             return try await session.data(for: request)
         } catch let error as NSError where shouldFallbackToNWConnection(error: error) {
-            let urlStr = request.url?.absoluteString ?? "<unknown>"
+            let urlStr = request.url.map { DebugLogger.sanitize($0.absoluteString) } ?? "<unknown>"
             debugLog("HTTPRouter: URLSession failed for \(urlStr) (code=\(error.code) \(error.localizedDescription)) → NWConnection fallback")
             do {
                 return try await NWHTTPClient.data(for: request,
