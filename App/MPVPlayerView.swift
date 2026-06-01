@@ -3202,7 +3202,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // both classes; the surround check below is what
             // protects legitimate dark content. See block comment
             // above the state declarations for the full rationale.
+            // Never suppress the FIRST frame (none enqueued yet). The
+            // flash-suppression below only makes sense between two real frames;
+            // for the very first frame there is no genuine prior frame (the
+            // prev-luma is just the 128 placeholder, which spuriously satisfies
+            // the surround check). Suppressing the first frame both leaves the
+            // player black AND keeps the bootstrap render pump running forever
+            // (lastEnqueueTime never leaves 0), which starves the mpv core. So
+            // always present the first frame, then let flash-suppression run
+            // on subsequent frames.
             let isSuspectBlackFrame = probeValid
+                && lastEnqueueTime > 0
                 && blackProbe.avg < 10.0
                 && blackProbe.std < 8.0
                 && blackFramePrevAvgLuma > 25.0
