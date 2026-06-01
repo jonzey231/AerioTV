@@ -119,7 +119,10 @@ actor LocalRecordingSession: NSObject {
 // (the whole point of the recording fix). The lock only guards the rare
 // overlap between a late delegate write and the actor's stop()-driven
 // close(); on the steady-state write path it is uncontended.
-private final class StreamFileWriter {
+private final class StreamFileWriter: @unchecked Sendable {
+    // @unchecked Sendable: every access to `handle` / `bytes` is serialized by
+    // `lock`, so the type is genuinely safe to hand to the URLSession delegate
+    // (a Sendable-conforming class) and read from the actor.
     private let lock = NSLock()
     private var handle: FileHandle?
     private var bytes: Int64 = 0
@@ -167,9 +170,9 @@ private final class StreamFileWriter {
 
 private final class SessionDelegate: NSObject, URLSessionDataDelegate {
     private let writer: StreamFileWriter
-    private let onComplete: (Error?) -> Void
+    private let onComplete: @Sendable (Error?) -> Void
 
-    init(writer: StreamFileWriter, onComplete: @escaping (Error?) -> Void) {
+    init(writer: StreamFileWriter, onComplete: @escaping @Sendable (Error?) -> Void) {
         self.writer = writer
         self.onComplete = onComplete
     }
