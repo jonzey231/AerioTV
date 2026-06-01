@@ -2887,7 +2887,14 @@ struct EPGGuideView: View {
                 .padding(.vertical, 6)
                 .background(Capsule().fill(Color.accentPrimary))
             }
+            // tvOS: use the app's themed focus style (accent stroke ring)
+            // instead of leaving .plain, which lets the default white system
+            // focus glow blob through and clashes with the capsule pill.
+            #if os(tvOS)
+            .buttonStyle(TVNoHighlightButtonStyle())
+            #else
             .buttonStyle(.plain)
+            #endif
             .disabled(count == 0)
             .opacity(count == 0 ? 0.5 : 1.0)
             // Done (secondary action). Outlined rather than filled so
@@ -2908,7 +2915,11 @@ struct EPGGuideView: View {
                         Capsule().stroke(Color.accentPrimary, lineWidth: 1)
                     )
             }
+            #if os(tvOS)
+            .buttonStyle(TVNoHighlightButtonStyle())
+            #else
             .buttonStyle(.plain)
+            #endif
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
