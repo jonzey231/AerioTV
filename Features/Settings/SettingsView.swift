@@ -543,6 +543,16 @@ struct SettingsView: View {
                 case "edit-server":
                     if let server = serverToEdit {
                         EditServerPage(server: server)
+                            // Reset serverToEdit when this page pops, so editing
+                            // the SAME server again is a real nil -> server change
+                            // that re-fires the .onChange push below. Without it,
+                            // serverToEdit stayed set to that server, the second
+                            // Edit tap was a no-op change, and the page never
+                            // pushed (you had to edit a different server first).
+                            // EditServerPage only calls dismiss() (no navPath
+                            // sub-routes or sheets), so onDisappear fires solely
+                            // on the real pop, never spuriously.
+                            .onDisappear { serverToEdit = nil }
                     }
                 default:           EmptyView()
                 }
