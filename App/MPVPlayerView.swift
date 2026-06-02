@@ -3663,37 +3663,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             setOption(mpv, "initial-audio-sync", "no")
             setOption(mpv, "vd-lavc-fast", "yes")
             setOption(mpv, "vd-lavc-skiploopfilter", "nonref")
-            // Split by isLive. Live MPEG-TS is pure forward streaming and
-            // never seeks, so reconnect_streamed=1 (FFmpeg's "this is a
-            // non-seekable live source, recover by re-issuing the request")
-            // is correct for it. VOD/DVR are the opposite: a seekable file
-            // whose demuxer MUST range-seek to read an index away from byte 0
-            // (an MKV SeekHead/Cues/Tags near EOF, or a trailing mp4 moov).
-            // With reconnect_streamed=1, when the Dispatcharr proxy stalls or
-            // 500s that near-EOF range, FFmpeg retries it forever instead of
-            // failing fast, so mpv's open-time index seek never completes:
-            // seeking=1 stuck, input_rate=0, audio output never opens, one
-            // frame then frozen (root-caused from the [MPV-STALLDIAG] line).
-            // For VOD/DVR drop reconnect_streamed so a non-servable index read
-            // fails fast and the matroska demuxer falls back to linear
-            // playback from byte 0 (Cues are only needed to SEEK, not to
-            // start), and add multiple_requests=1 to reuse one HTTP/1.1
-            // connection across range GETs instead of churning a fresh proxy
-            // VOD session per range. Do NOT add reconnect_on_http_error: a
-            // genuine 500 should surface, not loop.
-            if isLive {
-                setOption(
-                    mpv,
-                    "stream-lavf-o",
-                    "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2"
-                )
-            } else {
-                setOption(
-                    mpv,
-                    "stream-lavf-o",
-                    "reconnect=1,reconnect_delay_max=2,multiple_requests=1"
-                )
-            }
+            // `stream-lavf-o=reconnect=...`: libavformat-level HTTP reconnect
+            // for mid-stream drops, faster recovery than burning the 5-second
+            // premature-end retry path. This is the proven 1.7.3 value applied
+            // to all streams. (An isLive-split variant was tried while chasing
+            // the Debug VOD/DVR wedge and reverted: that wedge was a render
+            // VO-config handshake bug, not a reconnect issue.)
+            setOption(
+                mpv,
+                "stream-lavf-o",
+                "reconnect=1,reconnect_streamed=1,reconnect_delay_max=2"
+            )
             // `network-timeout=30` — raised from 10s. The tighter
             // timeout triggered `tls: IO error: Operation timed out`
             // on a user's WAN route when their LAN probe hadn't
@@ -4283,13 +4263,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // scrub (the scrub UI settles the playhead onto the real
                 // landing position). Live keeps the default (it never seeks).
                 mpv_set_property_string(mpv, "hr-seek", "no")
-                // Serve small back-seeks (the demuxer's own moov/index
-                // re-reads and short scrub-backs) from the in-memory cache
-                // instead of re-hitting the Dispatcharr proxy with a fresh
-                // range GET. Fewer ranged requests against the proxy means
-                // fewer chances to trip the near-EOF range stall the
-                // stream-lavf-o split above guards against.
-                mpv_set_property_string(mpv, "demuxer-seekable-cache", "yes")
             }
 
             mpv_set_property_string(mpv, "framedrop", "decoder+vo")
@@ -5413,54 +5386,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             debugLog("[\(ts)] \(t) [MPV-PERF] vo_drops: +\(deltaVideoDrops), dec_drops: +\(deltaDecoderDrops), fps: estimated=\(String(format: "%.1f", estimatedFPS))/container=\(String(format: "%.1f", containerFPS))/display=\(String(format: "%.1f", displayFPS)), hwdec=\(hwdecCurrent)")
             debugLog("[\(ts)] \(t) [MPV-FRAME] render: \(String(format: "%.1f", avgRenderMs))ms avg / \(String(format: "%.1f", maxRenderMs))ms max, interval: \(String(format: "%.1f", avgInterval))ms avg [\(String(format: "%.1f", minInterval))-\(String(format: "%.1f", maxInterval))ms], jitter: \(String(format: "%.2f", jitterMs))ms, late: \(lateFrames)/\(frameCount), layer: \(layerStatus)")
             debugLog("[\(ts)] \(t) [MPV-CACHE] duration: \(String(format: "%.2f", cacheDuration))s, bytes: \(cacheBytes / 1024)KB, speed: \(String(format: "%.0f", cacheSpeed / 1024))KB/s, input_rate: \(String(format: "%.0f", demuxerInputBytesPerSec / 1024))KB/s, paused_for_cache: \(pausedForCache != 0)")
-            // v1.7.4 VOD-stall diagnostic (measure, don't guess). The
-            // "first frame then mpv stops reading" fingerprint (input_rate=0,
-            // paused_for_cache=false, isPlaying=true) is what mpv shows when
-            // the video-sync=audio MASTER CLOCK never starts, i.e. the audio
-            // output never opens. Read the clock/audio/seek state straight
-            // from mpv so one session is conclusive: current-ao empty or
-            // core-idle=1 while pause=0 => the audio unit never started (the
-            // audio-clock stall); vid=no => video was suppressed; seeking=1
-            // forever => a wedged seek. Cheap reads on this off-main path.
-            var diagCoreIdle: Int32 = -1
-            mpv_get_property(mpv, "core-idle", MPV_FORMAT_FLAG, &diagCoreIdle)
-            var diagPause: Int32 = -1
-            mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &diagPause)
-            var diagSeeking: Int32 = -1
-            mpv_get_property(mpv, "seeking", MPV_FORMAT_FLAG, &diagSeeking)
-            var diagDemuxIdle: Int32 = -1
-            mpv_get_property(mpv, "demuxer-cache-idle", MPV_FORMAT_FLAG, &diagDemuxIdle)
-            let diagAO = getMPVString(mpv, "current-ao") ?? "nil"
-            let diagAid = getMPVString(mpv, "aid") ?? "nil"
-            let diagAcodec = getMPVString(mpv, "audio-codec-name") ?? "nil"
-            let diagVid = getMPVString(mpv, "vid") ?? "nil"
-            debugLog("[\(ts)] \(t) [MPV-STALLDIAG] core-idle=\(diagCoreIdle) pause=\(diagPause) seeking=\(diagSeeking) demux-idle=\(diagDemuxIdle) current-ao=\(diagAO) aid=\(diagAid) acodec=\(diagAcodec) vid=\(diagVid)")
-            // v1.7.4 wedge localization: read the DEEPER state so the next log
-            // says definitively WHAT the restart is blocked on. vo-configured=0
-            // => mpv is waiting for OUR video output (render) to accept the
-            // config (a render-loop problem); seekable=0 / a stuck seek =>
-            // demuxer can't reach the target; eof=1 / idle-active=1 => mpv gave
-            // up; buffering/fw-bytes => cache state. All read-only.
-            var diagVoConfigured: Int32 = -1
-            mpv_get_property(mpv, "vo-configured", MPV_FORMAT_FLAG, &diagVoConfigured)
-            var diagSeekable: Int32 = -1
-            mpv_get_property(mpv, "seekable", MPV_FORMAT_FLAG, &diagSeekable)
-            var diagPartSeekable: Int32 = -1
-            mpv_get_property(mpv, "partially-seekable", MPV_FORMAT_FLAG, &diagPartSeekable)
-            var diagEof: Int32 = -1
-            mpv_get_property(mpv, "eof-reached", MPV_FORMAT_FLAG, &diagEof)
-            var diagIdleActive: Int32 = -1
-            mpv_get_property(mpv, "idle-active", MPV_FORMAT_FLAG, &diagIdleActive)
-            var diagBuffering: Int64 = -1
-            mpv_get_property(mpv, "cache-buffering-state", MPV_FORMAT_INT64, &diagBuffering)
-            var diagFwBytes: Int64 = -1
-            mpv_get_property(mpv, "demuxer-cache-state/fw-bytes", MPV_FORMAT_INT64, &diagFwBytes)
-            var diagDw: Int64 = 0; var diagDh: Int64 = 0
-            mpv_get_property(mpv, "dwidth", MPV_FORMAT_INT64, &diagDw)
-            mpv_get_property(mpv, "dheight", MPV_FORMAT_INT64, &diagDh)
-            let diagVo = getMPVString(mpv, "current-vo") ?? "nil"
-            let diagFormat = getMPVString(mpv, "file-format") ?? "nil"
-            debugLog("[\(ts)] \(t) [MPV-STALLDIAG2] vo-configured=\(diagVoConfigured) current-vo=\(diagVo) vo-size=\(diagDw)x\(diagDh) seekable=\(diagSeekable) part-seekable=\(diagPartSeekable) eof=\(diagEof) idle-active=\(diagIdleActive) buffering=\(diagBuffering) fw-bytes=\(diagFwBytes) fmt=\(diagFormat)")
             // v1.7.x Step 8: drop the video-pts read and the
             // self-computed `a-v` field. mpv's `avsync` property is
             // the canonical sync metric on this render path; see the
