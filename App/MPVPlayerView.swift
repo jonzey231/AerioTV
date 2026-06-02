@@ -5349,6 +5349,32 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let diagAcodec = getMPVString(mpv, "audio-codec-name") ?? "nil"
             let diagVid = getMPVString(mpv, "vid") ?? "nil"
             debugLog("[\(ts)] \(t) [MPV-STALLDIAG] core-idle=\(diagCoreIdle) pause=\(diagPause) seeking=\(diagSeeking) demux-idle=\(diagDemuxIdle) current-ao=\(diagAO) aid=\(diagAid) acodec=\(diagAcodec) vid=\(diagVid)")
+            // v1.7.4 wedge localization: read the DEEPER state so the next log
+            // says definitively WHAT the restart is blocked on. vo-configured=0
+            // => mpv is waiting for OUR video output (render) to accept the
+            // config (a render-loop problem); seekable=0 / a stuck seek =>
+            // demuxer can't reach the target; eof=1 / idle-active=1 => mpv gave
+            // up; buffering/fw-bytes => cache state. All read-only.
+            var diagVoConfigured: Int32 = -1
+            mpv_get_property(mpv, "vo-configured", MPV_FORMAT_FLAG, &diagVoConfigured)
+            var diagSeekable: Int32 = -1
+            mpv_get_property(mpv, "seekable", MPV_FORMAT_FLAG, &diagSeekable)
+            var diagPartSeekable: Int32 = -1
+            mpv_get_property(mpv, "partially-seekable", MPV_FORMAT_FLAG, &diagPartSeekable)
+            var diagEof: Int32 = -1
+            mpv_get_property(mpv, "eof-reached", MPV_FORMAT_FLAG, &diagEof)
+            var diagIdleActive: Int32 = -1
+            mpv_get_property(mpv, "idle-active", MPV_FORMAT_FLAG, &diagIdleActive)
+            var diagBuffering: Int64 = -1
+            mpv_get_property(mpv, "cache-buffering-state", MPV_FORMAT_INT64, &diagBuffering)
+            var diagFwBytes: Int64 = -1
+            mpv_get_property(mpv, "demuxer-cache-state/fw-bytes", MPV_FORMAT_INT64, &diagFwBytes)
+            var diagDw: Int64 = 0; var diagDh: Int64 = 0
+            mpv_get_property(mpv, "dwidth", MPV_FORMAT_INT64, &diagDw)
+            mpv_get_property(mpv, "dheight", MPV_FORMAT_INT64, &diagDh)
+            let diagVo = getMPVString(mpv, "current-vo") ?? "nil"
+            let diagFormat = getMPVString(mpv, "file-format") ?? "nil"
+            debugLog("[\(ts)] \(t) [MPV-STALLDIAG2] vo-configured=\(diagVoConfigured) current-vo=\(diagVo) vo-size=\(diagDw)x\(diagDh) seekable=\(diagSeekable) part-seekable=\(diagPartSeekable) eof=\(diagEof) idle-active=\(diagIdleActive) buffering=\(diagBuffering) fw-bytes=\(diagFwBytes) fmt=\(diagFormat)")
             // v1.7.x Step 8: drop the video-pts read and the
             // self-computed `a-v` field. mpv's `avsync` property is
             // the canonical sync metric on this render path; see the
