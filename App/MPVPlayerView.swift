@@ -1521,6 +1521,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var renderPending = false
         private var renderLock = os_unfair_lock()
 
+        // Render/VO-configuration handshake (Codex fix for the Debug-only
+        // VOD/DVR `vo-configured=0` wedge). The libmpv VO (vo=libmpv) only
+        // reaches "configured" once we actually call mpv_render_context_render
+        // against a valid FBO. For a sparse-callback non-live source, the old
+        // loop could consume the one update edge before the FBO existed and
+        // then bail forever on "no FRAME flag", so the VO never configured and
+        // playback-restart hung (seeking=1, current-ao=nil). These flags let us
+        // do ONE bounded config-commit render after each FBO (re)build even
+        // when no new frame is pending, then resume normal frame-gated
+        // rendering. Touched only on renderQueue.
+        private var renderTargetNeedsCommit = false   // set when an FBO is (re)built; cleared after the commit render
+        private var didCommitRenderTarget = false      // true once mpv_render_context_render has run against a valid FBO
+        private var didEnqueueFirstVideoFrame = false   // true once a real frame has been enqueued to the display layer
+
         // Stream info refresh timer (2s interval for volatile stats).
         // Runs on its own low-priority queue — NEVER on renderQueue (would block frame delivery).
         private var streamInfoTimer: DispatchSourceTimer?
@@ -2538,6 +2552,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let texNames = fboSlots.map { String(CVOpenGLESTextureGetName($0.texture)) }.joined(separator: ",")
             debugLog("[MPV-FBO] \(streamTag) created \(fboSlots.count)-deep pool \(width)x\(height) fbos=[\(fboIDs)] tex=[\(texNames)]\(rebuildSuffix)")
             #endif
+
+            // Codex VO-handshake fix: a freshly (re)built FBO needs ONE
+            // config-commit render so mpv's libmpv VO reconfigures to this
+            // target (vo-configured=1). Without an explicit kick, a
+            // sparse-callback non-live source can sit with the FBO built but
+            // never rendered, so the VO never configures and playback-restart
+            // hangs (the Debug-only seeking=1 wedge). Runs on renderQueue (same
+            // queue as setupFBO), and requestRender coalesces so it cannot
+            // double-dispatch or spin.
+            renderTargetNeedsCommit = true
+            requestRender(reason: "fbo")
         }
 
         /// Handle rotation/resize — creates or recreates the GL FBO.
@@ -2867,12 +2892,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     // fired at startup; mid-playback gaps were 10-33s
                     // after the last reconfig).
                     #if DEBUG
-                    var audioPts: Double = 0
-                    var avsyncProp: Double = 0
-                    if let mpv = activeMPVHandle() {
-                        mpv_get_property(mpv, "audio-pts", MPV_FORMAT_DOUBLE, &audioPts)
-                        mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsyncProp)
-                    }
+                    // CALLBACK-SAFETY (Codex fix): scheduleRender IS the libmpv
+                    // render-update callback. Calling normal libmpv API here
+                    // (mpv_get_property) violates the render-callback contract
+                    // and is a prime suspect for the Debug-only startup wedge,
+                    // so the audio-pts/avsync reads that used to live here were
+                    // removed. Only local state is read now; the audio/avsync
+                    // figures are still available on the stats path.
                     let sinceAudioReconfig: String
                     if lastAudioReconfigAt > 0 {
                         let deltaMs = (now - lastAudioReconfigAt) * 1000.0
@@ -2880,12 +2906,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     } else {
                         sinceAudioReconfig = "n/a"
                     }
-                    debugLog("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms \(severity) audio_pts=\(String(format: "%.3f", audioPts))s avsync=\(String(format: "%+.4f", avsyncProp))s(positive=video_behind, mpv-internal) since_audio_reconfig=\(sinceAudioReconfig) (libmpv internal stall — decoder/demuxer/render-context, not our render path)")
+                    debugLog("[MPV-CALLBACK-GAP] \(streamTag) update-callback silence: \(String(format: "%.0f", gapMs))ms \(severity) since_audio_reconfig=\(sinceAudioReconfig) (libmpv internal stall; render-callback-safe, no mpv property reads here)")
                     #endif
                 }
             }
             lastScheduleRenderTime = now
 
+            requestRender(reason: "callback")
+        }
+
+        /// Coalesced render request used by ALL render reasons (the libmpv
+        /// update callback, an FBO (re)build, and video reconfig). Codex fix:
+        /// one funnel so a setup/FBO kick and a callback render can't race or
+        /// double-dispatch. Safe to call from the render-update-callback thread
+        /// (touches only the local lock, then hops to renderQueue).
+        private func requestRender(reason: String) {
             os_unfair_lock_lock(&renderLock)
             let pending = renderPending
             renderPending = true
@@ -2894,7 +2929,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 coalescedFrameCount += 1
                 return
             }
-
             renderQueue.async { [weak self] in
                 self?.renderAndPresent()
             }
@@ -2953,7 +2987,28 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // this unifies the policy across the main path and the
             // watchdog path — both refuse to push when AVSBDL is
             // full.
-            if let renderer = sampleBufferLayer?.sampleBufferRenderer,
+            // Ask libmpv what needs doing. (Aerio fix on PR #14:
+            // MPV_RENDER_UPDATE_FRAME imports as a C enum, convert via
+            // `.rawValue` before the bitwise AND.) mpv_render_context_update
+            // is safe to call without the GL context current.
+            let updateFlags = mpv_render_context_update(mpvGL)
+            let hasFrame = (updateFlags & UInt64(MPV_RENDER_UPDATE_FRAME.rawValue)) != 0
+            // Codex VO-handshake fix: do ONE bounded config-commit render after
+            // each FBO (re)build even when no new frame is pending, so mpv's
+            // libmpv VO reaches vo-configured=1 and playback-restart can finish
+            // (this is the Debug-only seeking=1 / current-ao=nil wedge). After
+            // the commit lands, render only when a real frame is pending.
+            let shouldCommitTarget = renderTargetNeedsCommit || !didCommitRenderTarget
+            guard hasFrame || shouldCommitTarget else { return }
+
+            // Backpressure: rate-limit only STEADY-STATE frame renders (mpv's
+            // videotoolbox-copy decoder can outrun AVSBDL on high-bitrate
+            // streams; skipping the whole render pass lets framedrop=vo
+            // rate-limit the upstream pipeline, per the block comment above).
+            // A config-commit render (and therefore the very first frame) must
+            // NOT be skipped on backpressure, or the VO never configures.
+            if hasFrame && !shouldCommitTarget,
+               let renderer = sampleBufferLayer?.sampleBufferRenderer,
                !renderer.isReadyForMoreMediaData {
                 backpressureSkipCount &+= 1
                 return
@@ -2963,15 +3018,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let h = fboHeight
             guard w > 0, h > 0 else { return }
 
-            // v1.7.x Step 5: advance the ring cursor and pick the
-            // next slot. mpv writes to slot[renderBufferIndex],
-            // we hand THAT slot's pixel buffer to AVSBDL. By the
-            // time the cursor wraps back to this slot (after two
-            // other slots have been written + handed off), AVSBDL
-            // has long since composed the previous reference and
-            // released it. No producer/consumer race on the
-            // IOSurface — the bug Steps 3a/3b/4a were trying to
-            // mask is gone at the source.
+            // v1.7.x Step 5: advance the ring cursor and pick the next slot.
+            // mpv writes to slot[renderBufferIndex], we hand THAT slot's pixel
+            // buffer to AVSBDL. By the time the cursor wraps back here, AVSBDL
+            // has composed and released the previous reference, so no
+            // producer/consumer race on the IOSurface.
             renderBufferIndex = (renderBufferIndex + 1) % fboSlots.count
             let renderPixelBuffer = fboSlots[renderBufferIndex].pixelBuffer
             let fbo = fboSlots[renderBufferIndex].fbo
@@ -2982,14 +3033,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // Make our GL context current on the render thread
             EAGLContext.setCurrent(eaglContext)
-
-            // The update callback can fire for redraw/config changes too. Ask
-            // libmpv what actually needs doing and skip no-op wakeups.
-            // (Aerio fix on PR #14: `MPV_RENDER_UPDATE_FRAME` imports as a
-            // C `mpv_render_update_flag` enum, not a numeric — convert via
-            // `.rawValue` before the bitwise AND with the UInt64 mask.)
-            let updateFlags = mpv_render_context_update(mpvGL)
-            guard (updateFlags & UInt64(MPV_RENDER_UPDATE_FRAME.rawValue)) != 0 else { return }
 
             // Tell mpv to render into our FBO (GPU handles color conversion, scaling, OSD).
             // withUnsafeMutablePointer ensures the data pointers outlive the render call.
@@ -3012,6 +3055,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // Flush GPU work (non-blocking — just ensures commands are submitted)
             glFlush()
+
+            // Codex VO-handshake fix: this mpv_render_context_render call has
+            // now configured the libmpv VO against a valid FBO. Mark it so we
+            // do the config-commit exactly once per FBO (re)build.
+            renderTargetNeedsCommit = false
+            didCommitRenderTarget = true
+            // If this was a config-only commit (no new frame was pending), do
+            // NOT build/enqueue a CMSampleBuffer from the (stale) FBO contents.
+            // Just return; mpv can now start playback and the next update
+            // callback delivers the first real frame to render + enqueue.
+            if !hasFrame { return }
 
             let renderEnd = CACurrentMediaTime()
             let renderMs = (renderEnd - renderStart) * 1000.0
@@ -3132,7 +3186,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // both classes; the surround check below is what
             // protects legitimate dark content. See block comment
             // above the state declarations for the full rationale.
+            // Codex fix: never suppress before a real frame has been enqueued.
+            // The surround check (prevLuma > 25) starts at the 128 placeholder,
+            // so without this gate the very FIRST frame can be mistaken for a
+            // black flash and dropped, leaving the player black after the
+            // handshake fix lets the first frame through.
             let isSuspectBlackFrame = probeValid
+                && lastEnqueueTime > 0
                 && blackProbe.avg < 10.0
                 && blackProbe.std < 8.0
                 && blackFramePrevAvgLuma > 25.0
@@ -3195,6 +3255,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 nonisolated(unsafe) let sb = sampleBuffer
                 sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
                 enqueued = true
+                didEnqueueFirstVideoFrame = true   // Codex handshake fix: a real frame has now been presented
                 // v1.7.x Issue A round 4: cache the latest enqueued
                 // buffer for the IOSurface re-attach watchdog. Stored
                 // under watchdogLock so the main-thread display-link
@@ -4716,6 +4777,31 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             debugLog("[MPV-RECONFIG] \(streamTag) #\(videoReconfigCount) gap=\(gap) size=\(w)x\(h) pixfmt=\(pixfmt) colormatrix=\(colormatrix) codec=\(videoCodec) hwdec=\(hwdec) fbo=\(fboState) decoderErr_since_last: pps=\(ppsErrorWindow) nalu=\(naluErrorWindow) vt_null=\(vtNullBufferWindow) hwdec_err=\(hwdecErrorWindow)")
             #endif
+
+            // Codex VO-handshake fix: build the native-size FBO HERE on
+            // video-reconfig, not only on PLAYBACK_RESTART. For a non-live
+            // source the restart can never arrive while the VO is still
+            // unconfigured (vo-configured=0), so as soon as the decoded size is
+            // known we (re)build + commit the render target. handleResize is
+            // main-only (it reads @MainActor MultiviewStore) and dispatches
+            // setupFBO -> requestRender on renderQueue, which runs the
+            // config-commit render that lets mpv finish the restart. Mirrors
+            // the PLAYBACK_RESTART resize so the two paths agree (dwidth/dheight,
+            // falling back to the video-params w/h already read above).
+            var dw: Int64 = 0; var dh: Int64 = 0
+            mpv_get_property(mpv, "dwidth", MPV_FORMAT_INT64, &dw)
+            mpv_get_property(mpv, "dheight", MPV_FORMAT_INT64, &dh)
+            if dw <= 0 || dh <= 0 { dw = w; dh = h }
+            if dw > 0, dh > 0, (Int(dw) != videoNativeWidth || Int(dh) != videoNativeHeight) {
+                videoNativeWidth = Int(dw)
+                videoNativeHeight = Int(dh)
+                let curW = renderWidth
+                let curH = renderHeight
+                renderWidth = 0; renderHeight = 0   // force handleResize past its no-op guard
+                DispatchQueue.main.async { [weak self] in
+                    self?.handleResize(size: CGSize(width: curW, height: curH))
+                }
+            }
 
             // Reset per-window counters. Cumulative totals stay.
             ppsErrorWindow = 0
