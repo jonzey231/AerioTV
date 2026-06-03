@@ -1445,6 +1445,21 @@ struct MultiviewTileButtonStyle: ButtonStyle {
         let s = shadowSpec
         return configuration.label
             .clipShape(shape)
+            // Focused-tile border highlight (tvOS). The 1.015 scale plus
+            // soft shadow alone read as too subtle while D-pad-navigating
+            // a grid (user feedback), so a clear accent border marks the
+            // focused tile. Gated on isChromeVisible exactly like the lift
+            // above, so the grid still sits flush and borderless when the
+            // user is just watching rather than navigating. The relocating
+            // tile keeps its amber treatment from the tile body overlay.
+            .overlay(
+                shape
+                    .strokeBorder(ThemeManager.shared.accent, lineWidth: 5)
+                    .opacity(isFocused && isChromeVisible && !isRelocating ? 1 : 0)
+                    .allowsHitTesting(false)
+                    .animation(.easeInOut(duration: 0.18), value: isFocused)
+                    .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
+            )
             .scaleEffect(scale)
             .shadow(color: s.color, radius: s.radius, y: s.y)
             .opacity(configuration.isPressed ? 0.85 : 1.0)
