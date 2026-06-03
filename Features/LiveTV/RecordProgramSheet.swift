@@ -60,6 +60,33 @@ struct RecordProgramSheet: View {
         activeServer?.type == .dispatcharrAPI
     }
 
+    /// Whether the connected Dispatcharr account may record to the
+    /// server (POST /api/channels/recordings/ requires IsAdmin =
+    /// user_level >= 10). A Standard / Streamer account gets HTTP 403,
+    /// so we hide the "Dispatcharr server" destination and force local.
+    /// Non-Dispatcharr servers report `true` (they never touch this
+    /// endpoint). Defaults to `true` when there's no active server.
+    private var canRecordToServer: Bool {
+        activeServer?.dispatcharrCanRecordToServer ?? true
+    }
+
+    /// True when this sheet can't produce any recording for the
+    /// connected account, so the Record button must be disabled /
+    /// hidden and an explainer shown. Two cases:
+    ///   1. Future program on a non-Dispatcharr playlist (the existing
+    ///      case; AerioTV can't auto-start a future local recording).
+    ///   2. Future program on a Dispatcharr server where the user
+    ///      isn't an admin (server scheduling 403s, and a future local
+    ///      recording can't auto-start either).
+    /// Live programs always have a path (local recording starts
+    /// immediately while foregrounded), so this is never true for
+    /// `isLive`.
+    private var hasNoRecordingPath: Bool {
+        guard !isLive else { return false }
+        if !isDispatcharr { return true }
+        return !canRecordToServer
+    }
+
     var body: some View {
         NavigationStack {
             #if os(tvOS)
@@ -87,7 +114,16 @@ struct RecordProgramSheet: View {
             // because the recording starts immediately while the
             // app is foregrounded.
             if isLive {
-                destination = activeServer?.defaultRecordingDestination ?? .local
+                // v1.7.x: a non-admin Dispatcharr account can't record
+                // to the server (403), so force local for live programs
+                // (the only valid path) and the picker hides the server
+                // option. canRecordToServer is true for non-Dispatcharr
+                // and admin servers, so their default is unchanged.
+                if !canRecordToServer {
+                    destination = .local
+                } else {
+                    destination = activeServer?.defaultRecordingDestination ?? .local
+                }
             } else {
                 destination = .dispatcharrServer
             }
@@ -147,7 +183,11 @@ struct RecordProgramSheet: View {
             // `.onAppear` above) because AerioTV can't auto-start a
             // local recording at a scheduled future time, so we
             // never offer the choice in the first place. v1.6.22.
-            if isDispatcharr && isLive {
+            // v1.7.x: also hidden when the account can't record to the
+            // server (Standard / Streamer); only local is valid then,
+            // so there's no choice to present and destination is
+            // already forced to `.local` in `.onAppear`.
+            if isDispatcharr && isLive && canRecordToServer {
                 Section {
                     Picker("Record to", selection: $destination) {
                         Text("Dispatcharr server").tag(RecordingDestination.dispatcharrServer)
@@ -215,6 +255,26 @@ struct RecordProgramSheet: View {
                 }
             }
 
+            // v1.7.x: future program on a Dispatcharr server where the
+            // connected account isn't an admin. Server scheduling 403s
+            // and a future local recording can't auto-start, so there's
+            // no path. Explain it instead of letting Record fail.
+            if !isLive && isDispatcharr && !canRecordToServer {
+                Section {
+                    Label {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Recording requires a Dispatcharr admin account")
+                                .font(.footnote.bold())
+                            Text("Scheduling a recording on the Dispatcharr server needs an admin account. Your account can watch and record live programs to this device, but not schedule server recordings. Ask your Dispatcharr administrator for access, or wait until the program is airing to record it on this device.")
+                                .font(.footnote)
+                        }
+                    } icon: {
+                        Image(systemName: "lock.fill")
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+
             if destination == .local && coordinator.isApproachingQuotaLimit {
                 Section {
                     Label {
@@ -236,9 +296,10 @@ struct RecordProgramSheet: View {
                     .foregroundColor(.red)
                     // Disabled when there's no recording path
                     // available: future program + non-Dispatcharr
-                    // playlist. The orange info section above tells
-                    // the user why.
-                    .disabled(!isLive && !isDispatcharr)
+                    // playlist, or future program on a Dispatcharr
+                    // server the account can't write to (non-admin).
+                    // The orange info section above tells the user why.
+                    .disabled(hasNoRecordingPath)
             }
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel") { dismiss() }
@@ -296,7 +357,10 @@ struct RecordProgramSheet: View {
                     // still shown for any Dispatcharr context; it
                     // disables itself with an explainer when
                     // destination == .local. v1.6.22 (Codex finding 1).
-                    if isDispatcharr && isLive {
+                    // v1.7.x: destination choice also requires admin
+                    // (a non-admin account is forced to local in
+                    // `.onAppear`, so there's nothing to choose).
+                    if isDispatcharr && isLive && canRecordToServer {
                         destinationRow
                     }
                     if isDispatcharr {
@@ -305,6 +369,14 @@ struct RecordProgramSheet: View {
 
                     if destination == .local {
                         warningsBox
+                    }
+
+                    // v1.7.x: explain the no-path case (future program
+                    // on a Dispatcharr server the account can't write
+                    // to). Mirrors the iOS orange info section; the
+                    // Record pill is also hidden below.
+                    if hasNoRecordingPath && isDispatcharr {
+                        adminRequiredBox
                     }
                 }
                 .padding(.horizontal, 80)
@@ -322,11 +394,12 @@ struct RecordProgramSheet: View {
                     tintColor: .textSecondary,
                     action: { dismiss() }
                 )
-                // No-recording-path case: future program on a
-                // non-Dispatcharr playlist. The orange info card
-                // above explains; hide Record so the user can't
-                // tap into a no-op.
-                if isLive || isDispatcharr {
+                // No-recording-path cases: future program on a
+                // non-Dispatcharr playlist, or future program on a
+                // Dispatcharr server the account can't write to
+                // (non-admin). The info card above explains; hide
+                // Record so the user can't tap into a no-op / 403.
+                if !hasNoRecordingPath {
                     RecordActionPill(
                         label: "Record",
                         systemImage: "record.circle",
@@ -461,6 +534,30 @@ struct RecordProgramSheet: View {
         }
     }
 
+    /// tvOS explainer for the no-path case (future program on a
+    /// Dispatcharr server the connected account can't write to).
+    /// Mirrors the iOS orange info section; the Record pill is hidden
+    /// alongside it. Worded to point the user at local live recording
+    /// or an admin account.
+    private var adminRequiredBox: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Recording requires a Dispatcharr admin account")
+                        .font(.system(size: 22, weight: .bold))
+                    Text("Scheduling a recording on the Dispatcharr server needs an admin account. Your account can watch and record live programs to this device, but not schedule server recordings. Ask your Dispatcharr administrator for access, or wait until the program is airing to record it on this device.")
+                        .font(.system(size: 20))
+                }
+            } icon: {
+                Image(systemName: "lock.fill")
+                    .foregroundColor(.orange)
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.elevatedBackground, in: RoundedRectangle(cornerRadius: 16))
+    }
+
     private var warningsBox: some View {
         VStack(alignment: .leading, spacing: 12) {
             Label {
@@ -560,6 +657,26 @@ struct RecordProgramSheet: View {
     // MARK: - Schedule
 
     private func scheduleRecording() {
+        // v1.7.x: belt-and-suspenders for the admin gate. The UI
+        // hides/disables Record for the no-path case and forces local
+        // for live programs on non-admin Dispatcharr accounts, but if
+        // any future caller bypasses that, never insert a server
+        // recording the account can't create (it would 403). For a
+        // live program, fall back to local (always valid while
+        // foregrounded); for a future program there's no valid path,
+        // so bail without inserting a stuck row.
+        if !canRecordToServer {
+            if isLive {
+                if destination != .local {
+                    debugLog("RecordProgramSheet: account cannot record to server; coercing live recording to .local")
+                }
+            } else {
+                debugLog("RecordProgramSheet: account cannot record to server and program is future; aborting (no valid recording path)")
+                dismiss()
+                return
+            }
+        }
+
         // v1.6.22 (Codex finding 1): belt-and-suspenders. The UI
         // already prevents this combination (the destination picker
         // is hidden for `!isLive`, and `.onAppear` forces destination
@@ -568,7 +685,11 @@ struct RecordProgramSheet: View {
         // a `.scheduled` local row that can never start. Coerce here
         // so the SwiftData state is always coherent.
         let effectiveDestination: RecordingDestination
-        if !isLive && destination == .local {
+        if !canRecordToServer && isLive {
+            // Live program, non-admin account: local is the only valid
+            // path. Overrides any stale `.dispatcharrServer` selection.
+            effectiveDestination = .local
+        } else if !isLive && destination == .local {
             debugLog("⚠️ RecordProgramSheet: future + local is unsupported; coercing destination to .dispatcharrServer")
             effectiveDestination = .dispatcharrServer
         } else {

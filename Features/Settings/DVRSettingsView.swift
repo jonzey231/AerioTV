@@ -42,6 +42,17 @@ struct DVRSettingsView: View {
         activeServer?.type == .dispatcharrAPI
     }
 
+    /// v1.7.x: whether the active Dispatcharr account may record to the
+    /// server (IsAdmin, user_level >= 10). When false (Standard /
+    /// Streamer), the server-side recording destination is hidden
+    /// because every server recording would 403; local recording (this
+    /// device, while foregrounded) is the only path and needs no
+    /// destination choice. True for non-Dispatcharr and admin servers,
+    /// so their UI is unchanged.
+    private var canRecordToServer: Bool {
+        activeServer?.dispatcharrCanRecordToServer ?? true
+    }
+
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
@@ -108,7 +119,10 @@ struct DVRSettingsView: View {
             .listRowBackground(Color.cardBackground)
 
             // MARK: - Default Destination (Dispatcharr only)
-            if isDispatcharr, let server = activeServer {
+            // v1.7.x: hidden for non-admin Dispatcharr accounts. They
+            // can't record to the server, so local is the only path and
+            // there's no destination choice to present.
+            if isDispatcharr, canRecordToServer, let server = activeServer {
                 Section {
                     Picker("Default destination", selection: Binding(
                         get: { server.defaultRecordingDestination },
@@ -189,7 +203,11 @@ struct DVRSettingsView: View {
             .listRowBackground(Color.cardBackground)
 
             // MARK: - Recordings folder
-            if !isDispatcharr || activeServer?.defaultRecordingDestination != .dispatcharrServer {
+            // v1.7.x: also shown when the account can't record to the
+            // server (non-admin); recordings then go local regardless
+            // of the stored default destination, so the local folder is
+            // relevant.
+            if !isDispatcharr || !canRecordToServer || activeServer?.defaultRecordingDestination != .dispatcharrServer {
                 Section {
                     HStack {
                         Text("Recordings folder")
@@ -283,7 +301,7 @@ struct DVRSettingsView: View {
                     )
                 }
 
-                if isDispatcharr, let server = activeServer {
+                if isDispatcharr, canRecordToServer, let server = activeServer {
                     tvSection("Recording Destination") {
                         TVSettingsSelectionRow(
                             icon: "server.rack",

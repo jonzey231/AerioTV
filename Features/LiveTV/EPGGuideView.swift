@@ -3340,6 +3340,24 @@ private struct GuideProgramButton: View {
         prog.end > Date()
     }
 
+    /// v1.7.x: whether to offer a Record action for this program given
+    /// the connected account's permission tier. A future program can
+    /// only be recorded on the Dispatcharr server (POST
+    /// /api/channels/recordings/, IsAdmin-only), so when the active
+    /// Dispatcharr account isn't an admin we hide Record for future
+    /// programs (it would 403 with no fallback; AerioTV can't
+    /// auto-start a future local recording). Live programs always keep
+    /// Record because the sheet falls back to local recording, which
+    /// any account can do while the app is foregrounded.
+    /// `dispatcharrCanRecordToServer` is true for non-Dispatcharr and
+    /// admin servers, so their behavior is unchanged.
+    private var canOfferRecord: Bool {
+        guard isRecordable else { return false }
+        if prog.isLive { return true }
+        let canServer = ChannelStore.shared.activeServer?.dispatcharrCanRecordToServer ?? true
+        return canServer
+    }
+
     /// Unified sheet/cover driver for the program cell. Replaces the
     /// previous `showRecordSheet: Bool` + `programInfoTarget:
     /// ProgramInfoTarget?` pair of separate `.sheet` modifiers.
@@ -3453,7 +3471,7 @@ private struct GuideProgramButton: View {
                         )
                     )
                 }
-                if isRecordable {
+                if canOfferRecord {
                     Button(prog.isLive ? "Record from Now" : "Record") {
                         activeSheet = .record
                     }
@@ -3651,7 +3669,7 @@ private struct GuideProgramButton: View {
                         )
                     }
                 }
-                if isRecordable {
+                if canOfferRecord {
                     guidePopoverActionButton(
                         title: prog.isLive ? "Record from Now" : "Record",
                         systemImage: "record.circle",

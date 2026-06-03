@@ -60,6 +60,15 @@ struct DispatcharrUser: Decodable {
     let apiKey: String
     let isStaff: Bool
     let isSuperuser: Bool
+    /// Dispatcharr permission tier: Streamer = 0, Standard = 1,
+    /// Admin = 10. Server-side write endpoints (POST
+    /// /api/channels/recordings/, the DVR-on-server flow) require
+    /// IsAdmin, i.e. user_level >= 10; a Standard user can connect and
+    /// view fine but gets HTTP 403 on those writes. Decodes
+    /// permissively: older Dispatcharr builds (and any payload that
+    /// omits the field) default to 0 so a missing key never fails the
+    /// whole users/me decode. Capture-and-gate happens at the call
+    /// sites, not here.
     let userLevel: Int
 
     private enum CodingKeys: String, CodingKey {
@@ -69,6 +78,18 @@ struct DispatcharrUser: Decodable {
         case isStaff     = "is_staff"
         case isSuperuser = "is_superuser"
         case userLevel   = "user_level"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        username = try c.decode(String.self, forKey: .username)
+        apiKey = try c.decode(String.self, forKey: .apiKey)
+        isStaff = try c.decode(Bool.self, forKey: .isStaff)
+        isSuperuser = try c.decode(Bool.self, forKey: .isSuperuser)
+        // Default to 0 (lowest privilege) when absent so older
+        // Dispatcharr builds that predate the field still decode.
+        userLevel = (try? c.decodeIfPresent(Int.self, forKey: .userLevel)) ?? 0
     }
 }
 

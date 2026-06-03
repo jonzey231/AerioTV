@@ -2356,8 +2356,20 @@ struct ChannelRow: View {
                         }
                         if let end = entry.endTime, end > Date() {
                             let isLive = (entry.startTime ?? Date()) <= Date()
-                            Button(isLive ? "Record from Now" : "Record") {
-                                activeSheet = .record(entry)
+                            // v1.7.x: a future program can only be
+                            // recorded on the Dispatcharr server
+                            // (IsAdmin-only). Hide Record for future
+                            // programs when the active account isn't an
+                            // admin (it would 403, with no local
+                            // fallback for a future recording). Live
+                            // recordings keep the button; the sheet
+                            // falls back to local for any account.
+                            let canOfferRecord = isLive
+                                || (ChannelStore.shared.activeServer?.dispatcharrCanRecordToServer ?? true)
+                            if canOfferRecord {
+                                Button(isLive ? "Record from Now" : "Record") {
+                                    activeSheet = .record(entry)
+                                }
                             }
                         }
                         if let start = entry.startTime, start > Date() {

@@ -1662,6 +1662,14 @@ struct RootView: View {
                     if !remote.dispatcharrCredentialTypeRaw.isEmpty {
                         local.dispatcharrCredentialTypeRaw = remote.dispatcharrCredentialTypeRaw
                     }
+                    // v1.7.x: adopt the connected user's permission tier
+                    // so the server-side Record / DVR affordances gate
+                    // consistently across devices. deserialize defaults
+                    // an absent value to 10 (admin), so a legacy sender
+                    // (no key) or an admin server leaves the local field
+                    // at the recording-capable default; only a positively
+                    // synced sub-10 value restricts.
+                    local.dispatcharrUserLevel = remote.dispatcharrUserLevel
                     // Queue credential writes for after the merge
                     if !remote.password.isEmpty {
                         pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))
@@ -1707,6 +1715,11 @@ struct RootView: View {
                 // remote value falls through to "" which resolves to
                 // `.apiKey` (the legacy default).
                 newServer.dispatcharrCredentialTypeRaw = remote.dispatcharrCredentialTypeRaw
+                // v1.7.x: inherit the connected user's permission tier so
+                // the server-side Record / DVR affordances gate the same
+                // way on this device. Absent in the payload defaults to
+                // 10 (admin = recording-capable) via deserialize.
+                newServer.dispatcharrUserLevel = remote.dispatcharrUserLevel
                 // Queue credential writes for after the merge
                 if !remote.password.isEmpty {
                     pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))

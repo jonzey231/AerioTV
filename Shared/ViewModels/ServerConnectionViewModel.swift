@@ -62,6 +62,18 @@ final class ServerConnectionViewModel {
     /// stay connected after the initial discovery.
     var discoveredDispatcharrAuthMode: DispatcharrAuthHeaderMode? = nil
 
+    /// v1.7.x: the connected Dispatcharr user's permission tier
+    /// (`user_level`) discovered during Test Connection by fetching
+    /// `/api/accounts/users/me/`. Mirrors the
+    /// `discoveredDispatcharrAuthMode` capture-then-persist pattern:
+    /// `buildServerConnection()` writes it onto the new
+    /// `ServerConnection.dispatcharrUserLevel`. Defaults to 10 (admin)
+    /// so if we never positively learn a lower level (non-Dispatcharr
+    /// server, or a users/me fetch that fails), the server stays
+    /// recording-capable. Used only to gate the server-side Record /
+    /// DVR affordances; viewing and local recording are unaffected.
+    var discoveredUserLevel: Int = 10
+
     var isFormValid: Bool {
         validationErrors().isEmpty
     }
@@ -191,6 +203,7 @@ final class ServerConnectionViewModel {
         verificationSuccess = false
         verifiedServerName = nil
         discoveredDispatcharrAuthMode = nil
+        discoveredUserLevel = 10
 
         // Silent one-shot retry. Some reverse-proxy / LB setups (Cloudflare
         // Tunnel, Traefik with cold upstreams, nginx with slow_start) return
@@ -290,6 +303,23 @@ final class ServerConnectionViewModel {
                     }
                     self.discoveredDispatcharrAuthMode = info.discoveredAuthMode
                     self.verificationSuccess = true
+
+                    // Best-effort: the api_key works for /users/me/, so
+                    // fetch the user to learn the permission tier and gate
+                    // the server-side Record / DVR affordances. Use the
+                    // discovered header shape so we speak whatever the
+                    // server accepts. Any failure here is non-fatal: the
+                    // connection is already verified, so we leave
+                    // discoveredUserLevel at its default (10 = admin) and
+                    // simply don't restrict recording.
+                    let userAPI = DispatcharrAPI(
+                        baseURL: url,
+                        auth: .apiKey(self.apiKey),
+                        authMode: info.discoveredAuthMode ?? .xapikey
+                    )
+                    if let user = try? await userAPI.fetchCurrentUser() {
+                        self.discoveredUserLevel = user.userLevel
+                    }
                 }
 
             case .usernamePassword:
@@ -330,6 +360,10 @@ final class ServerConnectionViewModel {
                     let bearerAPI = DispatcharrAPI(baseURL: url, auth: .bearer(pair.access))
                     let user = try await bearerAPI.fetchCurrentUser()
                     self.apiKey = user.apiKey
+                    // Capture the permission tier so Save can persist it
+                    // and the server-side Record / DVR affordances can be
+                    // gated. Streamer = 0, Standard = 1, Admin = 10.
+                    self.discoveredUserLevel = user.userLevel
 
                     // Now run the standard API-key verify so we get the
                     // same `discoveredDispatcharrAuthMode` discovery the
@@ -475,6 +509,19 @@ final class ServerConnectionViewModel {
         if let mode = discoveredDispatcharrAuthMode {
             server.dispatcharrAuthMode = mode.rawValue
         }
+        // v1.7.x: persist the connected Dispatcharr user's permission
+        // tier (captured from /users/me/ during verify, in BOTH the
+        // api-key and username/password modes). Only meaningful for
+        // Dispatcharr servers; leaving the model default (10 = admin)
+        // for everything else keeps non-Dispatcharr servers and
+        // pre-capture connections recording-capable. The server-side
+        // Record / DVR affordances gate on dispatcharrCanRecordToServer
+        // (level >= 10). discoveredUserLevel is itself 10 by default,
+        // so when verify never learned a level (e.g. a users/me fetch
+        // that failed), we write 10 and don't restrict recording.
+        if serverType == .dispatcharrAPI {
+            server.dispatcharrUserLevel = discoveredUserLevel
+        }
         // v1.7 Direct Connect: persist the credential type on the
         // SwiftData record. For `.apiKey` we leave the raw value at
         // the model default ("") so legacy clients (older AerioTV
@@ -516,6 +563,7 @@ final class ServerConnectionViewModel {
         verificationError = nil
         verifiedServerName = nil
         discoveredDispatcharrAuthMode = nil
+        discoveredUserLevel = 10
         // v1.7.x: matches the property default above. Back-button
         // out of the Configure screen and re-entering should land
         // on the same Direct Connect username + password starting

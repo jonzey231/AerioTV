@@ -203,6 +203,21 @@ final class ServerConnection {
     /// Possible values: `""` (= apiKey), `"api_key"`, `"username_password"`.
     var dispatcharrCredentialTypeRaw: String = ""
 
+    /// v1.7.x: the connected Dispatcharr user's permission tier
+    /// (Streamer = 0, Standard = 1, Admin = 10), captured from
+    /// `/api/accounts/users/me/` (`user_level`) at Test Connection /
+    /// Save. Used only to gate the server-side Record / DVR
+    /// affordances (POST /api/channels/recordings/ requires IsAdmin =
+    /// level 10; a Standard user gets HTTP 403). Viewing and local
+    /// recording are unaffected.
+    ///
+    /// Defaults to `10` (admin) so back-compat servers (added before
+    /// this field existed, synced from older AerioTV builds, or any
+    /// non-Dispatcharr server) are treated as recording-capable and
+    /// keep DVR. We only restrict when we positively learn the level
+    /// is below 10 during a connect/verify.
+    var dispatcharrUserLevel: Int = 10
+
     init(
         name: String,
         type: ServerType,
@@ -323,6 +338,19 @@ final class ServerConnection {
     /// resolves to `.apiKey` so legacy behaviour is preserved.
     var dispatcharrCredentialType: DispatcharrCredentialType {
         DispatcharrCredentialType(rawValue: dispatcharrCredentialTypeRaw) ?? .apiKey
+    }
+
+    /// Whether this server can accept server-side (Dispatcharr DVR)
+    /// recordings for the connected account. Only Dispatcharr servers
+    /// are gated: POST /api/channels/recordings/ requires IsAdmin
+    /// (`user_level` >= 10), so a Standard user (level 1) would hit
+    /// HTTP 403. Non-Dispatcharr servers return `true` (they never
+    /// touch this endpoint; their recordings always go local). The
+    /// `dispatcharrUserLevel` default of 10 keeps back-compat /
+    /// pre-capture servers recording-capable. Local recording is NOT
+    /// gated by this and stays available to everyone.
+    var dispatcharrCanRecordToServer: Bool {
+        type != .dispatcharrAPI || dispatcharrUserLevel >= 10
     }
 
     /// Auth headers for API requests. Dispatcharr servers honor the

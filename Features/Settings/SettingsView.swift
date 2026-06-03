@@ -2043,6 +2043,23 @@ struct ServerDetailView: View {
                     // shape without waiting for the next debounce.
                     SyncManager.shared.pushServers(servers, immediate: true)
                 }
+                // v1.7.x: refresh the connected user's permission tier
+                // so the server-side Record / DVR affordances stay
+                // accurate if the account was promoted/demoted in
+                // Dispatcharr since it was first saved. Best-effort: a
+                // failed users/me fetch leaves the stored level
+                // unchanged. Re-fetch with the (possibly newly)
+                // discovered header shape.
+                let levelAPI = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                              auth: .apiKey(server.effectiveApiKey),
+                                              userAgent: server.effectiveUserAgent,
+                                              authMode: info.discoveredAuthMode ?? server.dispatcharrHeaderMode)
+                if let user = try? await levelAPI.fetchCurrentUser(),
+                   user.userLevel != server.dispatcharrUserLevel {
+                    server.dispatcharrUserLevel = user.userLevel
+                    debugLog("SettingsView Test Connection: persisting user_level \(user.userLevel) for \(server.name)")
+                    SyncManager.shared.pushServers(servers, immediate: true)
+                }
             case .m3uPlaylist:
                 guard let url = URL(string: server.baseURL) else { throw APIError.invalidURL }
                 let (_, response) = try await URLSession.shared.data(from: url)

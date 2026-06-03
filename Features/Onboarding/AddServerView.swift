@@ -899,20 +899,31 @@ struct AddServerView: View {
             AppTextField("Device Name", placeholder: DeviceInfo.modelName,
                          text: $deviceNickname, icon: "iphone")
 
-            Divider().padding(.vertical, 8)
+            // v1.7.x: only offer the recording-destination choice when
+            // the connected account is a Dispatcharr admin (user_level
+            // >= 10). A Standard / Streamer account can't create server
+            // recordings (POST /api/channels/recordings/ 403s), so the
+            // server destination would be a dead end. discoveredUserLevel
+            // is captured during Test Connection, which has already
+            // succeeded by the time this section renders. It defaults to
+            // 10 (admin), so admins and any case where the level wasn't
+            // learned keep the picker.
+            if viewModel.discoveredUserLevel >= 10 {
+                Divider().padding(.vertical, 8)
 
-            Text("Default Recording Destination")
-                .font(.headline)
-                .foregroundColor(.textPrimary)
-            Text("Where should recordings be saved by default? Server-side is recommended — recordings continue even when AerioTV is closed.")
-                .font(.subheadline)
-                .foregroundColor(.textSecondary)
+                Text("Default Recording Destination")
+                    .font(.headline)
+                    .foregroundColor(.textPrimary)
+                Text("Where should recordings be saved by default? Server-side is recommended. Recordings continue even when AerioTV is closed.")
+                    .font(.subheadline)
+                    .foregroundColor(.textSecondary)
 
-            Picker("Destination", selection: $dvrDestination) {
-                Text("Dispatcharr server (recommended)").tag(RecordingDestination.dispatcharrServer)
-                Text("This device").tag(RecordingDestination.local)
+                Picker("Destination", selection: $dvrDestination) {
+                    Text("Dispatcharr server (recommended)").tag(RecordingDestination.dispatcharrServer)
+                    Text("This device").tag(RecordingDestination.local)
+                }
+                .pickerStyle(.segmented)
             }
-            .pickerStyle(.segmented)
         }
         .padding(16)
         .background(Color.cardBackground.cornerRadius(12))
@@ -928,7 +939,12 @@ struct AddServerView: View {
         server.lastConnected = Date()
         // Dispatcharr onboarding extras
         if server.type == .dispatcharrAPI {
-            server.defaultRecordingDestination = dvrDestination
+            // v1.7.x: a non-admin account can't record to the server, so
+            // store local as the default regardless of the (hidden)
+            // picker's state. buildServerConnection() already persisted
+            // the captured user_level onto `server`, so use the model's
+            // own gate here.
+            server.defaultRecordingDestination = server.dispatcharrCanRecordToServer ? dvrDestination : .local
             DeviceInfo.deviceNickname = deviceNickname
         }
         modelContext.insert(server)

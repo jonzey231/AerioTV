@@ -860,6 +860,17 @@ final class SyncManager: ObservableObject {
         if !server.dispatcharrCredentialTypeRaw.isEmpty {
             dict["dispatcharrCredentialType"] = server.dispatcharrCredentialTypeRaw
         }
+        // v1.7.x: cross-device persistence of the connected Dispatcharr
+        // user's permission tier, used to gate the server-side Record /
+        // DVR affordances. Only carried when it's below the default 10
+        // (admin): a Standard / Streamer account is the only case worth
+        // restricting, and omitting the key for the common admin case
+        // keeps the payload identical to today and invisible to older
+        // clients (which ignore the unknown key and keep their own
+        // recording-capable default).
+        if server.dispatcharrUserLevel < 10 {
+            dict["dispatcharrUserLevel"] = server.dispatcharrUserLevel
+        }
         // v1.6.23: re-include credentials in the KVS payload as a
         // **transport fallback** when iCloud Keychain isn't propagating.
         //
@@ -938,7 +949,12 @@ final class SyncManager: ObservableObject {
             // v1.7: empty string from older clients defaults to
             // .apiKey via `dispatcharrCredentialType` accessor on the
             // SwiftData model. No data loss for legacy senders.
-            dispatcharrCredentialTypeRaw: dict["dispatcharrCredentialType"] as? String ?? ""
+            dispatcharrCredentialTypeRaw: dict["dispatcharrCredentialType"] as? String ?? "",
+            // v1.7.x: absent (older sender or omitted admin default)
+            // means 10 (admin = recording-capable). Only a positively
+            // synced sub-10 value restricts the server-side Record /
+            // DVR affordances on this device.
+            dispatcharrUserLevel: dict["dispatcharrUserLevel"] as? Int ?? 10
         )
     }
 
@@ -1309,6 +1325,14 @@ struct SyncedServer: Sendable {
     /// added in v1.6.23 covering devices that don't have iCloud
     /// Keychain enabled.
     let dispatcharrCredentialTypeRaw: String
+    /// v1.7.x: the connected Dispatcharr user's permission tier
+    /// (Streamer = 0, Standard = 1, Admin = 10). Synced so a Standard
+    /// account discovered on one device gates the server-side Record /
+    /// DVR affordances on every device. Defaults to 10 (admin) when
+    /// absent from the payload (older sender, or an admin server whose
+    /// level is omitted to stay back-compat) so non-restricted servers
+    /// stay recording-capable.
+    let dispatcharrUserLevel: Int
 }
 
 // MARK: - Notification Names
