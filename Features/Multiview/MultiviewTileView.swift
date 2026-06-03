@@ -185,6 +185,24 @@ struct MultiviewTileView: View {
         return store.isPiPActive && !isAudioActive
     }
 
+    /// For VOD / DVR tiles, seed the per-tile progress store with the
+    /// VOD identity so the shared player coordinator resumes from the
+    /// saved position and saves WatchProgress every 10s, mirroring
+    /// `PlayerView.startPlayback`. No-op for live tiles. Called from
+    /// onAppear and `.task(id:)`, which both run before the file's first
+    /// MPV_EVENT_PLAYBACK_RESTART (when the coordinator reads the resume
+    /// position), so the values are in place in time.
+    private func applyVODIdentityToProgressStore() {
+        guard tile.kind != .live else { return }
+        progressStore.vodID = tile.vodID
+        progressStore.vodTitle = tile.item.name
+        progressStore.vodPosterURL = tile.item.logoURL?.absoluteString
+        progressStore.vodStreamURL = tile.streamURL.absoluteString
+        progressStore.vodServerID = tile.vodServerID
+        progressStore.vodType = tile.vodType
+        progressStore.explicitResumeMs = tile.resumePositionMs
+    }
+
     var body: some View {
         #if os(tvOS)
         tvOSBody
@@ -451,7 +469,8 @@ struct MultiviewTileView: View {
             MPVPlayerViewRepresentable(
                 urls: [tile.streamURL],
                 headers: tile.headers,
-                isLive: true,
+                isLive: tile.kind == .live,
+                isDVR: tile.kind == .dvr,
                 nowPlayingTitle: tile.item.name,
                 nowPlayingSubtitle: tile.item.currentProgram,
                 nowPlayingArtworkURL: tile.item.logoURL,
@@ -481,6 +500,7 @@ struct MultiviewTileView: View {
                 // the audio tile's store regardless of which tile it
                 // happens to be.
                 store.registerProgressStore(progressStore, for: tile.id)
+                applyVODIdentityToProgressStore()
             }
             .onDisappear {
                 debugLog("[MV-Tile] onDisappear id=\(tile.id)")
@@ -501,6 +521,7 @@ struct MultiviewTileView: View {
             .task(id: tile.id) {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
+                applyVODIdentityToProgressStore()
             }
 
             // Per-tile corner chrome is suppressed at N=1. The
@@ -639,7 +660,8 @@ struct MultiviewTileView: View {
             MPVPlayerViewRepresentable(
                 urls: [tile.streamURL],
                 headers: tile.headers,
-                isLive: true,
+                isLive: tile.kind == .live,
+                isDVR: tile.kind == .dvr,
                 nowPlayingTitle: tile.item.name,
                 nowPlayingSubtitle: tile.item.currentProgram,
                 nowPlayingArtworkURL: tile.item.logoURL,
@@ -680,6 +702,7 @@ struct MultiviewTileView: View {
                 // the audio tile's store regardless of which tile it
                 // happens to be.
                 store.registerProgressStore(progressStore, for: tile.id)
+                applyVODIdentityToProgressStore()
             }
             .onDisappear {
                 debugLog("[MV-Tile] onDisappear id=\(tile.id)")
@@ -691,6 +714,7 @@ struct MultiviewTileView: View {
             .task(id: tile.id) {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
+                applyVODIdentityToProgressStore()
             }
 
             // Per-tile corner chrome suppressed at N=1 (container

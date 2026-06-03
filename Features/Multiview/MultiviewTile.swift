@@ -1,5 +1,14 @@
 import Foundation
 
+/// What a multiview tile is playing. Drives `isLive` / `isDVR` on the
+/// player and whether resume / continue-watching applies. Defaults to
+/// `.live`, so every existing channel-tile construction is unchanged.
+enum TilePlaybackKind: Equatable {
+    case live
+    case vod
+    case dvr
+}
+
 /// One tile inside the multiview grid.
 ///
 /// A `MultiviewTile` captures everything needed to instantiate a single
@@ -56,4 +65,27 @@ struct MultiviewTile: Identifiable, Equatable {
     /// audio-focused tile (most-recently-added) and to animate
     /// newcomers distinctly from existing tiles.
     let addedAt: Date
+
+    /// What this tile is playing. `.live` (the default, so every
+    /// existing construction compiles unchanged) for channels; `.vod`
+    /// for movies / episodes; `.dvr` for in-progress server recordings
+    /// played via HLS. Read by `MultiviewTileView` to pass
+    /// `isLive` / `isDVR` to the shared player.
+    var kind: TilePlaybackKind = .live
+
+    /// VOD / recording identity, set only for `.vod` / `.dvr` tiles.
+    /// These seed the per-tile `PlayerProgressStore` so the shared
+    /// player coordinator resumes from the saved position and saves
+    /// WatchProgress every 10s (mirrors the `progressStore.vod*` fields
+    /// PlayerView sets in `startPlayback`). All nil / default for live
+    /// tiles. A nil `vodID` means no continue-watching for this tile
+    /// (used for server recordings, matching the single-player path).
+    var vodID: String? = nil
+    var vodServerID: String? = nil
+    var vodType: String = "movie"
+
+    /// Optional forced resume position. Nil lets the coordinator look
+    /// the position up from `WatchProgress` via `vodID` / `vodServerID`;
+    /// set it to 0 for a deliberate "watch from the beginning".
+    var resumePositionMs: Int32? = nil
 }

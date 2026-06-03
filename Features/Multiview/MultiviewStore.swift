@@ -440,6 +440,80 @@ final class MultiviewStore: ObservableObject {
         return .added
     }
 
+    /// Add a VOD (movie / episode) or in-progress DVR-recording tile.
+    /// The stream URL must already be resolved (the picker runs the
+    /// async Dispatcharr proxy resolve before calling this, so the store
+    /// stays synchronous and UI-free). Mirrors `add` for the cap /
+    /// warning / audio-focus rules, but builds the tile from a synthetic
+    /// `ChannelDisplayItem` (so the existing `tile.item` readers keep
+    /// working unchanged) plus the VOD identity that drives resume + the
+    /// periodic WatchProgress save in the player coordinator.
+    ///
+    /// The synthetic item's `streamURL` is deliberately left nil so the
+    /// Record affordance (which gates on `item.streamURL != nil`) stays
+    /// hidden for VOD tiles; playback uses the tile's own `streamURL`.
+    @discardableResult
+    func addVOD(
+        title: String,
+        streamURL: URL,
+        headers: [String: String],
+        posterURL: URL?,
+        kind: TilePlaybackKind,
+        vodID: String?,
+        serverID: String?,
+        vodType: String,
+        resumePositionMs: Int32? = nil,
+        bypassWarning: Bool = false
+    ) -> AddResult {
+        // Dedup on the VOD id when present. Server recordings have no
+        // id, so they can be added more than once (matching channels).
+        if let vid = vodID, !vid.isEmpty,
+           tiles.contains(where: { $0.vodID == vid }) {
+            return .alreadyPresent
+        }
+        if tiles.count >= maxTiles { return .rejectedMax }
+        // Same scheme allowlist as `resolveStream`. The URL is already
+        // resolved, but a Dispatcharr redirect could land on an exotic
+        // scheme; only http(s) / rtmp(s) / rtsp are real streams.
+        guard let scheme = streamURL.scheme?.lowercased(),
+              Self.allowedSchemes.contains(scheme) else { return .unresolvable }
+        if !bypassWarning && tiles.count >= softLimit && !warningRecentlyShown {
+            return .needsWarning
+        }
+        // Synthetic display item: name + poster only. EPG fields stay
+        // nil (a VOD has no live programme) and `streamURL` stays nil so
+        // the Record affordance hides; playback uses `tile.streamURL`.
+        let syntheticItem = ChannelDisplayItem(
+            id: vodID ?? UUID().uuidString,
+            name: title,
+            number: "",
+            logoURL: posterURL,
+            group: "VOD",
+            categoryOrder: 0,
+            streamURL: nil,
+            streamURLs: []
+        )
+        let tile = MultiviewTile(
+            id: UUID().uuidString,
+            item: syntheticItem,
+            streamURL: streamURL,
+            headers: headers,
+            addedAt: Date(),
+            kind: kind,
+            vodID: vodID,
+            vodServerID: serverID,
+            vodType: vodType,
+            resumePositionMs: resumePositionMs
+        )
+        tiles.append(tile)
+        audioTileID = tile.id
+        DebugLogger.shared.log(
+            "[MV-Tile] addVOD ok: \(title) kind=\(kind) tileID=\(tile.id) total=\(tiles.count)",
+            category: "Playback", level: .info
+        )
+        return .added
+    }
+
     /// Seed the store with tile[0] from an already-playing single
     /// stream. Called by `PlayerSession.enterMultiview(seeding:)`.
     /// Uses `item.id` as the tile ID to pin SwiftUI identity so the
