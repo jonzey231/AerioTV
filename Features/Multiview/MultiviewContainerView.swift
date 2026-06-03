@@ -1206,7 +1206,15 @@ struct MultiviewContainerView: View {
             let grid = MultiviewLayoutView(tiles: store.tiles, spacing: tileSpacing, spotlightTileID: store.spotlightTileID) { tile in
                 #if os(tvOS)
                 MultiviewTileView(tile: tile, store: store, isSoleTile: isSole)
-                    .prefersDefaultFocus(store.audioTileID == tile.id, in: focusNS)
+                    // Issue #30: during Move Tile (relocate) mode prefer focus
+                    // on the tile being moved, so when the context menu
+                    // dismisses tvOS's focus pass lands directly on it and the
+                    // FIRST D-pad press reaches .onMoveCommand and swaps. The
+                    // old code only ever preferred the audio tile here, so the
+                    // menu-dismiss pass yanked focus off the moving tile and the
+                    // first arrow was swallowed re-realizing focus (the async
+                    // re-focus below then fixed it, but only by the 2nd press).
+                    .prefersDefaultFocus((store.relocatingTileID ?? store.audioTileID) == tile.id, in: focusNS)
                     // Bind each tile to the container's `focusedTileID`
                     // `@FocusState`. Normal navigation: the binding
                     // tracks the focus engine (SwiftUI updates the
