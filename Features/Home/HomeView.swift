@@ -1091,6 +1091,11 @@ final class ChannelStore: ObservableObject {
         // the per-server shape that Test Connection discovered.
         let authMode = server.dispatcharrHeaderMode
         let userAgent = server.effectiveUserAgent
+        // v1.7.x: the connected Dispatcharr user's assigned Channel
+        // Profile ids (empty = no profile = show all channels). When
+        // non-empty, fetchDispatcharr filters the channel list to the
+        // union of those profiles' memberships - a child-safety filter.
+        let channelProfileIDs = server.dispatcharrProfileIDList
         debugLog("🔷 ChannelStore.load: snapshot done (type=\(type), baseURL=\(DebugLogger.sanitize(baseURL)), hasPw=\(!password.isEmpty), hasKey=\(!apiKey.isEmpty))")
 
         // Fast reachability probe (only on a cold load). A dead Docker
@@ -1132,7 +1137,8 @@ final class ChannelStore: ObservableObject {
                     username: username, password: password,
                     apiKey: apiKey, serverID: serverID,
                     epgURL: epgURL,
-                    authMode: authMode, userAgent: userAgent
+                    authMode: authMode, userAgent: userAgent,
+                    dispatcharrChannelProfileIDs: channelProfileIDs
                 )
                 debugLog("🔷 ChannelStore.load: fetchChannels returned \(items.count) items")
                 guard !Task.isCancelled else { isLoading = false; return }
@@ -1935,7 +1941,8 @@ final class ChannelStore: ObservableObject {
         apiKey: String, serverID: UUID,
         epgURL: String = "",
         authMode: DispatcharrAuthHeaderMode = .xapikey,
-        userAgent: String = DeviceInfo.defaultUserAgent
+        userAgent: String = DeviceInfo.defaultUserAgent,
+        dispatcharrChannelProfileIDs: [Int] = []
     ) async throws -> ([ChannelDisplayItem], [String]) {
         switch type {
         case .m3uPlaylist:
@@ -1945,11 +1952,13 @@ final class ChannelStore: ObservableObject {
         case .dispatcharrAPI:
             // v1.7.x: thread serverID + username so Dispatcharr's
             // API instance can drive silent api_key re-bootstrap on
-            // 401 (Save Credentials Option 1).
+            // 401 (Save Credentials Option 1). dispatcharrChannelProfileIDs
+            // drives the child-safety Channel Profile filter (empty = show all).
             return try await fetchDispatcharr(baseURL: baseURL, apiKey: apiKey,
                                               authMode: authMode, userAgent: userAgent,
                                               serverID: serverID,
-                                              savedUsername: username)
+                                              savedUsername: username,
+                                              channelProfileIDs: dispatcharrChannelProfileIDs)
         }
     }
 
@@ -2087,7 +2096,8 @@ final class ChannelStore: ObservableObject {
                                   authMode: DispatcharrAuthHeaderMode = .xapikey,
                                   userAgent: String = DeviceInfo.defaultUserAgent,
                                   serverID: UUID? = nil,
-                                  savedUsername: String? = nil) async throws -> ([ChannelDisplayItem], [String]) {
+                                  savedUsername: String? = nil,
+                                  channelProfileIDs: [Int] = []) async throws -> ([ChannelDisplayItem], [String]) {
         debugLog("🔷 ChannelStore.fetchDispatcharr: starting")
         // v1.7.x: silent api_key re-bootstrap is gated on a non-nil
         // serverID + savedUsername. Empty username (server is in
@@ -2131,13 +2141,42 @@ final class ChannelStore: ObservableObject {
             debugLog("🔷 ChannelStore.fetchDispatcharr: groups FAILED: \(error.localizedDescription)")
             dGroups = []
         }
-        let dChannels: [DispatcharrChannel]
+        var dChannels: [DispatcharrChannel]
         do {
             dChannels = try await channelsFetch
             debugLog("🔷 ChannelStore.fetchDispatcharr: channels=\(dChannels.count)")
         } catch {
             debugLog("🔷 ChannelStore.fetchDispatcharr: channels FAILED: \(error.localizedDescription)")
             throw error
+        }
+
+        // v1.7.x Channel Profile filter (child-safety): when the
+        // connected Dispatcharr user is assigned one or more Channel
+        // Profiles (a curated subset of channels, e.g. a "Kids" profile),
+        // /api/channels/channels/ STILL returns every channel, so we
+        // fetch each profile's membership from /api/channels/profiles/<id>/
+        // and keep only channels whose id is in the union. Empty
+        // `channelProfileIDs` (no profile assigned, or a non-Dispatcharr
+        // path) skips this entirely and shows all channels - the common
+        // admin case, identical to pre-v1.7.x behaviour.
+        //
+        // Fail-closed policy: a Channel Profile is a child-safety filter,
+        // so it must never leak the full channel list. If any
+        // profile-membership fetch throws (network blip, decode error),
+        // we let it propagate so the whole channel load fails and the
+        // caller keeps the prior channels (or retries), instead of
+        // showing everything unfiltered. A profile that decodes to an
+        // empty allow-set is respected literally (it enables no channels).
+        if !channelProfileIDs.isEmpty {
+            var allowedIDs = Set<Int>()
+            for profileID in channelProfileIDs {
+                let ids = try await dAPI.fetchChannelProfileChannelIDs(profileID: profileID)
+                allowedIDs.formUnion(ids)
+                debugLog("🔷 ChannelStore.fetchDispatcharr: profile \(profileID) -> \(ids.count) channel ids")
+            }
+            let before = dChannels.count
+            dChannels = dChannels.filter { allowedIDs.contains($0.id) }
+            debugLog("🔷 ChannelStore.fetchDispatcharr: Channel Profile filter \(before) -> \(dChannels.count) channels (allowed union=\(allowedIDs.count))")
         }
 
         // uniquingKeysWith so duplicate group ids (or a malformed paginated

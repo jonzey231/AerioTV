@@ -74,6 +74,18 @@ final class ServerConnectionViewModel {
     /// DVR affordances; viewing and local recording are unaffected.
     var discoveredUserLevel: Int = 10
 
+    /// v1.7.x: the connected Dispatcharr user's assigned Channel Profile
+    /// id(s) (`channel_profiles`) discovered during Test Connection by
+    /// fetching `/api/accounts/users/me/`. Stored comma-joined, mirroring
+    /// the `discoveredUserLevel` capture-then-persist pattern:
+    /// `buildServerConnection()` writes it onto the new
+    /// `ServerConnection.dispatcharrChannelProfileIDs`. Empty (the
+    /// default) means no profile is assigned, so the channel list is
+    /// shown unfiltered. When non-empty, the Dispatcharr channel-load
+    /// path filters channels down to the union of those profiles'
+    /// memberships - a child-safety filter (e.g. a "Kids" profile).
+    var discoveredChannelProfileIDs: String = ""
+
     var isFormValid: Bool {
         validationErrors().isEmpty
     }
@@ -204,6 +216,7 @@ final class ServerConnectionViewModel {
         verifiedServerName = nil
         discoveredDispatcharrAuthMode = nil
         discoveredUserLevel = 10
+        discoveredChannelProfileIDs = ""
 
         // Silent one-shot retry. Some reverse-proxy / LB setups (Cloudflare
         // Tunnel, Traefik with cold upstreams, nginx with slow_start) return
@@ -319,6 +332,13 @@ final class ServerConnectionViewModel {
                     )
                     if let user = try? await userAPI.fetchCurrentUser() {
                         self.discoveredUserLevel = user.userLevel
+                        // Capture the assigned Channel Profile id(s) so
+                        // Save can persist them and the Dispatcharr
+                        // channel-load path can filter to the allowed
+                        // channels (a child-safety filter). Empty = no
+                        // profile = show all channels.
+                        self.discoveredChannelProfileIDs =
+                            user.channelProfiles.map(String.init).joined(separator: ",")
                     }
                 }
 
@@ -364,6 +384,12 @@ final class ServerConnectionViewModel {
                     // and the server-side Record / DVR affordances can be
                     // gated. Streamer = 0, Standard = 1, Admin = 10.
                     self.discoveredUserLevel = user.userLevel
+                    // Capture the assigned Channel Profile id(s) so Save
+                    // can persist them and the Dispatcharr channel-load
+                    // path can filter to the allowed channels (a
+                    // child-safety filter). Empty = no profile = show all.
+                    self.discoveredChannelProfileIDs =
+                        user.channelProfiles.map(String.init).joined(separator: ",")
 
                     // Now run the standard API-key verify so we get the
                     // same `discoveredDispatcharrAuthMode` discovery the
@@ -522,6 +548,17 @@ final class ServerConnectionViewModel {
         if serverType == .dispatcharrAPI {
             server.dispatcharrUserLevel = discoveredUserLevel
         }
+        // v1.7.x: persist the connected Dispatcharr user's assigned
+        // Channel Profile id(s) (captured from /users/me/ during verify,
+        // in BOTH the api-key and username/password modes). Only
+        // meaningful for Dispatcharr servers; the model default ("" =
+        // no profile = show all channels) covers everything else and
+        // back-compat. When non-empty, the channel-load path filters the
+        // loaded channels to the union of those profiles' memberships
+        // (a child-safety filter).
+        if serverType == .dispatcharrAPI {
+            server.dispatcharrChannelProfileIDs = discoveredChannelProfileIDs
+        }
         // v1.7 Direct Connect: persist the credential type on the
         // SwiftData record. For `.apiKey` we leave the raw value at
         // the model default ("") so legacy clients (older AerioTV
@@ -564,6 +601,7 @@ final class ServerConnectionViewModel {
         verifiedServerName = nil
         discoveredDispatcharrAuthMode = nil
         discoveredUserLevel = 10
+        discoveredChannelProfileIDs = ""
         // v1.7.x: matches the property default above. Back-button
         // out of the Configure screen and re-entering should land
         // on the same Direct Connect username + password starting

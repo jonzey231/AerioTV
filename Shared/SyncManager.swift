@@ -871,6 +871,16 @@ final class SyncManager: ObservableObject {
         if server.dispatcharrUserLevel < 10 {
             dict["dispatcharrUserLevel"] = server.dispatcharrUserLevel
         }
+        // v1.7.x: cross-device persistence of the connected Dispatcharr
+        // user's assigned Channel Profile id(s), used to drive the
+        // child-safety Channel Profile filter on the channel list. Only
+        // carried when non-empty: a server with no profile assigned is
+        // the common case, and omitting the key for it keeps the payload
+        // identical to today and invisible to older clients (which ignore
+        // the unknown key and keep their own unfiltered default).
+        if !server.dispatcharrChannelProfileIDs.isEmpty {
+            dict["dispatcharrChannelProfileIDs"] = server.dispatcharrChannelProfileIDs
+        }
         // v1.6.23: re-include credentials in the KVS payload as a
         // **transport fallback** when iCloud Keychain isn't propagating.
         //
@@ -954,7 +964,12 @@ final class SyncManager: ObservableObject {
             // means 10 (admin = recording-capable). Only a positively
             // synced sub-10 value restricts the server-side Record /
             // DVR affordances on this device.
-            dispatcharrUserLevel: dict["dispatcharrUserLevel"] as? Int ?? 10
+            dispatcharrUserLevel: dict["dispatcharrUserLevel"] as? Int ?? 10,
+            // v1.7.x: absent (older sender or a server with no profile
+            // assigned) means "" = no filter = show all channels. Only a
+            // positively synced non-empty value drives the child-safety
+            // Channel Profile filter on this device.
+            dispatcharrChannelProfileIDs: dict["dispatcharrChannelProfileIDs"] as? String ?? ""
         )
     }
 
@@ -1333,6 +1348,14 @@ struct SyncedServer: Sendable {
     /// level is omitted to stay back-compat) so non-restricted servers
     /// stay recording-capable.
     let dispatcharrUserLevel: Int
+    /// v1.7.x: the connected Dispatcharr user's assigned Channel Profile
+    /// id(s), comma-joined (`""`, `"44"`, `"44,57"`). Synced so a user
+    /// whose account is locked to a "Kids" profile on one device gets the
+    /// same curated channel list on every device on the same Apple ID.
+    /// Defaults to "" (no profile = show all channels) when absent from
+    /// the payload (older sender, or a server with no profile assigned),
+    /// keeping unrestricted servers unfiltered.
+    let dispatcharrChannelProfileIDs: String
 }
 
 // MARK: - Notification Names

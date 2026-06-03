@@ -1322,6 +1322,31 @@ struct DispatcharrAPI {
         try await fetchAllPages(DispatcharrChannel.self, firstPath: "/api/channels/channels/")
     }
 
+    /// Fetches the channel ids that belong to a single Channel Profile.
+    /// A Channel Profile is a curated subset of channels (e.g. a "Kids"
+    /// profile with only age-appropriate channels). The REST endpoint
+    /// `/api/channels/channels/` returns ALL channels regardless of the
+    /// connected user's profile, so AerioTV filters the loaded list down
+    /// to the union of the user's assigned profiles' memberships. This
+    /// is a child-safety filter, so the caller fails open only on a
+    /// fetch/decode error (logging a warning) and never silently widens
+    /// the set on a successful-but-empty response.
+    ///
+    /// `/api/channels/profiles/<id>/` returns
+    /// `{ id, name, channels: [<enabled channel ids>] }` where each
+    /// entry matches `DispatcharrChannel.id`.
+    func fetchChannelProfileChannelIDs(profileID: Int) async throws -> [Int] {
+        /// Slim view of the profile detail response. Only `channels`
+        /// (the enabled channel ids) is consumed; the rest is discarded.
+        struct ProfileChannels: Decodable { let channels: [Int] }
+        let url = try buildURL(path: "/api/channels/profiles/\(profileID)/")
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try decode(ProfileChannels.self, from: data).channels
+    }
+
     // MARK: - Lightweight channel summary (fast guide UI)
     func getChannelSummaries() async throws -> [DispatcharrChannelSummary] {
         try await fetchAllPages(DispatcharrChannelSummary.self, firstPath: "/api/channels/summary/")

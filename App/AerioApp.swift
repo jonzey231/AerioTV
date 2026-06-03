@@ -1670,6 +1670,14 @@ struct RootView: View {
                     // at the recording-capable default; only a positively
                     // synced sub-10 value restricts.
                     local.dispatcharrUserLevel = remote.dispatcharrUserLevel
+                    // v1.7.x: adopt the connected user's assigned Channel
+                    // Profile id(s) so the child-safety channel filter is
+                    // consistent across devices. deserialize defaults an
+                    // absent value to "" (no profile = show all), so a
+                    // legacy sender (no key) or an unrestricted server
+                    // leaves the local field unfiltered; only a positively
+                    // synced non-empty value applies the filter.
+                    local.dispatcharrChannelProfileIDs = remote.dispatcharrChannelProfileIDs
                     // Queue credential writes for after the merge
                     if !remote.password.isEmpty {
                         pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))
@@ -1720,6 +1728,11 @@ struct RootView: View {
                 // way on this device. Absent in the payload defaults to
                 // 10 (admin = recording-capable) via deserialize.
                 newServer.dispatcharrUserLevel = remote.dispatcharrUserLevel
+                // v1.7.x: inherit the connected user's assigned Channel
+                // Profile id(s) so the child-safety channel filter applies
+                // the same way on this device. Absent in the payload
+                // defaults to "" (no profile = show all) via deserialize.
+                newServer.dispatcharrChannelProfileIDs = remote.dispatcharrChannelProfileIDs
                 // Queue credential writes for after the merge
                 if !remote.password.isEmpty {
                     pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))

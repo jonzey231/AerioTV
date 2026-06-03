@@ -218,6 +218,22 @@ final class ServerConnection {
     /// is below 10 during a connect/verify.
     var dispatcharrUserLevel: Int = 10
 
+    /// v1.7.x: the Channel Profile id(s) assigned to the connected
+    /// Dispatcharr user (`channel_profiles` on /api/accounts/users/me/),
+    /// stored comma-joined for SwiftData stability. A Channel Profile is
+    /// a curated subset of channels (e.g. a "Kids" profile with only
+    /// age-appropriate channels). When non-empty, the Dispatcharr
+    /// channel-load path filters the loaded channels down to the union
+    /// of those profiles' memberships (fetched from
+    /// `/api/channels/profiles/<id>/`). This is a child-safety filter.
+    ///
+    /// Empty string (the default) means no profile is assigned, so the
+    /// user sees every channel exactly as before. This default also
+    /// keeps back-compat: servers added before this field existed, or
+    /// synced from older AerioTV builds, carry "" and stay unfiltered.
+    /// Possible values: `""`, `"44"`, `"44,57"`.
+    var dispatcharrChannelProfileIDs: String = ""
+
     init(
         name: String,
         type: ServerType,
@@ -351,6 +367,18 @@ final class ServerConnection {
     /// gated by this and stays available to everyone.
     var dispatcharrCanRecordToServer: Bool {
         type != .dispatcharrAPI || dispatcharrUserLevel >= 10
+    }
+
+    /// Parsed list of the connected Dispatcharr user's assigned Channel
+    /// Profile ids. Splits `dispatcharrChannelProfileIDs` on commas,
+    /// trims whitespace, and drops blanks / non-integers so a malformed
+    /// stored value can never crash the channel-load filter. An empty
+    /// array (the common case: no profile assigned, or a non-Dispatcharr
+    /// server) signals "show every channel" to the load path.
+    var dispatcharrProfileIDList: [Int] {
+        dispatcharrChannelProfileIDs
+            .split(separator: ",")
+            .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
     }
 
     /// Auth headers for API requests. Dispatcharr servers honor the

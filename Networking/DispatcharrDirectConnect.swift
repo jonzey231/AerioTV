@@ -71,6 +71,19 @@ struct DispatcharrUser: Decodable {
     /// sites, not here.
     let userLevel: Int
 
+    /// The Channel Profile id(s) assigned to this Dispatcharr user
+    /// (`channel_profiles`). A Channel Profile is a curated subset of
+    /// channels (e.g. a "Kids" profile with only age-appropriate
+    /// channels); the membership is fetched separately from
+    /// `/api/channels/profiles/<id>/`. Empty means no profile is
+    /// assigned, in which case the user sees every channel (the common
+    /// admin case). Decodes permissively: older Dispatcharr builds (and
+    /// any payload that omits the field) default to `[]` so a missing
+    /// key never fails the whole users/me decode. Captured at connect
+    /// and persisted so the channel-load path can filter to the allowed
+    /// channels (a child-safety filter).
+    let channelProfiles: [Int]
+
     private enum CodingKeys: String, CodingKey {
         case id
         case username
@@ -78,6 +91,7 @@ struct DispatcharrUser: Decodable {
         case isStaff     = "is_staff"
         case isSuperuser = "is_superuser"
         case userLevel   = "user_level"
+        case channelProfiles = "channel_profiles"
     }
 
     init(from decoder: Decoder) throws {
@@ -90,6 +104,9 @@ struct DispatcharrUser: Decodable {
         // Default to 0 (lowest privilege) when absent so older
         // Dispatcharr builds that predate the field still decode.
         userLevel = (try? c.decodeIfPresent(Int.self, forKey: .userLevel)) ?? 0
+        // Default to [] (no profile = show every channel) when absent so
+        // older Dispatcharr builds that predate the field still decode.
+        channelProfiles = (try? c.decodeIfPresent([Int].self, forKey: .channelProfiles)) ?? []
     }
 }
 
