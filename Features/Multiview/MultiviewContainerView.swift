@@ -326,6 +326,16 @@ struct MultiviewContainerView: View {
                     // this guard the panel becomes a true focus trap.
                     #if os(tvOS)
                     .disabled(showTVOptions)
+                    // Issue #31: the transport bar is its own focus
+                    // section so D-pad-down from ANY tile (including a
+                    // left-column one) lands on the right-aligned Add /
+                    // Exit buttons. Without it tvOS does a geometric
+                    // search that misses them from a left tile (the user
+                    // had to arrow right first, then down). Mirrors the
+                    // On Demand grid's `.focusSection()` (MoviesView),
+                    // which makes Down land cleanly instead of by
+                    // geometric jumps.
+                    .focusSection()
                     #endif
                 }
             }
