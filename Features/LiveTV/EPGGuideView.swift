@@ -2381,6 +2381,21 @@ struct EPGGuideView: View {
                         HStack(spacing: 0) {
                             Color.cardBackground
                                 .frame(width: channelColumnWidth, height: timeHeaderHeight)
+                                // Coolwolf (Discord): show the current time in the
+                                // guide. Top-left corner cell (the mini-player sits
+                                // top-right), refreshes each minute, and uses the
+                                // locale-aware format so it honors the device's
+                                // 12 or 24-hour setting.
+                                .overlay {
+                                    TimelineView(.periodic(from: Date(), by: 60)) { context in
+                                        Text(context.date, format: .dateTime.hour().minute())
+                                            .font(.system(size: timeHeaderHeight * 0.4, weight: .semibold).monospacedDigit())
+                                            .foregroundColor(.textPrimary)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.5)
+                                            .padding(.horizontal, 4)
+                                    }
+                                }
                                 .overlay(alignment: .trailing) {
                                     Rectangle().fill(Color.accentPrimary.opacity(0.2)).frame(width: 1)
                                 }
