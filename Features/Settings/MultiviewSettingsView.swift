@@ -14,10 +14,10 @@ struct MultiviewSettingsView: View {
     @AppStorage(MultiviewAudioFocusStyle.storageKey)
     private var audioFocusStyleRaw: String = MultiviewAudioFocusStyle.centerIcon.rawValue
 
-    /// Padding between tiles — `false` keeps the flush look that's
-    /// shipped since multiview launched.
+    /// Padding between tiles: `true` (the default as of v1.7.4) puts an
+    /// 8pt gap between tiles; `false` keeps the original flush look.
     @AppStorage(multiviewTilePaddingKey)
-    private var paddingEnabled: Bool = false
+    private var paddingEnabled: Bool = true
 
     /// Rounded tile corners — `false` keeps the square-edge default.
     @AppStorage(multiviewTileCornersRoundedKey)

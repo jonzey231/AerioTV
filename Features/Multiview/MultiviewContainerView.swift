@@ -143,16 +143,16 @@ struct MultiviewContainerView: View {
     /// call `reportInteraction()` from their button actions.
     @StateObject private var chromeState = MultiviewChromeState()
 
-    /// Settings → Multiview → "Padding Between Tiles". v1.6.8 —
-    /// false (default) keeps adjacent tiles meeting flush like the
-    /// original multiview design; true inserts an 8pt gap between
-    /// tiles so each stream stands on its own.
+    /// Settings → Multiview → "Padding Between Tiles". true (the
+    /// default as of v1.7.4) inserts an 8pt gap between tiles so each
+    /// stream stands on its own; false keeps adjacent tiles meeting
+    /// flush like the original multiview design.
     @AppStorage(multiviewTilePaddingKey)
-    private var paddingEnabled: Bool = false
+    private var paddingEnabled: Bool = true
 
     /// Resolved spacing for the grid math, derived from the user's
     /// preference. 0pt is the legacy flush layout; 8pt is the
-    /// "padded" layout introduced in v1.6.8.
+    /// "padded" layout (the default as of v1.7.4).
     private var tileSpacing: CGFloat { paddingEnabled ? 8 : 0 }
 
     /// v1.7.x: gates the Apple TV up/down d-pad channel-flip on
