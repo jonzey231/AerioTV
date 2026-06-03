@@ -1,5 +1,76 @@
 # Changelog
 
+## v1.7.4 - 2026-06-02
+
+### Added
+
+- **Watch in-progress recordings from the beginning.** A program that is
+  still recording can now be started from the top instead of the live
+  edge. AerioTV plays the recording's HLS from segment 0 and drives a real
+  DVR window that grows toward the live edge as the recording continues,
+  so you can pause and rewind everything captured so far.
+- **Aspect-ratio control in the player.** Switch between Fit (the whole
+  frame, letterboxed) and Fill (cropped to fill the screen) from the
+  player menu, on iOS and Apple TV.
+- **Spotlight a Multiview tile.** Promote any tile to a large panel with
+  the remaining tiles stacked beside it, and toggle back to the even grid.
+  The transition keeps each tile's identity so streams grow and shrink in
+  place rather than reshuffling.
+- **Multiview tile padding, on by default.** The standard Multiview grid
+  now shows an 8pt gutter between tiles so each stream stands on its own.
+  Toggle it in Settings > Multiview ("Padding Between Tiles"); the flush
+  layout is still one switch away.
+- **iPhone full-screen button.** A control in the player rotates into
+  landscape for an edge-to-edge view.
+- **Hide channel logos.** A Settings > Appearance toggle drops the logos
+  for a denser, more compact channel list.
+- **Refresh Everything.** A playlist's settings gained a full data-rebuild
+  action that discards cached channels, guide, and On Demand and re-fetches
+  from scratch.
+
+### Changed
+
+- **The guide refreshes itself when stale.** Returning to the app with an
+  out-of-date EPG now kicks off a background refresh instead of waiting for
+  the next manual reload.
+- **Apple TV guide focus restore.** Pressing Menu jumps to the top channel,
+  and returning from a stream puts focus back on the channel you were
+  watching rather than the top of the list.
+- **Smoother On Demand and DVR scrubbing.** The scrub bar holds the
+  playhead at the target until the player catches up, buffers back faster
+  after a seek, and reads out the position more clearly.
+- **Deleting a playlist clears its On Demand library** from this device
+  along with its channels and guide data.
+
+### Fixed
+
+- **Launch crash on duplicate category/group IDs.** Servers that returned
+  duplicate category or group identifiers could crash the app on launch
+  while it built its lookup tables. The tables now tolerate duplicates.
+- **Local recording corruption.** Captured stream chunks could be written
+  to disk out of order, producing a file the player could not read. Chunks
+  are now appended in arrival order on a serial writer.
+- **Edit Server no-op on Apple TV.** Opening the same server in Edit Server
+  twice in a row did nothing the second time; the edit screen now resets
+  correctly between visits.
+- **Freeze leaving an in-progress recording.** Leaving a still-recording
+  stream could briefly hang the main thread; teardown now quits the player
+  engine asynchronously.
+- **Player controls no longer freeze the UI on a stalled stream.** Play,
+  pause, scrub, and track selection run their player calls off the main
+  thread, so they stay responsive even while a stream is buffering.
+
+### Security
+
+- Credentials (Xtream username/password, API keys, tokens) are scrubbed
+  from debug logs and from a user-facing connection-error message.
+- Server-provided image URLs (Xtream and Dispatcharr poster/backdrop art)
+  are validated against the SSRF guard instead of being trusted verbatim.
+- Keychain saves are atomic, so a failed write can no longer drop saved
+  credentials.
+- iCloud key-value reads run on the main actor, removing a data race in the
+  sync path.
+
 ## v1.7.3 - 2026-05-29
 
 ### Added

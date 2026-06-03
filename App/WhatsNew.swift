@@ -57,6 +57,26 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.4",
+            title: "What's new in 1.7.4",
+            bullets: [
+                "Watch an in-progress recording from the beginning. Start a program that is still recording from the top instead of the live edge, and the rewindable window keeps growing as it records",
+                "New aspect-ratio control in the player. Switch between Fit (see the whole picture, letterboxed) and Fill (crop to fill the screen) from the player menu",
+                "Multiview: spotlight a tile to make it the big one. Pick any tile and it grows to a large panel with the rest stacked beside it, then tap again to return to the even grid",
+                "Multiview tiles now have a gap between them by default so each stream stands on its own. Turn it off in Settings, Multiview if you prefer the flush look",
+                "iPhone: a full-screen button in the player rotates to landscape for an edge-to-edge view",
+                "Option to hide channel logos for a cleaner, more compact channel list (Settings, Appearance)",
+                "The guide now refreshes itself when it has gone stale, and a Refresh Everything action was added to a playlist's settings for a full rebuild",
+                "Apple TV: guide focus now lands where you expect. Menu jumps to the top channel, and returning from a stream puts focus back on the channel you were watching",
+                "Fixed a launch crash that could hit servers with duplicate category or group IDs",
+                "Fixed local recordings that could be corrupted by out-of-order writes to disk",
+                "Fixed editing the same server twice in a row doing nothing on Apple TV",
+                "Fixed a brief freeze when leaving an in-progress recording, and play, pause, and scrub no longer freeze the UI if a stream stalls",
+                "Security and reliability hardening: credentials are scrubbed from logs, server-provided image URLs are validated, and saved credentials are written more safely"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.4")
+        ),
+        WhatsNewRelease(
             version: "1.7.3",
             title: "What's new in 1.7.3",
             bullets: [
