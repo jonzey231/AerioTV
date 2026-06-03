@@ -1859,6 +1859,27 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
             }
 
+            // Replay-from-start: used by the multiview "Finished" overlay.
+            // A VOD that hit EOF has `playbackEnded` latched (which
+            // `seekAction` deliberately refuses to seek past), so this
+            // dedicated path clears the latch, seeks to 0, and unpauses.
+            // Live tiles never reach EOF, so guarding on `!isLive` keeps
+            // this inert for them. Runs on mpvQueue like the other
+            // transport actions so it never blocks the UI.
+            progressStore.replayFromStartAction = { [weak self] in
+                guard let self, !self.isLive else { return }
+                DispatchQueue.main.async { [weak self] in
+                    self?.progressStore.reachedEOF = false
+                }
+                self.mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    self.playbackEnded = false
+                    self.mpvCommandAsync(mpv, ["seek", "0", "absolute"])
+                    var unpause: Int32 = 0
+                    mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &unpause)
+                }
+            }
+
             // Playback speed. mpv write on mpvQueue; UI state on main.
             progressStore.setSpeedAction = { [weak self] speed in
                 guard let self else { return }
@@ -4354,6 +4375,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             hasStarted = false
             playbackStartTime = nil
+            // A fresh file is loading (initial play, retry, or the
+            // reload-fallback replay path), so clear any prior VOD EOF
+            // state. Multiview's per-tile "Finished" overlay keys on
+            // this; live/DVR never set it so this is a harmless no-op
+            // for them.
+            if progressStore.reachedEOF {
+                DispatchQueue.main.async { [weak self] in
+                    self?.progressStore.reachedEOF = false
+                }
+            }
             // `loadfile replace` reuses the same mpv core, so any runtime
             // hwdec downgrade from the previous stream must be cleared before
             // the next file starts. v1.7.x: default is now videotoolbox-copy
@@ -5113,8 +5144,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DebugLogger.shared.logPlayback(event: "DVR reached live edge")
                 logStore.append("ℹ️ MPV: DVR live edge")
             } else {
-                // VOD ended normally — not an error
+                // VOD ended normally, not an error. This branch is the
+                // non-live, non-DVR case (the `isLive` / `!hasStarted` /
+                // `isDVR` arms above already returned), so setting
+                // `reachedEOF` here can never fire for live or DVR
+                // live-edge EOF. Multiview tiles read `reachedEOF` to
+                // show the per-tile "Finished" overlay and hand audio
+                // off; the single PlayerView ignores it (own end UI).
                 playbackEnded = true
+                DispatchQueue.main.async { [weak self] in
+                    self?.progressStore.reachedEOF = true
+                }
                 DebugLogger.shared.logPlayback(event: "ended normally")
                 logStore.append("ℹ️ MPV: playback ended")
             }

@@ -209,6 +209,14 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     @Published var subtitleTracks: [MediaTrack] = []
     @Published var currentAudioTrackID: Int = 0
     @Published var currentSubtitleTrackID: Int = 0
+    /// True when a non-live VOD file has played all the way to its end.
+    /// Set by the Coordinator's `handleEndFile` VOD branch and cleared
+    /// whenever a fresh file starts loading or the user replays from 0.
+    /// Multiview reads this (per-tile) to show a "Finished" overlay and
+    /// to hand audio off to another tile; the legacy single PlayerView
+    /// ignores it (it has its own end handling), so adding it here is a
+    /// no-op for that path. Never set for live or DVR live-edge EOF.
+    @Published var reachedEOF: Bool = false
     /// VOD resume tracking — set before playback starts, nil for live
     var vodID: String?
     var vodTitle: String?
@@ -219,6 +227,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var explicitResumeMs: Int32?  // Pre-loaded resume position (bypasses DB lookup)
     /// Closure set by the Coordinator; call with a target position in ms to seek.
     var seekAction: ((Int32) -> Void)?
+    /// Closure set by the Coordinator; replays the current VOD file from
+    /// the start. Distinct from `seekAction` because a VOD that has hit
+    /// EOF has `playbackEnded` latched, which the normal seek guard
+    /// blocks. This path clears that latch (and `reachedEOF`), seeks to
+    /// 0, and unpauses. Used by the multiview "Finished" overlay's Replay
+    /// button. Nil / unused on the legacy single PlayerView path.
+    var replayFromStartAction: (() -> Void)?
     /// Closure set by the Coordinator; toggles play/pause.
     var togglePauseAction: (() -> Void)?
     /// Closure set by the Coordinator; sets playback speed.

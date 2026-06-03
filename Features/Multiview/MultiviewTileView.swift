@@ -203,6 +203,28 @@ struct MultiviewTileView: View {
         progressStore.explicitResumeMs = tile.resumePositionMs
     }
 
+    /// Phase 2: when a VOD tile reaches the end of its file it stops
+    /// producing audio. If it happened to be the audio tile, move audio
+    /// to another tile so sound continues elsewhere, mirroring the
+    /// auto-promote logic in `MultiviewStore.remove(id:)` ("newest
+    /// remaining gets audio"). No-op if this isn't the audio tile or if
+    /// there's no other tile to hand off to (then audio stays put). Runs
+    /// the moment EOF is detected, before the user taps Replay/Remove.
+    private func reassignAudioIfFinishedTileWasAudio() {
+        guard store.audioTileID == tile.id else { return }
+        // Newest remaining tile that isn't this one (last in the list),
+        // matching `remove(id:)`'s "last-added gets audio" rule.
+        guard let next = store.tiles.last(where: { $0.id != tile.id }) else {
+            // No other tile, leave audio as-is.
+            return
+        }
+        store.setAudio(to: next.id)
+        DebugLogger.shared.log(
+            "[MV-Focus] audio auto-promoted on VOD finish: newAudio=\(next.id) finished=\(tile.id)",
+            category: "Playback", level: .info
+        )
+    }
+
     var body: some View {
         #if os(tvOS)
         tvOSBody
@@ -377,6 +399,23 @@ struct MultiviewTileView: View {
             titleVisibility: .visible
         ) {
             subtitleTrackButtons
+        }
+        // Phase 2: VOD "Finished" overlay as a SIBLING of the tile
+        // Button (not inside its label) so the Replay / Remove buttons
+        // are real focus targets on tvOS. Gated to `.vod` so live / DVR
+        // tiles never show it.
+        .overlay {
+            if tile.kind == .vod, progressStore.reachedEOF {
+                finishedOverlay
+            }
+        }
+        // Move audio off a tile the moment it finishes (before the user
+        // taps anything) so sound continues on another tile. No-op if
+        // this isn't the audio tile or there's nowhere to hand off.
+        .onChange(of: progressStore.reachedEOF) { _, nowEOF in
+            if nowEOF, tile.kind == .vod {
+                reassignAudioIfFinishedTileWasAudio()
+            }
         }
         .accessibilityLabel(a11yLabel)
     }
@@ -578,6 +617,23 @@ struct MultiviewTileView: View {
                 titleVisibility: .visible
             ) {
                 subtitleTrackButtons
+            }
+            // Phase 2: VOD "Finished" overlay layered OUTSIDE
+            // `tappableRegion` (so its Replay / Remove buttons receive
+            // taps instead of being swallowed by the tile's
+            // `.onTapGesture`). Gated to `.vod` so live / DVR tiles
+            // never show it.
+            .overlay {
+                if tile.kind == .vod, progressStore.reachedEOF {
+                    finishedOverlay
+                }
+            }
+            // Hand audio off the instant a VOD tile finishes (mirrors
+            // the tvOS body). No-op unless this was the audio tile.
+            .onChange(of: progressStore.reachedEOF) { _, nowEOF in
+                if nowEOF, tile.kind == .vod {
+                    reassignAudioIfFinishedTileWasAudio()
+                }
             }
     }
     #endif
@@ -1070,6 +1126,88 @@ struct MultiviewTileView: View {
             }
             .padding(12)
         }
+    }
+
+    // MARK: - VOD finished overlay (Phase 2)
+
+    /// Shown over a `.vod` tile that has played to its end
+    /// (`progressStore.reachedEOF`). Mirrors `decodeErrorOverlay`'s
+    /// visual language (full-tile scrim + centered VStack with a title)
+    /// but uses real `Button`s for Replay / Remove. Unlike the decode-
+    /// error card (which lives INSIDE the tile's tap target and so can't
+    /// host focusable inner buttons), this overlay is attached as a
+    /// SIBLING overlay on the tile container (see `tvOSBody` / iPad
+    /// `tileContent`), so its buttons receive focus on tvOS and taps on
+    /// iPad directly. Gated strictly to `.vod`: a `.dvr` tile at its live
+    /// edge isn't "finished" and a `.live` tile never finishes, so this
+    /// view is only ever mounted for VOD.
+    @ViewBuilder
+    private var finishedOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.82)
+            VStack(spacing: 14) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.largeTitle)
+                    .foregroundStyle(.white)
+                Text("Finished")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                // `verbatim:` so a VOD title can't be interpreted as
+                // Markdown (titles are server-sourced metadata).
+                Text(verbatim: tile.item.name)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .padding(.horizontal, 10)
+
+                HStack(spacing: 12) {
+                    Button {
+                        replayFromStart()
+                    } label: {
+                        Label("Replay", systemImage: "arrow.counterclockwise")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Color.accentPrimary))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(role: .destructive) {
+                        DebugLogger.shared.log(
+                            "[MV-Cmd] VOD finished overlay Remove tile=\(tile.id)",
+                            category: "Playback", level: .info
+                        )
+                        store.remove(id: tile.id)
+                    } label: {
+                        Label("Remove", systemImage: "xmark.circle")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Color.white.opacity(0.22)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    /// Replay action for the finished overlay: clear the EOF flag and
+    /// drive the coordinator's `replayFromStartAction` (seek to 0 +
+    /// unpause; clears the `playbackEnded` latch that the normal seek
+    /// guard would otherwise block). If the coordinator hasn't wired the
+    /// action yet (shouldn't happen once playing), clearing `reachedEOF`
+    /// still dismisses the overlay.
+    private func replayFromStart() {
+        DebugLogger.shared.log(
+            "[MV-Cmd] VOD finished overlay Replay tile=\(tile.id)",
+            category: "Playback", level: .info
+        )
+        progressStore.reachedEOF = false
+        progressStore.replayFromStartAction?()
     }
 
     /// Per-platform text telling the user how to remove the tile
