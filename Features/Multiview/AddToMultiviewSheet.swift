@@ -1,4 +1,47 @@
 import SwiftUI
+import SwiftData
+
+/// Which content source the picker is currently listing. Phase 1
+/// (Step 4): the picker grew from channels-only to also offer Movies,
+/// Series episodes, and server Recordings so a user can build a mixed
+/// multiview (a live game in one tile, a movie in another). The pill
+/// bar at the top swaps between these; each case drives a different
+/// content list + add path. `.channels` is the historical default so
+/// the picker opens exactly as it did before.
+enum MultiviewPickerSource: String, CaseIterable, Identifiable {
+    case channels
+    case movies
+    case series
+    case recordings
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .channels:   return "Channels"
+        case .movies:     return "Movies"
+        case .series:     return "Series"
+        case .recordings: return "Recordings"
+        }
+    }
+}
+
+/// Parameters of a VOD / recording add that the store deferred with
+/// `.needsWarning` (soft-limit crossed). Stashed so the perf-warning
+/// alert's Continue button can re-issue the add with `bypassWarning`.
+///
+/// SECURITY: `headers` can carry the active server's API key. Do NOT
+/// log this struct wholesale; same rule as `MultiviewTile`.
+private struct PendingVODAdd {
+    let streamURL: URL
+    let headers: [String: String]
+    let title: String
+    let posterURL: URL?
+    let kind: TilePlaybackKind
+    let vodID: String?
+    let serverID: String?
+    let vodType: String
+}
 
 /// Channel picker presented from `MultiviewTransportBar`'s "Add Tile"
 /// button. Three stacked sections:
@@ -28,6 +71,44 @@ struct AddToMultiviewSheet: View {
     @ObservedObject private var recentsStore = RecentChannelsStore.shared
     @ObservedObject private var multiviewStore = MultiviewStore.shared
 
+    /// Phase 1 (Step 4): VOD catalogue (movies + series for the active
+    /// server). Shared singleton, already populated by the On Demand
+    /// tab's pre-fetch, so the picker's Movies / Series lists render
+    /// instantly without re-fetching.
+    @ObservedObject private var vodStore = VODStore.shared
+
+    /// Server recordings live in SwiftData (synced from Dispatcharr by
+    /// `MyRecordingsView`'s reconcile loop). Queried newest-first so
+    /// the Recordings source mirrors that screen's ordering.
+    @Query(sort: \Recording.createdAt, order: .reverse)
+    private var allRecordings: [Recording]
+
+    /// All configured servers, used to (a) resolve the active server's
+    /// auth headers for VOD / recording playback and (b) scope the
+    /// recordings list to the active server (matching `MyRecordingsView`).
+    @Query private var servers: [ServerConnection]
+
+    /// Phase 1 (Step 4): which content source the pill bar is showing.
+    /// `.channels` keeps the picker's original behaviour on open.
+    @State private var pickerSource: MultiviewPickerSource = .channels
+
+    /// IDs (movie id / episode id / recording UUID string) whose
+    /// playback URL is currently being resolved before the add lands.
+    /// Drives the per-row spinner so a slow Dispatcharr proxy resolve
+    /// doesn't look like a dead tap. Mirrors `VODDetailView`'s
+    /// `isResolvingURL`, but keyed per row since several can resolve
+    /// at once.
+    @State private var resolvingIDs: Set<String> = []
+
+    /// Series drill-in target. Non-nil when the user tapped a series
+    /// and we're showing (or loading) its episode list. Back clears it.
+    @State private var drilledSeries: VODSeries? = nil
+
+    /// Loaded episodes for `drilledSeries`, flattened across seasons.
+    /// `nil` while the detail fetch is in flight (shows a spinner);
+    /// empty array means "loaded, but the series has no episodes".
+    @State private var drilledEpisodes: [VODEpisode]? = nil
+
     /// Search query on iPad. tvOS skips the search field — typing via
     /// Siri Remote is painful and the category grouping below is
     /// usually enough.
@@ -37,6 +118,13 @@ struct AddToMultiviewSheet: View {
     /// response. Non-nil while the performance-warning alert is
     /// showing; nil otherwise.
     @State private var pendingWarningItem: ChannelDisplayItem? = nil
+
+    /// Phase 1 (Step 4): a VOD / recording add that hit the perf-warning
+    /// soft limit, captured so the alert's Continue can re-issue it with
+    /// `bypassWarning: true`. Parallel to `pendingWarningItem` (which is
+    /// channel-only) because the VOD add takes resolved-URL parameters,
+    /// not a `ChannelDisplayItem`.
+    @State private var pendingVODAdd: PendingVODAdd? = nil
 
     /// Non-nil when an add attempt produced a user-facing error
     /// (`.rejectedMax`, `.unresolvable`). Short inline toast.
@@ -74,11 +162,40 @@ struct AddToMultiviewSheet: View {
     @State private var hiddenGroups: Set<String> = []
 
     var body: some View {
-        #if os(tvOS)
-        tvOSBody
-        #else
-        iPadOSBody
-        #endif
+        Group {
+            #if os(tvOS)
+            tvOSBody
+            #else
+            iPadOSBody
+            #endif
+        }
+        // Phase 1 (Step 4): perf-warning alert for VOD / recording adds.
+        // Parallel to the channel warning in `SharedSheetModifiers`;
+        // separate because the deferred add carries resolved-URL params
+        // rather than a `ChannelDisplayItem`. Continue re-issues the add
+        // with `bypassWarning: true`.
+        .alert(
+            "Performance may degrade",
+            isPresented: Binding(
+                get: { pendingVODAdd != nil },
+                set: { if !$0 { pendingVODAdd = nil } }
+            ),
+            presenting: pendingVODAdd
+        ) { pending in
+            Button("Continue", role: .destructive) {
+                pendingVODAdd = nil
+                commitAddVOD(
+                    streamURL: pending.streamURL, headers: pending.headers,
+                    title: pending.title, posterURL: pending.posterURL,
+                    kind: pending.kind, vodID: pending.vodID,
+                    serverID: pending.serverID, vodType: pending.vodType,
+                    bypassWarning: true
+                )
+            }
+            Button("Cancel", role: .cancel) { pendingVODAdd = nil }
+        } message: { _ in
+            Text("Adding more than \(multiviewStore.softLimit) streams may cause audio drops, buffering, or overheating on some devices.")
+        }
     }
 
     // MARK: - iPadOS body (NavigationStack + List + detents)
@@ -94,22 +211,19 @@ struct AddToMultiviewSheet: View {
                 // search bar is focused; collapsed entirely when there
                 // are 0–1 visible groups so a single-group provider
                 // doesn't get a lonely "All" chip eating vertical room.
-                if groupChips.count > 1 {
+                //
+                // Phase 1 (Step 4): the source switcher (Channels /
+                // Movies / Series / Recordings) sits above the group
+                // filter. The group filter is channel-only (VOD has no
+                // group chips), so it's hidden for the other sources.
+                iPadSourcePillBar
+                if pickerSource == .channels, groupChips.count > 1 {
                     iPadGroupFilterBar
                 }
 
-                List {
-                    if !favoriteChannels.isEmpty {
-                        section(title: "Favorites", items: favoriteChannels)
-                    }
-                    if !recentChannels.isEmpty {
-                        section(title: "Recent", items: recentChannels)
-                    }
-                    section(title: "All Channels", items: allChannelsFiltered)
-                }
-                .listStyle(.plain)
+                iPadContent
             }
-            .searchable(text: $searchText, prompt: "Search channels")
+            .searchable(text: $searchText, prompt: iPadSearchPrompt)
             .navigationTitle("Add to Multiview")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -179,6 +293,154 @@ struct AddToMultiviewSheet: View {
             .padding(.vertical, 8)
         }
     }
+
+    /// Phase 1 (Step 4): source switcher pill bar for iPad. Same visual
+    /// vocabulary as `iPadGroupFilterBar` (accent fill selected,
+    /// elevated unselected, capsule) so the picker reads as one
+    /// cohesive control. Switching source clears the search field and
+    /// any series drill-in so the new source starts clean.
+    @ViewBuilder
+    private var iPadSourcePillBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(MultiviewPickerSource.allCases) { source in
+                    Button {
+                        withAnimation(.spring(response: 0.25)) {
+                            selectSource(source)
+                        }
+                    } label: {
+                        Text(source.displayName)
+                            .font(.labelMedium)
+                            .foregroundColor(pickerSource == source
+                                             ? .appBackground
+                                             : .textSecondary)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(
+                                pickerSource == source
+                                    ? AnyView(Capsule().fill(Color.accentPrimary))
+                                    : AnyView(Capsule().fill(Color.elevatedBackground))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Source: \(source.displayName)")
+                    .accessibilityAddTraits(pickerSource == source ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+    }
+
+    /// Phase 1 (Step 4): the iPad content list, switched by source.
+    /// Channels keep their original Favorites / Recent / All sections;
+    /// Movies / Series / Recordings render their own row types. All use
+    /// a plain `List` with `LazyVStack`-equivalent on-demand row
+    /// realization so large catalogues don't decode every poster up
+    /// front.
+    @ViewBuilder
+    private var iPadContent: some View {
+        switch pickerSource {
+        case .channels:
+            List {
+                if !favoriteChannels.isEmpty {
+                    section(title: "Favorites", items: favoriteChannels)
+                }
+                if !recentChannels.isEmpty {
+                    section(title: "Recent", items: recentChannels)
+                }
+                section(title: "All Channels", items: allChannelsFiltered)
+            }
+            .listStyle(.plain)
+        case .movies:
+            List {
+                moviesSection
+            }
+            .listStyle(.plain)
+        case .series:
+            iPadSeriesContent
+        case .recordings:
+            List {
+                recordingSection
+            }
+            .listStyle(.plain)
+        }
+    }
+
+    /// Series source on iPad: either the show grid (a list of series)
+    /// or, when one is drilled into, that series' episodes with a Back
+    /// row at the top. A `List` keeps the platform's swipe / scroll
+    /// behaviour consistent with the channels source.
+    @ViewBuilder
+    private var iPadSeriesContent: some View {
+        List {
+            if let series = drilledSeries {
+                Section {
+                    Button {
+                        exitSeriesDrillIn()
+                    } label: {
+                        Label("Back to Series", systemImage: "chevron.left")
+                            .font(.headline)
+                            .foregroundStyle(Color.accentPrimary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                if drilledEpisodes == nil {
+                    Section(series.name) {
+                        HStack {
+                            ProgressView()
+                            Text("Loading episodes...")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    Section(series.name) {
+                        ForEach(drilledEpisodesFiltered) { ep in
+                            episodeRow(ep, seriesPoster: series.posterURL)
+                        }
+                    }
+                }
+            } else {
+                Section("Series") {
+                    ForEach(seriesFiltered) { item in
+                        seriesRow(item)
+                    }
+                }
+            }
+        }
+        .listStyle(.plain)
+    }
+
+    /// Movies section body (iPad). Each row resolves + adds on tap.
+    private var moviesSection: some View {
+        Section("Movies") {
+            ForEach(moviesFiltered) { item in
+                if let movie = item.movie {
+                    movieRow(movie)
+                }
+            }
+        }
+    }
+
+    /// Recordings section body (iPad).
+    private var recordingSection: some View {
+        Section("Recordings") {
+            ForEach(recordingsFiltered, id: \.id) { rec in
+                recordingRow(rec)
+            }
+        }
+    }
+
+    /// Search prompt reflects the active source so the field reads
+    /// naturally ("Search movies" while browsing movies, etc.).
+    private var iPadSearchPrompt: String {
+        switch pickerSource {
+        case .channels:   return "Search channels"
+        case .movies:     return "Search movies"
+        case .series:     return drilledSeries == nil ? "Search series" : "Search episodes"
+        case .recordings: return "Search recordings"
+        }
+    }
     #endif
 
     // MARK: - tvOS body (full-screen, couch-readable)
@@ -207,6 +469,15 @@ struct AddToMultiviewSheet: View {
                     .padding(.top, 40)
                     .padding(.bottom, 20)
 
+                // Phase 1 (Step 4): source switcher (Channels / Movies
+                // / Series / Recordings). Sits directly under the
+                // header so D-pad Down from Close lands here first, then
+                // the (channel-only) group filter, then the list.
+                tvSourcePillBar
+                    .padding(.horizontal, 80)
+                    .padding(.bottom, 12)
+                    .focusSection()
+
                 // v1.6.12: group filter pill bar. Sits between the
                 // header and the channel scroll so the focus engine's
                 // natural top-to-bottom traversal lands on filter
@@ -214,8 +485,9 @@ struct AddToMultiviewSheet: View {
                 // Live TV's tvOS layout. `.focusSection()` keeps focus
                 // grouped here when the user moves up from the channels
                 // — without it, swiping up jumps straight to the Close
-                // button instead of the chips.
-                if groupChips.count > 1 {
+                // button instead of the chips. Channel-only: VOD
+                // sources have no group chips.
+                if pickerSource == .channels, groupChips.count > 1 {
                     tvGroupFilterBar
                         .padding(.horizontal, 80)
                         .padding(.bottom, 12)
@@ -243,31 +515,7 @@ struct AddToMultiviewSheet: View {
                     // reinstates the visual gap between sections
                     // without costing lazy-load.
                     LazyVStack(alignment: .leading, spacing: 12) {
-                        // Each `ForEach` id is namespaced by section name
-                        // ("fav:<id>", "recent:<id>", "all:<id>") because
-                        // the same channel can appear in multiple sections
-                        // (a favorited channel is also in All Channels),
-                        // and SwiftUI's `LazyVStack` emits
-                        // "ID used by multiple child views" warnings + real
-                        // rendering glitches when two siblings share an
-                        // `explicitID`. Composite keys keep each row's
-                        // identity unique within the flat list.
-                        if !favoriteChannels.isEmpty {
-                            tvSectionHeader("Favorites")
-                            ForEach(favoriteChannels, id: \.favSectionID) { item in
-                                tvChannelRow(item)
-                            }
-                        }
-                        if !recentChannels.isEmpty {
-                            tvSectionHeader("Recent")
-                            ForEach(recentChannels, id: \.recentSectionID) { item in
-                                tvChannelRow(item)
-                            }
-                        }
-                        tvSectionHeader("All Channels")
-                        ForEach(allChannelsFiltered, id: \.allSectionID) { item in
-                            tvChannelRow(item)
-                        }
+                        tvContent
                     }
                     .padding(.horizontal, 80)
                     .padding(.bottom, 60)
@@ -321,6 +569,138 @@ struct AddToMultiviewSheet: View {
             }
             .padding(.vertical, 4)
         }
+    }
+
+    /// Phase 1 (Step 4): source switcher pill bar for tvOS. Same
+    /// `PickerGroupPillButtonStyle` as the group filter so focus halo +
+    /// scale match. Switching source resets search + any series
+    /// drill-in.
+    @ViewBuilder
+    private var tvSourcePillBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(MultiviewPickerSource.allCases) { source in
+                    Button {
+                        withAnimation(.spring(response: 0.25)) {
+                            selectSource(source)
+                        }
+                    } label: {
+                        Text(source.displayName)
+                            .font(.system(size: 22, weight: .medium))
+                    }
+                    .buttonStyle(PickerGroupPillButtonStyle(
+                        isSelected: pickerSource == source
+                    ))
+                    .accessibilityLabel("Source: \(source.displayName)")
+                    .accessibilityAddTraits(pickerSource == source ? .isSelected : [])
+                }
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
+    /// Phase 1 (Step 4): tvOS content, switched by source. Each branch
+    /// emits flat `LazyVStack` siblings (section header + rows) so lazy
+    /// realization is preserved exactly like the channels list.
+    @ViewBuilder
+    private var tvContent: some View {
+        switch pickerSource {
+        case .channels:
+            // Each `ForEach` id is namespaced by section name
+            // ("fav:<id>", "recent:<id>", "all:<id>") because the same
+            // channel can appear in multiple sections (a favorited
+            // channel is also in All Channels), and SwiftUI's
+            // `LazyVStack` emits "ID used by multiple child views"
+            // warnings + real rendering glitches when two siblings
+            // share an `explicitID`. Composite keys keep each row's
+            // identity unique within the flat list.
+            if !favoriteChannels.isEmpty {
+                tvSectionHeader("Favorites")
+                ForEach(favoriteChannels, id: \.favSectionID) { item in
+                    tvChannelRow(item)
+                }
+            }
+            if !recentChannels.isEmpty {
+                tvSectionHeader("Recent")
+                ForEach(recentChannels, id: \.recentSectionID) { item in
+                    tvChannelRow(item)
+                }
+            }
+            tvSectionHeader("All Channels")
+            ForEach(allChannelsFiltered, id: \.allSectionID) { item in
+                tvChannelRow(item)
+            }
+        case .movies:
+            tvSectionHeader("Movies")
+            if moviesFiltered.isEmpty {
+                tvEmptyRow("No movies available")
+            }
+            ForEach(moviesFiltered) { item in
+                if let movie = item.movie {
+                    movieRow(movie)
+                }
+            }
+        case .series:
+            tvSeriesContent
+        case .recordings:
+            tvSectionHeader("Recordings")
+            if recordingsFiltered.isEmpty {
+                tvEmptyRow("No playable recordings")
+            }
+            ForEach(recordingsFiltered, id: \.id) { rec in
+                recordingRow(rec)
+            }
+        }
+    }
+
+    /// tvOS Series source: show list, or the drilled series' episodes
+    /// with a Back row. Flat siblings keep lazy realization.
+    @ViewBuilder
+    private var tvSeriesContent: some View {
+        if let series = drilledSeries {
+            Button {
+                exitSeriesDrillIn()
+            } label: {
+                Label("Back to Series", systemImage: "chevron.left")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(Color.accentPrimary)
+                    .padding(.vertical, 8)
+            }
+            .buttonStyle(TVNoHighlightButtonStyle())
+            tvSectionHeader(series.name)
+            if drilledEpisodes == nil {
+                HStack(spacing: 16) {
+                    ProgressView()
+                    Text("Loading episodes...")
+                        .font(.system(size: 22))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                .padding(.vertical, 12)
+            } else if drilledEpisodesFiltered.isEmpty {
+                tvEmptyRow("No episodes found")
+            } else {
+                ForEach(drilledEpisodesFiltered) { ep in
+                    episodeRow(ep, seriesPoster: series.posterURL)
+                }
+            }
+        } else {
+            tvSectionHeader("Series")
+            if seriesFiltered.isEmpty {
+                tvEmptyRow("No series available")
+            }
+            ForEach(seriesFiltered) { item in
+                seriesRow(item)
+            }
+        }
+    }
+
+    /// A simple empty-state row for the tvOS list (no content for the
+    /// active source). Couch-readable, muted.
+    private func tvEmptyRow(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 24, weight: .regular))
+            .foregroundStyle(.white.opacity(0.45))
+            .padding(.vertical, 24)
     }
 
     /// Header: title on the left, big Close button on the right.
@@ -418,6 +798,164 @@ struct AddToMultiviewSheet: View {
         }
     }
 
+    // MARK: - VOD / Recording rows (Phase 1 Step 4)
+
+    /// A movie row. Tap resolves the proxy URL then adds a `.vod` tile.
+    /// Shows a spinner while resolving, a green check once a tile with
+    /// this movie's id exists, the `+` otherwise.
+    private func movieRow(_ movie: VODMovie) -> some View {
+        let added = vodAlreadyAdded(vodID: movie.id)
+        return VODPickerRow(
+            title: movie.name,
+            subtitle: movie.releaseYear.isEmpty ? nil : movie.releaseYear,
+            posterURL: movie.posterURL,
+            headers: activeServerHeaders,
+            trailing: rowTrailingState(isAdded: added, isResolving: resolvingIDs.contains(movie.id)),
+            isDisabled: multiviewStore.isAtMax && !added
+        ) {
+            if added {
+                removeVODTile(vodID: movie.id)
+                return
+            }
+            guard let url = movie.streamURL else {
+                showToast("This movie has no playable stream")
+                return
+            }
+            Task {
+                await resolveAndAddVOD(
+                    id: movie.id, proxyURL: url, title: movie.name,
+                    posterURL: movie.posterURL, vodID: movie.id, vodType: "movie"
+                )
+            }
+        }
+    }
+
+    /// A series row. Tap drills into the show's episode list (no add on
+    /// the series itself; a multiview tile plays one episode).
+    private func seriesRow(_ item: VODDisplayItem) -> some View {
+        VODPickerRow(
+            title: item.name,
+            subtitle: item.releaseYear.isEmpty ? nil : item.releaseYear,
+            posterURL: item.posterURL,
+            headers: activeServerHeaders,
+            trailing: .disclosure,
+            isDisabled: false
+        ) {
+            if let series = item.series {
+                enterSeriesDrillIn(series)
+            }
+        }
+    }
+
+    /// An episode row inside a drilled-into series. Tap resolves the
+    /// episode's proxy URL then adds a `.vod` tile.
+    private func episodeRow(_ ep: VODEpisode, seriesPoster: URL?) -> some View {
+        let added = vodAlreadyAdded(vodID: ep.id)
+        let label = episodeNumberLabel(season: ep.seasonNumber, episode: ep.episodeNumber)
+        let title = label.isEmpty ? ep.title : "\(label)  \(ep.title)"
+        return VODPickerRow(
+            title: title,
+            subtitle: nil,
+            posterURL: ep.posterURL ?? seriesPoster,
+            headers: activeServerHeaders,
+            trailing: rowTrailingState(isAdded: added, isResolving: resolvingIDs.contains(ep.id)),
+            isDisabled: multiviewStore.isAtMax && !added
+        ) {
+            if added {
+                removeVODTile(vodID: ep.id)
+                return
+            }
+            guard let url = ep.streamURL else {
+                showToast("This episode has no playable stream")
+                return
+            }
+            Task {
+                await resolveAndAddVOD(
+                    id: ep.id, proxyURL: url, title: ep.title,
+                    posterURL: ep.posterURL ?? seriesPoster,
+                    vodID: ep.id, vodType: "episode"
+                )
+            }
+        }
+    }
+
+    /// A recording row. Tap adds the recording as a tile (completed =>
+    /// `.vod` file, in-progress => `.dvr` HLS). Recordings carry no VOD
+    /// id (no continue-watching), so the row can't show an "added"
+    /// check keyed on a vodID; it always shows `+` (a recording can be
+    /// added more than once, matching the channel duplicate rule).
+    private func recordingRow(_ rec: Recording) -> some View {
+        let subtitle = rec.isInProgress
+            ? "Recording now - \(rec.channelName)"
+            : rec.channelName
+        return VODPickerRow(
+            title: rec.programTitle.isEmpty ? "Recording" : rec.programTitle,
+            subtitle: subtitle.isEmpty ? nil : subtitle,
+            posterURL: nil,
+            headers: activeServerHeaders,
+            trailing: multiviewStore.isAtMax ? .blocked : .add,
+            isDisabled: multiviewStore.isAtMax
+        ) {
+            addRecording(rec)
+        }
+    }
+
+    /// Trailing-icon state for a VOD row, given add + resolve flags.
+    private func rowTrailingState(isAdded: Bool, isResolving: Bool) -> VODPickerRow.Trailing {
+        if isResolving { return .loading }
+        if isAdded { return .added }
+        if multiviewStore.isAtMax { return .blocked }
+        return .add
+    }
+
+    /// "S1:E4" / "E4" / "" using the same convention as Continue Watching.
+    private func episodeNumberLabel(season: Int, episode: Int) -> String {
+        if season > 0 && episode > 0 { return "S\(season):E\(episode)" }
+        if episode > 0 { return "E\(episode)" }
+        return ""
+    }
+
+    /// `true` when a tile already carries this VOD id (movie / episode).
+    private func vodAlreadyAdded(vodID: String) -> Bool {
+        multiviewStore.tiles.contains { $0.vodID == vodID }
+    }
+
+    /// Remove the tile carrying this VOD id (tap-again-to-deselect,
+    /// matching the channel toggle behaviour).
+    private func removeVODTile(vodID: String) {
+        guard let tile = multiviewStore.tiles.first(where: { $0.vodID == vodID }) else { return }
+        multiviewStore.remove(id: tile.id)
+    }
+
+    // MARK: - Source / drill-in navigation (Phase 1 Step 4)
+
+    /// Switch the active source. Clears the search field and any series
+    /// drill-in so the new source starts from a clean state. No-op when
+    /// the source is unchanged.
+    private func selectSource(_ source: MultiviewPickerSource) {
+        guard source != pickerSource else { return }
+        pickerSource = source
+        searchText = ""
+        drilledSeries = nil
+        drilledEpisodes = nil
+    }
+
+    /// Begin a series drill-in: stash the series, clear the search, and
+    /// kick off the episode fetch.
+    private func enterSeriesDrillIn(_ series: VODSeries) {
+        drilledSeries = series
+        drilledEpisodes = nil
+        searchText = ""
+        Task { await loadDrilledEpisodes(series) }
+    }
+
+    /// Leave the series drill-in, back to the show list.
+    private func exitSeriesDrillIn() {
+        drilledSeries = nil
+        drilledEpisodes = nil
+        searchText = ""
+    }
+
     // MARK: - Data
 
     private var favoriteChannels: [ChannelDisplayItem] {
@@ -430,6 +968,89 @@ struct AddToMultiviewSheet: View {
 
     private var allChannelsFiltered: [ChannelDisplayItem] {
         applyFilters(channelStore.channels)
+    }
+
+    // MARK: - VOD / Recordings data (Phase 1 Step 4)
+
+    /// The active server, used for VOD / recording auth headers and
+    /// for the async URL resolve. VOD content is per-active-server
+    /// (the On Demand tab loads from whichever server is active), so
+    /// the channel store's `activeServer` is the same server that
+    /// produced `vodStore.movies` / `.series`.
+    private var activeServer: ServerConnection? {
+        channelStore.activeServer
+            ?? servers.first(where: { $0.isActive })
+            ?? servers.first
+    }
+
+    /// Auth headers for the active server's stream / file requests.
+    /// Same shape `VODDetailView.serverHeaders()` and
+    /// `MyRecordingsView` hand to the player. Falls back to an empty
+    /// dictionary when no server is active (the lists are then empty
+    /// too, so this is only defensive).
+    private var activeServerHeaders: [String: String] {
+        activeServer?.authHeaders ?? [:]
+    }
+
+    /// Movies for the active server, search-filtered. The group filter
+    /// is channel-only, so VOD sources honour just the search query.
+    private var moviesFiltered: [VODDisplayItem] {
+        searchFilterVOD(vodStore.movies)
+    }
+
+    /// Series for the active server, search-filtered.
+    private var seriesFiltered: [VODDisplayItem] {
+        searchFilterVOD(vodStore.series)
+    }
+
+    /// Episodes of the drilled-into series, search-filtered by title.
+    private var drilledEpisodesFiltered: [VODEpisode] {
+        let eps = drilledEpisodes ?? []
+        guard !searchText.isEmpty else { return eps }
+        let q = searchText.lowercased()
+        return eps.filter { $0.title.lowercased().contains(q) }
+    }
+
+    /// Recordings scoped to the active server and limited to the
+    /// statuses a tile can actually play: completed / stopped (a
+    /// finished file) and in-progress recordings that expose the new
+    /// HLS DVR pipeline. Scheduled / failed rows are omitted (nothing
+    /// to play). Search-filtered on the program title.
+    private var recordingsFiltered: [Recording] {
+        guard let sid = activeServer?.id.uuidString else { return [] }
+        let scoped = allRecordings.filter { $0.serverID == sid }
+        let playable = scoped.filter { recordingIsPlayable($0) }
+        guard !searchText.isEmpty else { return playable }
+        let q = searchText.lowercased()
+        return playable.filter {
+            $0.programTitle.lowercased().contains(q)
+                || $0.channelName.lowercased().contains(q)
+        }
+    }
+
+    /// A recording is addable to a tile when it has a playable URL:
+    /// a completed/stopped server recording, or an in-progress server
+    /// recording whose HLS pipeline URL the server has emitted. Local
+    /// recordings are excluded: their `file://` path plays fine in the
+    /// single full-screen player but the multiview tile pipeline is
+    /// built around remote streams, and an in-progress local file is
+    /// held open by the recorder. Matches `MyRecordingsView`'s
+    /// server-playback gating.
+    private func recordingIsPlayable(_ rec: Recording) -> Bool {
+        guard rec.destination == .dispatcharrServer,
+              rec.remoteRecordingID != nil else { return false }
+        if rec.isCompleted || rec.status == .stopped { return true }
+        if rec.status == .recording, rec.dispatcharrFileURL != nil { return true }
+        return false
+    }
+
+    /// Case-insensitive substring match on a VOD item's name. The
+    /// group-filter pill bar is channel-only, so VOD lists filter on
+    /// the search query alone.
+    private func searchFilterVOD(_ items: [VODDisplayItem]) -> [VODDisplayItem] {
+        guard !searchText.isEmpty else { return items }
+        let q = searchText.lowercased()
+        return items.filter { $0.name.lowercased().contains(q) }
     }
 
     /// Groups eligible to appear in the filter pill bar — the
@@ -583,6 +1204,222 @@ struct AddToMultiviewSheet: View {
         }
     }
 
+    // MARK: - VOD / Recording add flow (Phase 1 Step 4)
+
+    /// Resolve a VOD proxy URL (Dispatcharr only) then add the tile.
+    /// Mirrors `VODDetailView.resolveAndLaunch`: Dispatcharr's
+    /// `/proxy/vod/*` endpoints redirect to a session / provider URL,
+    /// and the tile's player can drop custom headers across a redirect,
+    /// so we resolve the final URL up-front with the active server's
+    /// auth headers. Xtream URLs are direct (auth is in the path) and
+    /// need no resolve. While resolving, `id` is held in `resolvingIDs`
+    /// so the row shows a spinner.
+    ///
+    /// `proxyURL` here is the raw `VODMovie.streamURL` / `VODEpisode.streamURL`.
+    /// The resolved URL and the server headers are NEVER logged
+    /// (credentials); same convention as the rest of this file.
+    @MainActor
+    private func resolveAndAddVOD(
+        id: String,
+        proxyURL: URL,
+        title: String,
+        posterURL: URL?,
+        vodID: String?,
+        vodType: String
+    ) async {
+        guard !resolvingIDs.contains(id) else { return }
+        let server = activeServer
+        let headers = activeServerHeaders
+
+        // Thermal refusal: same gate as the channel path's `tryAdd`.
+        if multiviewStore.isThermallyStressed {
+            showToast("Device is too hot to add more streams")
+            return
+        }
+
+        resolvingIDs.insert(id)
+        defer { resolvingIDs.remove(id) }
+
+        var resolvedURL = proxyURL
+        if let server, server.type == .dispatcharrAPI {
+            let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                     auth: .apiKey(server.effectiveApiKey),
+                                     userAgent: server.effectiveUserAgent,
+                                     authMode: server.dispatcharrHeaderMode)
+            resolvedURL = (try? await api.resolveFinalURLForPlayback(proxyURL)) ?? proxyURL
+        }
+
+        commitAddVOD(
+            streamURL: resolvedURL,
+            headers: headers,
+            title: title,
+            posterURL: posterURL,
+            kind: .vod,
+            vodID: vodID,
+            serverID: server?.id.uuidString,
+            vodType: vodType
+        )
+    }
+
+    /// Add a server recording as a tile. Completed / stopped recordings
+    /// play their finished file (kind `.vod`, no continue-watching);
+    /// in-progress recordings play the growing HLS DVR window (kind
+    /// `.dvr`). URL + headers are built exactly as
+    /// `MyRecordingsView.playServerRecording` does. No async resolve is
+    /// needed (the recording endpoints are not the redirecting
+    /// `/proxy/vod/*` shape).
+    @MainActor
+    private func addRecording(_ rec: Recording) {
+        guard let server = activeServer,
+              server.type == .dispatcharrAPI,
+              let remoteID = rec.remoteRecordingID else {
+            showToast("This recording has no playable stream")
+            return
+        }
+        if multiviewStore.isThermallyStressed {
+            showToast("Device is too hot to add more streams")
+            return
+        }
+
+        // Prefer the server-reported file_url (HLS for in-progress,
+        // direct file for completed); fall back to the constructed
+        // /file/ URL on older builds. Same precedence as MyRecordingsView.
+        let url: URL
+        let isHLS: Bool
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode)
+        if let fileURL = rec.dispatcharrFileURL, !fileURL.isEmpty,
+           let resolved = resolveRecordingURL(server: server, relative: fileURL) {
+            url = resolved
+            isHLS = fileURL.contains(".m3u8")
+        } else if let fallback = api.recordingPlaybackURL(id: remoteID) {
+            url = fallback
+            isHLS = false
+        } else {
+            showToast("This recording has no playable stream")
+            return
+        }
+
+        // In-progress + HLS is a growing DVR window (kind .dvr); a
+        // completed recording or the legacy /file/ fallback is a fixed
+        // file (kind .vod). vodID stays nil so there's no
+        // continue-watching, matching the single recording player.
+        let kind: TilePlaybackKind = (rec.isInProgress && isHLS) ? .dvr : .vod
+        commitAddVOD(
+            streamURL: url,
+            headers: server.authHeaders,
+            title: rec.programTitle.isEmpty ? "Recording" : rec.programTitle,
+            posterURL: nil,
+            kind: kind,
+            vodID: nil,
+            serverID: server.id.uuidString,
+            vodType: "movie"
+        )
+    }
+
+    /// Resolves a Dispatcharr-relative `file_url` against the active
+    /// server's base URL. Copy of `MyRecordingsView.resolveRecordingURL`
+    /// (absolute strings pass through; relative ones anchor to the base).
+    private func resolveRecordingURL(server: ServerConnection, relative: String) -> URL? {
+        let trimmed = relative.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let absolute = URL(string: trimmed), absolute.scheme != nil {
+            return absolute
+        }
+        let base = server.effectiveBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let baseURL = URL(string: base) else { return nil }
+        return URL(string: trimmed, relativeTo: baseURL)?.absoluteURL
+    }
+
+    /// Shared commit for VOD / recording tiles. Auto-seeds tile 0 from
+    /// a playing single stream (same as the channel `commitAdd`) so the
+    /// sheet-first flow works when the picker was opened over a live
+    /// stream, then routes through `MultiviewStore.addVOD` and maps the
+    /// `AddResult` to the same warning / toast UI as the channel path.
+    /// The perf-warning Continue branch re-issues with `bypassWarning`
+    /// via `pendingVODAdd`.
+    @MainActor
+    private func commitAddVOD(
+        streamURL: URL,
+        headers: [String: String],
+        title: String,
+        posterURL: URL?,
+        kind: TilePlaybackKind,
+        vodID: String?,
+        serverID: String?,
+        vodType: String,
+        bypassWarning: Bool = false
+    ) {
+        // Auto-seed tile 0 from the current single stream, identical
+        // to the channel `commitAdd` branch so adding a movie/recording
+        // as the FIRST tile keeps the live stream playing in tile 0.
+        if multiviewStore.tiles.isEmpty,
+           PlayerSession.shared.mode != .multiview,
+           let currentItem = NowPlayingManager.shared.playingItem,
+           let server = channelStore.activeServer {
+            PlayerSession.shared.enterMultiview(seeding: currentItem, server: server)
+        }
+
+        let result = multiviewStore.addVOD(
+            title: title,
+            streamURL: streamURL,
+            headers: headers,
+            posterURL: posterURL,
+            kind: kind,
+            vodID: vodID,
+            serverID: serverID,
+            vodType: vodType,
+            resumePositionMs: nil,
+            bypassWarning: bypassWarning
+        )
+        switch result {
+        case .added:
+            break
+        case .needsWarning:
+            // Stash the parameters so Continue can re-issue with
+            // bypassWarning. Reuse the same alert as the channel path.
+            pendingVODAdd = PendingVODAdd(
+                streamURL: streamURL, headers: headers, title: title,
+                posterURL: posterURL, kind: kind, vodID: vodID,
+                serverID: serverID, vodType: vodType
+            )
+            multiviewStore.warningLastShownAt = Date()
+        case .rejectedMax:
+            showToast("Maximum \(multiviewStore.maxTiles) streams reached")
+        case .alreadyPresent:
+            showToast("Already added")
+        case .unresolvable:
+            showToast("This title has no playable stream")
+        }
+    }
+
+    /// Load the drilled-into series' episodes. Mirrors
+    /// `VODDetailView`'s series `loadDetail`: route through
+    /// `VODService.fetchSeriesDetail`, which returns a fully populated
+    /// `VODSeries` (seasons + episodes). Flattened season-then-episode
+    /// for a single scroll list. The slim list-time `VODSeries` carries
+    /// no episodes, so this fetch is required.
+    @MainActor
+    private func loadDrilledEpisodes(_ series: VODSeries) async {
+        guard let server = activeServer else {
+            drilledEpisodes = []
+            return
+        }
+        drilledEpisodes = nil  // spinner
+        let snap = server.snapshot
+        let detail = try? await VODService.fetchSeriesDetail(
+            seriesID: series.id, from: snap, existing: series
+        )
+        // Bail if the user backed out / switched series while loading.
+        guard drilledSeries?.id == series.id else { return }
+        let flattened = (detail?.seasons ?? [])
+            .sorted { $0.seasonNumber < $1.seasonNumber }
+            .flatMap { $0.episodes.sorted { $0.episodeNumber < $1.episodeNumber } }
+        drilledEpisodes = flattened
+    }
+
     private func showToast(_ message: String) {
         toastMessage = message
         Task {
@@ -609,6 +1446,211 @@ struct AddToMultiviewSheet: View {
                 Capsule().fill(Color.black.opacity(0.85))
             )
             .accessibilityLabel(text)
+    }
+}
+
+// MARK: - VOD / Recording picker row (Phase 1 Step 4)
+
+/// A single Movies / Series / Episode / Recording row inside the
+/// `AddToMultiviewSheet`. Visual sibling to `CompactChannelRow`: a
+/// leading poster thumbnail, a title (+ optional subtitle), and a
+/// trailing affordance whose icon depends on state (add / added /
+/// loading / blocked / disclosure). Platform-agnostic, with the same
+/// tvOS focus treatment (`TVNoHighlightButtonStyle`) the channel row
+/// uses so the picker reads as one consistent list.
+///
+/// Poster art routes through `AuthPosterImage` (defined in
+/// `MoviesView.swift`) so the active server's auth headers reach the
+/// poster fetch (Dispatcharr posters 401 without them). Recordings
+/// have no art and fall back to a film-icon placeholder.
+private struct VODPickerRow: View {
+    /// Trailing-icon state. `disclosure` is for a series row (tap
+    /// drills in rather than adds); the others mirror
+    /// `CompactChannelRow.trailing`.
+    enum Trailing {
+        case add
+        case added
+        case loading
+        case blocked
+        case disclosure
+    }
+
+    let title: String
+    var subtitle: String? = nil
+    let posterURL: URL?
+    var headers: [String: String] = [:]
+    let trailing: Trailing
+    let isDisabled: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(alignment: .center, spacing: rowSpacing) {
+                poster
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(verbatim: title)
+                        .font(titleFont)
+                        .lineLimit(1)
+                        .foregroundStyle(.primary)
+                    if let subtitle, !subtitle.isEmpty {
+                        Text(verbatim: subtitle)
+                            .font(subtitleFont)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer(minLength: 8)
+                trailingIcon
+            }
+            .padding(.vertical, rowVPadding)
+            .padding(.horizontal, rowHPadding)
+            .contentShape(Rectangle())
+            .opacity(rowOpacity)
+        }
+        #if os(tvOS)
+        .buttonStyle(TVNoHighlightButtonStyle())
+        #else
+        .buttonStyle(.plain)
+        #endif
+        .disabled(isDisabled)
+        .accessibilityLabel(a11yLabel)
+    }
+
+    // MARK: Subviews
+
+    @ViewBuilder
+    private var poster: some View {
+        // 2:3 poster aspect, matching the VOD grid. Sized to the same
+        // footprint as the channel row's square logo so both row types
+        // align in a mixed list.
+        if posterURL != nil {
+            AuthPosterImage(url: posterURL, headers: headers)
+                .aspectRatio(2/3, contentMode: .fill)
+                .frame(width: posterWidth, height: posterHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        } else {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.secondary.opacity(0.15))
+                .frame(width: posterWidth, height: posterHeight)
+                .overlay(
+                    Image(systemName: "film")
+                        .foregroundStyle(.secondary)
+                )
+        }
+    }
+
+    @ViewBuilder
+    private var trailingIcon: some View {
+        switch trailing {
+        case .add:
+            Image(systemName: "plus.circle")
+                .font(.system(size: trailingIconSize))
+                .foregroundStyle(Color.accentPrimary)
+        case .added:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: trailingIconSize))
+                .foregroundStyle(.green)
+        case .loading:
+            ProgressView()
+                #if os(tvOS)
+                .scaleEffect(1.4)
+                #endif
+        case .blocked:
+            Image(systemName: "hand.raised.slash")
+                .font(.system(size: trailingIconSize))
+                .foregroundStyle(.secondary)
+        case .disclosure:
+            Image(systemName: "chevron.right")
+                .font(.system(size: trailingIconSize * 0.8, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Platform sizing
+
+    private var posterWidth: CGFloat {
+        #if os(tvOS)
+        return 48
+        #else
+        return 30
+        #endif
+    }
+
+    private var posterHeight: CGFloat {
+        #if os(tvOS)
+        return 72
+        #else
+        return 45
+        #endif
+    }
+
+    private var rowSpacing: CGFloat {
+        #if os(tvOS)
+        return 20
+        #else
+        return 12
+        #endif
+    }
+
+    private var rowVPadding: CGFloat {
+        #if os(tvOS)
+        return 14
+        #else
+        return 8
+        #endif
+    }
+
+    private var rowHPadding: CGFloat {
+        #if os(tvOS)
+        return 20
+        #else
+        return 12
+        #endif
+    }
+
+    private var titleFont: Font {
+        #if os(tvOS)
+        return .system(size: 26, weight: .semibold)
+        #else
+        return .headline
+        #endif
+    }
+
+    private var subtitleFont: Font {
+        #if os(tvOS)
+        return .system(size: 20, weight: .regular)
+        #else
+        return .caption
+        #endif
+    }
+
+    private var trailingIconSize: CGFloat {
+        #if os(tvOS)
+        return 30
+        #else
+        return 22
+        #endif
+    }
+
+    private var rowOpacity: Double {
+        switch trailing {
+        case .added:   return 0.55
+        case .blocked: return 0.4
+        default:       return 1
+        }
+    }
+
+    private var a11yLabel: String {
+        let sub = subtitle.map { ", \($0)" } ?? ""
+        switch trailing {
+        case .added:      return "\(title)\(sub), added"
+        case .blocked:    return "\(title)\(sub), cannot add, limit reached"
+        case .loading:    return "\(title)\(sub), adding"
+        case .disclosure: return "\(title)\(sub), show episodes"
+        case .add:        return "\(title)\(sub)"
+        }
     }
 }
 
