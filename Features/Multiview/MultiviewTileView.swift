@@ -160,17 +160,19 @@ struct MultiviewTileView: View {
     /// Computed: a tile should freeze its mpv decode when:
     /// - PiP is currently active AND this is NOT the audio tile
     ///   (PiP-source tile keeps decoding; others pause for
-    ///   CPU/GPU/network savings — existing behaviour).
-    /// - OR the channel-picker sheet is open (`isPickerPresented`).
-    ///   In the picker case we pause ALL tiles including the audio
-    ///   tile — the sheet's channel-list rendering + image loads
-    ///   can consume hundreds of MB on Apple TV 4K, and holding a
-    ///   concurrent videotoolbox decode session turns borderline
-    ///   pressure into jetsam kills. The pause resumes the instant
-    ///   the sheet dismisses (pick or cancel), so the user sees a
-    ///   momentary freeze rather than a crash.
+    ///   CPU/GPU/network savings).
+    /// - OR the channel-picker sheet is open (`isPickerPresented`)
+    ///   AND this is NOT the audio tile. The user wants to keep
+    ///   watching and hearing the focused stream while adding another,
+    ///   so the audio tile keeps decoding; the non-audio tiles still
+    ///   pause so the picker's channel-list image loads keep their
+    ///   videotoolbox / IOSurface headroom on Apple TV 4K (the
+    ///   original pause-all was added after jetsam kills at ~1.8 GB RSS
+    ///   with the picker open over a playing tile). On tvOS the picker
+    ///   is a fullScreenCover, so the paused non-audio tiles are hidden
+    ///   behind it anyway; only the audio tile's sound is perceptible.
     private var shouldPause: Bool {
-        if store.isPickerPresented { return true }
+        if store.isPickerPresented { return !isAudioActive }
         // Fullscreen-within-grid mode: the promoted tile keeps
         // decoding; every OTHER tile freezes. This is the
         // double-click-Select UX (tvOS) — user zooms into one
