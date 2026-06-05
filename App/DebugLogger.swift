@@ -25,6 +25,15 @@ func debugLog(_ message: @autoclosure () -> String) {
     #if DEBUG
     let line = message()
     _debugConsoleQueue.async { print(line) }
+    // v1.7.x: also route to the on-disk log file when Developer Settings
+    // has Debug Logging on. Pre-fix this firehose (the emoji-prefixed
+    // ChannelStore / MPV-DIAG / SyncManager / FRAME lines users see in
+    // Xcode console) went to stdout only, so the on-device file the
+    // share path serves up stayed effectively empty - users with no Mac
+    // attached had no log to send to us. captureFreeFunctionLog is a
+    // no-op when isEnabled is false, so cost on a tester who has the
+    // toggle off is exactly the existing print.
+    DebugLogger.shared.captureFreeFunctionLog(line)
     #endif
 }
 
@@ -402,6 +411,28 @@ final class DebugLogger: @unchecked Sendable {
             """
             self.appendToFile(header)
         }
+    }
+
+    // MARK: - Free-function (`debugLog`) capture
+
+    /// Sink for the `debugLog(_:)` free-function firehose. Called from
+    /// every `debugLog(...)` call site in Debug builds. When the user
+    /// has Debug Logging turned on in Developer Settings, the message
+    /// is sanitized (creds, api_key, Authorization, JWTs scrubbed) and
+    /// appended to `aerio_debug_logs.txt` so the Share Log File path
+    /// actually has content to share. No-op when logging is off, so the
+    /// non-tester path stays exactly as the existing stdout-only path.
+    /// v1.7.x: deliberately does NOT add the `formatEntry` decorations
+    /// (timestamp + level + category brackets) because the existing
+    /// callers already include their own emoji prefixes and contextual
+    /// tags; we just prepend a short `[HH:mm:ss.SSS]` so each line is
+    /// timestamped and append the newline.
+    func captureFreeFunctionLog(_ text: String) {
+        guard isEnabled else { return }
+        let ts = timestampFormatter.string(from: Date())
+        let sanitized = Self.sanitize(text)
+        let line = "[\(ts)] \(sanitized)\n"
+        queue.async { [weak self] in self?.appendToFile(line) }
     }
 
     // MARK: - Formatting & I/O
