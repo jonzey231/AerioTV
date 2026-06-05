@@ -2387,14 +2387,7 @@ struct EPGGuideView: View {
                                 // locale-aware format so it honors the device's
                                 // 12 or 24-hour setting.
                                 .overlay {
-                                    TimelineView(.periodic(from: Date(), by: 60)) { context in
-                                        Text(context.date, format: .dateTime.hour().minute())
-                                            .font(.system(size: timeHeaderHeight * 0.4, weight: .semibold).monospacedDigit())
-                                            .foregroundColor(.textPrimary)
-                                            .lineLimit(1)
-                                            .minimumScaleFactor(0.5)
-                                            .padding(.horizontal, 4)
-                                    }
+                                    GuideCornerClock(fontSize: timeHeaderHeight * 0.4)
                                 }
                                 .overlay(alignment: .trailing) {
                                     Rectangle().fill(Color.accentPrimary.opacity(0.2)).frame(width: 1)
@@ -3070,6 +3063,30 @@ struct EPGGuideView: View {
 }
 
 // MARK: - Guide Channel Button (own @FocusState for tvOS highlight)
+/// Literal wall-clock time of day shown in the Guide's top-left corner
+/// cell (Coolwolf, Discord request) - the time of day, not anything to do
+/// with the program schedule. Self-contained and Timer-driven: it paints
+/// the current time immediately on appear, then re-paints every 30s. A
+/// schedule-driven view did not reliably paint this in the pinned guide
+/// header on tvOS (the corner read blank), so this uses a plain Timer and
+/// @State instead. The locale-aware hour/minute format honors the
+/// device's 12 or 24-hour setting.
+private struct GuideCornerClock: View {
+    let fontSize: CGFloat
+    @State private var now = Date()
+    private let tick = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        Text(now, format: .dateTime.hour().minute())
+            .font(.system(size: fontSize, weight: .semibold).monospacedDigit())
+            .foregroundColor(.textPrimary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.5)
+            .padding(.horizontal, 4)
+            .onReceive(tick) { now = $0 }
+    }
+}
+
 private struct GuideChannelButton: View {
     let channel: ChannelDisplayItem
     let onSelect: (ChannelDisplayItem) -> Void
