@@ -3,6 +3,11 @@ import SwiftData
 #if canImport(UIKit)
 import UIKit
 #endif
+#if os(tvOS)
+import Network
+import CoreImage
+import CoreImage.CIFilterBuiltins
+#endif
 
 // MARK: - Developer Settings View
 
@@ -49,6 +54,12 @@ struct DeveloperSettingsView: View {
     @State private var copiedConfirmation = false
     @State private var showClearConfirmation = false
     @State private var showLogViewer = false
+    #if os(tvOS)
+    /// Drives the tvOS-only share sheet that exposes the log file on the
+    /// LAN via a tiny embedded HTTP server. iOS uses
+    /// UIActivityViewController instead (not available on tvOS).
+    @State private var showTvOSShareSheet = false
+    #endif
     @State private var logSize = "Empty"
     private let logger = DebugLogger.shared
 
@@ -103,6 +114,15 @@ struct DeveloperSettingsView: View {
         } message: {
             Text("This permanently deletes the current aerio_debug_logs.txt. This cannot be undone.")
         }
+        // MARK: - tvOS Share Sheet (LAN HTTP server + QR code)
+        // Presented when the user taps Share Log File on tvOS. The server
+        // is started in `shareFile` just before this flips true; it stops
+        // automatically when the sheet disappears (TvOSLogShareSheet.onDisappear).
+        #if os(tvOS)
+        .fullScreenCover(isPresented: $showTvOSShareSheet) {
+            TvOSLogShareSheet(isPresented: $showTvOSShareSheet)
+        }
+        #endif
     }
 
     // MARK: - iOS Body
@@ -314,9 +334,20 @@ struct DeveloperSettingsView: View {
                                         Text("Share Log File")
                                             .font(.bodyMedium)
                                             .foregroundColor(.textPrimary)
+                                        #if os(tvOS)
+                                        // tvOS share sheet is AirDrop-only in
+                                        // practice (Mail / Messages / third-
+                                        // party apps are not on the platform),
+                                        // so we say so up front instead of the
+                                        // iOS-style "Email, Messages, ...".
+                                        Text("Send via AirDrop to a nearby Mac or iPhone")
+                                            .font(.labelSmall)
+                                            .foregroundColor(.textTertiary)
+                                        #else
                                         Text("Email, Messages, Discord, Signal…")
                                             .font(.labelSmall)
                                             .foregroundColor(.textTertiary)
+                                        #endif
                                     }
                                 } icon: {
                                     Image(systemName: "square.and.arrow.up")
@@ -626,7 +657,8 @@ struct DeveloperSettingsView: View {
         logSize = logger.logFileSizeString
     }
 
-    /// Present a UIActivityViewController with proper iPad popover anchoring.
+    /// Present a UIActivityViewController with proper iPad popover anchoring
+    /// (iOS) or AirDrop-only sharing (tvOS).
     private func shareFile(_ url: URL) {
         #if os(iOS)
         let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
@@ -653,6 +685,20 @@ struct DeveloperSettingsView: View {
         }
 
         presenter.present(activityVC, animated: true)
+        #endif
+
+        #if os(tvOS)
+        // tvOS does not have UIActivityViewController (no AirDrop API
+        // exposed to apps), so we cannot present a system share sheet.
+        // Instead we start a small HTTP server bound to the Apple TV's
+        // LAN address that serves only this log file, and let the user
+        // open the URL on their phone or Mac browser. The phone saves
+        // the .txt and forwards it to us via email, Discord, etc.
+        // No setup beyond "be on the same WiFi as the Apple TV".
+        // The actual UI lives in TvOSLogShareSheet below; this just
+        // flips the state that presents it.
+        LogShareServer.shared.start(fileURL: url)
+        showTvOSShareSheet = true
         #endif
     }
 }
@@ -791,3 +837,252 @@ private func logCategoryRow(icon: String, title: String, detail: String) -> some
     }
     .padding(.vertical, 4)
 }
+
+// MARK: - tvOS Log Share (LAN HTTP server + QR code)
+
+#if os(tvOS)
+/// One-shot local HTTP server used by tvOS Developer Settings to make
+/// the debug log file reachable from a nearby phone or laptop on the
+/// same WiFi. tvOS has no UIActivityViewController (AirDrop API is not
+/// exposed there), so we expose the file ourselves on a random high
+/// port for the duration of the share sheet and tear the server down
+/// when the user dismisses.
+///
+/// Why a server rather than a one-shot URL: the user opens the URL on
+/// a different device (their phone's Safari, or their Mac), the file
+/// streams over the LAN to that device's Downloads folder, and they
+/// forward it to us via Email, Messages, Discord, etc. No setup beyond
+/// "be on the same WiFi as the Apple TV".
+///
+/// Privacy posture: the server binds to all interfaces but only on the
+/// LAN segment the Apple TV is on, and only stays up while the share
+/// sheet is presented (TvOSLogShareSheet.onDisappear calls stop). The
+/// route /log.txt returns the file content; everything else returns
+/// 404. The file content is the same already-sanitized log produced by
+/// DebugLogger.shared (Xtream creds, api_key, JWT, etc. are scrubbed
+/// before they ever hit the file).
+@MainActor
+final class LogShareServer: ObservableObject {
+    static let shared = LogShareServer()
+
+    /// http://<lan-ip>:<port>/log.txt once the listener is ready. nil
+    /// until the listener picks an interface and port (typically within
+    /// ~50 ms of start).
+    @Published private(set) var shareURL: String?
+    /// True while a server is bound. UI binds to this to render the
+    /// "waiting" vs "ready" states distinctly.
+    @Published private(set) var isRunning: Bool = false
+    /// Set to a brief human-readable reason when start cannot bind a
+    /// port at all (rare; typically only if the LAN is unreachable).
+    @Published private(set) var lastError: String?
+
+    private var listener: NWListener?
+    private var fileURL: URL?
+
+    private init() {}
+
+    func start(fileURL: URL) {
+        stop()
+        self.fileURL = fileURL
+        do {
+            let listener = try NWListener(using: NWParameters.tcp)
+            listener.newConnectionHandler = { [weak self] conn in
+                guard let self else { conn.cancel(); return }
+                Task { @MainActor in self.handle(connection: conn) }
+            }
+            listener.stateUpdateHandler = { [weak self] state in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    switch state {
+                    case .ready:
+                        guard let port = listener.port?.rawValue else { return }
+                        let ip = Self.firstNonLoopbackIPv4() ?? "127.0.0.1"
+                        self.shareURL = "http://\(ip):\(port)/log.txt"
+                        self.isRunning = true
+                    case .failed(let err):
+                        self.lastError = err.localizedDescription
+                        self.shareURL = nil
+                        self.isRunning = false
+                    case .cancelled:
+                        self.shareURL = nil
+                        self.isRunning = false
+                    default: break
+                    }
+                }
+            }
+            listener.start(queue: .main)
+            self.listener = listener
+            self.lastError = nil
+        } catch {
+            self.lastError = error.localizedDescription
+            self.isRunning = false
+        }
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+        fileURL = nil
+        shareURL = nil
+        isRunning = false
+    }
+
+    private func handle(connection conn: NWConnection) {
+        conn.start(queue: .main)
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 4096) { [weak self] data, _, _, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { conn.cancel(); return }
+                let path = Self.parseRequestPath(from: data)
+                if path == "/log.txt" {
+                    self.respondLogFile(on: conn)
+                } else {
+                    self.respondNotFound(on: conn)
+                }
+            }
+        }
+    }
+
+    private func respondLogFile(on conn: NWConnection) {
+        guard let fileURL, let body = try? Data(contentsOf: fileURL) else {
+            respondNotFound(on: conn); return
+        }
+        let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(body.count)\r\nContent-Disposition: attachment; filename=\"aerio_debug_logs.txt\"\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+        var payload = Data(headers.utf8); payload.append(body)
+        conn.send(content: payload, completion: .contentProcessed { _ in conn.cancel() })
+    }
+
+    private func respondNotFound(on conn: NWConnection) {
+        let body = "Not Found"
+        let headers = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: \(body.utf8.count)\r\nConnection: close\r\n\r\n"
+        var payload = Data(headers.utf8); payload.append(Data(body.utf8))
+        conn.send(content: payload, completion: .contentProcessed { _ in conn.cancel() })
+    }
+
+    private static func parseRequestPath(from data: Data?) -> String? {
+        guard let data, !data.isEmpty,
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        guard let lineEnd = text.range(of: "\r\n") else { return nil }
+        let firstLine = text[..<lineEnd.lowerBound]
+        let parts = firstLine.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+        guard parts.count >= 2 else { return nil }
+        let pathPart = parts[1]
+        if let q = pathPart.firstIndex(of: "?") { return String(pathPart[..<q]) }
+        return String(pathPart)
+    }
+
+    /// Walk the BSD interface list and return the first non-loopback
+    /// IPv4 address. tvOS Apple TVs typically have a single en0; this
+    /// returns its 192.168.x.x / 10.x.x.x / etc. address so the user
+    /// can type it on their phone if the QR code is not convenient.
+    private static func firstNonLoopbackIPv4() -> String? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0, let first = ifaddr else { return nil }
+        defer { freeifaddrs(ifaddr) }
+        var ptr: UnsafeMutablePointer<ifaddrs>? = first
+        while let p = ptr {
+            defer { ptr = p.pointee.ifa_next }
+            let flags = Int32(p.pointee.ifa_flags)
+            guard let addrRef = p.pointee.ifa_addr else { continue }
+            guard (flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING),
+                  (flags & IFF_LOOPBACK) == 0,
+                  addrRef.pointee.sa_family == UInt8(AF_INET) else { continue }
+            var hostBuf = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(addrRef, socklen_t(addrRef.pointee.sa_len),
+                           &hostBuf, socklen_t(hostBuf.count),
+                           nil, 0, NI_NUMERICHOST) == 0 {
+                let host = String(cString: hostBuf)
+                if !host.isEmpty, host != "127.0.0.1" { return host }
+            }
+        }
+        return nil
+    }
+
+    /// Build a QR-code image for `string`. Used by TvOSLogShareSheet to
+    /// render a code the user can scan with their phone camera. H-level
+    /// error correction is generous for a TV that the user is viewing
+    /// through a phone camera at an angle / through living-room lighting.
+    static func qrCode(for string: String, scale: CGFloat = 10) -> UIImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(string.utf8)
+        filter.correctionLevel = "H"
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let context = CIContext(options: nil)
+        guard let cg = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+}
+
+/// Full-screen sheet on tvOS that surfaces the LAN URL hosting the log
+/// file along with a QR code the user scans on their phone. Drives
+/// LogShareServer's lifecycle: starts when shown (via the caller's
+/// shareFile flow), stops on dismiss.
+struct TvOSLogShareSheet: View {
+    @Binding var isPresented: Bool
+    @ObservedObject private var server = LogShareServer.shared
+
+    var body: some View {
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            VStack(spacing: 32) {
+                Text("Share Log File")
+                    .font(.system(size: 48, weight: .bold))
+                    .foregroundStyle(.white)
+                Text("On your phone or laptop, open this URL or scan the QR code. The .txt file will download. Forward it to us via Email or Discord.")
+                    .font(.system(size: 22))
+                    .foregroundStyle(.white.opacity(0.75))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 900)
+
+                if let urlString = server.shareURL {
+                    if let qr = LogShareServer.qrCode(for: urlString) {
+                        Image(uiImage: qr)
+                            .interpolation(.none)
+                            .resizable()
+                            .frame(width: 360, height: 360)
+                            .background(Color.white)
+                            .padding(12)
+                            .background(Color.white)
+                    }
+                    Text(urlString)
+                        .font(.system(size: 30, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 32)
+                        .padding(.vertical, 14)
+                        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12))
+                    Text("Server stops when you close this screen. The Apple TV and your phone must be on the same WiFi.")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 900)
+                } else if let err = server.lastError {
+                    Label("Could not start LAN server: \(err)", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(Color.statusWarning)
+                        .padding()
+                } else {
+                    ProgressView("Starting LAN server…")
+                        .foregroundStyle(.white)
+                        .padding()
+                }
+
+                Button {
+                    isPresented = false
+                } label: {
+                    Text("Close")
+                        .font(.system(size: 26, weight: .semibold))
+                        .padding(.horizontal, 48)
+                        .padding(.vertical, 16)
+                }
+                .padding(.top, 12)
+            }
+            .padding(48)
+        }
+        .onDisappear {
+            // Stop the listener as soon as the user leaves the screen so
+            // it never outlives the share UX. Idempotent.
+            LogShareServer.shared.stop()
+        }
+    }
+}
+#endif
+
