@@ -5414,13 +5414,33 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // converges on a stable cadence for UHD HEVC live MPEG-TS.
             var containerFPS: Double = 0
             mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &containerFPS)
-            // v1.7.4.x: feed the AVSBDL re-enqueue watchdog the live
-            // container fps so its stale threshold can scale to the
-            // stream's natural frame interval. Without this the watchdog
-            // fires between every real frame on sub-60fps content,
-            // doubling per-frame main-thread work. See
-            // `watchdogStaleThresholdFloor` for the rationale and
-            // `handleWatchdogTick` for how the value is consumed.
+            // v1.7.4.x: with `vo=libmpv` (we replace mpv's internal VO),
+            // both `estimated-vf-fps` and `container-fps` can stop
+            // reporting after a `loadfile replace` channel-flip swap -
+            // mpv returns 0 even when playback is healthy at a stable
+            // cadence. Stream Info would then show "0.00fps" forever
+            // (Archie, Sky Sports Football, 09:01:32 onwards). Derive
+            // a fallback fps from our own measured frame intervals when
+            // mpv's properties are zero. This is the cadence the AVSBDL
+            // is actually presenting at, so it is also the right number
+            // for the user-facing readout.
+            if containerFPS <= 0 && estimatedFPS <= 0 && frameIntervals.count > 30 {
+                let recentSum = frameIntervals.suffix(60).reduce(0, +)
+                let recentCount = Double(min(frameIntervals.count, 60))
+                let avgIntervalMs = recentSum / recentCount
+                if avgIntervalMs > 4 && avgIntervalMs < 200 {
+                    let measuredFps = 1000.0 / avgIntervalMs
+                    containerFPS = measuredFps
+                    detectedFps = measuredFps
+                }
+            }
+            // Feed the AVSBDL re-enqueue watchdog the live container fps
+            // so its stale threshold can scale to the stream's natural
+            // frame interval. Without this the watchdog fires between
+            // every real frame on sub-60fps content, doubling per-frame
+            // main-thread work. See `watchdogStaleThresholdFloor` for
+            // the rationale and `handleWatchdogTick` for how the value
+            // is consumed.
             if containerFPS > 0 {
                 let captured = containerFPS
                 Task { @MainActor [weak self] in
@@ -5923,6 +5943,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             mpv_get_property(mpv, "frame-drop-count", MPV_FORMAT_INT64, &drops)
             mpv_get_property(mpv, "demuxer-cache-state/raw-input-rate", MPV_FORMAT_DOUBLE, &bitrate)
             mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &fps)
+            // v1.7.4.x: `vo=libmpv` can leave estimated-vf-fps at 0 even
+            // when playback is healthy (Archie field test 09:01 Sky Sports
+            // Football showed 0.00fps in the Stream Info box while real
+            // intervals were a stable 18ms). Fall back to `detectedFps`
+            // (which the perf-pump now derives from measured intervals
+            // when mpv returns 0) so the readout reflects what the AVSBDL
+            // is actually presenting at.
+            if fps <= 0, self.detectedFps > 0 {
+                fps = self.detectedFps
+            }
             if fps > 0 { self.detectedFps = fps }
 
             let ps = progressStore
