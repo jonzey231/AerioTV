@@ -2417,6 +2417,24 @@ enum TopShelfKeychain {
     /// entitlement already granted by the provisioning profile.
     static let accessGroup = "47DTJ3Q67T.aerio.topshelf.shared"
 
+    /// Serial background queue for the actual SecItem read/write/delete
+    /// calls. v1.7.x launch-hang fix: Archie's 2026-06-06 Apple TV log
+    /// showed `[WATCHDOG] HANG: ping#3 took 4754.8ms` during launch, with
+    /// the TopShelf `keychain[continueWatching]` / `keychain[topChannels]`
+    /// writes landing right in the hang window. SecItemUpdate/SecItemAdd on
+    /// tvOS routinely take hundreds of ms to multiple seconds (keychain
+    /// index work, iCloud-Keychain coordination), and these ran
+    /// SYNCHRONOUSLY on the main actor from RootView.onAppear's launch
+    /// sequence. The Top Shelf extension only reads these items lazily when
+    /// tvOS renders the shelf - nothing about app launch needs the write to
+    /// have completed - so the SecItem calls move to this background queue.
+    /// Serial (not concurrent) so writes/deletes to the same key keep their
+    /// program order: clearAll()'s deletes stay ahead of a subsequent
+    /// syncContinueWatching() write. The JSON payload is built on the
+    /// caller's thread (cheap, microseconds for these tiny arrays) and only
+    /// the Sendable `Data` is handed to the queue.
+    private static let ioQueue = DispatchQueue(label: "aerio.topshelf.keychain", qos: .utility)
+
     // MARK: Write
 
     static func write(array: [[String: String]], key: String) {
@@ -2438,32 +2456,36 @@ enum TopShelfKeychain {
 
     private static func writeData(_ data: Data, key: String) {
         #if os(tvOS)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-            kSecAttrAccessGroup as String: accessGroup,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-        let attrs: [String: Any] = [kSecValueData as String: data]
+        // Run the SecItem calls off the main thread (see ioQueue). `data`
+        // and `key` are Sendable value types, safe to capture.
+        ioQueue.async {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: key,
+                kSecAttrAccessGroup as String: accessGroup,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            ]
+            let attrs: [String: Any] = [kSecValueData as String: data]
 
-        let status = SecItemUpdate(query as CFDictionary, attrs as CFDictionary)
-        if status == errSecSuccess {
-            debugLog("🔐 TopShelf: updated \(data.count)B → keychain[\(key)]")
-            return
-        }
-        if status == errSecItemNotFound {
-            var addQuery = query
-            addQuery[kSecValueData as String] = data
-            let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-            if addStatus == errSecSuccess {
-                debugLog("🔐 TopShelf: added \(data.count)B → keychain[\(key)]")
-            } else {
-                debugLog("🔐 TopShelf: ❌ SecItemAdd failed key=\(key) status=\(addStatus) (\(secErrorMessage(addStatus)))")
+            let status = SecItemUpdate(query as CFDictionary, attrs as CFDictionary)
+            if status == errSecSuccess {
+                debugLog("🔐 TopShelf: updated \(data.count)B → keychain[\(key)]")
+                return
             }
-            return
+            if status == errSecItemNotFound {
+                var addQuery = query
+                addQuery[kSecValueData as String] = data
+                let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+                if addStatus == errSecSuccess {
+                    debugLog("🔐 TopShelf: added \(data.count)B → keychain[\(key)]")
+                } else {
+                    debugLog("🔐 TopShelf: ❌ SecItemAdd failed key=\(key) status=\(addStatus) (\(secErrorMessage(addStatus)))")
+                }
+                return
+            }
+            debugLog("🔐 TopShelf: ❌ SecItemUpdate failed key=\(key) status=\(status) (\(secErrorMessage(status)))")
         }
-        debugLog("🔐 TopShelf: ❌ SecItemUpdate failed key=\(key) status=\(status) (\(secErrorMessage(status)))")
         #endif
     }
 
@@ -2474,15 +2496,20 @@ enum TopShelfKeychain {
     /// would otherwise survive an app delete/reinstall.
     static func delete(key: String) {
         #if os(tvOS)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: key,
-            kSecAttrAccessGroup as String: accessGroup
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        if status != errSecSuccess && status != errSecItemNotFound {
-            debugLog("🔐 TopShelf: ❌ delete failed key=\(key) status=\(status) (\(secErrorMessage(status)))")
+        // Same off-main treatment as writeData, on the SAME serial queue so
+        // a clearAll() delete stays ordered ahead of any subsequent write
+        // to the same key. `key` is Sendable.
+        ioQueue.async {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: key,
+                kSecAttrAccessGroup as String: accessGroup
+            ]
+            let status = SecItemDelete(query as CFDictionary)
+            if status != errSecSuccess && status != errSecItemNotFound {
+                debugLog("🔐 TopShelf: ❌ delete failed key=\(key) status=\(status) (\(secErrorMessage(status)))")
+            }
         }
         #endif
     }
