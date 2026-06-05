@@ -1831,6 +1831,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var blackFramePrevPrevAvgLuma: Double = 128
         private var blackFramesSuppressedCount: Int64 = 0
 
+        // v1.7.x stale-frame reload watchdog threshold.
+        //
+        // Sibling to the black-frame-storm threshold below. Archie's
+        // 2026-06-06 second test (Sky Sports Football HD) showed an
+        // audio underrun cascade that DID NOT produce a black-frame
+        // storm - instead mpv just stopped delivering frames for ~18
+        // seconds while AVSBDL kept re-enqueuing the last good frame
+        // (stale=12301ms by the last log line before the user gave up
+        // and channel-flipped). cache=6.98s and network=1197KB/s
+        // throughout, so the upstream was healthy; mpv's internal
+        // pipeline was wedged. Same root cause as the black-frame
+        // storm, different symptom.
+        //
+        // 3-second threshold: shorter than the 5s the user manually
+        // gave up at, long enough that natural cache underruns on a
+        // weak network do not falsely trigger. Gated by !paused so a
+        // user pause does not get force-reloaded.
+        private let staleFrameStormThresholdSec: CFTimeInterval = 3.0
+
         // v1.7.x black-frame-storm reload watchdog.
         //
         // Archie 2026-06-06 field test on Apple TV (Sky Sports Action HD,
@@ -2934,6 +2953,49 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 debugLog("[AVSBDL-WATCHDOG] \(streamTag) re-enqueue #\(watchdogReenqueueCount) (stale=\(String(format: "%.0f", staleMs))ms)")
             }
             #endif
+
+            // v1.7.x stale-frame storm reload: companion to the
+            // black-frame reload above. Archie 2026-06-06 second test
+            // (Sky Sports Football HD): after an Audio device underrun,
+            // mpv stopped delivering frames entirely for ~18s while
+            // AVSBDL kept re-enqueueing the last good frame and the
+            // network/cache stayed healthy. No black frames so the
+            // suppression-based watchdog could not see it - but the
+            // re-enqueue staleAge here is the perfect signal: it is
+            // exactly "time since the last REAL frame from mpv."
+            //
+            // Trigger conditions:
+            // - staleAge >= 3s (well past any normal VSync skip on a
+            //   24-60fps stream; matches "user notices the freeze")
+            // - lastAppliedPause != true (do not force-reload a stream
+            //   the user just paused)
+            // - cooldown elapsed (shared with the black-frame variant
+            //   via lastForcedBlackReloadAt so the two watchdogs do
+            //   not fire on top of each other)
+            // - urls.first available (no URL = nothing to loadfile)
+            //
+            // Cost: a small set of checks every VSync once we are
+            // already in a stale state. The branch is reached only
+            // when watchdog re-enqueue has already fired, which by
+            // definition means we are NOT in the steady-state hot
+            // path of clean playback.
+            if staleAge >= staleFrameStormThresholdSec, lastAppliedPause != true {
+                let wallNow = CFAbsoluteTimeGetCurrent()
+                if wallNow - lastForcedBlackReloadAt >= blackFrameReloadCooldownSec,
+                   let reloadURL = urls.first {
+                    lastForcedBlackReloadAt = wallNow
+                    let safeURL = DebugLogger.sanitize(reloadURL.absoluteString)
+                    debugLog("[STALE-RELOAD] \(streamTag) stale=\(String(format: "%.0f", staleAge * 1000))ms >= threshold=\(String(format: "%.0f", staleFrameStormThresholdSec * 1000))ms; issuing loadfile replace to re-prime pipeline (url=\(safeURL.prefix(80)))")
+                    DebugLogger.shared.log(
+                        "🟡 [MPV-RELOAD] stale-frame storm reload tile=\(tileID ?? "single") stale_ms=\(Int(staleAge * 1000))",
+                        category: "MPV-STREAM", level: .warning
+                    )
+                    mpvQueue.async { [weak self] in
+                        guard let self, let mpv = self.activeMPVHandle() else { return }
+                        self.mpvCommand(mpv, ["loadfile", reloadURL.absoluteString, "replace"])
+                    }
+                }
+            }
         }
 
         /// Build a CMSampleBuffer that points at the same IOSurface
