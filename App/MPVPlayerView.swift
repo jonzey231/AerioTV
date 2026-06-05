@@ -1178,6 +1178,71 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
         }
 
+        // MARK: - HDR detection (v1.7.x cadence-regression fix)
+
+        /// Already-applied flag so we do not re-issue the property writes
+        /// on every playback-restart (which can fire multiple times across
+        /// a stream's lifetime - audio reconfig, cache underrun recovery,
+        /// etc.). Reset on play(url:) so the next stream re-evaluates.
+        private var hdrToneMappingApplied = false
+
+        /// Set the BT.709 SDR pin on the libmpv render target only when
+        /// the current source actually needs it. The v1.7.3 fix that
+        /// originally introduced these three options applied them
+        /// unconditionally on the assumption "SDR -> SDR is a no-op";
+        /// Archie's 2026-06-06 field test on ESPN HD showed that to be
+        /// wrong on Apple TV - the BT.709 target pin forces mpv's render
+        /// path through colorspace work on every frame even for an SDR
+        /// source, and the extra cost surfaces as visible jitter on
+        /// 30fps content (regression from v1.7.2).
+        ///
+        /// HDR detection uses mpv's `video-params/primaries` and
+        /// `video-params/gamma`. A source is HDR if primaries reports
+        /// `bt.2020` or gamma reports `pq` / `hlg` / `smpte2084`. mpv
+        /// populates these properties at MPV_EVENT_PLAYBACK_RESTART
+        /// time (after the stream's headers are parsed), which is when
+        /// this is called from the event loop.
+        ///
+        /// Called only from MPV_EVENT_PLAYBACK_RESTART on the wakeup
+        /// thread, so it is safe to read mpv properties here (unlike
+        /// the render-update callback path).
+        fileprivate func applyHDRToneMappingIfNeeded(mpv: OpaquePointer) {
+            guard !hdrToneMappingApplied else { return }
+
+            func mpvString(_ name: String) -> String {
+                guard let raw = mpv_get_property_string(mpv, name) else { return "" }
+                let s = String(cString: raw)
+                mpv_free(raw)
+                return s.lowercased()
+            }
+            let primaries = mpvString("video-params/primaries")
+            let gamma = mpvString("video-params/gamma")
+            let isHDR =
+                primaries == "bt.2020"
+                || gamma == "pq" || gamma == "smpte2084"
+                || gamma == "hlg" || gamma == "arib-std-b67"
+
+            if isHDR {
+                // Pin the BT.709 SDR target so mpv runs the BT.2020 ->
+                // 709 gamut map and the HDR -> SDR tone-map itself before
+                // collapsing into our 8-bit BGRA FBO. Without this HDR
+                // channels (Sky Sports Main Event UHD class) render green
+                // and washed out - that was the original v1.7.3 fix
+                // scenario, still preserved here.
+                mpv_set_property_string(mpv, "target-prim", "bt.709")
+                mpv_set_property_string(mpv, "target-trc", "bt.1886")
+                mpv_set_property_string(mpv, "tone-mapping", "bt.2390")
+                #if DEBUG
+                debugLog("\(self.streamTag) [HDR] tone-map enabled: primaries=\(primaries) gamma=\(gamma)")
+                #endif
+            } else {
+                #if DEBUG
+                debugLog("\(self.streamTag) [HDR] SDR source detected (primaries=\(primaries) gamma=\(gamma)); leaving target-prim / target-trc / tone-mapping at mpv defaults")
+                #endif
+            }
+            hdrToneMappingApplied = true
+        }
+
         // mpv handles
         private struct PlaybackState {
             var mpv: OpaquePointer?
@@ -3877,21 +3942,24 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             setOption(mpv, "video-sync", "audio")
             setOption(mpv, "video-timing-offset", "0")
 
-            // v1.7.3: Force HDR sources to correct SDR. The libmpv GLES
-            // render path cannot emit HDR; left to its defaults mpv
-            // collapses a BT.2020/PQ (or HLG) source into our 8-bit BGRA
-            // FBO with no gamut or transfer conversion, which shows green
-            // and washed out on UHD HDR channels (Sky Sports Main Event
-            // UHD class; Discord report). Pinning the render target to
-            // BT.709 SDR makes mpv do the BT.2020 -> 709 gamut map and the
-            // HDR -> SDR tone-map itself, so HDR channels render with
-            // correct colors. No-op for SDR sources (709 -> 709), so this
-            // is safe to set unconditionally and needs no HDR detection.
-            // True HDR output is deferred to a future AVPlayer path that
-            // waits on a natively-playable Dispatcharr HLS (backlog #28).
-            setOption(mpv, "target-prim", "bt.709")
-            setOption(mpv, "target-trc", "bt.1886")  // SDR display EOTF; "bt.709" is not a valid trc value (rejected by mpv)
-            setOption(mpv, "tone-mapping", "bt.2390")
+            // v1.7.3 introduced unconditional target-prim / target-trc /
+            // tone-mapping options here to fix green/washed colors on
+            // HDR (BT.2020/PQ or HLG) channels. The fix worked for HDR,
+            // but the "no-op for SDR" claim turned out to be wrong on
+            // Apple TV - Archie's 2026-06-06 field test on ESPN HD (SDR
+            // 1080i) showed steady-state micro-stutter that did not
+            // exist in v1.7.2. Pinning the target transfer function
+            // forces mpv's render path through extra colorspace work
+            // on every frame even when source and target both reduce
+            // to BT.709 SDR, and on a thermally-stressed Apple TV that
+            // extra cost was visible.
+            //
+            // Moved to applyHDRToneMappingIfNeeded() (called from
+            // MPV_EVENT_PLAYBACK_RESTART) so we only set the three
+            // options when mpv reports the source is actually HDR
+            // (primaries=bt.2020 OR gamma=pq/hlg/smpte2084). SDR
+            // channels stay at mpv defaults and recover the v1.7.2
+            // cadence; HDR channels still get the correct colors.
 
             // v1.7.x Issue A round 5 — anti-flash mitigations
             // targeting the FFmpeg-VideoToolbox bridge's silent-
@@ -4429,6 +4497,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // (it would otherwise stay at the looser 60ms until the next
             // perf cycle).
             Task { @MainActor [weak self] in self?.containerFpsHint = 0 }
+            // v1.7.x: reset HDR tone-map gate so the next stream's
+            // playback-restart re-evaluates the source colorspace.
+            // Without this a channel-flip from HDR to SDR would keep
+            // the BT.709 SDR pin alive on the SDR stream (or vice
+            // versa would leave HDR without the pin).
+            hdrToneMappingApplied = false
             // A fresh file is loading (initial play, retry, or the
             // reload-fallback replay path), so clear any prior VOD EOF
             // state. Multiview's per-tile "Finished" overlay keys on
@@ -4677,6 +4751,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // so playback doesn't stall on brief network dips.
                         if self.isLive, let mpv = self.activeMPVHandle() {
                             mpv_set_property_string(mpv, "cache-pause", "no")
+                        }
+                        // v1.7.x: HDR-only target-prim/trc/tone-mapping.
+                        // Now that the stream is decoded enough for mpv
+                        // to know its colorspace, apply the BT.709 SDR
+                        // pin only for actual HDR sources. See
+                        // applyHDRToneMappingIfNeeded() for the rationale.
+                        if let mpv = self.activeMPVHandle() {
+                            self.applyHDRToneMappingIfNeeded(mpv: mpv)
                         }
                         // Clear the load-failure retry budget now that
                         // playback has actually started. If the stream
