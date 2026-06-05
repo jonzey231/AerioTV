@@ -298,8 +298,18 @@ struct DeveloperSettingsView: View {
                         .task { refreshLogSize() }
 
                         // View
+                        // v1.7.x: show this whenever Debug Logging is enabled
+                        // OR the file already has bytes on disk. Pre-fix the
+                        // guard was file-existence only, but the file is
+                        // created lazily on the first write - so users who
+                        // just toggled logging on, then opened this screen,
+                        // saw no View / Share buttons until they triggered
+                        // something log-worthy (a channel play). LogViewerView
+                        // and the share path both handle empty content
+                        // gracefully, so it is safe to surface the buttons
+                        // immediately on enable.
                         if let url = logger.logFileURL,
-                           FileManager.default.fileExists(atPath: url.path) {
+                           (debugLoggingEnabled || FileManager.default.fileExists(atPath: url.path)) {
                             Button {
                                 showLogViewer = true
                             } label: {
@@ -324,8 +334,12 @@ struct DeveloperSettingsView: View {
                         }
 
                         // Share — uses a UIKit sheet with proper iPad popover anchoring
+                        // (iOS) or a LAN HTTP server + QR sheet (tvOS). Same
+                        // relaxed guard as View above so the button appears
+                        // the moment Debug Logging is on, not after the
+                        // first log flush.
                         if let url = logger.logFileURL,
-                           FileManager.default.fileExists(atPath: url.path) {
+                           (debugLoggingEnabled || FileManager.default.fileExists(atPath: url.path)) {
                             Button {
                                 shareFile(url)
                             } label: {
@@ -658,8 +672,18 @@ struct DeveloperSettingsView: View {
     }
 
     /// Present a UIActivityViewController with proper iPad popover anchoring
-    /// (iOS) or AirDrop-only sharing (tvOS).
+    /// (iOS) or a LAN HTTP server + QR sheet (tvOS).
     private func shareFile(_ url: URL) {
+        // v1.7.x: ensure the file exists before we hand it to the share
+        // path. Debug Logging is async-buffered, so the user can toggle
+        // it on and immediately tap Share with the file not yet flushed
+        // to disk. Create an empty placeholder so both iOS's
+        // UIActivityViewController and the tvOS LAN server have a real
+        // file URL to operate on. The next real log line appends as
+        // usual.
+        if !FileManager.default.fileExists(atPath: url.path) {
+            FileManager.default.createFile(atPath: url.path, contents: Data(), attributes: nil)
+        }
         #if os(iOS)
         let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
 
