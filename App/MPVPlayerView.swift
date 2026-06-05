@@ -1831,6 +1831,37 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var blackFramePrevPrevAvgLuma: Double = 128
         private var blackFramesSuppressedCount: Int64 = 0
 
+        // v1.7.x black-frame-storm reload watchdog.
+        //
+        // Archie 2026-06-06 field test on Apple TV (Sky Sports Action HD,
+        // H.264 50fps): a mid-stream audio underrun triggered audio-reconfig
+        // 48000Hz -> 44100Hz, after which libmpv emitted ~367 consecutive
+        // all-black frames over ~7 seconds while the underlying stream had
+        // already recovered. Our existing BLACK-DETECT correctly suppressed
+        // them (so AVSBDL stayed on the last good frame instead of cutting
+        // to black), but the user-visible result was a 7-second frozen-frame
+        // freeze with no way out except teardown. The decode pipeline
+        // never spontaneously came back; mpv's video buffers needed a kick.
+        //
+        // Mitigation: count CONSECUTIVE black-frame suppressions (separate
+        // from the lifetime total). When the consecutive run exceeds a
+        // small threshold, issue `loadfile <currentURL> replace` on
+        // mpvQueue to force mpv to re-prime its video pipeline against
+        // the same URL. A cooldown prevents storms of reloads if the
+        // underlying issue persists.
+        //
+        // Thresholds:
+        // - 30 consecutive suppressed frames = ~0.6s at 50fps, ~1.0s at
+        //   30fps. That is short enough to feel like a "blip" instead
+        //   of a freeze, long enough that an isolated 1-2 black frame
+        //   from a real channel cut to commercial does NOT trip it.
+        // - 5 second reload cooldown = avoids hammering the proxy if
+        //   the storm is sourced upstream.
+        private var consecutiveBlackFramesSuppressed: Int = 0
+        private var lastForcedBlackReloadAt: CFAbsoluteTime = 0
+        private let blackFrameStormThreshold: Int = 30
+        private let blackFrameReloadCooldownSec: CFAbsoluteTime = 5.0
+
         // v1.7.x Issue A round 2: localize mid-stream black flashes.
         // Archie 2026-05-08 native-UHD test showed late=3 frames
         // including FRAME #226 with render=8.1ms interval=211.8ms
@@ -3352,11 +3383,40 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // sample buffer with a fresh PTS, so the user sees
                 // the previous frame held instead of solid black.
                 blackFramesSuppressedCount &+= 1
+                consecutiveBlackFramesSuppressed &+= 1
                 #if DEBUG
                 if blackFramesSuppressedCount == 1 || blackFramesSuppressedCount % 10 == 0 {
-                    debugLog("[BLACK-DETECT] \(streamTag) suppressed black frame #\(blackFramesSuppressedCount) (avg=\(String(format: "%.2f", blackProbe.avg)) std=\(String(format: "%.2f", blackProbe.std)) prev=\(String(format: "%.0f", blackFramePrevAvgLuma)) prev_prev=\(String(format: "%.0f", blackFramePrevPrevAvgLuma)))")
+                    debugLog("[BLACK-DETECT] \(streamTag) suppressed black frame #\(blackFramesSuppressedCount) (consec=\(consecutiveBlackFramesSuppressed) avg=\(String(format: "%.2f", blackProbe.avg)) std=\(String(format: "%.2f", blackProbe.std)) prev=\(String(format: "%.0f", blackFramePrevAvgLuma)) prev_prev=\(String(format: "%.0f", blackFramePrevPrevAvgLuma)))")
                 }
                 #endif
+                // v1.7.x storm reload: if libmpv has been emitting
+                // all-zero frames for blackFrameStormThreshold in a
+                // row, its video pipeline is wedged - the upstream
+                // audio reconfig / decoder re-prime case from the
+                // 2026-06-06 field test produced ~367 consecutive
+                // black frames over 7s with no spontaneous recovery.
+                // A single `loadfile <currentURL> replace` re-primes
+                // the demuxer + decoder against the same URL and the
+                // stream resumes within ~1s. Cooldown prevents repeat
+                // hits when the source is genuinely dark or the
+                // proxy keeps producing the same broken bytes.
+                if consecutiveBlackFramesSuppressed == blackFrameStormThreshold {
+                    let now = CFAbsoluteTimeGetCurrent()
+                    if now - lastForcedBlackReloadAt >= blackFrameReloadCooldownSec,
+                       let reloadURL = urls.first {
+                        lastForcedBlackReloadAt = now
+                        let safeURL = DebugLogger.sanitize(reloadURL.absoluteString)
+                        debugLog("[BLACK-RELOAD] \(streamTag) consecutive=\(consecutiveBlackFramesSuppressed) >= threshold=\(blackFrameStormThreshold); issuing loadfile replace to re-prime pipeline (url=\(safeURL.prefix(80)))")
+                        DebugLogger.shared.log(
+                            "🟡 [MPV-RELOAD] black-frame storm reload tile=\(tileID ?? "single") consec=\(consecutiveBlackFramesSuppressed)",
+                            category: "MPV-STREAM", level: .warning
+                        )
+                        mpvQueue.async { [weak self] in
+                            guard let self, let mpv = self.activeMPVHandle() else { return }
+                            self.mpvCommand(mpv, ["loadfile", reloadURL.absoluteString, "replace"])
+                        }
+                    }
+                }
                 // Note: we deliberately do NOT update the prev/prev-
                 // prev luma history with the suppressed frame. The
                 // surround check on the NEXT frame still compares
@@ -3370,6 +3430,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 nonisolated(unsafe) let sb = sampleBuffer
                 sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
                 enqueued = true
+                // v1.7.x: a real (non-black) frame landed, so the
+                // black-frame storm reload watchdog's consecutive
+                // counter resets. lastForcedBlackReloadAt stays set
+                // so the cooldown still gates the next forced reload
+                // - we do not want a one-good-frame-then-storm-again
+                // pattern to bypass the cooldown.
+                consecutiveBlackFramesSuppressed = 0
                 didEnqueueFirstVideoFrame = true   // Codex handshake fix: a real frame has now been presented
                 // v1.7.x Issue A round 4: cache the latest enqueued
                 // buffer for the IOSurface re-attach watchdog. Stored
@@ -4532,6 +4599,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // behaviour for tile-rebind / channel-change.
             blackFramePrevAvgLuma = 128
             blackFramePrevPrevAvgLuma = 128
+            // v1.7.x: also reset the storm-reload watchdog state. A
+            // fresh play(url:) means either an external channel-flip
+            // or a user-initiated stream change, neither of which
+            // should inherit the prior stream's consecutive black
+            // count or sit inside the prior reload's cooldown
+            // (the user just asked to start playing something new).
+            consecutiveBlackFramesSuppressed = 0
+            lastForcedBlackReloadAt = 0
             // v1.6.23: route URL strings through DebugLogger.sanitize
             // before any console / file output so Xtream credentials
             // (`/live/<u>/<p>/<id>` and `?username=&password=` query
