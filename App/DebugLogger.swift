@@ -115,9 +115,22 @@ final class DebugLogger: @unchecked Sendable {
         get { UserDefaults.standard.bool(forKey: "debugLoggingEnabled") }
     }
 
-    /// The URL of the active log file (in the Documents directory).
+    /// The URL of the active log file.
+    ///
+    /// v1.7.x: moved from .documentDirectory to .cachesDirectory after
+    /// the 2026-06-05 field test from Archie's Apple TV showed every
+    /// write to /var/mobile/.../Documents/aerio_debug_logs.txt failing
+    /// with "You don't have permission to save the file ... in the
+    /// folder 'Documents'." tvOS sandboxes Documents read-only for the
+    /// app's own container - iOS allows app-Documents writes, tvOS does
+    /// not. Apple's documented writable scratch location on every
+    /// platform is .cachesDirectory, and logs are exactly the kind of
+    /// regenerable diagnostic content it was designed for. The file is
+    /// still served by the tvOS Share Log File LAN HTTP path and the
+    /// iOS UIActivityViewController path, which both take a URL and do
+    /// not care where in the sandbox it lives.
     var logFileURL: URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)
             .first?.appendingPathComponent("aerio_debug_logs.txt")
     }
 
@@ -488,43 +501,52 @@ final class DebugLogger: @unchecked Sendable {
         let exists = FileManager.default.fileExists(atPath: url.path)
         if exists {
             // v1.7.x diag: capture FileHandle errors so a sandboxing /
-            // permissions failure (which prior to this surfaced as
-            // "file stays Empty" with no log line) gets a clear stdout
-            // marker. The try? swallowed both the open AND the write -
-            // do/catch the open, and let any write throw be visible.
+            // permissions failure (the original try? swallowed both the
+            // open and the write) gets a clear stdout marker. Failures
+            // print at most once per session so we still notice them but
+            // do not flood the console.
             do {
                 let handle = try FileHandle(forWritingTo: url)
                 defer { try? handle.close() }
                 handle.seekToEndOfFile()
                 handle.write(data)
-                // First-write breadcrumb every 50 writes so the console
-                // is not flooded but a tester can still confirm bytes
-                // are landing. (See appendDiagCounter just below.)
-                appendDiagCounter &+= 1
-                if appendDiagCounter == 1 || appendDiagCounter % 50 == 0 {
-                    print("[DebugLogger][diag] appended \(data.count) B (#\(appendDiagCounter), totalNowAprox=\(handle.offsetInFile)) at \(url.path)")
+                if !appendDiagFirstWriteLogged {
+                    appendDiagFirstWriteLogged = true
+                    print("[DebugLogger][diag] first append OK: \(data.count) B at \(url.path)")
                 }
             } catch {
-                print("[DebugLogger][diag] appendToFile FileHandle error at \(url.path): \(error.localizedDescription)")
+                if !appendDiagFailureLogged {
+                    appendDiagFailureLogged = true
+                    print("[DebugLogger][diag] appendToFile FileHandle error at \(url.path): \(error.localizedDescription) (further failures suppressed)")
+                }
             }
         } else {
             // First-ever write: create the file. Use do/catch so a
             // sandbox / disk-full / unwritable-parent error surfaces.
             do {
                 try data.write(to: url, options: .atomic)
-                appendDiagCounter &+= 1
-                print("[DebugLogger][diag] created \(url.path) with \(data.count) B")
+                if !appendDiagFirstWriteLogged {
+                    appendDiagFirstWriteLogged = true
+                    print("[DebugLogger][diag] created \(url.path) with \(data.count) B")
+                }
             } catch {
-                print("[DebugLogger][diag] create FAILED at \(url.path): \(error.localizedDescription)")
+                if !appendDiagFailureLogged {
+                    appendDiagFailureLogged = true
+                    print("[DebugLogger][diag] create FAILED at \(url.path): \(error.localizedDescription) (further failures suppressed)")
+                }
             }
         }
     }
 
-    /// Counts how many appendToFile calls have actually reached disk,
-    /// independent of whether their writes succeeded. Used only by the
-    /// breadcrumb print() above so the stdout firehose stays survey-
-    /// able instead of being flooded once per debugLog call.
-    private var appendDiagCounter: UInt64 = 0
+    /// One-shot guards so the stdout breadcrumbs print at most once per
+    /// process per outcome. Pre-fix the success breadcrumb fired every
+    /// 50 writes (still readable but noisy on a steady firehose), and
+    /// the failure breadcrumb fired once per failed write (which on the
+    /// pre-fix .documentDirectory bug printed the same error hundreds
+    /// of times per session - the very transcript Archie sent that
+    /// surfaced the sandbox issue).
+    private var appendDiagFirstWriteLogged = false
+    private var appendDiagFailureLogged = false
 
     /// Rename the current log to debug_logs_archive.txt and start fresh.
     private func rotateLog(at url: URL) {
