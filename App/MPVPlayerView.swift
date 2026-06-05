@@ -1681,7 +1681,24 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var displayLinkWatchdog: CADisplayLink?
         private var watchdogLock = os_unfair_lock_s()
         private var lastEnqueuedSampleBuffer: CMSampleBuffer?
-        private let watchdogStaleThreshold: CFTimeInterval = 0.030  // 30ms
+        // Floor for the watchdog stale threshold. Original purpose was
+        // to mask single-VSync black flashes (~16ms), so 30ms is the
+        // minimum a re-enqueue triggers at. v1.7.4.x community feedback
+        // (madplanet, UK 50Hz / 25fps content; sjsteve, Apple TV Live)
+        // showed continuous re-enqueue activity on streams whose natural
+        // frame interval already exceeds 30ms - the watchdog was firing
+        // between EVERY real frame, doubling per-frame main-thread work
+        // (CMSampleBufferCreateCopyWithNewTiming + renderer.enqueue) on
+        // an already-thermal-stressed Apple TV. effectiveThreshold below
+        // scales the floor by container fps so a 25fps stream gets ~60ms,
+        // a 30fps gets 50ms, and 60fps stays at 30ms.
+        private let watchdogStaleThresholdFloor: CFTimeInterval = 0.030  // 30ms
+        /// Container fps observed from `container-fps` in the perf-log
+        /// pump, used to scale the watchdog threshold per-stream. 0 means
+        /// "no measurement yet" - the watchdog uses the floor in that
+        /// case. Updated on the main actor (perf-log pump hops to main),
+        /// read on the main actor (CADisplayLink tick is main).
+        private var containerFpsHint: Double = 0
         // Cumulative count of watchdog-driven re-enqueues, exposed
         // in FRAME SUMMARY so we can see how often the watchdog
         // saved a flash. Field-only diagnostic; non-zero means the
@@ -2777,7 +2794,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let now = CACurrentMediaTime()
             let lastEnq = lastEnqueueTime
             let staleAge = now - lastEnq
-            guard staleAge >= watchdogStaleThreshold else { return }
+            // Effective threshold: floor at 30ms (original safety net),
+            // scaled to 1.5x the natural frame interval for streams whose
+            // container fps puts a real frame more than the floor apart.
+            // This is the fix for the v1.7.4.x community report that
+            // sub-60fps content (UK 50Hz/25fps, 30fps streams) had the
+            // watchdog firing between every real frame. A 25fps stream
+            // gets 60ms, 30fps gets 50ms, 60fps stays at 30ms.
+            let effectiveThreshold: CFTimeInterval = {
+                guard containerFpsHint > 0 else { return watchdogStaleThresholdFloor }
+                let naturalInterval = 1.0 / containerFpsHint
+                return max(watchdogStaleThresholdFloor, naturalInterval * 1.5)
+            }()
+            guard staleAge >= effectiveThreshold else { return }
             guard let layer = sampleBufferLayer else { return }
             let renderer = layer.sampleBufferRenderer
             guard renderer.status != .failed,
@@ -4205,10 +4234,28 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // longer initial startup.
                 #if os(tvOS)
                 let liveMinMs = 10_000
+                // v1.7.4.x: VOD/DVR were using userPrefMs (default 1500ms)
+                // unconditionally, which was tuned for single-stream
+                // playback. Multiview-VOD field reports (Archie, 2026-06-03)
+                // had the 12 Citizens tile freezing 73 seconds because
+                // the 1.5s demuxer cache underran when sharing network
+                // with concurrent live tiles - libmpv's update callback
+                // went quiet until the next tile-add cycle nudged it back.
+                // Single-stream VOD stutter (Apple TV VOD community poll
+                // 33%) likely has the same root: thin cache + sporadic
+                // proxy reads. Raise the non-live floor to 5s on tvOS
+                // to give the demuxer enough headroom that a brief
+                // network hiccup or co-tile bandwidth contention does
+                // not stall video. Memory cost is bounded (~5s of
+                // typical 8 Mbps stream is ~5 MB).
+                let vodMinMs = 5_000
                 #else
                 let liveMinMs = 5_000
+                let vodMinMs = 3_000
                 #endif
-                let ms = isLive ? max(userPrefMs, liveMinMs) : userPrefMs
+                let ms = isLive
+                    ? max(userPrefMs, liveMinMs)
+                    : max(userPrefMs, vodMinMs)
                 return Double(ms) / 1000.0
             }()
 
@@ -4375,6 +4422,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             hasStarted = false
             playbackStartTime = nil
+            // v1.7.4.x: invalidate the previous stream's container-fps
+            // hint so the watchdog reverts to the floor until the perf
+            // pump re-measures the new stream. Prevents a 60fps -> 25fps
+            // swap from leaving the watchdog tuned to the wrong cadence
+            // (it would otherwise stay at the looser 60ms until the next
+            // perf cycle).
+            Task { @MainActor [weak self] in self?.containerFpsHint = 0 }
             // A fresh file is loading (initial play, retry, or the
             // reload-fallback replay path), so clear any prior VOD EOF
             // state. Multiview's per-tile "Finished" overlay keys on
@@ -5240,8 +5294,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         DispatchQueue.main.async { ps.currentMs = ms }
                     }
 
-                    // Save VOD progress every 10 seconds (non-live only)
-                    if !isLive, now.timeIntervalSince(lastProgressSave) >= 10.0 {
+                    // Save VOD progress every 30 seconds (non-live only).
+                    // v1.7.4.x: was 10s, but each save() hops through
+                    // modelContext.save() -> SwiftData persistent-store
+                    // change broadcast -> every @Query in the app re-fires.
+                    // RootView's `@Query servers` + `@Query playlists` re-
+                    // render under MainTabView and any open tvOS context
+                    // menu flashes (same disease that commit 06842ce fixed
+                    // by removing @Query from EPGGuideView). Tripling the
+                    // interval cuts the menu-flash rate to 1/3 without
+                    // changing the on-disk resume position UX in a way the
+                    // user can perceive (a 30s rather than 10s window of
+                    // possibly-lost-on-crash progress). Pause / EOF still
+                    // save immediately on the player teardown path.
+                    if !isLive, now.timeIntervalSince(lastProgressSave) >= 30.0 {
                         lastProgressSave = now
                         let ps = progressStore
                         let posMs = ms
@@ -5348,6 +5414,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // converges on a stable cadence for UHD HEVC live MPEG-TS.
             var containerFPS: Double = 0
             mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &containerFPS)
+            // v1.7.4.x: feed the AVSBDL re-enqueue watchdog the live
+            // container fps so its stale threshold can scale to the
+            // stream's natural frame interval. Without this the watchdog
+            // fires between every real frame on sub-60fps content,
+            // doubling per-frame main-thread work. See
+            // `watchdogStaleThresholdFloor` for the rationale and
+            // `handleWatchdogTick` for how the value is consumed.
+            if containerFPS > 0 {
+                let captured = containerFPS
+                Task { @MainActor [weak self] in
+                    self?.containerFpsHint = captured
+                }
+            }
 
             // A/V sync. mpv's `avsync` is computed internally as
             // audio_position - video_position; positive means video
