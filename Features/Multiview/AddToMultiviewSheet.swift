@@ -104,6 +104,14 @@ struct AddToMultiviewSheet: View {
     /// and we're showing (or loading) its episode list. Back clears it.
     @State private var drilledSeries: VODSeries? = nil
 
+    /// Non-nil when the episode fetch threw, so the UI can render an
+    /// actionable error message instead of the generic "No episodes
+    /// found" placeholder. Cleared on success and on re-entering the
+    /// drill-in. v1.7.x: the same fetch used to use `try?` and silently
+    /// produce an empty list - users had no way to tell a network blip
+    /// from a series with no episodes.
+    @State private var drilledEpisodesError: String? = nil
+
     /// Loaded episodes for `drilledSeries`, flattened across seasons.
     /// `nil` while the detail fetch is in flight (shows a spinner);
     /// empty array means "loaded, but the series has no episodes".
@@ -393,6 +401,20 @@ struct AddToMultiviewSheet: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                } else if drilledEpisodesFiltered.isEmpty {
+                    // v1.7.x: render fetch failures distinctly. Pre-fix the
+                    // try? in loadDrilledEpisodes turned every error into
+                    // a silent empty list - users could not tell a network
+                    // blip from a series with no scraped episodes.
+                    Section(series.name) {
+                        if let err = drilledEpisodesError {
+                            Label("Couldn't load episodes: \(err)", systemImage: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text("No episodes found")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 } else {
                     Section(series.name) {
                         ForEach(drilledEpisodesFiltered) { ep in
@@ -677,7 +699,7 @@ struct AddToMultiviewSheet: View {
                 }
                 .padding(.vertical, 12)
             } else if drilledEpisodesFiltered.isEmpty {
-                tvEmptyRow("No episodes found")
+                tvEmptyRow(drilledEpisodesError.map { "Couldn't load episodes: \($0)" } ?? "No episodes found")
             } else {
                 ForEach(drilledEpisodesFiltered) { ep in
                     episodeRow(ep, seriesPoster: series.posterURL)
@@ -945,6 +967,7 @@ struct AddToMultiviewSheet: View {
     private func enterSeriesDrillIn(_ series: VODSeries) {
         drilledSeries = series
         drilledEpisodes = nil
+        drilledEpisodesError = nil
         searchText = ""
         Task { await loadDrilledEpisodes(series) }
     }
@@ -953,6 +976,7 @@ struct AddToMultiviewSheet: View {
     private func exitSeriesDrillIn() {
         drilledSeries = nil
         drilledEpisodes = nil
+        drilledEpisodesError = nil
         searchText = ""
     }
 
@@ -1409,14 +1433,41 @@ struct AddToMultiviewSheet: View {
         }
         drilledEpisodes = nil  // spinner
         let snap = server.snapshot
-        let detail = try? await VODService.fetchSeriesDetail(
-            seriesID: series.id, from: snap, existing: series
-        )
+        // v1.7.x: surface failures instead of swallowing them. The pre-fix
+        // call was `try? await ...` which collapsed every error path
+        // (network, decode, auth) into an empty episode list, so a user
+        // who hit the Series picker on a server that briefly failed
+        // /api/vod/series/<id>/episodes/ would see "No episodes found"
+        // with no signal to retry. Surface the error in debugLog so the
+        // failure mode is visible the next time it happens, and leave a
+        // dedicated drilledEpisodesError state for the UI to render an
+        // actionable message rather than the generic empty placeholder.
+        let detail: VODSeries?
+        do {
+            detail = try await VODService.fetchSeriesDetail(
+                seriesID: series.id, from: snap, existing: series
+            )
+        } catch {
+            debugLog("[MV-AddToMV] series detail fetch FAILED: id=\(series.id) name=\(series.name) error=\(error.localizedDescription)")
+            guard drilledSeries?.id == series.id else { return }
+            drilledEpisodesError = error.localizedDescription
+            drilledEpisodes = []
+            return
+        }
         // Bail if the user backed out / switched series while loading.
         guard drilledSeries?.id == series.id else { return }
         let flattened = (detail?.seasons ?? [])
             .sorted { $0.seasonNumber < $1.seasonNumber }
             .flatMap { $0.episodes.sorted { $0.episodeNumber < $1.episodeNumber } }
+        if flattened.isEmpty {
+            // Distinguish "fetch succeeded, server reports zero episodes"
+            // (rare but real - Dispatcharr's scraper hasn't run yet for
+            // this series, OR the seasons array is empty by design) from
+            // "fetch failed" above. Both render the same empty state in
+            // the UI today, but the debugLog tells us which one to chase.
+            debugLog("[MV-AddToMV] series detail returned empty episodes: id=\(series.id) name=\(series.name) seasons=\(detail?.seasons.count ?? 0)")
+        }
+        drilledEpisodesError = nil
         drilledEpisodes = flattened
     }
 
