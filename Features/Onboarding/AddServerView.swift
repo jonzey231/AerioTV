@@ -317,7 +317,34 @@ struct AddServerView: View {
 
                 advancedXMLTVSection
             }
+
+            // v1.7.x: per-server On Demand toggle, surfaced at Add Server.
+            // Only meaningful for server types that actually carry VOD;
+            // M3U-only playlists never have it. Default ON (matches the
+            // model default and Edit Server's wording). The Settings ->
+            // Edit Server screen has the same toggle in case the user
+            // wants to flip it later.
+            if viewModel.serverType.supportsVOD {
+                vodEnabledRow
+            }
         }
+    }
+
+    /// On Demand opt-in. Same wording and behavior as the Edit Server
+    /// toggle ("Fetch VOD from this playlist"), surfaced earlier so the
+    /// user can skip the multi-thousand-item VOD load on the very first
+    /// channel sync if they only want Live TV from this playlist.
+    private var vodEnabledRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Fetch On Demand from this playlist", isOn: $viewModel.vodEnabled)
+                .tint(.accentPrimary)
+            Text("When off, this playlist's movies and TV shows are not loaded into the On Demand tab. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand. You can change this later in Settings.")
+                .font(.labelSmall)
+                .foregroundColor(.textTertiary)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     // MARK: - Advanced XMLTV Section (Dispatcharr only)

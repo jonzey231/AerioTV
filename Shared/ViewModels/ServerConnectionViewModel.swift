@@ -12,6 +12,14 @@ final class ServerConnectionViewModel {
     var apiKey: String = ""       // Dispatcharr personal API key
     var dispatcharrXMLTVURL: String = "" // Optional XMLTV override for Dispatcharr (empty = use API)
     var xtreamXMLTVURL: String = "" // Optional custom XMLTV for XC category tints (empty = none)
+    /// v1.7.x: per-server On Demand toggle, exposed in Add Server (and
+    /// already in Edit Server). Defaults true to match the model default
+    /// and the pre-toggle behaviour. Ignored for M3U-only playlists at
+    /// the UI layer (gated on serverType.supportsVOD) and at the load
+    /// layer (VODStore only consults Dispatcharr / XC servers anyway),
+    /// but the field is kept neutral so flipping types in the wizard
+    /// does not reset the user's choice.
+    var vodEnabled: Bool = true
     var epgURL: String = ""       // Optional EPG URL for m3uPlaylist
     var localURL: String = ""     // LAN URL (e.g. http://192.168.1.10:9191)
     var localEPGURL: String = ""  // Local EPG URL for M3U when on LAN
@@ -525,6 +533,10 @@ final class ServerConnectionViewModel {
         )
         server.dispatcharrXMLTVURL = dispatcharrXMLTVURL
         server.xtreamXMLTVURL = xtreamXMLTVURL
+        // v1.7.x: persist the Add Server On Demand toggle. Default true
+        // (matches the model default), so older code paths that did not
+        // capture this still produce a server with VOD enabled.
+        server.vodEnabled = vodEnabled
         // v1.6.20: persist the auth header shape that worked during
         // verifyConnection so subsequent API calls and stream playback
         // skip re-discovery and immediately speak the right shape.
@@ -592,6 +604,7 @@ final class ServerConnectionViewModel {
         apiKey = ""
         dispatcharrXMLTVURL = ""
         xtreamXMLTVURL = ""
+        vodEnabled = true
         epgURL = ""
         localURL = ""
         localEPGURL = ""
