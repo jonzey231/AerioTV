@@ -556,8 +556,13 @@ struct DeveloperSettingsView: View {
                         tvLogSizeCard
                             .task { refreshLogSize() }
 
+                        // View / Share gate: surface when Debug Logging is
+                        // enabled OR the file already has bytes, mirroring
+                        // the iOSBody guard. Pre-fix this was file-existence
+                        // only, so a user who just toggled logging on saw
+                        // no rows until the first write landed.
                         if let url = logger.logFileURL,
-                           FileManager.default.fileExists(atPath: url.path) {
+                           (debugLoggingEnabled || FileManager.default.fileExists(atPath: url.path)) {
                             TVSettingsActionRow(
                                 icon: "doc.text.magnifyingglass",
                                 label: "View Log File",
@@ -567,6 +572,20 @@ struct DeveloperSettingsView: View {
                             .sheet(isPresented: $showLogViewer) {
                                 LogViewerView(url: url)
                             }
+
+                            // v1.7.x: matching Share Log File row was missing
+                            // from this body entirely - all prior iterations
+                            // of the Share fix landed in iOSBody (line ~356)
+                            // and the tvOS view never showed a Share entry.
+                            // Wires through shareFile(url), which starts
+                            // LogShareServer and presents TvOSLogShareSheet
+                            // (URL + QR for the user's phone).
+                            TVSettingsActionRow(
+                                icon: "square.and.arrow.up",
+                                label: "Share Log File",
+                                isAccent: true,
+                                action: { shareFile(url) }
+                            )
                         }
 
                         TVSettingsActionRow(
@@ -1035,7 +1054,14 @@ final class LogShareServer: ObservableObject {
             if getnameinfo(addrRef, socklen_t(addrRef.pointee.sa_len),
                            &hostBuf, socklen_t(hostBuf.count),
                            nil, 0, NI_NUMERICHOST) == 0 {
-                let host = String(cString: hostBuf)
+                // v1.7.x: was String(cString: hostBuf) which Swift 6
+                // deprecated. Truncate to the NUL terminator and decode
+                // the leading bytes - getnameinfo writes a C-string into
+                // the buffer so the NUL is present, never reading past
+                // it. UInt8 reinterpret of CChar is safe (same width).
+                let nulIndex = hostBuf.firstIndex(of: 0) ?? hostBuf.endIndex
+                let bytes = hostBuf[..<nulIndex].map { UInt8(bitPattern: $0) }
+                let host = String(decoding: bytes, as: UTF8.self)
                 if !host.isEmpty, host != "127.0.0.1" { return host }
             }
         }
