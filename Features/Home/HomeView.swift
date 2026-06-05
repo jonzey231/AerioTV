@@ -2150,6 +2150,30 @@ final class ChannelStore: ObservableObject {
             throw error
         }
 
+        // Self-heal the Channel Profile assignment on every load. The
+        // persisted dispatcharrChannelProfileIDs is captured only when a
+        // server is first added (AddServer Save) - never on load, and not
+        // even on Edit Server > Test Connection - so a server added before
+        // this build, or one whose profile changed server-side, carries a
+        // stale or empty snapshot. That would skip the filter below and
+        // leak the full channel list (the reported "kids profile still
+        // shows all channels"). Re-fetch the connected user's profiles
+        // live and let them win; persist the result back (only when it
+        // changed) so the stored model is accurate and serves as a
+        // fail-closed fallback on a later load whose whoami call fails.
+        // Verified against the live server: /api/accounts/users/me/ returns
+        // channel_profiles for X-API-Key auth (kids=[44], admin=[]).
+        var effectiveProfileIDs = channelProfileIDs
+        if let user = try? await dAPI.fetchCurrentUser() {
+            effectiveProfileIDs = user.channelProfiles
+            if let server = activeServer,
+               server.dispatcharrProfileIDList != user.channelProfiles {
+                server.dispatcharrChannelProfileIDs =
+                    user.channelProfiles.map(String.init).joined(separator: ",")
+                debugLog("🔷 ChannelStore.fetchDispatcharr: captured Channel Profile assignment \(user.channelProfiles)")
+            }
+        }
+
         // v1.7.x Channel Profile filter (child-safety): when the
         // connected Dispatcharr user is assigned one or more Channel
         // Profiles (a curated subset of channels, e.g. a "Kids" profile),
@@ -2167,9 +2191,9 @@ final class ChannelStore: ObservableObject {
         // caller keeps the prior channels (or retries), instead of
         // showing everything unfiltered. A profile that decodes to an
         // empty allow-set is respected literally (it enables no channels).
-        if !channelProfileIDs.isEmpty {
+        if !effectiveProfileIDs.isEmpty {
             var allowedIDs = Set<Int>()
-            for profileID in channelProfileIDs {
+            for profileID in effectiveProfileIDs {
                 let ids = try await dAPI.fetchChannelProfileChannelIDs(profileID: profileID)
                 allowedIDs.formUnion(ids)
                 debugLog("🔷 ChannelStore.fetchDispatcharr: profile \(profileID) -> \(ids.count) channel ids")
