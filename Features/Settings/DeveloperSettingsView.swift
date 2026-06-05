@@ -290,9 +290,24 @@ struct DeveloperSettingsView: View {
                                     .foregroundColor(.textSecondary)
                             }
                             Spacer()
-                            Text(logSize)
-                                .font(.monoSmall)
-                                .foregroundColor(.textTertiary)
+                            // v1.7.x: poll the file size every 2s while the
+                            // screen is up. Pre-fix this only refreshed inside
+                            // .task(once-on-appear), so a user enabling
+                            // logging and watching the row would see "Empty"
+                            // until they backed out and re-entered Developer
+                            // Settings. Now Empty -> 1 KB -> 5 KB updates
+                            // live as the firehose lands in the file, which
+                            // is the simplest possible signal that the write
+                            // path is actually working.
+                            TimelineView(.periodic(from: Date(), by: 2)) { _ in
+                                Text(logSize)
+                                    .font(.monoSmall)
+                                    .foregroundColor(.textTertiary)
+                                    .onAppear { refreshLogSize() }
+                                    .onChange(of: Date().timeIntervalSinceReferenceDate) { _, _ in
+                                        refreshLogSize()
+                                    }
+                            }
                         }
                         .listRowBackground(Color.cardBackground)
                         .task { refreshLogSize() }

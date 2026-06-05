@@ -22,19 +22,29 @@ private let _debugConsoleQueue = DispatchQueue(label: "com.aerio.debugconsole", 
 /// comment above for why that matters on the mpv threads).
 @inline(__always)
 func debugLog(_ message: @autoclosure () -> String) {
-    #if DEBUG
+    // Build the line in every configuration. The autoclosure means
+    // construction cost is paid only inside this call, so a caller's
+    // expression is not evaluated until we are sure we want it (Release
+    // builds still pay the line build, but that is the same cost the
+    // file-write needs anyway).
     let line = message()
+    #if DEBUG
+    // stdout only matters in Debug (Xcode console attached). Stays
+    // inside the DEBUG guard so Release builds do not pay the queue
+    // hop for a console nobody reads.
     _debugConsoleQueue.async { print(line) }
-    // v1.7.x: also route to the on-disk log file when Developer Settings
-    // has Debug Logging on. Pre-fix this firehose (the emoji-prefixed
-    // ChannelStore / MPV-DIAG / SyncManager / FRAME lines users see in
-    // Xcode console) went to stdout only, so the on-device file the
-    // share path serves up stayed effectively empty - users with no Mac
-    // attached had no log to send to us. captureFreeFunctionLog is a
-    // no-op when isEnabled is false, so cost on a tester who has the
-    // toggle off is exactly the existing print.
-    DebugLogger.shared.captureFreeFunctionLog(line)
     #endif
+    // v1.7.x: also route to the on-disk log file when Developer
+    // Settings has Debug Logging on. captureFreeFunctionLog is a no-op
+    // when isEnabled is false, so the off-by-default Release path pays
+    // only the cheap UserDefaults read. THIS CALL DELIBERATELY RUNS IN
+    // BOTH DEBUG AND RELEASE - Archie explicitly asked for the firehose
+    // to land in the file on every build, since the tvOS Share Log File
+    // flow has to work for TestFlight community testers too (they have
+    // no Xcode-attached Mac to spy on stdout). Pre-fix the whole body
+    // including this call was inside #if DEBUG, so the TestFlight log
+    // file stayed empty even with the toggle on.
+    DebugLogger.shared.captureFreeFunctionLog(line)
 }
 
 // Safe array subscript used by PlayerView logging.
