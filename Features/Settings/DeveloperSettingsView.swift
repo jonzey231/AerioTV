@@ -383,11 +383,17 @@ struct DeveloperSettingsView: View {
                                         .foregroundColor(.accentPrimary)
                                 }
                             }
-                            #if os(tvOS)
-                            .buttonStyle(TVNoHighlightButtonStyle())
-                            #else
-                            .buttonStyle(.plain)
-                            #endif
+                            // v1.7.x: removed the platform-split buttonStyle.
+                            // On tvOS the previous TVNoHighlightButtonStyle()
+                            // returned only the label content with a focus-
+                            // ring overlay - no card chrome, no padding - and
+                            // in a List/Form row it rendered effectively
+                            // invisible against the dark background until
+                            // focused. The sibling View Log File button right
+                            // above this one uses no buttonStyle at all and
+                            // gets the default tvOS form-row chrome the user
+                            // expects, so match that pattern exactly. iOS
+                            // List handles the .plain treatment naturally too.
                             .listRowBackground(Color.cardBackground)
                         }
 
