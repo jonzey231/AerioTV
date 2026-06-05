@@ -579,6 +579,13 @@ struct MultiviewTileView: View {
             if !isSoleTile {
                 labelStrip
                 centerAudioIcon
+                // Accent border marking the focused tile during D-pad
+                // navigation. It lives here in the button label (a ZStack
+                // sibling of centerAudioIcon), NOT in
+                // MultiviewTileButtonStyle, so @Environment(\.isFocused)
+                // resolves per-tile, the same reliable context the center
+                // audio icon already uses. See TileFocusBorder.
+                TileFocusBorder(isRelocating: store.relocatingTileID == tile.id)
             }
             if let decodeErrorMessage {
                 decodeErrorOverlay(decodeErrorMessage)
@@ -1583,21 +1590,13 @@ struct MultiviewTileButtonStyle: ButtonStyle {
         let s = shadowSpec
         return configuration.label
             .clipShape(shape)
-            // Focused-tile border highlight (tvOS). The 1.015 scale plus
-            // soft shadow alone read as too subtle while D-pad-navigating
-            // a grid (user feedback), so a clear accent border marks the
-            // focused tile. Gated on isChromeVisible exactly like the lift
-            // above, so the grid still sits flush and borderless when the
-            // user is just watching rather than navigating. The relocating
-            // tile keeps its amber treatment from the tile body overlay.
-            .overlay(
-                shape
-                    .strokeBorder(ThemeManager.shared.accent, lineWidth: 5)
-                    .opacity(isFocused && isChromeVisible && !isRelocating ? 1 : 0)
-                    .allowsHitTesting(false)
-                    .animation(.easeInOut(duration: 0.18), value: isFocused)
-                    .animation(.easeInOut(duration: 0.25), value: isChromeVisible)
-            )
+            // NOTE: the focused-tile accent border is NOT drawn here. It
+            // lives in the button LABEL (TileFocusBorder, a ZStack sibling
+            // of the center audio icon) because @Environment(\.isFocused)
+            // is reliable per-tile in the label but unreliable inside a
+            // ButtonStyle makeBody, where it could read true for more than
+            // the focused tile and paint the accent on every tile at once
+            // (the "border wraps the whole screen" report).
             .scaleEffect(scale)
             .shadow(color: s.color, radius: s.radius, y: s.y)
             .opacity(configuration.isPressed ? 0.85 : 1.0)
@@ -1608,6 +1607,37 @@ struct MultiviewTileButtonStyle: ButtonStyle {
             // picks "Move Tile" so they associate the pop with the
             // action they just took.
             .animation(.easeOut(duration: 0.18), value: isRelocating)
+    }
+}
+
+/// Accent border that marks the focused tile during D-pad navigation.
+///
+/// It lives INSIDE the tile's button label (a ZStack sibling of
+/// `CenterAudioIconView`) rather than in `MultiviewTileButtonStyle`.
+/// `@Environment(\.isFocused)` resolves per-tile correctly in the label
+/// hierarchy (the same place the center audio icon reads it), but is
+/// unreliable inside a `ButtonStyle.makeBody`, where it can read true for
+/// more than the focused tile and paint the accent on every tile at once
+/// (the user-reported "border wraps the entire screen"). A `Shape` in a
+/// `ZStack` fills the tile bounds, so the stroke traces the tile edge and
+/// never the screen edge.
+///
+/// Gated on `focusIndicatorVisible` so the grid stays flush and
+/// borderless while the user is just watching, and suppressed on the
+/// relocating tile (which keeps its amber lift from the tile body).
+private struct TileFocusBorder: View {
+    let isRelocating: Bool
+    @Environment(\.isFocused) private var isFocused
+    @EnvironmentObject private var chromeState: MultiviewChromeState
+    @AppStorage(multiviewTileCornersRoundedKey) private var cornersRounded: Bool = false
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: cornersRounded ? 12 : 0, style: .continuous)
+            .strokeBorder(ThemeManager.shared.accent, lineWidth: 5)
+            .opacity(isFocused && chromeState.focusIndicatorVisible && !isRelocating ? 1 : 0)
+            .allowsHitTesting(false)
+            .animation(.easeInOut(duration: 0.18), value: isFocused)
+            .animation(.easeInOut(duration: 0.25), value: chromeState.focusIndicatorVisible)
     }
 }
 #endif
