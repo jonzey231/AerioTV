@@ -275,6 +275,26 @@ struct RecordProgramSheet: View {
                 }
             }
 
+            // v1.7.x: live program on a Dispatcharr server where the
+            // connected account isn't an admin. Recording is allowed but
+            // lands on this device (server scheduling needs admin), so say
+            // so rather than letting the user assume the server DVR has it.
+            if isLive && isDispatcharr && !canRecordToServer {
+                Section {
+                    Label {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Saving to this device")
+                                .font(.footnote.bold())
+                            Text("Your account can record live programs to this device. Recording to the Dispatcharr server requires a Dispatcharr admin account.")
+                                .font(.footnote)
+                        }
+                    } icon: {
+                        Image(systemName: "internaldrive.fill")
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+
             if destination == .local && coordinator.isApproachingQuotaLimit {
                 Section {
                     Label {
@@ -560,6 +580,18 @@ struct RecordProgramSheet: View {
 
     private var warningsBox: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // v1.7.x: a non-admin Dispatcharr account is forced to local,
+            // so spell out that the recording lands on THIS device and that
+            // server recording needs an admin account. The user otherwise
+            // cannot tell it did not go to the Dispatcharr server DVR.
+            if isDispatcharr && !canRecordToServer {
+                Label {
+                    Text("Saving to this device. Recording to the Dispatcharr server requires a Dispatcharr admin account.")
+                } icon: {
+                    Image(systemName: "internaldrive.fill")
+                        .foregroundColor(.orange)
+                }
+            }
             Label {
                 Text("Keep AerioTV open — closing the app will stop this recording.")
             } icon: {
