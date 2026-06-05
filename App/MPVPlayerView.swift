@@ -1844,11 +1844,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // pipeline was wedged. Same root cause as the black-frame
         // storm, different symptom.
         //
-        // 3-second threshold: shorter than the 5s the user manually
-        // gave up at, long enough that natural cache underruns on a
-        // weak network do not falsely trigger. Gated by !paused so a
-        // user pause does not get force-reloaded.
-        private let staleFrameStormThresholdSec: CFTimeInterval = 3.0
+        // 6-second threshold, MEASURED from the same field log, not
+        // guessed. The same session's NORMAL channel-flip probes (the
+        // ones that recovered fine on their own) drove AVSBDL stale
+        // time up to `re-enqueue #480 (stale=3023ms)` during a healthy
+        // flip back to Action HD - mpv was simply probing the new
+        // stream (analyzeduration=1.5s + network) and frames flowed
+        // right after. A 3s threshold would have misfired there,
+        // issuing a redundant loadfile mid-probe and making the flip
+        // SLOWER. The actual wedge (Football HD post-underrun) climbed
+        // monotonically past that to stale=12301ms with no recovery.
+        // 6.0s sits at 2x the worst observed normal-probe stale, well
+        // clear of healthy flips, yet recovers the user at ~6s instead
+        // of the ~18s they waited before giving up. Gated by !paused so
+        // a user pause is never force-reloaded.
+        private let staleFrameStormThresholdSec: CFTimeInterval = 6.0
 
         // v1.7.x black-frame-storm reload watchdog.
         //
