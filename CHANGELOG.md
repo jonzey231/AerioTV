@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.7.5 - 2026-06-05
+
+### Fixed
+
+- **Playback stutter on standard (SDR) channels.** The HDR color
+  correction added in 1.7.3 was being applied to every channel, including
+  standard-range ones, which forced the renderer through extra work each
+  frame and produced a visible stutter on Apple TV, most noticeable around
+  30fps content. The correction is now applied only to channels that are
+  actually HDR (BT.2020 / PQ / HLG), so SDR channels play smoothly again
+  while HDR channels keep their corrected colors.
+- **Live streams that froze after an audio glitch now recover on their
+  own.** After an audio underrun a live stream could wedge in one of two
+  ways: the picture went black, or it stuck on the last frame with no new
+  frames. Both are now detected and the stream re-primes itself in place
+  instead of staying frozen until you change channels.
+- **Apple TV: multi-second freeze right after launch.** The Top Shelf
+  data sync was writing to the keychain on the main thread during launch,
+  which could block the interface for several seconds. The keychain writes
+  now happen off the main thread, so the app is responsive immediately.
+- **Apple TV: debug logging now works.** Enabling Debug Logging (Settings
+  > Developer) now actually writes the log to disk, and a Share Log File
+  option serves it over your local network so you can open it on a phone
+  or laptop and send it in for support.
+
 ## v1.7.4 - 2026-06-02
 
 ### Added

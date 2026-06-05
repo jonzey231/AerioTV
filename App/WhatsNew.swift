@@ -57,6 +57,17 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.5",
+            title: "What's new in 1.7.5",
+            bullets: [
+                "Fixed a playback stutter on standard (SDR) channels, most noticeable around 30fps content, that crept in when HDR color correction was added. HDR channels still tone-map to correct colors",
+                "Live streams now recover on their own if the picture freezes after an audio glitch, instead of staying stuck on the last frame",
+                "Apple TV: fixed a multi-second freeze right after launch while the app finished syncing",
+                "Apple TV: debug logging (Settings, Developer) now saves to disk, and a Share Log File option lets you send the log to support over your local network"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.5")
+        ),
+        WhatsNewRelease(
             version: "1.7.4",
             title: "What's new in 1.7.4",
             bullets: [
