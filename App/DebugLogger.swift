@@ -211,6 +211,12 @@ final class DebugLogger: @unchecked Sendable {
 
     @MainActor func enable() {
         UserDefaults.standard.set(true, forKey: "debugLoggingEnabled")
+        // v1.7.x diag: log the path we are about to write to, so an
+        // Xcode-attached tester can see the actual sandbox URL and
+        // cross-check it against what the [DebugLogger][diag] appendToFile
+        // breadcrumbs report. The mismatch case (writing to one path,
+        // size-read from another) was a real hypothesis worth ruling out.
+        print("[DebugLogger][diag] enable() called; isEnabled=\(isEnabled) logFileURL=\(logFileURL?.path ?? "<nil>")")
         writeSessionHeader()
     }
 
@@ -458,8 +464,20 @@ final class DebugLogger: @unchecked Sendable {
     }
 
     private func appendToFile(_ text: String) {
-        guard let url = logFileURL else { return }
-        guard let data = text.data(using: .utf8) else { return }
+        guard let url = logFileURL else {
+            // v1.7.x diag: shout to stdout if we have no URL. tvOS's
+            // .documentDirectory has historically been the right path
+            // for app-purgeable user files, but if FileManager ever
+            // returns an empty list for any reason every write would
+            // silently no-op and the file would stay "Empty" forever.
+            // This print lets a tester paired with Xcode see the cause.
+            print("[DebugLogger][diag] appendToFile FAILED: logFileURL is nil")
+            return
+        }
+        guard let data = text.data(using: .utf8) else {
+            print("[DebugLogger][diag] appendToFile FAILED: utf8 encode returned nil (len=\(text.count))")
+            return
+        }
 
         // Rotate if the file has grown beyond the limit.
         if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
@@ -467,16 +485,46 @@ final class DebugLogger: @unchecked Sendable {
             rotateLog(at: url)
         }
 
-        if FileManager.default.fileExists(atPath: url.path) {
-            if let handle = try? FileHandle(forWritingTo: url) {
+        let exists = FileManager.default.fileExists(atPath: url.path)
+        if exists {
+            // v1.7.x diag: capture FileHandle errors so a sandboxing /
+            // permissions failure (which prior to this surfaced as
+            // "file stays Empty" with no log line) gets a clear stdout
+            // marker. The try? swallowed both the open AND the write -
+            // do/catch the open, and let any write throw be visible.
+            do {
+                let handle = try FileHandle(forWritingTo: url)
                 defer { try? handle.close() }
                 handle.seekToEndOfFile()
                 handle.write(data)
+                // First-write breadcrumb every 50 writes so the console
+                // is not flooded but a tester can still confirm bytes
+                // are landing. (See appendDiagCounter just below.)
+                appendDiagCounter &+= 1
+                if appendDiagCounter == 1 || appendDiagCounter % 50 == 0 {
+                    print("[DebugLogger][diag] appended \(data.count) B (#\(appendDiagCounter), totalNowAprox=\(handle.offsetInFile)) at \(url.path)")
+                }
+            } catch {
+                print("[DebugLogger][diag] appendToFile FileHandle error at \(url.path): \(error.localizedDescription)")
             }
         } else {
-            try? data.write(to: url, options: .atomic)
+            // First-ever write: create the file. Use do/catch so a
+            // sandbox / disk-full / unwritable-parent error surfaces.
+            do {
+                try data.write(to: url, options: .atomic)
+                appendDiagCounter &+= 1
+                print("[DebugLogger][diag] created \(url.path) with \(data.count) B")
+            } catch {
+                print("[DebugLogger][diag] create FAILED at \(url.path): \(error.localizedDescription)")
+            }
         }
     }
+
+    /// Counts how many appendToFile calls have actually reached disk,
+    /// independent of whether their writes succeeded. Used only by the
+    /// breadcrumb print() above so the stdout firehose stays survey-
+    /// able instead of being flooded once per debugLog call.
+    private var appendDiagCounter: UInt64 = 0
 
     /// Rename the current log to debug_logs_archive.txt and start fresh.
     private func rotateLog(at url: URL) {
