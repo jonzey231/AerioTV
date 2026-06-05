@@ -874,6 +874,26 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // reconfigure events will repopulate `detectedFps` once
             // the new stream's headers are parsed.
             detectedFps = 0
+            // v1.7.x: a channel flip goes through loadfile replace here,
+            // NOT through play(url:), so the per-stream state that
+            // play(url:) resets must be reset here too or it leaks across
+            // the flip:
+            //  - hdrToneMappingApplied: if left true from an SDR stream,
+            //    applyHDRToneMappingIfNeeded() short-circuits on the new
+            //    stream and a flip SDR->HDR would skip the BT.709 tone-map
+            //    (green/washed HDR). Archie's 2026-06-06 fast-flip log
+            //    showed the [HDR] line firing only ONCE for the whole
+            //    session - every subsequent flip silently skipped detection.
+            //  - hasReachedPlaybackRestartForStream: the new stream has
+            //    not restarted yet, so disarm the reload watchdogs through
+            //    its startup probe.
+            //  - black/stale reload counters + cooldown: the new stream
+            //    must not inherit the outgoing one's storm count or sit
+            //    inside its cooldown.
+            hdrToneMappingApplied = false
+            hasReachedPlaybackRestartForStream = false
+            consecutiveBlackFramesSuppressed = 0
+            lastForcedBlackReloadAt = 0
             // Re-apply NowPlayingInfo metadata so the lockscreen +
             // Control Center reflect the new channel. The bridge
             // ownership rule from `shouldDriveNowPlayingBridge()`
@@ -1183,8 +1203,28 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Already-applied flag so we do not re-issue the property writes
         /// on every playback-restart (which can fire multiple times across
         /// a stream's lifetime - audio reconfig, cache underrun recovery,
-        /// etc.). Reset on play(url:) so the next stream re-evaluates.
+        /// etc.). Reset on play(url:) AND swapStream so the next stream
+        /// re-evaluates.
         private var hdrToneMappingApplied = false
+
+        /// True once the CURRENT stream (this URL, this play/swap) has
+        /// fired MPV_EVENT_PLAYBACK_RESTART at least once. The reload
+        /// watchdogs (black-frame storm and stale-frame storm) gate on
+        /// this so they fire ONLY for a stream that already reached
+        /// steady playback and then wedged - never during the normal
+        /// start-file -> probe -> first-frame window.
+        ///
+        /// Why this matters (Archie 2026-06-06 fast-flip field test):
+        /// rapid channel-flipping reuses one mpv handle via loadfile
+        /// replace, and the probe for a freshly-swapped stream legitimately
+        /// drove AVSBDL stale time to 5425ms BEFORE playback-restart - a
+        /// healthy flip that recovered on its own. Without this gate the
+        /// 6s stale threshold would eventually misfire on a slightly
+        /// slower probe, issuing a redundant loadfile mid-probe and making
+        /// the flip worse. A slow probe is pre-restart (flag false -> no
+        /// reload); a real post-underrun wedge is post-restart (flag true
+        /// -> reload allowed). Reset on play(url:) and swapStream.
+        private var hasReachedPlaybackRestartForStream = false
 
         /// Set the BT.709 SDR pin on the libmpv render target only when
         /// the current source actually needs it. The v1.7.3 fix that
@@ -2989,7 +3029,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // when watchdog re-enqueue has already fired, which by
             // definition means we are NOT in the steady-state hot
             // path of clean playback.
-            if staleAge >= staleFrameStormThresholdSec, lastAppliedPause != true {
+            if staleAge >= staleFrameStormThresholdSec,
+               lastAppliedPause != true,
+               hasReachedPlaybackRestartForStream {
                 let wallNow = CFAbsoluteTimeGetCurrent()
                 if wallNow - lastForcedBlackReloadAt >= blackFrameReloadCooldownSec,
                    let reloadURL = urls.first {
@@ -3472,7 +3514,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // stream resumes within ~1s. Cooldown prevents repeat
                 // hits when the source is genuinely dark or the
                 // proxy keeps producing the same broken bytes.
-                if consecutiveBlackFramesSuppressed == blackFrameStormThreshold {
+                if consecutiveBlackFramesSuppressed == blackFrameStormThreshold,
+                   hasReachedPlaybackRestartForStream {
                     let now = CFAbsoluteTimeGetCurrent()
                     if now - lastForcedBlackReloadAt >= blackFrameReloadCooldownSec,
                        let reloadURL = urls.first {
@@ -4679,6 +4722,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // (the user just asked to start playing something new).
             consecutiveBlackFramesSuppressed = 0
             lastForcedBlackReloadAt = 0
+            // Disarm the reload watchdogs until this new stream reaches
+            // playback-restart, so its startup probe is never treated as
+            // a wedge.
+            hasReachedPlaybackRestartForStream = false
             // v1.6.23: route URL strings through DebugLogger.sanitize
             // before any console / file output so Xtream credentials
             // (`/live/<u>/<p>/<id>` and `?username=&password=` query
@@ -4894,6 +4941,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         return  // Exit event loop
 
                     case MPV_EVENT_PLAYBACK_RESTART:
+                        // The current stream has now reached steady
+                        // playback at least once. Arms the reload
+                        // watchdogs (they only fire post-restart so a
+                        // slow startup probe is never mistaken for a
+                        // wedge). See hasReachedPlaybackRestartForStream.
+                        self.hasReachedPlaybackRestartForStream = true
                         // Now that initial buffer is filled, disable cache-pause for live
                         // so playback doesn't stall on brief network dips.
                         if self.isLive, let mpv = self.activeMPVHandle() {
