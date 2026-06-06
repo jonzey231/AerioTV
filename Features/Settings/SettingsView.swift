@@ -2847,30 +2847,7 @@ struct EditServerSheet: View {
             Text(placeholder)
                 .font(.system(size: 22, weight: .medium))
                 .foregroundColor(.textTertiary)
-            if isSecure {
-                SecureField(placeholder, text: text)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 28))
-                    .foregroundColor(.textPrimary)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.elevatedBackground)
-                    )
-            } else {
-                TextField(placeholder, text: text)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 28))
-                    .foregroundColor(.textPrimary)
-                    .autocorrectionDisabled()
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.elevatedBackground)
-                    )
-            }
+            TVSettingsTextField(placeholder: placeholder, text: text, isSecure: isSecure)
         }
     }
     #endif
@@ -3343,31 +3320,60 @@ struct EditServerPage: View {
             Text(placeholder)
                 .font(.system(size: 22, weight: .medium))
                 .foregroundColor(.textTertiary)
+            TVSettingsTextField(placeholder: placeholder, text: text, isSecure: isSecure)
+        }
+    }
+}
+
+// MARK: - Shared tvOS settings text field
+//
+// v1.7.5 (Archie field screenshot): the tvOS settings field helpers
+// (tvField / tvEditField) rolled their own bare TextField that forced a
+// light `.textPrimary` colour at all times. tvOS fills a FOCUSED TextField
+// with a solid white "platter" and expects dark text inside it, so our
+// light text became white-on-white and unreadable on the focused field.
+//
+// The app's standard field component, AppTextField, already solved this
+// exact bug in v1.6.21 and documented (see its tvOS notes) that the white
+// fill CANNOT be cleanly removed in pure SwiftUI - that needs a
+// UIViewRepresentable UITextField with custom focused-appearance overrides.
+// So rather than fight the system fill, we match AppTextField: switch the
+// text to dark when focused (readable against the white fill) and keep the
+// light colour when unfocused (readable against the dark elevatedBackground),
+// plus an accent border so the focused field is obvious. Every settings
+// field helper routes through this, so the fix lands on every server
+// add/edit screen at once and stays consistent with the onboarding fields.
+struct TVSettingsTextField: View {
+    let placeholder: String
+    @Binding var text: String
+    var isSecure: Bool = false
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Group {
             if isSecure {
-                SecureField(placeholder, text: text)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 28))
-                    .foregroundColor(.textPrimary)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.elevatedBackground)
-                    )
+                SecureField(placeholder, text: $text)
             } else {
-                TextField(placeholder, text: text)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 28))
-                    .foregroundColor(.textPrimary)
+                TextField(placeholder, text: $text)
                     .autocorrectionDisabled()
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 14)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.elevatedBackground)
-                    )
             }
         }
+        .textFieldStyle(.plain)
+        .font(.system(size: 28))
+        // Dark text on the white focus fill; light text when unfocused.
+        .foregroundColor(isFocused ? .black : .textPrimary)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color.elevatedBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.accentPrimary.opacity(isFocused ? 0.6 : 0.0),
+                        lineWidth: isFocused ? 2 : 0)
+        )
+        .focused($isFocused)
     }
 }
 #endif
