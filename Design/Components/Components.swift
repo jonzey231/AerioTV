@@ -15,8 +15,16 @@ import UIKit
 // our own accent border on focus, so it never goes white.
 
 /// UITextField with content insets + a self-managed dark focus appearance.
+/// The crux: in `didUpdateFocus` we re-assign `backgroundColor` AFTER super,
+/// which overrides the system's white-on-focus fill. `fillColor` may be a
+/// solid dark colour (standalone fields) or `.clear` (when the SwiftUI host
+/// already draws the box, e.g. AppTextField) - either way it defeats the
+/// white platter.
 final class DarkFocusTextField: UITextField {
     var textInsets = UIEdgeInsets(top: 14, left: 20, bottom: 14, right: 20)
+    var fillColor: UIColor = UIColor(Color.elevatedBackground)
+    var showsBorder: Bool = true
+    var onFocusChange: ((Bool) -> Void)?
 
     override func textRect(forBounds bounds: CGRect) -> CGRect { bounds.inset(by: textInsets) }
     override func editingRect(forBounds bounds: CGRect) -> CGRect { bounds.inset(by: textInsets) }
@@ -30,19 +38,21 @@ final class DarkFocusTextField: UITextField {
     override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
         super.didUpdateFocus(in: context, with: coordinator)
         let nowFocused = (context.nextFocusedView === self)
+        onFocusChange?(nowFocused)
         coordinator.addCoordinatedAnimations({ [weak self] in
             self?.applyDarkAppearance(focused: nowFocused)
         })
     }
 
-    /// Force the dark fill at all times (overriding the system white focus
-    /// platter) and draw the accent border only when focused.
+    /// Force our own fill at all times (overriding the system white focus
+    /// platter) and draw the accent border only when focused (and only if
+    /// the host isn't drawing its own box).
     private func applyDarkAppearance(focused: Bool) {
-        backgroundColor = UIColor(Color.elevatedBackground)
-        layer.cornerRadius = 10
+        backgroundColor = fillColor
+        layer.cornerRadius = showsBorder ? 10 : 0
         layer.cornerCurve = .continuous
         layer.borderColor = UIColor(Color.accentPrimary).cgColor
-        layer.borderWidth = focused ? 3 : 0
+        layer.borderWidth = (showsBorder && focused) ? 3 : 0
     }
 }
 
@@ -53,6 +63,15 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
     @Binding var text: String
     let placeholder: String
     var isSecure: Bool = false
+    /// Solid dark colour for standalone fields, or `.clear` when the SwiftUI
+    /// host already draws the field box (the override of white still works).
+    var fillColor: Color = .elevatedBackground
+    /// When false, the host draws the box + focus border; the field only
+    /// reports focus via `onFocusChange`.
+    var showsBorder: Bool = true
+    var fontSize: CGFloat = 28
+    var verticalInset: CGFloat = 14
+    var onFocusChange: ((Bool) -> Void)? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
 
@@ -60,7 +79,12 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
         let tf = DarkFocusTextField()
         tf.delegate = context.coordinator
         tf.isSecureTextEntry = isSecure
-        tf.font = .systemFont(ofSize: 28)
+        tf.fillColor = UIColor(fillColor)
+        tf.showsBorder = showsBorder
+        tf.onFocusChange = onFocusChange
+        tf.textInsets = UIEdgeInsets(top: verticalInset, left: showsBorder ? 20 : 0,
+                                     bottom: verticalInset, right: showsBorder ? 20 : 0)
+        tf.font = .systemFont(ofSize: fontSize)
         tf.textColor = UIColor(Color.textPrimary)
         tf.attributedPlaceholder = NSAttributedString(
             string: placeholder,
@@ -75,6 +99,7 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
     func updateUIView(_ uiView: DarkFocusTextField, context: Context) {
         if uiView.text != text { uiView.text = text }
         uiView.isSecureTextEntry = isSecure
+        uiView.onFocusChange = onFocusChange
     }
 
     final class Coordinator: NSObject, UITextFieldDelegate {
@@ -301,6 +326,12 @@ struct AppTextField: View {
     /// unchanged unless the user explicitly taps reveal.
     @State private var passwordVisible: Bool = false
 
+    /// v1.7.5: tvOS focus state, driven by the UIKit DarkFocusTextField's
+    /// focus callback (the tvOS body hosts that instead of a SwiftUI
+    /// TextField, so @FocusState can't track it). Drives the box border +
+    /// icon tint on tvOS the way `isFocused` does on iOS.
+    @State private var isFocusedTV: Bool = false
+
     init(_ title: String,
          placeholder: String,
          text: Binding<String>,
@@ -320,6 +351,68 @@ struct AppTextField: View {
     }
 
     var body: some View {
+        #if os(tvOS)
+        tvBody
+        #else
+        iosBody
+        #endif
+    }
+
+    #if os(tvOS)
+    /// tvOS body: hosts the UIKit dark-focus field so a focused field never
+    /// shows the system white platter. The box (background + accent focus
+    /// border) is drawn here; the field is transparent and reports focus via
+    /// onFocusChange. No leading icon (no call site passes one) and the
+    /// secure-reveal eye is kept for password verification on the remote.
+    private var tvBody: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.labelLarge)
+                .foregroundColor(.textSecondary)
+
+            HStack(spacing: 12) {
+                DarkFocusTextFieldRepresentable(
+                    text: $text,
+                    placeholder: placeholder,
+                    isSecure: isSecure && !passwordVisible,
+                    // Opaque dark fill (not .clear): a transparent fill lets a
+                    // residual gray system focus tint show through; an opaque
+                    // elevatedBackground fully covers it, matching the box.
+                    fillColor: .elevatedBackground,
+                    showsBorder: false,
+                    fontSize: 26,
+                    onFocusChange: { isFocusedTV = $0 }
+                )
+                if isSecure {
+                    Button {
+                        passwordVisible.toggle()
+                    } label: {
+                        Image(systemName: passwordVisible ? "eye.slash" : "eye")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .frame(width: 36, height: 36)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(passwordVisible ? "Hide password" : "Show password")
+                }
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 60)
+            .background(Color.elevatedBackground)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(isFocusedTV ? Color.accentPrimary
+                                        : (text.isEmpty ? Color.borderSubtle : Color.accentPrimary.opacity(0.4)),
+                            lineWidth: isFocusedTV ? 3 : 1)
+                    .animation(.easeInOut(duration: 0.15), value: isFocusedTV)
+            )
+        }
+    }
+    #endif
+
+    private var iosBody: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.labelLarge)
