@@ -1883,6 +1883,10 @@ struct ServerDetailView: View {
             .scrollContentBackground(.hidden)
             #else
             .listStyle(.plain)
+            // v1.7.5: cap to a centered 1200pt column on tvOS so the
+            // detail rows do not stretch the full TV width (matches the
+            // server edit screen). The enclosing ZStack centers it.
+            .frame(maxWidth: 1200)
             #endif
         }
         .navigationTitle(server.name)
@@ -2821,7 +2825,11 @@ struct EditServerSheet: View {
                     .padding(.vertical, 8)
                 }
             }
+            // v1.7.5: centered 1200pt reading column (matches EditServerPage)
+            // so the form does not stretch across the full TV width.
+            .frame(maxWidth: 1200, alignment: .leading)
             .padding(48)
+            .frame(maxWidth: .infinity)
         }
     }
 
@@ -3532,7 +3540,10 @@ struct NetworkSettingsView: View {
                 // App Settings → Appearance — alongside the theme +
                 // scale sliders, since they're all visual concerns.
             }
+            // v1.7.5: centered 1200pt reading column (matches EditServerPage).
+            .frame(maxWidth: 1200, alignment: .leading)
             .padding(48)
+            .frame(maxWidth: .infinity)
         }
     }
 
