@@ -3341,15 +3341,13 @@ struct EditServerPage: View {
 // with a solid white "platter" and expects dark text inside it, so our
 // light text became white-on-white and unreadable on the focused field.
 //
-// The app's standard field component, AppTextField, already solved this
-// exact bug in v1.6.21 and documented (see its tvOS notes) that the white
-// fill CANNOT be cleanly removed in pure SwiftUI - that needs a
-// UIViewRepresentable UITextField with custom focused-appearance overrides.
-// So rather than fight the system fill, we match AppTextField: switch the
-// text to dark when focused (readable against the white fill) and keep the
-// light colour when unfocused (readable against the dark elevatedBackground),
-// plus an accent border so the focused field is obvious. Every settings
-// field helper routes through this, so the fix lands on every server
+// v1.7.5 (Archie: "fix the white focus text boxes throughout onboarding +
+// settings"): a focused tvOS TextField shows the system white "platter"
+// focus effect. We suppress it entirely with `.focusEffectDisabled()` (the
+// same opt-out AppTextField now uses), so the field stays on the dark
+// `elevatedBackground` with readable light text, and a full-accent 3pt
+// border is the focus indicator. Every settings field helper (tvField /
+// tvEditField) routes through this, so the fix lands on every server
 // add/edit screen at once and stays consistent with the onboarding fields.
 struct TVSettingsTextField: View {
     let placeholder: String
@@ -3368,8 +3366,7 @@ struct TVSettingsTextField: View {
         }
         .textFieldStyle(.plain)
         .font(.system(size: 28))
-        // Dark text on the white focus fill; light text when unfocused.
-        .foregroundColor(isFocused ? .black : .textPrimary)
+        .foregroundColor(.textPrimary)
         .padding(.horizontal, 20)
         .padding(.vertical, 14)
         .background(
@@ -3378,10 +3375,11 @@ struct TVSettingsTextField: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.accentPrimary.opacity(isFocused ? 0.6 : 0.0),
-                        lineWidth: isFocused ? 2 : 0)
+                .stroke(Color.accentPrimary.opacity(isFocused ? 1.0 : 0.0),
+                        lineWidth: isFocused ? 3 : 0)
         )
         .focused($isFocused)
+        .focusEffectDisabled()
     }
 }
 #endif

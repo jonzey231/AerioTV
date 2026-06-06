@@ -260,31 +260,29 @@ struct AppTextField: View {
                     }
                 }
                 .font(.bodyMedium)
-                // v1.6.21 fix for the "white-on-white" tvOS bug.
-                // tvOS fills the focused TextField with white and
-                // expects dark text. Forcing `.textPrimary` (light)
-                // there made typed text invisible against the
-                // white fill. On tvOS, switch to a dark colour
-                // when focused so the entered text contrasts; on
-                // iOS the original light colour is correct.
-                #if os(tvOS)
-                .foregroundColor(isFocused ? .black : .textPrimary)
-                // v1.6.21 fix for vertical centering on tvOS. Without
-                // this, the focused TVTextField paints typed text
-                // top-aligned within the 52pt field height, leaving
-                // it visually misaligned with the leading icon (which
-                // SwiftUI centers via the HStack default alignment).
-                // `.frame(maxHeight: .infinity, alignment: .center)`
-                // tells SwiftUI to expand the TextField to fill the
-                // available height with its content centered, which
-                // overrides the top-alignment quirk.
-                .frame(maxHeight: .infinity, alignment: .center)
-                #else
+                // v1.7.5 (Archie: "fix the white focus text boxes
+                // throughout onboarding + settings"): the v1.6.21 fix
+                // kept the system white focus fill and only switched the
+                // text to dark so it stayed readable. Archie wants the
+                // white GONE. `.focusEffectDisabled()` (below) opts out
+                // of the system focus effect entirely - that effect IS the
+                // white platter on a focused tvOS TextField - so the field
+                // now stays on the dark `elevatedBackground` and the accent
+                // border overlay (added below) is the focus indicator. With
+                // no white fill the text stays light at all times.
                 .foregroundColor(.textPrimary)
+                #if os(tvOS)
+                // v1.6.21 vertical-centering fix retained: expand the field
+                // to fill the 52pt height with content centered so it lines
+                // up with the leading icon.
+                .frame(maxHeight: .infinity, alignment: .center)
                 #endif
                 .textInputAutocapitalization(autocapitalization)
                 .autocorrectionDisabled(!autocorrection)
                 .focused($isFocused)
+                #if os(tvOS)
+                .focusEffectDisabled()
+                #endif
 
                 // v1.7.x: trailing reveal/hide button for secure
                 // fields. Only renders when `isSecure` is true so
@@ -314,8 +312,13 @@ struct AppTextField: View {
             .background(Color.elevatedBackground)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
+                // v1.7.5: with the system white focus fill suppressed on
+                // tvOS (.focusEffectDisabled above), this border is the
+                // sole focus indicator, so it goes full-accent + 3pt when
+                // focused to read at TV distance. Unfocused styling is
+                // unchanged.
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(isFocused ? Color.accentPrimary.opacity(0.6) : (text.isEmpty ? Color.borderSubtle : Color.accentPrimary.opacity(0.4)), lineWidth: isFocused ? 1.5 : 1)
+                    .stroke(isFocused ? Color.accentPrimary : (text.isEmpty ? Color.borderSubtle : Color.accentPrimary.opacity(0.4)), lineWidth: isFocused ? 3 : 1)
                     .animation(.easeInOut(duration: 0.15), value: isFocused)
             )
             // Tapping anywhere in the field, including the icon area, focuses the input
