@@ -3355,33 +3355,15 @@ struct TVSettingsTextField: View {
     let placeholder: String
     @Binding var text: String
     var isSecure: Bool = false
-    @FocusState private var isFocused: Bool
 
     var body: some View {
-        Group {
-            if isSecure {
-                SecureField(placeholder, text: $text)
-            } else {
-                TextField(placeholder, text: $text)
-                    .autocorrectionDisabled()
-            }
-        }
-        .textFieldStyle(.plain)
-        .font(.system(size: 28))
-        // Dark text on the white focus fill; light text when unfocused.
-        .foregroundColor(isFocused ? .black : .textPrimary)
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.elevatedBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.accentPrimary.opacity(isFocused ? 0.6 : 0.0),
-                        lineWidth: isFocused ? 2 : 0)
-        )
-        .focused($isFocused)
+        // UIKit-backed field (DarkFocusTextFieldRepresentable) that forces a
+        // dark background on focus, so the field never shows the system white
+        // platter; the accent focus border is drawn in the UITextField's
+        // didUpdateFocus. Fixed 60pt height matches the previous 28pt-font +
+        // 14pt vertical-padding box.
+        DarkFocusTextFieldRepresentable(text: $text, placeholder: placeholder, isSecure: isSecure)
+            .frame(height: 60)
     }
 }
 #endif

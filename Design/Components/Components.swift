@@ -1,4 +1,89 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
+
+#if os(tvOS)
+// MARK: - tvOS dark-focus text field (UIKit-backed)
+//
+// v1.7.5 (Archie: "make it a regular text field that's not filled with white
+// when in focus"): a focused SwiftUI TextField on tvOS renders a solid white
+// system "platter" that cannot be suppressed in pure SwiftUI -
+// `.focusEffectDisabled()` has no effect on it (verified on the tvOS 26.2
+// simulator). The fix is to host a UIKit UITextField and control its focused
+// appearance directly in `didUpdateFocus`: force the dark background and draw
+// our own accent border on focus, so it never goes white.
+
+/// UITextField with content insets + a self-managed dark focus appearance.
+final class DarkFocusTextField: UITextField {
+    var textInsets = UIEdgeInsets(top: 14, left: 20, bottom: 14, right: 20)
+
+    override func textRect(forBounds bounds: CGRect) -> CGRect { bounds.inset(by: textInsets) }
+    override func editingRect(forBounds bounds: CGRect) -> CGRect { bounds.inset(by: textInsets) }
+    override func placeholderRect(forBounds bounds: CGRect) -> CGRect { bounds.inset(by: textInsets) }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        applyDarkAppearance(focused: isFocused)
+    }
+
+    override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
+        super.didUpdateFocus(in: context, with: coordinator)
+        let nowFocused = (context.nextFocusedView === self)
+        coordinator.addCoordinatedAnimations({ [weak self] in
+            self?.applyDarkAppearance(focused: nowFocused)
+        })
+    }
+
+    /// Force the dark fill at all times (overriding the system white focus
+    /// platter) and draw the accent border only when focused.
+    private func applyDarkAppearance(focused: Bool) {
+        backgroundColor = UIColor(Color.elevatedBackground)
+        layer.cornerRadius = 10
+        layer.cornerCurve = .continuous
+        layer.borderColor = UIColor(Color.accentPrimary).cgColor
+        layer.borderWidth = focused ? 3 : 0
+    }
+}
+
+/// SwiftUI host for `DarkFocusTextField`. Two-way binds `text`; the keyboard
+/// is presented by tvOS the normal way (the field is a real UITextField, so
+/// Select makes it first responder).
+struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    var isSecure: Bool = false
+
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+
+    func makeUIView(context: Context) -> DarkFocusTextField {
+        let tf = DarkFocusTextField()
+        tf.delegate = context.coordinator
+        tf.isSecureTextEntry = isSecure
+        tf.font = .systemFont(ofSize: 28)
+        tf.textColor = UIColor(Color.textPrimary)
+        tf.attributedPlaceholder = NSAttributedString(
+            string: placeholder,
+            attributes: [.foregroundColor: UIColor(Color.textTertiary)]
+        )
+        tf.addTarget(context.coordinator,
+                     action: #selector(Coordinator.editingChanged(_:)),
+                     for: .editingChanged)
+        return tf
+    }
+
+    func updateUIView(_ uiView: DarkFocusTextField, context: Context) {
+        if uiView.text != text { uiView.text = text }
+        uiView.isSecureTextEntry = isSecure
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        @Binding var text: String
+        init(text: Binding<String>) { _text = text }
+        @objc func editingChanged(_ tf: UITextField) { text = tf.text ?? "" }
+    }
+}
+#endif
 
 // MARK: - Shared tvOS Button Style
 
