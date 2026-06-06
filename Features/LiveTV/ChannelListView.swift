@@ -1472,10 +1472,25 @@ struct ChannelRow: View {
 
     @State private var showCardMenu = false
 
+    #if os(tvOS)
+    /// v1.7.5 (issue #34): confirm before REMOVING a favorite via the
+    /// one-press star button. On Apple TV the star sits one D-pad-left
+    /// from the channel, so a mis-aimed Select on an already-favorited
+    /// channel silently dropped it from Favorites (reporter: ochaos).
+    /// Adding a favorite stays immediate; only removal asks first.
+    @State private var showRemoveFavoriteConfirmation = false
+    #endif
+
     var body: some View {
         VStack(spacing: 0) {
             #if os(tvOS)
             tvRow
+                .alert("Remove Favorite?", isPresented: $showRemoveFavoriteConfirmation) {
+                    Button("Cancel", role: .cancel) {}
+                    Button("Remove", role: .destructive) { favoritesStore.toggle(item) }
+                } message: {
+                    Text("Remove \"\(item.name)\" from Favorites?")
+                }
             #else
             iOSRow
             #endif
@@ -1629,9 +1644,15 @@ struct ChannelRow: View {
 
             // ── Star button ───────────────────────────────────────────────
             // Reachable by pressing LEFT on the D-pad from the main content.
-            // SELECT toggles the favorite.
+            // SELECT adds a favorite immediately, but REMOVING one first
+            // asks for confirmation (issue #34) so an accidental Select on
+            // the star doesn't silently drop a channel from Favorites.
             Button {
-                favoritesStore.toggle(item)
+                if favoritesStore.isFavorite(item.id) {
+                    showRemoveFavoriteConfirmation = true
+                } else {
+                    favoritesStore.toggle(item)
+                }
             } label: {
                 let isFav = favoritesStore.isFavorite(item.id)
                 Image(systemName: isFav ? "star.fill" : "star")
