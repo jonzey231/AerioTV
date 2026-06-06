@@ -2942,6 +2942,20 @@ struct EditServerPage: View {
     /// whichever theme was active when the page was first pushed.
     @ObservedObject private var theme = ThemeManager.shared
 
+    // v1.7.5: Refresh EPG Data + Refresh Everything actions, ported
+    // from the iOS ServerDetailView. They were missing on the tvOS
+    // Edit Playlist page entirely (Archie field report: "the whole
+    // refresh entire playlist option isn't showing up, neither is
+    // refresh EPG"), so Apple TV users had no way to purge a wedged
+    // guide / stale channel list without an iPhone. Same GuideStore /
+    // EPGCache / VODStore / ChannelStore calls as the iOS path.
+    @Query private var servers: [ServerConnection]
+    @Environment(\.modelContext) private var modelContext
+    @State private var showPurgeConfirmation = false
+    @State private var isPurgingEPG = false
+    @State private var showRefreshAllConfirmation = false
+    @State private var isRefreshingAll = false
+
     // v1.7.x: Direct Connect mode picker + Refresh Session button
     // state. Mirrors EditServerSheet's iOS Form path so Apple TV
     // users can switch credential modes after server creation
@@ -3166,6 +3180,58 @@ struct EditServerPage: View {
                         .padding(.vertical, 8)
                     }
 
+                    // v1.7.5: Refresh EPG Data (per-playlist guide purge)
+                    tvSection("EPG Cache") {
+                        Button {
+                            showPurgeConfirmation = true
+                        } label: {
+                            HStack(spacing: 12) {
+                                if isPurgingEPG {
+                                    ProgressView().scaleEffect(0.9)
+                                } else {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                }
+                                Text(isPurgingEPG ? "Refreshing EPG Data…" : "Refresh EPG Data")
+                                Spacer()
+                            }
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundColor(isPurgingEPG ? .textSecondary : .statusWarning)
+                        }
+                        .buttonStyle(TVNoHighlightButtonStyle())
+                        .disabled(isPurgingEPG || isRefreshingAll)
+                        Text(server.isActive
+                             ? "Clears this playlist's cached guide data and downloads it fresh from the server. Use this if program cells look wrong or are missing."
+                             : "Clears this playlist's cached guide data. The fresh fetch runs automatically the next time you make this playlist active.")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.top, 4)
+                    }
+
+                    // v1.7.5: Refresh Everything (nuclear)
+                    tvSection("Full Refresh") {
+                        Button {
+                            showRefreshAllConfirmation = true
+                        } label: {
+                            HStack(spacing: 12) {
+                                if isRefreshingAll {
+                                    ProgressView().scaleEffect(0.9)
+                                } else {
+                                    Image(systemName: "arrow.clockwise.circle")
+                                }
+                                Text(isRefreshingAll ? "Refreshing Everything…" : "Refresh Everything")
+                                Spacer()
+                            }
+                            .font(.system(size: 28, weight: .semibold))
+                            .foregroundColor(isRefreshingAll ? .textSecondary : .statusWarning)
+                        }
+                        .buttonStyle(TVNoHighlightButtonStyle())
+                        .disabled(isRefreshingAll || isPurgingEPG)
+                        Text("Clears all cached channels, guide data, and On Demand for this playlist, then reloads from scratch. Use this if channels or guide data are missing or stale.")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.top, 4)
+                    }
+
                     // Save
                     HStack {
                         Spacer()
@@ -3193,11 +3259,66 @@ struct EditServerPage: View {
                     }
                     .padding(.top, 16)
                 }
+                // v1.7.5: cap the content to a centered reading column
+                // instead of letting every row span the full 1920pt TV
+                // width (Archie field report: tvOS settings "look like
+                // stretched out iPhone/iPad screens"). 1200pt keeps the
+                // 28pt form text comfortably readable at couch distance
+                // with generous side margins, the conventional tvOS form
+                // proportion. The inner cap is left-aligned; the outer
+                // infinity-width frame centers that capped column.
+                .frame(maxWidth: 1200, alignment: .leading)
                 .padding(48)
+                .frame(maxWidth: .infinity)
             }
         }
         .navigationTitle("Edit Playlist")
         .toolbar(.hidden, for: .navigationBar)
+        // v1.7.5: confirmation alerts for the two refresh actions,
+        // mirroring iOS ServerDetailView. Same GuideStore / EPGCache /
+        // VODStore / ChannelStore call sequence.
+        .alert("Refresh EPG Data?", isPresented: $showPurgeConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Refresh", role: .destructive) {
+                Task {
+                    isPurgingEPG = true
+                    await GuideStore.shared.purgePrograms(
+                        for: server.id.uuidString,
+                        isActiveServer: server.isActive,
+                        modelContext: modelContext
+                    )
+                    await EPGCache.shared.invalidateAll()
+                    if server.isActive {
+                        await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
+                    }
+                    isPurgingEPG = false
+                }
+            }
+        } message: {
+            Text(server.isActive
+                 ? "All cached guide data for \"\(server.name)\" will be cleared and reloaded from the server. This may take a few minutes on large playlists."
+                 : "All cached guide data for \"\(server.name)\" will be cleared. The next time you make this playlist active, fresh guide data will load automatically.")
+        }
+        .alert("Refresh Everything?", isPresented: $showRefreshAllConfirmation) {
+            Button("Cancel", role: .cancel) {}
+            Button("Refresh", role: .destructive) {
+                Task {
+                    isRefreshingAll = true
+                    await GuideStore.shared.purgeAllPrograms(modelContext: modelContext)
+                    await EPGCache.shared.invalidateAll()
+                    VODStore.shared.clear()
+                    if server.isActive {
+                        await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
+                        VODStore.shared.refresh(servers: Array(servers))
+                    }
+                    isRefreshingAll = false
+                }
+            }
+        } message: {
+            Text(server.isActive
+                 ? "Clears all cached channels, guide data, and On Demand, then reloads \"\(server.name)\" from scratch. Use this if channels or guide data are missing or stale. May take a few minutes on large playlists."
+                 : "Clears all cached channels, guide data, and On Demand. \"\(server.name)\" reloads automatically the next time you make it active.")
+        }
     }
 
     private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
