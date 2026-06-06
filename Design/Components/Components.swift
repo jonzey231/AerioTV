@@ -14,16 +14,21 @@ import UIKit
 // appearance directly in `didUpdateFocus`: force the dark background and draw
 // our own accent border on focus, so it never goes white.
 
-/// UITextField with content insets + a self-managed dark focus appearance.
-/// The crux: in `didUpdateFocus` we re-assign `backgroundColor` AFTER super,
-/// which overrides the system's white-on-focus fill. `fillColor` may be a
-/// solid dark colour (standalone fields) or `.clear` (when the SwiftUI host
-/// already draws the box, e.g. AppTextField) - either way it defeats the
-/// white platter.
+/// UITextField that stays TRANSPARENT on focus (no white platter, no gray).
+///
+/// Researched root cause (Apple Dev Forums 122597 + others): the white focus
+/// "platter" - and the translucent gray that remains when backgroundColor is
+/// `.clear` - are painted by UITextField's OWN focus-update animation, not by
+/// a detachable `UIFocusEffect`. `.focusEffectDisabled()` / `focusEffect = nil`
+/// target the iPad/Mac halo system and have no effect on this. The confirmed
+/// fix is to override `didUpdateFocus` and NOT call `super`, which suppresses
+/// the whole default focus appearance. The field then stays `backgroundColor
+/// = .clear` at all times, so its interior shows whatever the SwiftUI host
+/// draws behind it, unchanged by focus. The host draws the box + focus border;
+/// this field only reports focus via `onFocusChange`. `overrideUserInterface
+/// Style = .dark` keeps tvOS from flipping the text colour to black on focus.
 final class DarkFocusTextField: UITextField {
     var textInsets = UIEdgeInsets(top: 14, left: 20, bottom: 14, right: 20)
-    var fillColor: UIColor = UIColor(Color.elevatedBackground)
-    var showsBorder: Bool = true
     var onFocusChange: ((Bool) -> Void)?
 
     override func textRect(forBounds bounds: CGRect) -> CGRect { bounds.inset(by: textInsets) }
@@ -32,44 +37,30 @@ final class DarkFocusTextField: UITextField {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        applyDarkAppearance(focused: isFocused)
+        backgroundColor = .clear
+        borderStyle = .none
+        overrideUserInterfaceStyle = .dark
     }
 
+    // Deliberately does NOT call super: that is what suppresses the system
+    // white/gray focus platter. We only report focus and keep the interior
+    // transparent.
     override func didUpdateFocus(in context: UIFocusUpdateContext, with coordinator: UIFocusAnimationCoordinator) {
-        super.didUpdateFocus(in: context, with: coordinator)
         let nowFocused = (context.nextFocusedView === self)
         onFocusChange?(nowFocused)
-        coordinator.addCoordinatedAnimations({ [weak self] in
-            self?.applyDarkAppearance(focused: nowFocused)
-        })
-    }
-
-    /// Force our own fill at all times (overriding the system white focus
-    /// platter) and draw the accent border only when focused (and only if
-    /// the host isn't drawing its own box).
-    private func applyDarkAppearance(focused: Bool) {
-        backgroundColor = fillColor
-        layer.cornerRadius = showsBorder ? 10 : 0
-        layer.cornerCurve = .continuous
-        layer.borderColor = UIColor(Color.accentPrimary).cgColor
-        layer.borderWidth = (showsBorder && focused) ? 3 : 0
+        backgroundColor = .clear
     }
 }
 
-/// SwiftUI host for `DarkFocusTextField`. Two-way binds `text`; the keyboard
-/// is presented by tvOS the normal way (the field is a real UITextField, so
-/// Select makes it first responder).
+/// SwiftUI host for `DarkFocusTextField`. The field is transparent; the caller
+/// draws the box + focus border (driven by `onFocusChange`). Two-way binds
+/// `text`; tvOS presents the keyboard normally on Select (real UITextField).
 struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
     @Binding var text: String
     let placeholder: String
     var isSecure: Bool = false
-    /// Solid dark colour for standalone fields, or `.clear` when the SwiftUI
-    /// host already draws the field box (the override of white still works).
-    var fillColor: Color = .elevatedBackground
-    /// When false, the host draws the box + focus border; the field only
-    /// reports focus via `onFocusChange`.
-    var showsBorder: Bool = true
     var fontSize: CGFloat = 28
+    var horizontalInset: CGFloat = 20
     var verticalInset: CGFloat = 14
     var onFocusChange: ((Bool) -> Void)? = nil
 
@@ -79,11 +70,9 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
         let tf = DarkFocusTextField()
         tf.delegate = context.coordinator
         tf.isSecureTextEntry = isSecure
-        tf.fillColor = UIColor(fillColor)
-        tf.showsBorder = showsBorder
         tf.onFocusChange = onFocusChange
-        tf.textInsets = UIEdgeInsets(top: verticalInset, left: showsBorder ? 20 : 0,
-                                     bottom: verticalInset, right: showsBorder ? 20 : 0)
+        tf.textInsets = UIEdgeInsets(top: verticalInset, left: horizontalInset,
+                                     bottom: verticalInset, right: horizontalInset)
         tf.font = .systemFont(ofSize: fontSize)
         tf.textColor = UIColor(Color.textPrimary)
         tf.attributedPlaceholder = NSAttributedString(
@@ -375,12 +364,8 @@ struct AppTextField: View {
                     text: $text,
                     placeholder: placeholder,
                     isSecure: isSecure && !passwordVisible,
-                    // Opaque dark fill (not .clear): a transparent fill lets a
-                    // residual gray system focus tint show through; an opaque
-                    // elevatedBackground fully covers it, matching the box.
-                    fillColor: .elevatedBackground,
-                    showsBorder: false,
                     fontSize: 26,
+                    horizontalInset: 0,   // the HStack already pads horizontally
                     onFocusChange: { isFocusedTV = $0 }
                 )
                 if isSecure {
