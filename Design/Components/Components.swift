@@ -388,9 +388,12 @@ struct AppTextField: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(isFocusedTV ? Color.accentPrimary
-                                        : (text.isEmpty ? Color.borderSubtle : Color.accentPrimary.opacity(0.4)),
-                            lineWidth: isFocusedTV ? 3 : 1)
+                    // Only the FOCUSED field shows a border (the accent
+                    // highlight). At rest there is no border at all - the
+                    // elevatedBackground fill is the field; a resting grey
+                    // borderSubtle stroke read as an unwanted inner outline.
+                    .stroke(Color.accentPrimary.opacity(isFocusedTV ? 1 : 0),
+                            lineWidth: isFocusedTV ? 3 : 0)
                     .animation(.easeInOut(duration: 0.15), value: isFocusedTV)
             )
         }
