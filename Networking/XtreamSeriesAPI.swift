@@ -65,6 +65,22 @@ struct XtreamSeriesInfo: Decodable {
         case firstAirDate = "first_air_date"
         case categoryID = "category_id"
     }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name         = try? c.decode(String.self, forKey: .name)
+        cover        = try? c.decode(String.self, forKey: .cover)
+        plot         = try? c.decode(String.self, forKey: .plot)
+        // v0.26.0: cast/director may arrive as arrays (joined). A plain
+        // synthesized decode would throw on the array shape and fail the
+        // whole series-info decode, so handle both explicitly.
+        cast         = c.decodeFlexibleString(forKey: .cast)
+        director     = c.decodeFlexibleString(forKey: .director)
+        genre        = try? c.decode(String.self, forKey: .genre)
+        rating       = try? c.decode(String.self, forKey: .rating)
+        firstAirDate = try? c.decode(String.self, forKey: .firstAirDate)
+        categoryID   = try? c.decode(String.self, forKey: .categoryID)
+    }
 }
 
 struct XtreamEpisode: Decodable {

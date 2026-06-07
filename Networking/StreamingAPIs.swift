@@ -572,8 +572,9 @@ struct XtreamVODItem: Decodable, Identifiable {
         containerExtension = (try? c.decode(String.self, forKey: .containerExtension)) ?? "mp4"
         rating = try? c.decode(String.self, forKey: .rating)
         plot = try? c.decode(String.self, forKey: .plot)
-        cast = try? c.decode(String.self, forKey: .cast)
-        director = try? c.decode(String.self, forKey: .director)
+        // v0.26.0: tolerate array-shaped cast/director (joined).
+        cast = c.decodeFlexibleString(forKey: .cast)
+        director = c.decodeFlexibleString(forKey: .director)
         genre = try? c.decode(String.self, forKey: .genre)
         releaseDate = try? c.decode(String.self, forKey: .releaseDate)
         youtubeTrailer = try? c.decode(String.self, forKey: .youtubeTrailer)
@@ -581,6 +582,33 @@ struct XtreamVODItem: Decodable, Identifiable {
     }
 }
 
+
+// MARK: - Flexible string decoding (Dispatcharr v0.26.0)
+
+extension KeyedDecodingContainer {
+    /// Decode a field a provider may send as EITHER a JSON string
+    /// ("Actor A, Actor B") OR a JSON array (["Actor A", "Actor B"]).
+    /// Dispatcharr v0.26.0 began returning cast / actors / director as
+    /// full lists (the "no longer truncated to first name" fix, #1228).
+    /// A plain `decode(String.self)` throws on the array shape, so the
+    /// value would silently vanish from the UI; this joins arrays with
+    /// ", " to match the single-string display the app already renders.
+    /// Returns nil when the key is absent, null, or resolves to empty.
+    func decodeFlexibleString(forKey key: Key) -> String? {
+        if let s = try? decode(String.self, forKey: key) {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? nil : t
+        }
+        if let arr = try? decode([String].self, forKey: key) {
+            let joined = arr
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+            return joined.isEmpty ? nil : joined
+        }
+        return nil
+    }
+}
 
 // MARK: - Xtream Series Item
 struct XtreamSeriesItem: Decodable, Identifiable {
@@ -622,8 +650,9 @@ struct XtreamSeriesItem: Decodable, Identifiable {
         name = (try? c.decode(String.self, forKey: .name)) ?? ""
         cover = try? c.decode(String.self, forKey: .cover)
         plot = try? c.decode(String.self, forKey: .plot)
-        cast = try? c.decode(String.self, forKey: .cast)
-        director = try? c.decode(String.self, forKey: .director)
+        // v0.26.0: tolerate array-shaped cast/director (joined).
+        cast = c.decodeFlexibleString(forKey: .cast)
+        director = c.decodeFlexibleString(forKey: .director)
         genre = try? c.decode(String.self, forKey: .genre)
         releaseDate = try? c.decode(String.self, forKey: .releaseDate)
         rating = try? c.decode(String.self, forKey: .rating)
@@ -3333,11 +3362,12 @@ struct DispatcharrVODCustomProperties: Decodable {
         posterPath = try? c.decode(String.self, forKey: .posterPath)
 
         // Cast can come from either key; whichever is non-nil wins.
-        let castKey   = try? c.decode(String.self, forKey: .cast)
-        let actorsKey = try? c.decode(String.self, forKey: .actors)
-        cast = castKey ?? actorsKey
+        // v0.26.0: cast / actors may now arrive as a JSON array (the
+        // "no longer truncated to first name" fix), so decode either a
+        // string or an array (joined) rather than dropping the array.
+        cast = c.decodeFlexibleString(forKey: .cast) ?? c.decodeFlexibleString(forKey: .actors)
 
-        director = try? c.decode(String.self, forKey: .director)
+        director = c.decodeFlexibleString(forKey: .director)
 
         // episode_run_time: int or string — accept both.
         if let i = try? c.decode(Int.self, forKey: .episodeRunTime) {
@@ -3356,7 +3386,8 @@ struct DispatcharrVODCustomProperties: Decodable {
         country      = try? c.decode(String.self, forKey: .country)
         language     = try? c.decode(String.self, forKey: .language)
         movieImage   = try? c.decode(String.self, forKey: .movieImage)
-        crew         = try? c.decode(String.self, forKey: .crew)
+        // crew (per-episode director) may also arrive as an array.
+        crew         = c.decodeFlexibleString(forKey: .crew)
         // category_id can come through as String ("1136") or Int (1136)
         // depending on the Dispatcharr version; normalise to String.
         if let s = try? c.decode(String.self, forKey: .categoryID) {
@@ -3600,8 +3631,9 @@ struct DispatcharrVODMovieProviderInfo: Decodable {
         year           = try? c.decode(Int.self, forKey: .year)
         releaseDate    = try? c.decode(String.self, forKey: .releaseDate)
         genre          = try? c.decode(String.self, forKey: .genre)
-        director       = try? c.decode(String.self, forKey: .director)
-        actors         = try? c.decode(String.self, forKey: .actors)
+        // v0.26.0: director/actors may arrive as arrays (joined).
+        director       = c.decodeFlexibleString(forKey: .director)
+        actors         = c.decodeFlexibleString(forKey: .actors)
         country        = try? c.decode(String.self, forKey: .country)
 
         // rating: Dispatcharr can send either "7.5" (string) or 7.5

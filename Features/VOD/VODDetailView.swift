@@ -421,6 +421,14 @@ struct VODDetailView: View {
             if !genre.isEmpty {
                 metaRow(label: "Genre", value: genre)
             }
+            // v0.26.0 reliably populates release_date from basic sync.
+            // The hero already shows the year, so only surface the full
+            // date here when it carries more than the year (e.g. a
+            // month/day). Pure-year values are skipped as redundant.
+            let released = fullMovie?.releaseDate ?? fullSeries?.releaseDate ?? ""
+            if released.count > 4 {
+                metaRow(label: "Released", value: released)
+            }
             let cast = fullMovie?.cast ?? fullSeries?.cast ?? ""
             if !cast.isEmpty {
                 metaRow(label: "Cast", value: cast)

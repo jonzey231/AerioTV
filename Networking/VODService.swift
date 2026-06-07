@@ -326,7 +326,7 @@ final class VODService {
             if let idx = vodCats.firstIndex(where: { $0.id == (item.categoryID ?? "") }) {
                 vodCats[idx].itemCount += 1
             }
-            return VODMovie(
+            var movie = VODMovie(
                 id: String(item.streamID), name: item.name,
                 // resolveURL validates the server-provided image URL (rejects
                 // loopback / link-local / private-network hosts that aren't the
@@ -339,6 +339,12 @@ final class VODService {
                 categoryID: item.categoryID ?? "", categoryName: catName,
                 streamURL: streamURL, containerExtension: ext, serverID: server.id
             )
+            // v0.26.0: get_vod_streams now reliably carries the YouTube
+            // trailer; surface it. It was decoded into XtreamVODItem but
+            // never assigned here, so XC movies never showed a Trailer
+            // button (Dispatcharr-native movies already got one).
+            movie.youtubeTrailer = item.youtubeTrailer ?? ""
+            return movie
         }
         return (movies, vodCats)
     }
