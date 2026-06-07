@@ -2226,8 +2226,18 @@ final class ChannelStore: ObservableObject {
             guard let uuid, !uuid.isEmpty else { return [] }
             // TS stream — the only working Dispatcharr proxy endpoint.
             // /proxy/ts/channel/ doesn't exist. HLS returns 404 on this instance.
+            //
+            // v1.7.x: pin `?output_format=mpegts`. Dispatcharr v0.25.0
+            // added fragmented-MP4 live output, selectable per-request
+            // and overridable by a per-user / server-wide default. Our
+            // live path is libmpv expecting MPEG-TS, so we request the
+            // TS container explicitly rather than inherit a server
+            // default that an admin may have flipped to fmp4. Unknown
+            // query params are ignored by older servers, so this is a
+            // safe, version-agnostic pin (it matches what Dispatcharr's
+            // own preview player sends).
             return [
-                "\(base)/proxy/ts/stream/\(uuid)"
+                "\(base)/proxy/ts/stream/\(uuid)?output_format=mpegts"
             ].compactMap { URL(string: $0) }
         }
 
@@ -2260,7 +2270,12 @@ final class ChannelStore: ObservableObject {
             // can bridge `Channel.epg_data_id → EPGData.tvg_id`
             // when `Channel.tvg_id` doesn't agree with how the
             // bulk grid keys programs (the 25% mismatch case).
-            item.dispatcharrEPGDataID = ch.epgDataID
+            // v1.7.x: prefer the server's computed effective_epg_data_id
+            // when present (it accounts for auto-mapping and can diverge
+            // from the raw FK), falling back to epg_data_id on older
+            // servers. Single assignment site, so all three bridge loops
+            // (guide, list-enrichment, category-enrichment) inherit it.
+            item.dispatcharrEPGDataID = ch.effectiveEpgDataID ?? ch.epgDataID
             return item
         }
         items = sortChannels(items, groupOrder: groupOrder)

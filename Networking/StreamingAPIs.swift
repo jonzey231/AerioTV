@@ -2165,15 +2165,18 @@ struct DispatcharrAPI {
 
     /// MPEG-TS stream by *stream UUID* (works for direct playback; may bypass Dispatcharr failover logic).
     func proxyTSStreamURL(uuid: String) -> URL? {
-        // Trailing slash improves routing consistency and reduces redirect edge cases.
-        let urlString = baseURL + "/proxy/ts/stream/\(uuid)"
+        // v1.7.x: pin `?output_format=mpegts` so an admin-set per-user /
+        // server fmp4 default can't change the container under our
+        // libmpv TS path (Dispatcharr v0.25.0+). Harmless on older servers.
+        let urlString = baseURL + "/proxy/ts/stream/\(uuid)?output_format=mpegts"
         return URL(string: urlString)
     }
 
     /// MPEG-TS stream by *channel UUID* (preferred for reliability + server-side failover).
     /// This keeps iOS tied to the channel container so Dispatcharr can fail over between providers/streams.
     func proxyTSChannelURL(channelUUID: String) -> URL? {
-        let urlString = baseURL + "/proxy/ts/channel/\(channelUUID)"
+        // v1.7.x: same `output_format=mpegts` pin as proxyTSStreamURL.
+        let urlString = baseURL + "/proxy/ts/channel/\(channelUUID)?output_format=mpegts"
         return URL(string: urlString)
     }
 
@@ -3134,6 +3137,13 @@ struct DispatcharrChannel: Decodable, Identifiable {
 
     /// Optional fields that may exist on some deployments / endpoints.
     let epgDataID: Int?
+    /// Dispatcharr's server-computed *effective* EPG link. When the
+    /// server auto-maps a channel to an EPGData record, this can
+    /// diverge from the raw `epg_data_id` and is the more authoritative
+    /// key for bridging `Channel → EPGData.tvg_id`. Absent on older
+    /// servers, in which case callers fall back to `epgDataID`.
+    /// Mirrors the AerioTV-Android EPG bridge.
+    let effectiveEpgDataID: Int?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -3144,6 +3154,7 @@ struct DispatcharrChannel: Decodable, Identifiable {
         case streams
         case tvgID = "tvg_id"
         case epgDataID = "epg_data_id"
+        case effectiveEpgDataID = "effective_epg_data_id"
         // channelGroupID handled in init(from:)
     }
 
@@ -3182,6 +3193,13 @@ struct DispatcharrChannel: Decodable, Identifiable {
             epgDataID = Int(strVal)
         } else {
             epgDataID = nil
+        }
+        if let intVal = try? container.decodeIfPresent(Int.self, forKey: .effectiveEpgDataID) {
+            effectiveEpgDataID = intVal
+        } else if let strVal = try? container.decodeIfPresent(String.self, forKey: .effectiveEpgDataID) {
+            effectiveEpgDataID = Int(strVal)
+        } else {
+            effectiveEpgDataID = nil
         }
 
         // Try both "channel_group_id" and "channel_group" keys

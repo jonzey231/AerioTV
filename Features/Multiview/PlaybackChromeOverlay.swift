@@ -226,6 +226,16 @@ struct PlaybackChromeOverlay: View {
                         onRecord: {
                             chromeState.reportInteraction()
                             showRecordSheet = true
+                        },
+                        // Pin the chrome up while the overflow menu (and
+                        // its sub-menus) is open; release + restart the
+                        // fade clock on dismiss. Without this the 5s
+                        // timer could hide the chrome (and the menu's
+                        // anchor) out from under the open menu.
+                        onMenuOpen: { chromeState.setPinned(true) },
+                        onMenuClose: {
+                            chromeState.setPinned(false)
+                            chromeState.reportInteraction()
                         }
                     )
                 }
@@ -458,11 +468,15 @@ struct PlaybackChromeOverlay: View {
 ///   Background-audio discipline (audio keeps playing with the app
 ///   closed when Audio-Only is on) is already honoured by
 ///   `Coordinator.didEnterBackground` via the same flag.
-/// - `onMenuOpen`/`Close` are no-ops here. In legacy `PlayerView`
-///   they gated the 4s controls-hide timer; the unified chrome
-///   uses `MultiviewChromeState` which is already driven by any
-///   user interaction, so the menu open/close doesn't need special
-///   handling.
+/// - `onMenuOpen`/`Close` pin `MultiviewChromeState` while the overflow
+///   menu (and its nested sub-menus: Audio Track, Subtitles, Speed,
+///   Aspect, Sleep Timer, Audio Only, AirPlay) is open, so the
+///   auto-hiding chrome can't fade out from under the open menu after
+///   the 5s timer. v1.7.x: this was previously a no-op on the
+///   assumption that menu interaction already drove the chrome timer,
+///   but opening the SwiftUI `Menu` does not call `reportInteraction()`,
+///   so a stale fade could fire mid-menu. Now matches the tvOS pin on
+///   `showTVOptions`.
 private struct iPadOverflowAdapter: View {
     @ObservedObject var progressStore: PlayerProgressStore
     @Binding var sleepTimerEnd: Date?
@@ -474,6 +488,11 @@ private struct iPadOverflowAdapter: View {
     /// Fired from the menu. The overlay flips `showRecordSheet` so the
     /// container presents `RecordProgramSheet`.
     let onRecord: () -> Void
+    /// Pin / unpin the auto-hiding chrome while the menu popover is open
+    /// (fired from `PlayerOverflowMenu`'s `.onAppear`/`.onDisappear`
+    /// under `#if os(iOS)`). See the type doc comment.
+    var onMenuOpen: (() -> Void)? = nil
+    var onMenuClose: (() -> Void)? = nil
 
     var body: some View {
         PlayerOverflowMenu(
@@ -513,8 +532,8 @@ private struct iPadOverflowAdapter: View {
                 }
             },
             recordAction: onRecord,
-            onMenuOpen: nil,
-            onMenuClose: nil
+            onMenuOpen: onMenuOpen,
+            onMenuClose: onMenuClose
         )
     }
 }
