@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import CoreImage
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -413,7 +414,9 @@ struct VODDetailView: View {
             // either today). Hidden entirely on tvOS — the system
             // has no browser, and there's no in-app trailer player
             // yet, so the buttons would be no-ops on Apple TV.
-            #if !os(tvOS)
+            #if os(tvOS)
+            tvOSTrailerQR
+            #else
             externalLinks
             #endif
 
@@ -521,23 +524,6 @@ struct VODDetailView: View {
         )
     }
 
-    /// Build a YouTube watch URL from whatever shape Dispatcharr
-    /// stores `youtube_trailer` in. Most providers send just the
-    /// 11-char video key (`dQw4w9WgXcQ`), but a stray full URL or
-    /// `youtu.be/<key>` shows up occasionally — handle both rather
-    /// than producing a malformed URL.
-    private func trailerURL(from raw: String) -> URL? {
-        let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { return nil }
-        if key.hasPrefix("http://") || key.hasPrefix("https://") {
-            return URL(string: key)
-        }
-        if key.hasPrefix("youtu.be/") {
-            return URL(string: "https://" + key)
-        }
-        return URL(string: "https://www.youtube.com/watch?v=\(key)")
-    }
-
     /// Compose the TMDB page URL for a VOD item. `tmdbID` is the
     /// bare numeric ID Dispatcharr stores. TMDB uses different web
     /// paths for films vs. shows (`themoviedb.org/movie/<id>` and
@@ -556,6 +542,77 @@ struct VODDetailView: View {
             }
         }()
         return URL(string: "https://www.themoviedb.org/\(pathSegment)/\(trimmed)")
+    }
+    #endif
+
+    /// Build a YouTube watch URL from whatever shape Dispatcharr stores
+    /// `youtube_trailer` in. Most providers send just the 11-char video
+    /// key (`dQw4w9WgXcQ`), but a stray full URL or `youtu.be/<key>`
+    /// shows up occasionally — handle both rather than producing a
+    /// malformed URL. Cross-platform: tvOS uses it for the QR code.
+    private func trailerURL(from raw: String) -> URL? {
+        let key = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return nil }
+        if key.hasPrefix("http://") || key.hasPrefix("https://") {
+            return URL(string: key)
+        }
+        if key.hasPrefix("youtu.be/") {
+            return URL(string: "https://" + key)
+        }
+        return URL(string: "https://www.youtube.com/watch?v=\(key)")
+    }
+
+    #if os(tvOS)
+    // MARK: - tvOS trailer QR
+
+    /// Apple TV has no browser and the YouTube tvOS app exposes no
+    /// working deep link, so a trailer can't be opened on-device. We
+    /// render the YouTube watch URL as a QR code the user scans with
+    /// their phone (where the iOS YouTube universal link opens the
+    /// video). ToS-safe and version-proof.
+    @ViewBuilder
+    private var tvOSTrailerQR: some View {
+        let rawTrailer = fullMovie?.youtubeTrailer ?? fullSeries?.youtubeTrailer ?? ""
+        if let url = trailerURL(from: rawTrailer),
+           let qr = Self.qrCodeImage(from: url.absoluteString) {
+            HStack(alignment: .center, spacing: 24) {
+                Image(uiImage: qr)
+                    .interpolation(.none)
+                    .resizable()
+                    .frame(width: 150, height: 150)
+                    .padding(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.white)
+                    )
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "play.rectangle.fill")
+                        Text("Trailer").font(.headlineSmall)
+                    }
+                    .foregroundStyle(Color.accentPrimary)
+                    Text("Scan with your phone to watch the trailer on YouTube.")
+                        .font(.bodyMedium)
+                        .foregroundColor(.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    /// Render a string as a QR-code image via CoreImage, scaled up with
+    /// a nearest-neighbor transform so the modules stay crisp. Returns
+    /// nil if generation fails.
+    private static func qrCodeImage(from string: String) -> UIImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(string.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 12, y: 12))
+        let context = CIContext()
+        guard let cg = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: cg)
     }
     #endif
 
