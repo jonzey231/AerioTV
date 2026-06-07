@@ -4312,6 +4312,14 @@ struct MainTabView: View {
             withAnimation { selectedTab = target }
         }
         #endif
+        // EPG search → jump to the program in the Live TV guide.
+        // Cross-platform (the aerioOpenChannel switch above is
+        // tvOS-only). ChannelListView forces guide mode and
+        // EPGGuideView does the channel focus + timeline scroll.
+        .onReceive(NotificationCenter.default.publisher(for: .aerioJumpToGuideProgram)) { _ in
+            debugLog("🔗 MainTabView: aerioJumpToGuideProgram → switch to Live TV tab")
+            withAnimation { selectedTab = .liveTV }
+        }
     }
 
     /// v1.6.13: Channel/EPG load orchestrator. Pulled out of the

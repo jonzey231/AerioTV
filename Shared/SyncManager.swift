@@ -1400,6 +1400,17 @@ extension Notification.Name {
     /// claim. Body has no userInfo.
     static let forceGuideFocus = Notification.Name("forceGuideFocus")
 
+    /// Posted by `SearchView` when the user taps an EPG program search
+    /// result. `MainTabView` switches to the Live TV tab,
+    /// `ChannelListView` forces guide mode (and clears any group
+    /// filter so the target channel is visible), and `EPGGuideView`
+    /// scrolls to the program's channel + start time. The durable
+    /// target (channel id + start) is stashed in UserDefaults
+    /// (`guideJumpChannelID` / `guideJumpStart`) so the cold path
+    /// (guide not yet mounted) can consume it on load; this
+    /// notification is just the warm-path trigger. No userInfo.
+    static let aerioJumpToGuideProgram = Notification.Name("aerioJumpToGuideProgram")
+
     /// v1.6.12 (GH #11): a Back/Menu press caught by `MainTabView`'s
     /// outer `.onExitCommand` while a single-stream player is active
     /// AND not minimized — i.e. the player is full-screen but focus

@@ -2518,6 +2518,17 @@ struct EPGGuideView: View {
                 }
                 #endif
             }
+            // EPG-search jump: consume a pending guide target (set by
+            // SearchView) and scroll to that channel + program time.
+            // Warm path (guide already on screen) and cold path (guide
+            // just mounted / channels just loaded) both route through
+            // the same idempotent, guarded consume.
+            .onReceive(NotificationCenter.default.publisher(for: .aerioJumpToGuideProgram)) { _ in
+                consumePendingGuideJump(proxy: proxy)
+            }
+            .task(id: channels.count) {
+                consumePendingGuideJump(proxy: proxy)
+            }
             #if os(tvOS)
             .focusScope(guideFocusNS)
             .onReceive(
@@ -3038,6 +3049,42 @@ struct EPGGuideView: View {
     private func xOffset(for date: Date) -> CGFloat {
         let elapsed = date.timeIntervalSince(windowStart)
         return CGFloat(elapsed / totalDuration) * totalGridWidth
+    }
+
+    /// Consume a pending EPG-search "jump to program" target (stashed
+    /// in UserDefaults by SearchView) and scroll the guide to that
+    /// channel + start time. Idempotent and guarded: it clears the
+    /// keys only once a matching, loaded channel exists, so an early
+    /// call (channels not yet present) leaves the target for a later
+    /// retry via `.task(id: channels.count)`. The horizontal position
+    /// uses the same `xOffset(for:)` date→pixel map the now-line uses,
+    /// biased a little right of the channel column.
+    @MainActor
+    private func consumePendingGuideJump(proxy: ScrollViewProxy) {
+        let defaults = UserDefaults.standard
+        guard let channelID = defaults.string(forKey: "guideJumpChannelID"),
+              let startTS = defaults.object(forKey: "guideJumpStart") as? Double,
+              channels.contains(where: { $0.id == channelID })
+        else { return }
+        defaults.removeObject(forKey: "guideJumpChannelID")
+        defaults.removeObject(forKey: "guideJumpStart")
+        let start = Date(timeIntervalSince1970: startTS)
+        Task { @MainActor in
+            // Let the guide's own initial scroll-to-now settle first.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            withAnimation(.easeInOut(duration: 0.3)) {
+                proxy.scrollTo(channelID, anchor: .center)
+                let lead = pixelsPerHour * 0.25
+                horizontalOffset = min(0, max(maxHorizontalOffset, -xOffset(for: start) + lead))
+            }
+            #if os(tvOS)
+            guideFocusTargetChannelID = channelID
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            if let target = focusTargetProgramID(forChannel: channelID) {
+                focusedProgramID = target
+            }
+            #endif
+        }
     }
 
     private func hourMarkers() -> [Date] {

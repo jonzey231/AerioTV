@@ -338,6 +338,16 @@ struct ChannelListView: View {
                     }
                 }
                 #endif
+                // EPG-search jump: force guide mode and clear any group
+                // filter so the target channel is visible. EPGGuideView
+                // consumes the pending target (UserDefaults) and scrolls.
+                .onReceive(NotificationCenter.default.publisher(for: .aerioJumpToGuideProgram)) { _ in
+                    if selectedGroup != "All" {
+                        selectedGroup = "All"
+                        filterChannels()
+                    }
+                    showGuideView = true
+                }
                 .onAppear {
                     debugLog("🔷 ChannelListView.onAppear: channels=\(channelStore.channels.count), isLoading=\(channelStore.isLoading), thread=\(Thread.current)")
                     // Pull iCloud data while the user waits for channels/EPG to load
@@ -362,6 +372,13 @@ struct ChannelListView: View {
                         showGuideView = false
                     }
                     #endif
+                    // EPG-search jump (cold path): if SearchView stashed a
+                    // pending guide target, force guide mode so EPGGuideView
+                    // can scroll to it once it mounts.
+                    if UserDefaults.standard.object(forKey: "guideJumpChannelID") != nil {
+                        showGuideView = true
+                        if selectedGroup != "All" { selectedGroup = "All" }
+                    }
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     filterChannels()
                     favoritesStore.register(items: channelStore.channels)

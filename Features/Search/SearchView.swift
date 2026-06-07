@@ -186,7 +186,7 @@ struct SearchView: View {
         Button {
             switch result {
             case .vod(let item): selectedVODItem = item
-            case .epg: break // EPG tap — could navigate to guide/channel
+            case .epg(let prog): jumpToGuide(prog)
             }
         } label: {
             HStack(spacing: 12) {
@@ -339,5 +339,20 @@ struct SearchView: View {
                 vodCache[server.id] = items
             }
         }
+    }
+
+    /// Tapping an EPG search result jumps to that program in the Live
+    /// TV guide. We stash the target (channel id + start time) in
+    /// UserDefaults so the guide can consume it even if it isn't
+    /// mounted yet (cold path), dismiss this sheet, then post the
+    /// warm-path trigger that switches to the Live TV tab + guide mode.
+    /// `prog.channelID` already equals the guide's channel key
+    /// (ChannelDisplayItem.id), so no tvg-id/name matching is needed.
+    private func jumpToGuide(_ prog: EPGProgram) {
+        let defaults = UserDefaults.standard
+        defaults.set(prog.channelID, forKey: "guideJumpChannelID")
+        defaults.set(prog.startTime.timeIntervalSince1970, forKey: "guideJumpStart")
+        dismiss()
+        NotificationCenter.default.post(name: .aerioJumpToGuideProgram, object: nil)
     }
 }
