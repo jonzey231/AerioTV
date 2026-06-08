@@ -68,7 +68,7 @@ struct AppBehaviorsSettingsView: View {
     /// Eye toggle to reveal the entered key (masked by default).
     @State private var tmdbKeyVisible = false
 
-    enum TMDBKeyTestState: Equatable { case idle, testing, valid, invalid }
+    enum TMDBKeyTestState: Equatable { case idle, testing, valid, invalid, saved }
 
     var body: some View {
         ZStack {
@@ -104,6 +104,10 @@ struct AppBehaviorsSettingsView: View {
 
     private func saveTMDBKey() {
         TMDBPosters.saveAPIKey(tmdbKeyDraft)
+        // Confirm the write to the user: both bodies render tmdbStatusView,
+        // which shows a green "Saved" check for this state. Resets to .idle
+        // on the next keystroke (the field's onChange).
+        tmdbTestState = .saved
     }
 
     @ViewBuilder
@@ -117,6 +121,9 @@ struct AppBehaviorsSettingsView: View {
         case .invalid:
             Label("Invalid key", systemImage: "xmark.circle.fill")
                 .font(.labelSmall).foregroundColor(.red)
+        case .saved:
+            Label("Saved", systemImage: "checkmark.circle.fill")
+                .font(.labelSmall).foregroundColor(.green)
         }
     }
 
@@ -322,12 +329,17 @@ struct AppBehaviorsSettingsView: View {
 
                     if tmdbPostersEnabled {
                         // Same field component as the onboarding password
-                        // field (AddServerView): it types correctly on tvOS
-                        // and has the in-box reveal eye built in.
+                        // field (AddServerView) - types correctly on tvOS.
+                        // revealWhenFocused shows the key in plaintext while
+                        // the field is focused: the in-box eye button can't be
+                        // reached by the Siri Remote once a UITextField holds
+                        // focus (focus can't move sideways off it), so reveal-
+                        // on-focus is the remote-friendly way to read it back.
                         AppTextField("TMDB API Key",
                                      placeholder: "API Key or Read Access Token",
                                      text: $tmdbKeyDraft,
-                                     isSecure: true)
+                                     isSecure: true,
+                                     revealWhenFocused: true)
                             .onChange(of: tmdbKeyDraft) { _, _ in tmdbTestState = .idle }
 
                         HStack(spacing: 24) {

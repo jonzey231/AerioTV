@@ -86,8 +86,12 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: DarkFocusTextField, context: Context) {
-        if uiView.text != text { uiView.text = text }
+        // Set secure-state FIRST, then re-apply the bound text: toggling
+        // isSecureTextEntry can wipe the field's contents, so restoring the
+        // value immediately after keeps it intact when a reveal-on-focus
+        // caller flips secure on/off as focus enters/leaves the field.
         uiView.isSecureTextEntry = isSecure
+        if uiView.text != text { uiView.text = text }
         uiView.onFocusChange = onFocusChange
     }
 
@@ -314,6 +318,13 @@ struct AppTextField: View {
     var isSecure: Bool = false
     var autocapitalization: TextInputAutocapitalization = .never
     var autocorrection: Bool = false
+    /// tvOS-only: auto-reveal the text while the field is focused (re-masks
+    /// on blur). On tvOS the focus engine can't move sideways off a focused
+    /// UITextField onto the in-box eye button, so the tap-to-reveal eye is
+    /// unreachable by the Siri Remote; revealing on focus is the reliable
+    /// equivalent. Default false keeps every existing call site (including
+    /// the onboarding password fields) tap-to-reveal only.
+    var revealWhenFocused: Bool = false
 
     @FocusState private var isFocused: Bool
 
@@ -339,7 +350,8 @@ struct AppTextField: View {
          keyboardType: UIKeyboardType = .default,
          isSecure: Bool = false,
          autocapitalization: TextInputAutocapitalization = .never,
-         autocorrection: Bool = false) {
+         autocorrection: Bool = false,
+         revealWhenFocused: Bool = false) {
         self.title = title
         self.placeholder = placeholder
         self._text = text
@@ -348,6 +360,7 @@ struct AppTextField: View {
         self.isSecure = isSecure
         self.autocapitalization = autocapitalization
         self.autocorrection = autocorrection
+        self.revealWhenFocused = revealWhenFocused
     }
 
     var body: some View {
@@ -374,7 +387,9 @@ struct AppTextField: View {
                 DarkFocusTextFieldRepresentable(
                     text: $text,
                     placeholder: placeholder,
-                    isSecure: isSecure && !passwordVisible,
+                    // Reveal when the eye is toggled OR (for reveal-on-focus
+                    // callers) whenever the field itself is focused.
+                    isSecure: isSecure && !passwordVisible && !(revealWhenFocused && isFocusedTV),
                     fontSize: 26,
                     horizontalInset: 0,   // the HStack already pads horizontally
                     onFocusChange: { isFocusedTV = $0 }
