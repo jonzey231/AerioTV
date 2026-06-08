@@ -962,14 +962,37 @@ enum TMDBService {
         }
     }
 
-    /// Validate an API key by hitting `/configuration`. 200 = valid.
+    /// TMDB accepts two credential shapes: the classic v3 API Key (sent
+    /// as an `api_key` query param) and the newer v4 "Read Access Token",
+    /// a JWT sent as an `Authorization: Bearer` header. The user may
+    /// paste either (TMDB's settings page shows the token first), so we
+    /// detect the JWT shape and route auth accordingly - otherwise a
+    /// pasted v4 token would silently 401 as an api_key param.
+    private static func isBearerToken(_ key: String) -> Bool {
+        key.hasPrefix("eyJ") && key.filter { $0 == "." }.count == 2
+    }
+
+    /// Build an authorized GET request for `path`, attaching the user's
+    /// credential as either a bearer header (v4 token) or an api_key
+    /// query item (v3 key).
+    private static func makeRequest(path: String, queryItems: [URLQueryItem] = [], key: String) -> URLRequest? {
+        guard var comps = URLComponents(string: apiBase + path) else { return nil }
+        let bearer = isBearerToken(key)
+        var items = queryItems
+        if !bearer { items.append(URLQueryItem(name: "api_key", value: key)) }
+        comps.queryItems = items.isEmpty ? nil : items
+        guard let url = comps.url else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        if bearer { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
+        return req
+    }
+
+    /// Validate a credential by hitting `/configuration`. 200 = valid.
     static func validateKey(_ key: String) async -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
-              var comps = URLComponents(string: apiBase + "/configuration") else { return false }
-        comps.queryItems = [URLQueryItem(name: "api_key", value: trimmed)]
-        guard let url = comps.url,
-              let (_, resp) = try? await session.data(from: url),
+              let req = makeRequest(path: "/configuration", key: trimmed) else { return false }
+        guard let (_, resp) = try? await session.data(for: req),
               let http = resp as? HTTPURLResponse else { return false }
         return http.statusCode == 200
     }
@@ -984,14 +1007,11 @@ enum TMDBService {
             let path = cached as String
             return path.isEmpty ? nil : URL(string: imageBase + "/\(size)" + path)
         }
-        guard var comps = URLComponents(string: apiBase + "/search/multi") else { return nil }
-        comps.queryItems = [
-            URLQueryItem(name: "api_key", value: apiKey),
+        guard let req = makeRequest(path: "/search/multi", queryItems: [
             URLQueryItem(name: "query", value: title),
             URLQueryItem(name: "include_adult", value: "false")
-        ]
-        guard let url = comps.url,
-              let (data, resp) = try? await session.data(from: url),
+        ], key: apiKey) else { return nil }
+        guard let (data, resp) = try? await session.data(for: req),
               let http = resp as? HTTPURLResponse, http.statusCode == 200,
               let decoded = try? JSONDecoder().decode(SearchResponse.self, from: data)
         else { return nil }
@@ -1020,10 +1040,8 @@ enum TMDBService {
             let path = cached as String
             return path.isEmpty ? nil : URL(string: imageBase + "/\(size)" + path)
         }
-        guard var comps = URLComponents(string: apiBase + "/\(isMovie ? "movie" : "tv")/\(trimmed)") else { return nil }
-        comps.queryItems = [URLQueryItem(name: "api_key", value: apiKey)]
-        guard let url = comps.url,
-              let (data, resp) = try? await session.data(from: url),
+        guard let req = makeRequest(path: "/\(isMovie ? "movie" : "tv")/\(trimmed)", key: apiKey) else { return nil }
+        guard let (data, resp) = try? await session.data(for: req),
               let http = resp as? HTTPURLResponse, http.statusCode == 200,
               let decoded = try? JSONDecoder().decode(DetailResponse.self, from: data)
         else { return nil }

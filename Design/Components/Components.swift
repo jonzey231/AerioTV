@@ -50,6 +50,16 @@ final class DarkFocusTextField: UITextField {
         onFocusChange?(nowFocused)
         backgroundColor = .clear
     }
+
+    /// Flip secure entry in place (drives the tvOS in-box reveal eye).
+    /// Restores the text afterward in case UIKit clears it on the mode
+    /// change. Additive helper; existing call sites are unaffected.
+    func setSecure(_ secure: Bool) {
+        guard isSecureTextEntry != secure else { return }
+        let saved = text
+        isSecureTextEntry = secure
+        if text != saved { text = saved }
+    }
 }
 
 /// SwiftUI host for `DarkFocusTextField`. The field is transparent; the caller
@@ -95,6 +105,17 @@ struct DarkFocusTextFieldRepresentable: UIViewRepresentable {
         @Binding var text: String
         init(text: Binding<String>) { _text = text }
         @objc func editingChanged(_ tf: UITextField) { text = tf.text ?? "" }
+        // tvOS edits text in a separate full-screen keyboard and commits
+        // it to the field when editing ends ("done"), which does NOT
+        // reliably fire `.editingChanged` per keystroke - especially for
+        // secure fields. Sync the committed value here so the SwiftUI
+        // binding stays correct on tvOS (iOS keeps its live per-keystroke
+        // updates via editingChanged; this end-of-edit sync is a harmless
+        // no-op there).
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            let committed = textField.text ?? ""
+            if committed != text { text = committed }
+        }
     }
 }
 #endif
