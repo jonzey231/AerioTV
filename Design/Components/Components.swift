@@ -50,16 +50,6 @@ final class DarkFocusTextField: UITextField {
         onFocusChange?(nowFocused)
         backgroundColor = .clear
     }
-
-    /// Flip secure entry in place (drives the tvOS in-box reveal eye).
-    /// Restores the text afterward in case UIKit clears it on the mode
-    /// change. Additive helper; existing call sites are unaffected.
-    func setSecure(_ secure: Bool) {
-        guard isSecureTextEntry != secure else { return }
-        let saved = text
-        isSecureTextEntry = secure
-        if text != saved { text = saved }
-    }
 }
 
 /// SwiftUI host for `DarkFocusTextField`. The field is transparent; the caller

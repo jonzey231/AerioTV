@@ -321,8 +321,13 @@ struct AppBehaviorsSettingsView: View {
                     ) { _ in }
 
                     if tmdbPostersEnabled {
-                        TVRevealKeyField(placeholder: "API Key or Read Access Token",
-                                         text: $tmdbKeyDraft)
+                        // Same field component as the onboarding password
+                        // field (AddServerView): it types correctly on tvOS
+                        // and has the in-box reveal eye built in.
+                        AppTextField("TMDB API Key",
+                                     placeholder: "API Key or Read Access Token",
+                                     text: $tmdbKeyDraft,
+                                     isSecure: true)
                             .onChange(of: tmdbKeyDraft) { _, _ in tmdbTestState = .idle }
 
                         HStack(spacing: 24) {
@@ -418,173 +423,6 @@ private struct TVCompactButton: View {
         .scaleEffect(isFocused ? 1.04 : 1.0)
         .animation(.easeInOut(duration: 0.15), value: isFocused)
         .disabled(disabled)
-    }
-}
-
-/// tvOS API-key field with an in-box reveal eye that is actually
-/// reachable on the Siri Remote. A SwiftUI button placed beside a
-/// UIKit-hosted text field has no focus path (the focus engine treats
-/// the representable as an opaque leaf), so the field, the eye UIButton,
-/// and the UIFocusGuide that bridges them live together in ONE UIKit
-/// container. The box chrome (fill + accent focus border) is drawn by
-/// this SwiftUI host. Isolated to this one field so the shared
-/// DarkFocusTextFieldRepresentable / AppTextField / TVSettingsTextField
-/// stay untouched.
-private struct TVRevealKeyField: View {
-    let placeholder: String
-    @Binding var text: String
-    @State private var focused = false
-
-    var body: some View {
-        TVRevealKeyFieldRepresentable(
-            text: $text,
-            placeholder: placeholder,
-            onFocusChange: { focused = $0 }
-        )
-        .frame(height: 60)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.elevatedBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.accentPrimary.opacity(focused ? 1.0 : 0.0),
-                        lineWidth: focused ? 3 : 0)
-                .animation(.easeInOut(duration: 0.15), value: focused)
-        )
-    }
-}
-
-/// Container that repoints its bridging UIFocusGuide at whichever of
-/// {field, eye} is NOT currently focused, so focus can cross between
-/// them in both directions on the Siri Remote.
-private final class RevealFieldContainer: UIView {
-    weak var field: UIView?
-    weak var eye: UIView?
-    let bridge = UIFocusGuide()
-
-    override func didUpdateFocus(in context: UIFocusUpdateContext,
-                                 with coordinator: UIFocusAnimationCoordinator) {
-        super.didUpdateFocus(in: context, with: coordinator)
-        if context.nextFocusedView === field, let eye {
-            bridge.preferredFocusEnvironments = [eye]
-        } else if context.nextFocusedView === eye, let field {
-            bridge.preferredFocusEnvironments = [field]
-        }
-    }
-}
-
-/// UIKit container hosting the masked text field + an in-box reveal eye,
-/// bridged with a UIFocusGuide so the eye is reachable from the field on
-/// the Siri Remote (press Right). Reuses the existing DarkFocusTextField.
-private struct TVRevealKeyFieldRepresentable: UIViewRepresentable {
-    @Binding var text: String
-    let placeholder: String
-    var onFocusChange: ((Bool) -> Void)? = nil
-
-    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
-
-    func makeUIView(context: Context) -> UIView {
-        let field = DarkFocusTextField()
-        field.delegate = context.coordinator
-        field.isSecureTextEntry = true            // masked until the eye reveals
-        field.textInsets = UIEdgeInsets(top: 14, left: 20, bottom: 14, right: 0)
-        field.font = .systemFont(ofSize: 28)
-        field.textColor = UIColor(Color.textPrimary)
-        field.attributedPlaceholder = NSAttributedString(
-            string: placeholder,
-            attributes: [.foregroundColor: UIColor(Color.textTertiary)]
-        )
-        field.translatesAutoresizingMaskIntoConstraints = false
-        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        field.onFocusChange = onFocusChange
-        field.addTarget(context.coordinator,
-                        action: #selector(Coordinator.editingChanged(_:)),
-                        for: .editingChanged)
-        context.coordinator.field = field
-
-        let eye = UIButton(type: .system)
-        eye.translatesAutoresizingMaskIntoConstraints = false
-        eye.tintColor = UIColor(Color.accentPrimary)
-        eye.setContentHuggingPriority(.required, for: .horizontal)
-        eye.setContentCompressionResistancePriority(.required, for: .horizontal)
-        eye.addTarget(context.coordinator,
-                      action: #selector(Coordinator.toggleReveal),
-                      for: .primaryActionTriggered)
-        context.coordinator.eye = eye
-        context.coordinator.applyEyeGlyph()
-
-        let container = RevealFieldContainer()
-        container.backgroundColor = .clear
-        container.field = field
-        container.eye = eye
-        container.addSubview(field)
-        container.addSubview(eye)
-        NSLayoutConstraint.activate([
-            field.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            field.topAnchor.constraint(equalTo: container.topAnchor),
-            field.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-
-            eye.leadingAnchor.constraint(equalTo: field.trailingAnchor, constant: 8),
-            eye.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -14),
-            eye.centerYAnchor.constraint(equalTo: container.centerYAnchor),
-            eye.widthAnchor.constraint(equalToConstant: 56),
-            eye.heightAnchor.constraint(equalToConstant: 56),
-        ])
-
-        // A single focus guide in the gap between field and eye bridges
-        // them both ways: RevealFieldContainer.didUpdateFocus repoints it
-        // at whichever control is NOT focused, so Right reaches the eye
-        // and Left returns to the field (a focused text field otherwise
-        // swallows the press and traps focus on the side it captured).
-        let bridge = container.bridge
-        container.addLayoutGuide(bridge)
-        bridge.preferredFocusEnvironments = [eye]
-        NSLayoutConstraint.activate([
-            bridge.topAnchor.constraint(equalTo: field.topAnchor),
-            bridge.bottomAnchor.constraint(equalTo: field.bottomAnchor),
-            bridge.leadingAnchor.constraint(equalTo: field.trailingAnchor),
-            bridge.trailingAnchor.constraint(equalTo: eye.leadingAnchor),
-        ])
-        return container
-    }
-
-    func updateUIView(_ uiView: UIView, context: Context) {
-        guard let field = context.coordinator.field else { return }
-        if field.text != text { field.text = text }
-        field.onFocusChange = onFocusChange
-    }
-
-    final class Coordinator: NSObject, UITextFieldDelegate {
-        @Binding var text: String
-        weak var field: DarkFocusTextField?
-        weak var eye: UIButton?
-        private var revealed = false
-
-        init(text: Binding<String>) { _text = text }
-
-        @objc func editingChanged(_ tf: UITextField) { text = tf.text ?? "" }
-
-        // Commit on focus-leave: the tvOS keyboard does not reliably fire
-        // editingChanged per keystroke for secure fields.
-        func textFieldDidEndEditing(_ textField: UITextField) {
-            let committed = textField.text ?? ""
-            if committed != text { text = committed }
-        }
-
-        @objc func toggleReveal() {
-            revealed.toggle()
-            field?.setSecure(!revealed)
-            applyEyeGlyph()
-        }
-
-        func applyEyeGlyph() {
-            let name = revealed ? "eye.slash" : "eye"
-            let cfg = UIImage.SymbolConfiguration(pointSize: 26, weight: .semibold)
-            eye?.setImage(UIImage(systemName: name, withConfiguration: cfg), for: .normal)
-            eye?.accessibilityLabel = revealed ? "Hide key" : "Show key"
-        }
     }
 }
 #endif
