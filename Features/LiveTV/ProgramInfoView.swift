@@ -233,7 +233,10 @@ struct ProgramInfoView: View {
     var body: some View {
         #if os(tvOS)
         tvBody
-            .task(id: target.id) { await loadCategoryIfNeeded() }
+            .task(id: target.id) {
+                await loadCategoryIfNeeded()
+                await loadTMDBPosterIfNeeded()
+            }
         #else
         NavigationStack {
             iOSForm
@@ -258,7 +261,10 @@ struct ProgramInfoView: View {
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .presentationBackground(Color.appBackground)
-        .task(id: target.id) { await loadCategoryIfNeeded() }
+        .task(id: target.id) {
+            await loadCategoryIfNeeded()
+            await loadTMDBPosterIfNeeded()
+        }
         #endif
     }
 
@@ -351,6 +357,24 @@ struct ProgramInfoView: View {
         } catch {
             debugLog("📺 ProgramInfo lazy-load FAIL: pid=\(pid) error=\(error.localizedDescription)")
             // Swallow — the modal stays usable without pills.
+        }
+    }
+
+    /// TMDB-by-title poster fallback. Runs after the server-poster
+    /// attempt; only fires when the program has no server poster, the
+    /// user enabled TMDB posters (Settings > App Behaviors), and a key
+    /// is stored. Works for every source (no Dispatcharr programID
+    /// required) since it keys off the title.
+    @MainActor
+    private func loadTMDBPosterIfNeeded() async {
+        guard posterURL == nil,
+              TMDBPosters.isEnabled,
+              let apiKey = TMDBPosters.apiKey,
+              !target.title.trimmingCharacters(in: .whitespaces).isEmpty
+        else { return }
+        if let url = await TMDBService.posterURL(forTitle: target.title, apiKey: apiKey) {
+            posterURL = url
+            debugLog("📺 ProgramInfo TMDB poster: \(url.absoluteString)")
         }
     }
 

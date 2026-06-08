@@ -56,6 +56,18 @@ struct AppBehaviorsSettingsView: View {
     @AppStorage("appBehaviorsAppleTVChannelFlip")
     private var appleTVChannelFlip = true
 
+    // MARK: - TMDB program posters (opt-in, off by default)
+
+    /// Master toggle for the TMDB-by-title poster fallback.
+    @AppStorage(TMDBPosters.enabledDefaultsKey)
+    private var tmdbPostersEnabled = false
+    /// Editable draft of the API key; loaded from / saved to the
+    /// Keychain (never persisted in @AppStorage).
+    @State private var tmdbKeyDraft = ""
+    @State private var tmdbTestState: TMDBKeyTestState = .idle
+
+    enum TMDBKeyTestState: Equatable { case idle, testing, valid, invalid }
+
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
@@ -72,6 +84,43 @@ struct AppBehaviorsSettingsView: View {
         .toolbar(.hidden, for: .navigationBar)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
+        .onAppear {
+            tmdbKeyDraft = KeychainHelper.load(key: TMDBPosters.keychainKey) ?? ""
+        }
+    }
+
+    // MARK: - TMDB key actions
+
+    @MainActor
+    private func testTMDBKey() async {
+        let key = tmdbKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { tmdbTestState = .invalid; return }
+        tmdbTestState = .testing
+        let ok = await TMDBService.validateKey(key)
+        tmdbTestState = ok ? .valid : .invalid
+    }
+
+    private func saveTMDBKey() {
+        let key = tmdbKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if key.isEmpty {
+            _ = KeychainHelper.delete(TMDBPosters.keychainKey)
+        } else {
+            _ = KeychainHelper.save(key, for: TMDBPosters.keychainKey)
+        }
+    }
+
+    @ViewBuilder
+    private var tmdbStatusView: some View {
+        switch tmdbTestState {
+        case .idle, .testing:
+            EmptyView()
+        case .valid:
+            Label("Valid key", systemImage: "checkmark.circle.fill")
+                .font(.labelSmall).foregroundColor(.green)
+        case .invalid:
+            Label("Invalid key", systemImage: "xmark.circle.fill")
+                .font(.labelSmall).foregroundColor(.red)
+        }
     }
 
     // MARK: - iOS Body
@@ -145,6 +194,63 @@ struct AppBehaviorsSettingsView: View {
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
+
+            // MARK: Program Posters (TMDB)
+            Section {
+                Toggle(isOn: $tmdbPostersEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Fetch posters from TMDB")
+                            .font(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                        Text("Fill in program artwork your provider doesn't supply, using The Movie Database.")
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+
+                if tmdbPostersEnabled {
+                    SecureField("TMDB API Key", text: $tmdbKeyDraft)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                        .onChange(of: tmdbKeyDraft) { _, _ in tmdbTestState = .idle }
+                        .listRowBackground(Color.cardBackground)
+
+                    HStack(spacing: 12) {
+                        Button {
+                            Task { await testTMDBKey() }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if tmdbTestState == .testing {
+                                    ProgressView().controlSize(.small)
+                                }
+                                Text("Test")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(theme.accent)
+                        .disabled(tmdbKeyDraft.trimmingCharacters(in: .whitespaces).isEmpty
+                                  || tmdbTestState == .testing)
+
+                        tmdbStatusView
+
+                        Spacer()
+
+                        Button("Save") { saveTMDBKey() }
+                            .buttonStyle(.borderedProminent)
+                            .tint(theme.accent)
+                            .disabled(tmdbTestState == .testing)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                }
+            } header: {
+                Text("Program Posters").sectionHeaderStyle()
+            } footer: {
+                Text("Your key stays on this device (Keychain). Get a free key at themoviedb.org, then Settings, then API. Posters appear in Program Info.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+            .listSectionSeparator(.hidden)
         }
         .scrollContentBackground(.hidden)
         .listStyle(.insetGrouped)
@@ -190,6 +296,45 @@ struct AppBehaviorsSettingsView: View {
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
                 }
+
+                tvSection("Program Posters") {
+                    TVSettingsToggleRow(
+                        icon: "photo.on.rectangle.angled",
+                        iconColor: theme.accent,
+                        title: "Fetch Posters from TMDB",
+                        subtitle: "Fill in program artwork your provider doesn't supply, using The Movie Database.",
+                        isOn: $tmdbPostersEnabled
+                    ) { _ in }
+
+                    if tmdbPostersEnabled {
+                        TVSettingsTextField(placeholder: "TMDB API Key",
+                                            text: $tmdbKeyDraft,
+                                            isSecure: true)
+                            .onChange(of: tmdbKeyDraft) { _, _ in tmdbTestState = .idle }
+
+                        HStack(spacing: 24) {
+                            TVCompactButton(
+                                title: tmdbTestState == .testing ? "Testing…" : "Test",
+                                disabled: tmdbKeyDraft.trimmingCharacters(in: .whitespaces).isEmpty
+                                          || tmdbTestState == .testing
+                            ) { Task { await testTMDBKey() } }
+
+                            TVCompactButton(
+                                title: "Save",
+                                disabled: tmdbTestState == .testing
+                            ) { saveTMDBKey() }
+
+                            tmdbStatusView
+                            Spacer()
+                        }
+
+                        Text("Your key stays on this device. Get a free key at themoviedb.org. Posters appear in Program Info.")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 4)
+                    }
+                }
             }
             .padding(.horizontal, 80)
             .padding(.vertical, 60)
@@ -220,3 +365,41 @@ struct AppBehaviorsSettingsView: View {
     }
     #endif
 }
+
+#if os(tvOS)
+/// Compact tvOS action button that renders its label correctly when
+/// focused. The default tvOS button style fills with the accent and
+/// hides the label inside a hand-built (non-List) settings card, so we
+/// suppress it with TVNoHighlightButtonStyle and draw our own focus
+/// border + fill (mirroring TVSettingsActionRow's approach).
+private struct TVCompactButton: View {
+    let title: String
+    var disabled: Bool = false
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundColor(disabled ? .textTertiary : .accentPrimary)
+                .padding(.horizontal, 32)
+                .padding(.vertical, 14)
+                .frame(minWidth: 160)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(isFocused ? Color.accentPrimary.opacity(0.20) : Color.elevatedBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.accentPrimary, lineWidth: isFocused ? 3 : 0)
+                )
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.04 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+        .disabled(disabled)
+    }
+}
+#endif

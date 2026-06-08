@@ -878,3 +878,107 @@ final class VODService {
         return enriched
     }
 }
+
+// MARK: - TMDB program-poster config
+
+/// Opt-in TMDB program-poster settings. OFF by default. The user
+/// supplies their own free TMDB v3 API key (Settings > App Behaviors);
+/// the key lives in the Keychain, never in UserDefaults or git. When
+/// disabled or unkeyed, the whole TMDB path is inert and only
+/// server-provided posters show.
+enum TMDBPosters {
+    /// `@AppStorage` / UserDefaults key for the enable toggle.
+    static let enabledDefaultsKey = "programPostersTMDBEnabled"
+    /// Keychain item key for the user's TMDB API key.
+    static let keychainKey = "tmdbAPIKey"
+
+    static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: enabledDefaultsKey)
+    }
+
+    /// The stored API key, or nil if absent/empty.
+    static var apiKey: String? {
+        guard let k = KeychainHelper.load(key: keychainKey),
+              !k.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return k
+    }
+}
+
+// MARK: - TMDB client (poster-by-title + key validation)
+
+/// Minimal TMDB v3 client used only to (a) validate the user's API key
+/// and (b) look up a poster image for a program title. Public CDN
+/// images, no auth beyond the user's own key. Results are cached by
+/// title so opening several program-info popups doesn't re-query.
+enum TMDBService {
+    private static let apiBase = "https://api.themoviedb.org/3"
+    private static let imageBase = "https://image.tmdb.org/t/p"
+
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        return URLSession(configuration: config)
+    }()
+
+    /// title (lowercased) -> poster path ("" = confirmed no-poster miss,
+    /// so we don't re-query a title TMDB has nothing for). NSCache is
+    /// internally thread-safe, so the global is safe to share.
+    nonisolated(unsafe) private static let cache = NSCache<NSString, NSString>()
+
+    private struct SearchResponse: Decodable {
+        let results: [Item]
+        struct Item: Decodable {
+            let posterPath: String?
+            let mediaType: String?
+            let popularity: Double?
+            enum CodingKeys: String, CodingKey {
+                case posterPath = "poster_path"
+                case mediaType = "media_type"
+                case popularity
+            }
+        }
+    }
+
+    /// Validate an API key by hitting `/configuration`. 200 = valid.
+    static func validateKey(_ key: String) async -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              var comps = URLComponents(string: apiBase + "/configuration") else { return false }
+        comps.queryItems = [URLQueryItem(name: "api_key", value: trimmed)]
+        guard let url = comps.url,
+              let (_, resp) = try? await session.data(from: url),
+              let http = resp as? HTTPURLResponse else { return false }
+        return http.statusCode == 200
+    }
+
+    /// Look up a poster image URL for a program title via
+    /// `/search/multi`. Returns an `image.tmdb.org` CDN URL or nil.
+    /// `include_adult=false` per the app's fail-closed content policy.
+    static func posterURL(forTitle title: String, apiKey: String, size: String = "w500") async -> URL? {
+        let cacheKey = title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !cacheKey.isEmpty else { return nil }
+        if let cached = cache.object(forKey: cacheKey as NSString) {
+            let path = cached as String
+            return path.isEmpty ? nil : URL(string: imageBase + "/\(size)" + path)
+        }
+        guard var comps = URLComponents(string: apiBase + "/search/multi") else { return nil }
+        comps.queryItems = [
+            URLQueryItem(name: "api_key", value: apiKey),
+            URLQueryItem(name: "query", value: title),
+            URLQueryItem(name: "include_adult", value: "false")
+        ]
+        guard let url = comps.url,
+              let (data, resp) = try? await session.data(from: url),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(SearchResponse.self, from: data)
+        else { return nil }
+        // Prefer a movie/tv hit with a poster; else any hit with a poster.
+        let path = decoded.results.first {
+            ($0.posterPath?.isEmpty == false) && ($0.mediaType == "movie" || $0.mediaType == "tv")
+        }?.posterPath
+            ?? decoded.results.first { $0.posterPath?.isEmpty == false }?.posterPath
+        cache.setObject((path ?? "") as NSString, forKey: cacheKey as NSString)
+        guard let p = path, !p.isEmpty else { return nil }
+        return URL(string: imageBase + "/\(size)" + p)
+    }
+}
