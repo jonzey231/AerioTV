@@ -234,6 +234,9 @@ struct VODDetailView: View {
     /// TMDB poster fallback when the provider gave this VOD item no
     /// artwork (opt-in; Settings > App Behaviors > Program Posters).
     @State private var tmdbPosterURL: URL?
+    /// True once the TMDB lookup has run to completion (hit or miss), so
+    /// the source note can tell "still searching" from "searched, none".
+    @State private var tmdbLookupDone = false
     @State private var selectedSeason: Int = 0
     @State private var playingURL: IdentifiableURL?
     @State private var playingTitle = ""
@@ -450,6 +453,8 @@ struct VODDetailView: View {
             if !country.isEmpty {
                 metaRow(label: "Country", value: country)
             }
+
+            tmdbSourceNote
         }
         // v1.6.12 (third pass): clamp infoSection to fill width
         // BEFORE padding so the .padding(.horizontal, 16) carves
@@ -465,6 +470,55 @@ struct VODDetailView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
         .padding(.vertical, 16)
+    }
+
+    // MARK: - TMDB source note
+    //
+    // Surfaces the opt-in TMDB poster fallback to the user (and doubles
+    // as a verification aid): confirms when the artwork came from TMDB,
+    // and turns an art-less item into a CTA to add a key. Shared by iOS
+    // and tvOS, so it shows on both. Only the poster is sourced from
+    // TMDB today; provider-supplied metadata is unchanged.
+    @ViewBuilder
+    private var tmdbSourceNote: some View {
+        if tmdbPosterURL != nil {
+            // The poster shown above was supplied by TMDB.
+            tmdbNoteRow(
+                icon: "checkmark.seal.fill",
+                tint: .accentPrimary,
+                text: "Poster pulled from TMDB using your API key."
+            )
+        } else if item.posterURL == nil {
+            if !TMDBPosters.isEnabled || TMDBPosters.apiKey == nil {
+                // No provider artwork and no TMDB key supplied yet.
+                tmdbNoteRow(
+                    icon: "sparkles",
+                    tint: .accentPrimary,
+                    text: "No artwork from your provider. Enter a TMDB API key in Settings > App Behaviors to fill it in automatically. Only works when TMDB has a matching title."
+                )
+            } else if tmdbLookupDone {
+                // Key supplied and TMDB was queried, but nothing matched.
+                tmdbNoteRow(
+                    icon: "magnifyingglass",
+                    tint: .textTertiary,
+                    text: "No matching title found on TMDB."
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tmdbNoteRow(icon: String, tint: Color, text: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .font(.labelSmall)
+                .foregroundColor(tint)
+            Text(text)
+                .font(.labelSmall)
+                .foregroundColor(.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 4)
     }
 
     // MARK: - External links (Trailer + TMDB)
@@ -861,6 +915,7 @@ struct VODDetailView: View {
             url = await TMDBService.posterURL(forTitle: item.name, apiKey: apiKey)
         }
         if let url { tmdbPosterURL = url }
+        tmdbLookupDone = true
     }
 
     private func loadDetail() async {

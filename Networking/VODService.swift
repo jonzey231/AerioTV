@@ -1021,8 +1021,12 @@ enum TMDBService {
         }?.posterPath
             ?? decoded.results.first { $0.posterPath?.isEmpty == false }?.posterPath
         cache.setObject((path ?? "") as NSString, forKey: cacheKey as NSString)
-        guard let p = path, !p.isEmpty else { return nil }
-        return URL(string: imageBase + "/\(size)" + p)
+        let posterURL = (path?.isEmpty == false) ? URL(string: imageBase + "/\(size)" + path!) : nil
+        // Verification breadcrumb: proves TMDB was queried and shows what
+        // came back (the API key is never logged). Logs misses too, unlike
+        // the ProgramInfo-only hit log, and this also covers the VOD path.
+        debugLog("🎬 TMDB search '\(title)' -> \(posterURL?.absoluteString ?? "no match")")
+        return posterURL
     }
 
     private struct DetailResponse: Decodable {
@@ -1046,7 +1050,8 @@ enum TMDBService {
               let decoded = try? JSONDecoder().decode(DetailResponse.self, from: data)
         else { return nil }
         cache.setObject((decoded.posterPath ?? "") as NSString, forKey: cacheKey as NSString)
-        guard let p = decoded.posterPath, !p.isEmpty else { return nil }
-        return URL(string: imageBase + "/\(size)" + p)
+        let posterURL = (decoded.posterPath?.isEmpty == false) ? URL(string: imageBase + "/\(size)" + decoded.posterPath!) : nil
+        debugLog("🎬 TMDB id \(trimmed) (\(isMovie ? "movie" : "tv")) -> \(posterURL?.absoluteString ?? "no match")")
+        return posterURL
     }
 }
