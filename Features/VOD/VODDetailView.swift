@@ -231,6 +231,9 @@ struct VODDetailView: View {
 
     @State private var fullMovie: VODMovie?
     @State private var fullSeries: VODSeries?
+    /// TMDB poster fallback when the provider gave this VOD item no
+    /// artwork (opt-in; Settings > App Behaviors > Program Posters).
+    @State private var tmdbPosterURL: URL?
     @State private var selectedSeason: Int = 0
     @State private var playingURL: IdentifiableURL?
     @State private var playingTitle = ""
@@ -273,7 +276,10 @@ struct VODDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
-        .task { await loadDetail() }
+        .task {
+            await loadDetail()
+            await loadTMDBPosterIfNeeded()
+        }
         .fullScreenCover(item: $playingURL) { wrapper in
             PlayerView(
                 urls: [wrapper.url],
@@ -325,7 +331,7 @@ struct VODDetailView: View {
             // fill (overflowing internally), and `.clipped()` trims
             // the overflow. No upward width propagation, hero looks
             // identical, layout stays inside the safe area.
-            let heroURL = (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL
+            let heroURL = (fullMovie?.backdropURL ?? fullSeries?.backdropURL) ?? item.posterURL ?? tmdbPosterURL
             GeometryReader { geo in
                 AuthPosterImage(url: heroURL, headers: serverHeaders())
                     .aspectRatio(contentMode: .fill)
@@ -337,7 +343,7 @@ struct VODDetailView: View {
 
             HStack(alignment: .bottom, spacing: 14) {
                 // Small poster thumbnail
-                AuthPosterImage(url: item.posterURL, headers: serverHeaders())
+                AuthPosterImage(url: item.posterURL ?? tmdbPosterURL, headers: serverHeaders())
                     .aspectRatio(contentMode: .fill)
                     .frame(width: 80, height: 120)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -835,6 +841,26 @@ struct VODDetailView: View {
                 .font(.labelSmall).foregroundColor(.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// When the provider supplied no poster, fall back to TMDB (opt-in).
+    /// Prefers an exact tmdb_id lookup, else searches by title. Runs
+    /// after loadDetail so any detail-fetched tmdb_id is available.
+    @MainActor
+    private func loadTMDBPosterIfNeeded() async {
+        guard item.posterURL == nil, tmdbPosterURL == nil,
+              TMDBPosters.isEnabled, let apiKey = TMDBPosters.apiKey else { return }
+        let isMovie = (item.type != .series)
+        let tmdbID = item.movie?.tmdbID ?? item.series?.tmdbID
+            ?? fullMovie?.tmdbID ?? fullSeries?.tmdbID
+        var url: URL?
+        if let id = tmdbID, !id.isEmpty {
+            url = await TMDBService.posterURL(forTMDBID: id, isMovie: isMovie, apiKey: apiKey)
+        }
+        if url == nil, !item.name.isEmpty {
+            url = await TMDBService.posterURL(forTitle: item.name, apiKey: apiKey)
+        }
+        if let url { tmdbPosterURL = url }
     }
 
     private func loadDetail() async {

@@ -882,12 +882,15 @@ final class VODService {
 // MARK: - TMDB program-poster config
 
 /// Opt-in TMDB program-poster settings. OFF by default. The user
-/// supplies their own free TMDB v3 API key (Settings > App Behaviors);
-/// the key lives in the Keychain, never in UserDefaults or git. When
+/// supplies their own free TMDB v3 API key (Settings > App Behaviors).
+/// The key lives in the iCloud Keychain (synchronizable) so it follows
+/// the user to their other devices, never in UserDefaults or git. When
 /// disabled or unkeyed, the whole TMDB path is inert and only
 /// server-provided posters show.
 enum TMDBPosters {
-    /// `@AppStorage` / UserDefaults key for the enable toggle.
+    /// `@AppStorage` / UserDefaults key for the enable toggle (the
+    /// toggle itself is per-device, like the other App Behaviors
+    /// toggles; only the API key syncs).
     static let enabledDefaultsKey = "programPostersTMDBEnabled"
     /// Keychain item key for the user's TMDB API key.
     static let keychainKey = "tmdbAPIKey"
@@ -898,9 +901,29 @@ enum TMDBPosters {
 
     /// The stored API key, or nil if absent/empty.
     static var apiKey: String? {
-        guard let k = KeychainHelper.load(key: keychainKey),
-              !k.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return k
+        let k = loadAPIKey()
+        return k.isEmpty ? nil : k
+    }
+
+    /// Read the key, preferring the iCloud-synced copy and falling back
+    /// to any legacy local-only copy.
+    static func loadAPIKey() -> String {
+        if let synced = KeychainHelper.load(key: keychainKey, synchronizable: true),
+           !synced.isEmpty { return synced }
+        return KeychainHelper.load(key: keychainKey, synchronizable: false) ?? ""
+    }
+
+    /// Persist (or clear) the key in the iCloud Keychain so it syncs
+    /// across the user's devices; any stale local-only copy is removed
+    /// so the synced one is authoritative.
+    static func saveAPIKey(_ key: String) {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        KeychainHelper.delete(keychainKey, synchronizable: false)
+        if trimmed.isEmpty {
+            KeychainHelper.delete(keychainKey, synchronizable: true)
+        } else {
+            KeychainHelper.save(trimmed, for: keychainKey, synchronizable: true)
+        }
     }
 }
 
@@ -979,6 +1002,33 @@ enum TMDBService {
             ?? decoded.results.first { $0.posterPath?.isEmpty == false }?.posterPath
         cache.setObject((path ?? "") as NSString, forKey: cacheKey as NSString)
         guard let p = path, !p.isEmpty else { return nil }
+        return URL(string: imageBase + "/\(size)" + p)
+    }
+
+    private struct DetailResponse: Decodable {
+        let posterPath: String?
+        enum CodingKeys: String, CodingKey { case posterPath = "poster_path" }
+    }
+
+    /// Poster by exact TMDB id (no fuzzy matching) - used for VOD items
+    /// that already carry a tmdb_id. `isMovie` picks /movie vs /tv.
+    static func posterURL(forTMDBID id: String, isMovie: Bool, apiKey: String, size: String = "w500") async -> URL? {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let cacheKey = "id:\(isMovie ? "movie" : "tv"):\(trimmed)"
+        if let cached = cache.object(forKey: cacheKey as NSString) {
+            let path = cached as String
+            return path.isEmpty ? nil : URL(string: imageBase + "/\(size)" + path)
+        }
+        guard var comps = URLComponents(string: apiBase + "/\(isMovie ? "movie" : "tv")/\(trimmed)") else { return nil }
+        comps.queryItems = [URLQueryItem(name: "api_key", value: apiKey)]
+        guard let url = comps.url,
+              let (data, resp) = try? await session.data(from: url),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(DetailResponse.self, from: data)
+        else { return nil }
+        cache.setObject((decoded.posterPath ?? "") as NSString, forKey: cacheKey as NSString)
+        guard let p = decoded.posterPath, !p.isEmpty else { return nil }
         return URL(string: imageBase + "/\(size)" + p)
     }
 }

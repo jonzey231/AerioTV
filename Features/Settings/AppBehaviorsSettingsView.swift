@@ -85,7 +85,7 @@ struct AppBehaviorsSettingsView: View {
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         .onAppear {
-            tmdbKeyDraft = KeychainHelper.load(key: TMDBPosters.keychainKey) ?? ""
+            tmdbKeyDraft = TMDBPosters.loadAPIKey()
         }
     }
 
@@ -101,12 +101,7 @@ struct AppBehaviorsSettingsView: View {
     }
 
     private func saveTMDBKey() {
-        let key = tmdbKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        if key.isEmpty {
-            _ = KeychainHelper.delete(TMDBPosters.keychainKey)
-        } else {
-            _ = KeychainHelper.save(key, for: TMDBPosters.keychainKey)
-        }
+        TMDBPosters.saveAPIKey(tmdbKeyDraft)
     }
 
     @ViewBuilder
@@ -247,7 +242,7 @@ struct AppBehaviorsSettingsView: View {
             } header: {
                 Text("Program Posters").sectionHeaderStyle()
             } footer: {
-                Text("Your key stays on this device (Keychain). Get a free key at themoviedb.org, then Settings, then API. Posters appear in Program Info.")
+                Text("Your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org, then Settings, then API. Posters appear in Program Info and on VOD with no provider art.")
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
@@ -328,7 +323,7 @@ struct AppBehaviorsSettingsView: View {
                             Spacer()
                         }
 
-                        Text("Your key stays on this device. Get a free key at themoviedb.org. Posters appear in Program Info.")
+                        Text("Your key is saved to your iCloud Keychain and syncs to your other devices. Get a free key at themoviedb.org. Posters appear in Program Info and on VOD with no provider art.")
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.horizontal, 20)
