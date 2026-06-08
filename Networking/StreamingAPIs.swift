@@ -3053,9 +3053,23 @@ struct DispatcharrProgramDetail: Decodable {
     let id: Int
     let categories: [String]
     let rating: String?
+    /// Per-programme artwork the detail endpoint surfaces (the grid
+    /// strips all of these). `icon` is the XMLTV `<programme><icon>`,
+    /// `imageURL` the first of the XMLTV `<image>` list, `posterURL`
+    /// the absolute Schedules-Direct poster proxy URL (SD sources
+    /// only), and `tmdbID` the TMDB id when the server has one.
+    let icon: String?
+    let imageURL: String?
+    let posterURL: String?
+    let tmdbID: String?
+
+    private struct ImageEntry: Decodable { let url: String? }
 
     enum CodingKeys: String, CodingKey {
         case id, categories, rating
+        case icon, images
+        case posterURL = "poster_url"
+        case tmdbID = "tmdb_id"
     }
 
     init(from decoder: Decoder) throws {
@@ -3063,6 +3077,29 @@ struct DispatcharrProgramDetail: Decodable {
         id = try c.decode(Int.self, forKey: .id)
         categories = (try? c.decode([String].self, forKey: .categories)) ?? []
         rating = try? c.decode(String.self, forKey: .rating)
+        icon = try? c.decode(String.self, forKey: .icon)
+        imageURL = (try? c.decode([ImageEntry].self, forKey: .images))?
+            .compactMap { $0.url }.first
+        posterURL = try? c.decode(String.self, forKey: .posterURL)
+        // tmdb_id can be Int or String depending on source.
+        if let s = try? c.decode(String.self, forKey: .tmdbID) {
+            tmdbID = s
+        } else if let i = try? c.decode(Int.self, forKey: .tmdbID) {
+            tmdbID = String(i)
+        } else {
+            tmdbID = nil
+        }
+    }
+
+    /// Best server-provided poster path/URL, preferring the SD proxy,
+    /// then an XMLTV `<image>`, then the `<icon>`. nil when the
+    /// programme carries no artwork (the TMDB-by-title fallback then
+    /// applies, if enabled).
+    var bestPosterString: String? {
+        for candidate in [posterURL, imageURL, icon] {
+            if let c = candidate, !c.isEmpty { return c }
+        }
+        return nil
     }
 }
 

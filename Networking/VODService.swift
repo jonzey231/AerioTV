@@ -79,7 +79,7 @@ final class VODService {
     ///
     /// Returns nil on rejection. Caller should fall back to a
     /// placeholder image or skip the fetch.
-    private static func validateAbsoluteURL(_ url: URL, serverHost: String?) -> URL? {
+    static func validateAbsoluteURL(_ url: URL, serverHost: String?) -> URL? {
         guard let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else { return nil }
         guard let host = url.host?.lowercased() else { return nil }
@@ -190,9 +190,9 @@ final class VODService {
     /// the right size for backdrops on iPad/Apple TV. Callers
     /// rendering smaller artwork (square posters, list rows) can pass
     /// `w500` or `w342` to save bandwidth.
-    private static func resolveImageURL(_ raw: String,
-                                        base: String,
-                                        size: String = "w1280") -> URL? {
+    static func resolveImageURL(_ raw: String,
+                                base: String,
+                                size: String = "w1280") -> URL? {
         guard !raw.isEmpty else { return nil }
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
             // v1.6.23: validate absolute URLs against the trust

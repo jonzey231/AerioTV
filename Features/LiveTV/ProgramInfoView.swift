@@ -93,6 +93,20 @@ struct ProgramInfoView: View {
     @State private var loadedCategory: String? = nil
     @State private var isLoadingCategory: Bool = false
 
+    /// Program poster, resolved from the Dispatcharr program detail
+    /// (Schedules Direct poster proxy, XMLTV `<image>`/`<icon>`), or
+    /// from TMDB-by-title when that opt-in is enabled and the server
+    /// has no artwork. nil = no poster, render nothing.
+    @State private var posterURL: URL? = nil
+
+    /// Auth headers for the active Dispatcharr server, in case a
+    /// program icon is a protected `/media/` URL. The Schedules-Direct
+    /// poster proxy and TMDB CDN are both auth-free, so this is
+    /// usually unused but harmless.
+    private var posterAuthHeaders: [String: String] {
+        ChannelStore.shared.activeServer?.authHeaders ?? [:]
+    }
+
     /// Display category — prefers the loaded value over the target's
     /// initial value so a successful detail fetch wins. Empty string
     /// when neither source has data; the pills sections then hide
@@ -278,12 +292,13 @@ struct ProgramInfoView: View {
         // so the log greps cleanly.
         let pidStr = target.programID.map(String.init) ?? "nil"
         debugLog("📺 ProgramInfo lazy-load entry: title='\(target.title.prefix(40))' category.empty=\(target.category.isEmpty) programID=\(pidStr)")
-        guard target.category.isEmpty else {
-            debugLog("📺 ProgramInfo lazy-load SKIP: category already populated ('\(target.category.prefix(60))')")
-            return
-        }
-        guard loadedCategory == nil else {
-            debugLog("📺 ProgramInfo lazy-load SKIP: already loaded this session")
+        // Fetch the detail when EITHER the category pills are still
+        // missing OR we don't yet have a poster (the detail call
+        // carries both, so one request serves both needs).
+        let categoryNeeded = target.category.isEmpty && loadedCategory == nil
+        let posterNeeded = posterURL == nil
+        guard categoryNeeded || posterNeeded else {
+            debugLog("📺 ProgramInfo lazy-load SKIP: category + poster already resolved")
             return
         }
         guard let pid = target.programID else {
@@ -323,8 +338,15 @@ struct ProgramInfoView: View {
             // Only assign if we got something — avoids triggering a
             // pointless re-render on empty results, and leaves the
             // door open for a future retry path.
-            if !cats.isEmpty {
+            if categoryNeeded, !cats.isEmpty {
                 loadedCategory = cats
+            }
+            // Server-provided poster (SD proxy / XMLTV image / icon).
+            // resolveImageURL validates the host (SSRF guard) and maps
+            // bare TMDB slugs to the CDN, same as the VOD path.
+            if posterNeeded, let raw = detail.bestPosterString {
+                posterURL = VODService.resolveImageURL(raw, base: baseURL, size: "w500")
+                debugLog("📺 ProgramInfo poster: \(posterURL?.absoluteString ?? "rejected/none")")
             }
         } catch {
             debugLog("📺 ProgramInfo lazy-load FAIL: pid=\(pid) error=\(error.localizedDescription)")
@@ -338,6 +360,21 @@ struct ProgramInfoView: View {
     @ViewBuilder
     private var iOSForm: some View {
         Form {
+            if let posterURL {
+                Section {
+                    HStack {
+                        Spacer()
+                        AuthPosterImage(url: posterURL, headers: posterAuthHeaders)
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 130, height: 195)
+                            .clipped()
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        Spacer()
+                    }
+                    .listRowBackground(Color.clear)
+                }
+            }
+
             Section {
                 LabeledContent("Channel", value: target.channelName)
                 LabeledContent("Program", value: target.title)
@@ -404,6 +441,13 @@ struct ProgramInfoView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 36) {
+                    if let posterURL {
+                        AuthPosterImage(url: posterURL, headers: posterAuthHeaders)
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 220, height: 330)
+                            .clipped()
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
                     // Header — channel + title + live badge
                     VStack(alignment: .leading, spacing: 12) {
                         Text(target.channelName.uppercased())
