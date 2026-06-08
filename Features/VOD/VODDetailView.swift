@@ -237,6 +237,13 @@ struct VODDetailView: View {
     /// True once the TMDB lookup has run to completion (hit or miss), so
     /// the source note can tell "still searching" from "searched, none".
     @State private var tmdbLookupDone = false
+    #if os(tvOS)
+    /// Drives the top tab bar's visibility from this detail's scroll
+    /// position so it reappears when the user scrolls back to the top
+    /// (a pushed tvOS detail otherwise hides it, leaving the Menu
+    /// button as the only way back up to it).
+    @State private var detailScrolledToTop = true
+    #endif
     @State private var selectedSeason: Int = 0
     @State private var playingURL: IdentifiableURL?
     @State private var playingTitle = ""
@@ -274,11 +281,32 @@ struct VODDetailView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            #if os(tvOS)
+            // Reveal the top tab bar while the header (hero + plot +
+            // cast + season selector) is in view; hide it once the user
+            // scrolls down into the episode list. Lets the user reach
+            // the tab bar again by scrolling back up, without the Menu
+            // button (a pushed detail otherwise hides it). tvOS scrolls
+            // by focus, not free inertia, so "scroll to the top" of a
+            // series lands on the first focusable header element with
+            // the non-focusable hero still off-screen (~500pt offset).
+            // The threshold sits above that whole header band so the
+            // bar returns as soon as the user climbs back out of the
+            // episode list, then stays hidden deeper in the list.
+            .onScrollGeometryChange(for: Bool.self) { geo in
+                geo.contentOffset.y < 600
+            } action: { _, headerVisible in
+                if detailScrolledToTop != headerVisible { detailScrolledToTop = headerVisible }
+            }
+            #endif
         }
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
+        #if os(tvOS)
+        .toolbar(detailScrolledToTop ? .visible : .hidden, for: .tabBar)
+        #endif
         .task {
             await loadDetail()
             await loadTMDBPosterIfNeeded()
