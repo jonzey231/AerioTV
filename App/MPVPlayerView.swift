@@ -1742,6 +1742,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var lastAudioReconfigAt: CFAbsoluteTime = 0
         private var audioReconfigCount: Int64 = 0
 
+        /// Issue #36 (no audio when the tvOS output is Dolby Atmos): one-shot
+        /// post-restart audio health check + stereo-downmix fallback. Reset
+        /// per stream in handleStartFile(); re-armed by audio route changes
+        /// so toggling Atmos mid-app recovers without a restart.
+        private var audioHealthCheckScheduled = false
+        private var audioStereoFallbackApplied = false
+
         // v1.7.x Step 7 — callback-gap severity counters.
         //
         // Cumulative tallies of the gap classifications already
@@ -2570,6 +2577,24 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             #if DEBUG
             debugLog("[MPV-AIRPLAY] Route changed: reason=\(reasonStr), airPlay=\(hasAirPlay), outputs=\(outputs)")
+            #endif
+
+            // Issue #36: toggling Dolby Atmos in tvOS Settings while the app
+            // runs arrives as a route configuration change. Re-run the audio
+            // health check (re-armed) so a dead audio chain, or one stuck on
+            // the stereo fallback after the user turned Atmos back off,
+            // recovers without an app restart.
+            #if os(tvOS)
+            switch reason {
+            case .routeConfigurationChange, .categoryChange, .newDeviceAvailable, .oldDeviceUnavailable:
+                mpvQueue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    guard let self else { return }
+                    self.audioStereoFallbackApplied = false
+                    self.runAudioHealthCheck(context: "route-change(\(reasonStr))")
+                }
+            default:
+                break
+            }
             #endif
 
             // If AirPlay just connected and we're in the background with vid disabled, re-enable
@@ -4985,6 +5010,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         if self.isLive, let mpv = self.activeMPVHandle() {
                             mpv_set_property_string(mpv, "cache-pause", "no")
                         }
+                        // Issue #36: verify the audio chain actually opened
+                        // (it silently fails when the tvOS output is set to
+                        // Dolby Atmos) once the startup transient is past.
+                        if !self.audioHealthCheckScheduled {
+                            self.audioHealthCheckScheduled = true
+                            self.mpvQueue.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                                self?.runAudioHealthCheck(context: "post-restart")
+                            }
+                        }
                         // v1.7.x: HDR-only target-prim/trc/tone-mapping.
                         // Now that the stream is decoded enough for mpv
                         // to know its colorspace, apply the BT.709 SDR
@@ -5084,9 +5118,55 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private func handleStartFile() {
             logStore.append("ℹ️ MPV state: opening")
             DebugLogger.shared.logPlayback(event: "opening")
+            // Issue #36: new stream, re-arm the audio health check + fallback.
+            audioHealthCheckScheduled = false
+            audioStereoFallbackApplied = false
             #if DEBUG
             debugLog("[MPV-DIAG] State: opening (start-file)")
             #endif
+        }
+
+        /// Issue #36: with the tvOS audio output set to Dolby Atmos, mpv's
+        /// AVFoundation audio output can fail to open against the spatial
+        /// hardware layout. Playback then continues silently: the audio
+        /// decoder never produces (audio-params/channel-count stays 0, the
+        /// Stream Info card shows "0Hz 0ch") and no error surfaces. This
+        /// check runs ~2.5s after playback restart (and again on audio route
+        /// changes), logs the negotiation state in BOTH Debug and Release
+        /// (it is the diagnostic we ask issue reporters for), and when the
+        /// audio chain is dead it forces a stereo downmix, which the audio
+        /// output can always open; tvOS then applies its own spatialization,
+        /// so Atmos-capable setups still get surround rendering instead of
+        /// silence. One fallback attempt per stream.
+        ///
+        /// Must be called on mpvQueue.
+        private func runAudioHealthCheck(context: String) {
+            guard let mpv = self.mpv else { return }
+            var decCh: Int64 = 0
+            mpv_get_property(mpv, "audio-params/channel-count", MPV_FORMAT_INT64, &decCh)
+            var outCh: Int64 = 0
+            mpv_get_property(mpv, "audio-out-params/channel-count", MPV_FORMAT_INT64, &outCh)
+            let codec = getMPVString(mpv, "audio-codec")
+            let ao = getMPVString(mpv, "current-ao")
+            let session = AVAudioSession.sharedInstance()
+            let route = session.currentRoute.outputs
+                .map { "\($0.portType.rawValue)/\($0.channels?.count ?? -1)ch" }
+                .joined(separator: "+")
+            debugLog("[AUDIO-HEALTH] \(streamTag) (\(context)) codec=\(codec ?? "none") dec_ch=\(decCh) out_ch=\(outCh) ao=\(ao ?? "NONE") route=[\(route)] session=\(Int(session.sampleRate))Hz/\(session.outputNumberOfChannels)ch")
+
+            // Healthy (or no audio track at all, e.g. a decoder-off multiview
+            // tile): nothing to do.
+            guard codec != nil, decCh <= 0 || ao == nil, !audioStereoFallbackApplied else { return }
+            audioStereoFallbackApplied = true
+            debugLog("[AUDIO-FALLBACK] \(streamTag) audio chain failed to open (\(ao == nil ? "no audio output" : "0 channels")); forcing stereo downmix + audio chain reinit (Dolby Atmos output workaround)")
+            mpv_set_property_string(mpv, "audio-channels", "stereo")
+            // Cycle the audio track so the audio output reopens cleanly with
+            // the new layout.
+            mpv_set_property_string(mpv, "aid", "no")
+            mpv_set_property_string(mpv, "aid", "auto")
+            mpvQueue.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+                self?.runAudioHealthCheck(context: "post-fallback")
+            }
         }
 
         /// v1.7.x Issue A diagnostic. mpv emits MPV_EVENT_VIDEO_RECONFIG
