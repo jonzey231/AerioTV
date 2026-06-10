@@ -222,69 +222,40 @@ struct MultiviewContainerView: View {
                     // focusable view exists outside the panel).
                     #if os(tvOS)
                     .disabled(showTVOptions)
+                    // tvOS N=1 chrome floats as a BOTTOM OVERLAY over the
+                    // full-bleed video instead of an inline sibling that
+                    // shrank the tile (Android-style, far less obtrusive).
+                    // The overlay adds no layout height, so the video stays
+                    // edge to edge. `.disabled(... || !chromeState.isVisible)`
+                    // keeps the pills out of the focus engine while hidden
+                    // (the old height-0 collapse did that; an opacity-0
+                    // overlay would otherwise trap focus). Reveal is the
+                    // Menu/Back button (handleMenuPress ->
+                    // chromeState.reportInteraction()); focus is pulled to a
+                    // pill by the existing focusedChrome redirect in
+                    // .onChange(of: chromeState.isVisible). Hidden while
+                    // minimized so the corner mini has zero focusable pills.
+                    .overlay(alignment: .bottom) {
+                        if isSoleTile && !nowPlaying.isMinimized {
+                            PlaybackBottomChrome_tvOS(
+                                store: store,
+                                showAddSheet: $showAddSheet,
+                                showTVOptions: $showTVOptions,
+                                showRecordSheet: $showRecordSheet,
+                                focusedChrome: $focusedChrome
+                            )
+                            .opacity(chromeState.isVisible ? 1 : 0)
+                            .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
+                            .accessibilityHidden(!chromeState.isVisible)
+                            .disabled(showTVOptions || !chromeState.isVisible)
+                        }
+                    }
                     #endif
 
-                #if os(tvOS)
-                // tvOS N=1 chrome lives INLINE in this VStack but
-                // collapses to height 0 when the chrome is faded —
-                // so during normal playback the tile is edge-to-edge
-                // and the user doesn't see a permanent black strip
-                // reserving space below the video. When the user
-                // presses D-pad-down on the tile, the
-                // `.onMoveCommand` handler at the container level
-                // calls `chromeState.reportInteraction()` which
-                // reveals the chrome AND, via `@FocusState`
-                // redirect, pulls focus to the first pill (Options)
-                // so there's no intermediate "press down a second
-                // time" step.
-                //
-                // Previous iterations: ZStack overlay let the tile
-                // stay full-screen but pills were unreachable
-                // (focus couldn't traverse spatially); inline-always
-                // made pills reachable but permanently shrunk the
-                // video. The collapse-when-faded approach gives
-                // both: full-screen when watching, inline sibling
-                // when interacting.
-                // Render the bottom pills only when NOT minimized —
-                // when the player shrinks to the corner, we don't
-                // want Options / Add Stream as focusable targets
-                // inside the tiny mini box. Keeping them mounted
-                // (with opacity 0 + height 0) still registers them
-                // as focusable Button descendants in SwiftUI's
-                // hierarchy, which traps focus in the corner. The
-                // `if` guard fully removes them from the view tree
-                // while minimized, so the only remaining focusable
-                // inside the container is the tile Button (which we
-                // also mark `.focusable(false)` when minimized) —
-                // net result: zero focusable elements in the mini,
-                // and focus naturally flows to the guide beneath.
-                if isSoleTile && !nowPlaying.isMinimized {
-                    PlaybackBottomChrome_tvOS(
-                        store: store,
-                        showAddSheet: $showAddSheet,
-                        showTVOptions: $showTVOptions,
-                        showRecordSheet: $showRecordSheet,
-                        focusedChrome: $focusedChrome
-                    )
-                    .frame(height: chromeState.isVisible ? nil : 0)
-                    .opacity(chromeState.isVisible ? 1 : 0)
-                    .clipped()
-                    .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
-                    .accessibilityHidden(!chromeState.isVisible)
-                    // v1.6.12 (GH #11 follow-up): hard focus trap
-                    // when the TVOptions panel is open. The pill row
-                    // (Options / Record / Add Stream) is what the
-                    // user could D-pad into past Stream Info — its
-                    // .focusSection() on the panel side is just a
-                    // preference; the focus engine still honored the
-                    // directional move because the pill row was
-                    // focusable. Disabling makes its buttons
-                    // non-focusable and removes the only escape
-                    // target, so D-pad-down at the bottom of the
-                    // panel just stops there.
-                    .disabled(showTVOptions)
-                }
-                #endif
+                // tvOS N=1 chrome no longer lives here as an inline sibling
+                // (which shrank the video). It is now a bottom .overlay on
+                // gridArea above so the video stays full-bleed. See that
+                // overlay for the focus-trap handling.
 
                 if !isSoleTile {
                     // Transport bar spans edge-to-edge with its own
@@ -1175,6 +1146,15 @@ struct MultiviewContainerView: View {
                     category: "Playback", level: .info
                 )
                 NowPlayingManager.shared.minimize()
+                // Back-flow step 2: with the player now in the corner mini,
+                // land guide focus on the channel just watched (its NOW cell)
+                // so the user resumes browsing from there, not row 0. The
+                // .forceGuideFocus handler targets lastPlayedChannelID and
+                // scrolls it to center; deferred so the minimize spring
+                // settles and the guide becomes the active focus context.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+                }
             } else {
                 DebugLogger.shared.log(
                     "[MV-Cmd]   → branch: chrome visible + N>=2 → confirm exit",

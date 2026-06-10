@@ -1,5 +1,8 @@
 import SwiftUI
 import SwiftData
+import Combine  // Xcode 26.5 requires explicit Combine import for the
+               // Timer.publish().autoconnect() (Publishers.Autoconnect)
+               // stored-property type; transitive SwiftUI import no longer suffices.
 
 // MARK: - EPG Guide Program
 /// A program block in the guide grid. Carries enough data to render a cell
@@ -824,50 +827,67 @@ final class GuideStore: ObservableObject {
             #if DEBUG
             debugLog("📺 Dispatcharr: EPG grid returned \(gridPrograms.count) programs")
             #endif
-            var matched = 0
-            var matchedViaUUID = 0
-            for prog in gridPrograms {
-                guard let start = prog.startTime?.toDate(),
-                      let end = prog.endTime?.toDate(),
-                      end > windowStart && start < windowEnd else { continue }
-                // v1.7.3 (Issue #20): a single tvg-id can map to
-                // multiple channels (shared-EPG case); the program
-                // gets merged into every matched channel's program
-                // list. `intIDToChannelID` and `uuidToChannelID` are
-                // unique by construction so they stay single-channel.
-                let cids: [String]
-                if let tvg = prog.tvgID, !tvg.isEmpty {
-                    let key = tvg.lowercased()
-                    if let arr = tvgIDToChannelIDs[key], !arr.isEmpty {
-                        cids = arr
-                    } else if let cid = uuidToChannelID[key] {
-                        // Dummy EPG entry — the `tvg_id` IS the channel UUID.
-                        cids = [cid]
-                        matchedViaUUID += 1
-                    } else {
-                        cids = []
+            // v1.7.x: run the grid match+merge OFF the main actor. This
+            // ~7000-iteration loop (per-program dedup scan + sort) previously
+            // ran on the @MainActor and was the dominant cold-start hang
+            // (watchdog ~900ms+, plus part of the 2.5s hang). It mirrors the
+            // proven off-main XMLTV merge (performXMLTVFetch): build a LOCAL
+            // dict seeded from the current batch base, merge via the nonisolated
+            // GuideStore.mergeProgramInto(deferSort: true), sort each touched
+            // list ONCE at the end, then do a single @Published write. The cids
+            // match logic below (Issue #20 shared-tvg-id fan-out, Dummy-EPG UUID
+            // key, and intID fallback) is byte-identical to the prior on-main
+            // version; only the thread changed. `_pendingPrograms` was seeded
+            // by beginBatch above; assigning the merged result back lets the
+            // existing `defer`/endBatch commit it with one invalidation.
+            let base = _pendingPrograms
+            let merged: (dict: [String: [GuideProgram]], matched: Int, viaUUID: Int) =
+                await Task.detached(priority: .userInitiated) {
+                    var dict = base
+                    var matched = 0
+                    var viaUUID = 0
+                    var touched = Set<String>()
+                    for prog in gridPrograms {
+                        guard let start = prog.startTime?.toDate(),
+                              let end = prog.endTime?.toDate(),
+                              end > windowStart && start < windowEnd else { continue }
+                        let cids: [String]
+                        if let tvg = prog.tvgID, !tvg.isEmpty {
+                            let key = tvg.lowercased()
+                            if let arr = tvgIDToChannelIDs[key], !arr.isEmpty {
+                                cids = arr
+                            } else if let cid = uuidToChannelID[key] {
+                                // Dummy EPG entry; the `tvg_id` IS the channel UUID.
+                                cids = [cid]
+                                viaUUID += 1
+                            } else {
+                                cids = []
+                            }
+                        } else if let chInt = prog.channel, let cid = intIDToChannelID[chInt] {
+                            cids = [cid]
+                        } else {
+                            cids = []
+                        }
+                        if cids.isEmpty { continue }
+                        matched += 1
+                        let desc = prog.description.isEmpty ? prog.subTitle : prog.description
+                        // thread `programID` so ProgramInfoView can lazy-load
+                        // `<category>` via /api/epg/programs/<id>/.
+                        for cid in cids {
+                            let gp = GuideProgram(channelID: cid, title: prog.title,
+                                                  description: desc, start: start, end: end,
+                                                  category: "", programID: prog.programID)
+                            GuideStore.mergeProgramInto(&dict, program: gp, for: cid, deferSort: true)
+                            touched.insert(cid)
+                        }
                     }
-                } else if let chInt = prog.channel, let cid = intIDToChannelID[chInt] {
-                    cids = [cid]
-                } else {
-                    cids = []
-                }
-                if cids.isEmpty { continue }
-                matched += 1
-                let desc = prog.description.isEmpty ? prog.subTitle : prog.description
-                // v1.7.x: thread `programID` so ProgramInfoView can
-                // lazy-load `<category>` via /api/epg/programs/<id>/
-                // when the user opens the modal. The bulk grid strips
-                // categories server-side, so without this the modal
-                // shows zero pills for any program that wasn't part
-                // of the now-airing enrichment fan-out.
-                for cid in cids {
-                    let gp = GuideProgram(channelID: cid, title: prog.title,
-                                          description: desc, start: start, end: end,
-                                          category: "", programID: prog.programID)
-                    mergeProgram(gp, for: cid)
-                }
-            }
+                    // deferSort:true above; sort each touched list once.
+                    for cid in touched { dict[cid]?.sort { $0.start < $1.start } }
+                    return (dict, matched, viaUUID)
+                }.value
+            _pendingPrograms = merged.dict
+            let matched = merged.matched
+            let matchedViaUUID = merged.viaUUID
             #if DEBUG
             debugLog("📺 Dispatcharr: EPG grid matched \(matched) programs to channels (\(matchedViaUUID) via Dummy EPG UUID key)")
             #endif
@@ -2490,12 +2510,18 @@ struct EPGGuideView: View {
                 // engine accepts it (a single write is dropped while the row is
                 // still laying out). The readback log shows what actually stuck.
                 Task { @MainActor in
-                    let topChannel = channels.first?.id
-                    // Focus the top channel's program cell (the focusable
-                    // element), not the channel label.
-                    let target = topChannel.flatMap { focusTargetProgramID(forChannel: $0) }
-                    debugLog("🧭 [GuideFocus] scrollToTop(epg) → channel=\(topChannel ?? "nil") prog=\(target ?? "nil") count=\(channels.count)")
-                    guard let target else { proxy.scrollTo("guide.top", anchor: .top); return }
+                    // Focus the top of the guide. Channel-column cells are non-
+                    // focusable on tvOS, so we focus a PROGRAM cell via
+                    // focusedProgramID. The very top channel frequently has no
+                    // guide data (focusTargetProgramID nil); resolveFocusProgramID
+                    // then scans down for the first channel that DOES, so focus
+                    // lands on a real cell near the top instead of bailing to the
+                    // List toggle (the reported bug). The viewport stays pinned to
+                    // guide.top so channel 1 is the topmost visible row.
+                    guard let target = resolveFocusProgramID(preferringChannel: channels.first?.id) else {
+                        proxy.scrollTo("guide.top", anchor: .top); return
+                    }
+                    debugLog("🧭 [GuideFocus] scrollToTop(epg) → prog=\(target) count=\(channels.count)")
                     for attempt in 0..<8 {
                         proxy.scrollTo("guide.top", anchor: .top)
                         focusedProgramID = target
@@ -2559,16 +2585,16 @@ struct EPGGuideView: View {
                     guideFocusTargetChannelID = valid
                     debugLog("🧭 [GuideFocus] forceGuideFocus(epg) → mvLast=\(mvLastID ?? "nil") single=\(singleID ?? "nil") valid=\(valid ?? "nil") count=\(channels.count)")
                     guard let valid else { resetFocus(in: guideFocusNS); return }
-                    // Focus the watched channel's program cell (the focusable
-                    // element). The cells are now SwiftUI-native focusables (no
-                    // UIKit overlay, no competing target), so driving
-                    // focusedProgramID actually moves focus. resetFocus first
-                    // pulls focus off the minimized mini tile into the guide;
-                    // then scroll the channel into view and re-assert
-                    // focusedProgramID until the engine reports it stuck.
-                    let target = focusTargetProgramID(forChannel: valid)
+                    // Focus the watched channel's PROGRAM cell (channel-column
+                    // cells are non-focusable on tvOS). resolveFocusProgramID falls
+                    // back to the nearest channel-with-guide-data if this one has
+                    // none, so focus never bails to the List toggle. resetFocus
+                    // first pulls focus off the minimized mini tile into the guide;
+                    // then scroll the channel into view and re-assert focusedProgramID.
+                    guard let target = resolveFocusProgramID(preferringChannel: valid) else {
+                        resetFocus(in: guideFocusNS); return
+                    }
                     resetFocus(in: guideFocusNS)
-                    guard let target else { return }
                     for attempt in 0..<8 {
                         proxy.scrollTo(valid, anchor: .center)
                         focusedProgramID = target
@@ -2698,6 +2724,30 @@ struct EPGGuideView: View {
         let progs = guideStore.programs[channelID] ?? []
         let now = Date()
         return (progs.first { $0.start <= now && now < $0.end } ?? progs.first)?.id
+    }
+
+    /// Resolve a REAL focusable program id for programmatic focus. Channel-
+    /// column cells are intentionally non-focusable on tvOS (only program
+    /// cells accept focus), so focus restore must land on a program cell. If
+    /// the preferred channel has no guide data (focusTargetProgramID nil; the
+    /// very top channel frequently has none), scan forward from it, then
+    /// anywhere, for the first channel that DOES. This stops focus from bailing
+    /// to the List toggle (the "scroll to top focused the List button" bug).
+    private func resolveFocusProgramID(preferringChannel channelID: String?) -> String? {
+        if let channelID, let pid = focusTargetProgramID(forChannel: channelID) {
+            return pid
+        }
+        let startIdx = channelID
+            .flatMap { id in channels.firstIndex(where: { $0.id == id }) } ?? 0
+        if startIdx < channels.count {
+            for ch in channels[startIdx...] {
+                if let pid = focusTargetProgramID(forChannel: ch.id) { return pid }
+            }
+        }
+        for ch in channels {
+            if let pid = focusTargetProgramID(forChannel: ch.id) { return pid }
+        }
+        return nil
     }
     #endif
 

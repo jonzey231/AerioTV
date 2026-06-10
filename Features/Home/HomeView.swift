@@ -190,7 +190,16 @@ final class VODStore: ObservableObject {
                                      userAgent: userAgent, authMode: authMode)
             var results: [VODDisplayItem] = []
             var lastPublishTime = Date.distantPast
-            let publishInterval: TimeInterval = 0.5
+            // v1.7.x: widened from 0.5s to 2.0s. On a large library (e.g.
+            // 5000 movies over a ~30s paginated load) the old cadence
+            // republished the whole growing array up to 2x/sec on the main
+            // actor, each reassign forcing a full SwiftUI diff. Under the
+            // tvOS 26.5 SwiftUI runtime that cold-start churn (alongside the
+            // channel/EPG publishes) drives heavy display-list rebuilds that
+            // both produce the watchdog hangs AND raise the odds of the
+            // AttributeGraph "different namespace" abort. The user lands on
+            // Live TV during this load, so a chunkier VOD fill is invisible.
+            let publishInterval: TimeInterval = 2.0
             do {
                 for try await batch in api.searchVODMoviesStream(query: query) {
                     guard !Task.isCancelled else { break }
@@ -253,7 +262,16 @@ final class VODStore: ObservableObject {
                                      userAgent: userAgent, authMode: authMode)
             var results: [VODDisplayItem] = []
             var lastPublishTime = Date.distantPast
-            let publishInterval: TimeInterval = 0.5
+            // v1.7.x: widened from 0.5s to 2.0s. On a large library (e.g.
+            // 5000 movies over a ~30s paginated load) the old cadence
+            // republished the whole growing array up to 2x/sec on the main
+            // actor, each reassign forcing a full SwiftUI diff. Under the
+            // tvOS 26.5 SwiftUI runtime that cold-start churn (alongside the
+            // channel/EPG publishes) drives heavy display-list rebuilds that
+            // both produce the watchdog hangs AND raise the odds of the
+            // AttributeGraph "different namespace" abort. The user lands on
+            // Live TV during this load, so a chunkier VOD fill is invisible.
+            let publishInterval: TimeInterval = 2.0
             do {
                 for try await batch in api.searchVODSeriesStream(query: query) {
                     guard !Task.isCancelled else { break }
@@ -444,7 +462,16 @@ final class VODStore: ObservableObject {
             var accumulated: [VODDisplayItem] = []
             var seenUUIDs: Set<String> = []
             var lastPublishTime = Date.distantPast
-            let publishInterval: TimeInterval = 0.5
+            // v1.7.x: widened from 0.5s to 2.0s. On a large library (e.g.
+            // 5000 movies over a ~30s paginated load) the old cadence
+            // republished the whole growing array up to 2x/sec on the main
+            // actor, each reassign forcing a full SwiftUI diff. Under the
+            // tvOS 26.5 SwiftUI runtime that cold-start churn (alongside the
+            // channel/EPG publishes) drives heavy display-list rebuilds that
+            // both produce the watchdog hangs AND raise the odds of the
+            // AttributeGraph "different namespace" abort. The user lands on
+            // Live TV during this load, so a chunkier VOD fill is invisible.
+            let publishInterval: TimeInterval = 2.0
             var taggedFromCategoryID = 0
             var taggedFromFallback = 0
             debugLog("🎬 VODStore.loadMovies: starting unfiltered stream fetch — will tag by custom_properties.category_id when present, else fall back to first enabled category (\(enabledMovieCats.count) total)")
@@ -489,11 +516,20 @@ final class VODStore: ObservableObject {
                         )
                         accumulated.append(VODDisplayItem(movie: movie))
                     }
-                    // Throttle publishing to max 2x/second to reduce
-                    // SwiftUI redraws. Always publish on first batch
-                    // to hide the spinner.
+                    // v1.7.x: publish ONLY the first batch during the initial
+                    // cold-start load (reveal content + hide the spinner); the
+                    // full set is published once after the loop. Progressive
+                    // throttled publishing reassigned `movies` ~15x across the
+                    // ~30s load, and under tvOS 26.5 that foreground display-list
+                    // churn (while the user navigates the Live TV guide) is what
+                    // tripped the AttributeGraph "different namespace" crash. Two
+                    // publishes (first batch + final) instead of ~15 collapses
+                    // that crash window. The user is on Live TV during this load
+                    // and On Demand has its own spinner, so progressive fill is
+                    // not observed in practice.
+                    let allowProgressivePublish = false   // initial load: batch once
                     let now = Date()
-                    if isLoadingMovies || now.timeIntervalSince(lastPublishTime) >= publishInterval {
+                    if isLoadingMovies || (allowProgressivePublish && now.timeIntervalSince(lastPublishTime) >= publishInterval) {
                         movies = accumulated
                         lastPublishTime = now
                     }
@@ -644,7 +680,16 @@ final class VODStore: ObservableObject {
             var accumulated: [VODDisplayItem] = []
             var seenUUIDs: Set<String> = []
             var lastPublishTime = Date.distantPast
-            let publishInterval: TimeInterval = 0.5
+            // v1.7.x: widened from 0.5s to 2.0s. On a large library (e.g.
+            // 5000 movies over a ~30s paginated load) the old cadence
+            // republished the whole growing array up to 2x/sec on the main
+            // actor, each reassign forcing a full SwiftUI diff. Under the
+            // tvOS 26.5 SwiftUI runtime that cold-start churn (alongside the
+            // channel/EPG publishes) drives heavy display-list rebuilds that
+            // both produce the watchdog hangs AND raise the odds of the
+            // AttributeGraph "different namespace" abort. The user lands on
+            // Live TV during this load, so a chunkier VOD fill is invisible.
+            let publishInterval: TimeInterval = 2.0
             var taggedFromCategoryID = 0
             var taggedFromFallback = 0
             debugLog("📺 VODStore.loadSeries: starting unfiltered stream fetch. Tag by custom_properties.category_id when present, else fall back to first enabled category (\(enabledSeriesCats.count) total)")
@@ -685,8 +730,12 @@ final class VODStore: ObservableObject {
                         )
                         accumulated.append(VODDisplayItem(series: show))
                     }
+                    // v1.7.x: first-batch-only during the initial cold-start
+                    // load (same tvOS 26.5 display-list-churn crash mitigation as
+                    // loadMovies above); the full set publishes once after the loop.
+                    let allowProgressivePublish = false   // initial load: batch once
                     let now = Date()
-                    if isLoadingSeries || now.timeIntervalSince(lastPublishTime) >= publishInterval {
+                    if isLoadingSeries || (allowProgressivePublish && now.timeIntervalSince(lastPublishTime) >= publishInterval) {
                         series = accumulated
                         lastPublishTime = now
                     }
@@ -839,21 +888,23 @@ final class ChannelStore: ObservableObject {
     /// Scoped per server so switching playlists can't briefly reuse
     /// tint data learned from a different server that happens to
     /// share the same channel ids.
-    private static let cachedCategoriesKeyPrefix = "cachedChannelCategories.v1"
+    nonisolated private static let cachedCategoriesKeyPrefix = "cachedChannelCategories.v1"
 
     /// Snapshot of the last-known channel→category map. Written by
     /// `applyXMLTVCategories` after a fresh pass lands, read by
     /// `primeCategoriesFromCache(serverID:)` on the next cold load so
     /// the tint renders on the first frame instead of 5–10 s later.
-    private static func cachedCategoriesKey(for serverID: String) -> String {
+    // nonisolated so the persist can run inside a Task.detached off the main
+    // actor (UserDefaults is thread-safe). See applyXMLTVCategories.
+    nonisolated private static func cachedCategoriesKey(for serverID: String) -> String {
         "\(cachedCategoriesKeyPrefix).\(serverID)"
     }
 
-    private static func loadCachedCategories(for serverID: String) -> [String: String] {
+    nonisolated private static func loadCachedCategories(for serverID: String) -> [String: String] {
         UserDefaults.standard.dictionary(forKey: cachedCategoriesKey(for: serverID)) as? [String: String] ?? [:]
     }
 
-    private static func saveCachedCategories(_ map: [String: String], for serverID: String) {
+    nonisolated private static func saveCachedCategories(_ map: [String: String], for serverID: String) {
         UserDefaults.standard.set(map, forKey: cachedCategoriesKey(for: serverID))
     }
 
@@ -968,16 +1019,21 @@ final class ChannelStore: ObservableObject {
                 channels = updated
             }
         }
-        // Persist so the next app launch can prime the tint from
-        // cache on the first frame. Merging into the existing cache
-        // rather than replacing means a partial XMLTV pass (e.g.,
-        // parser errored halfway) doesn't wipe previously-known
-        // categories for channels it didn't cover.
-        var merged = Self.loadCachedCategories(for: serverID)
-        for (id, cat) in categoriesByChannelID {
-            merged[id] = cat
+        // Persist so the next app launch can prime the tint from cache on the
+        // first frame. Merging into the existing cache rather than replacing
+        // means a partial XMLTV pass doesn't wipe previously-known categories
+        // for channels it didn't cover.
+        // v1.7.x: done OFF the main actor. The synchronous plist
+        // read+serialize+write of the merged map was firing on the main thread
+        // on every category pass during the cold-start storm (2x at launch).
+        // UserDefaults is thread-safe and the cache is only read on the NEXT
+        // launch, so eventual consistency is fine.
+        let snapshot = categoriesByChannelID
+        Task.detached(priority: .utility) {
+            var merged = Self.loadCachedCategories(for: serverID)
+            for (id, cat) in snapshot { merged[id] = cat }
+            Self.saveCachedCategories(merged, for: serverID)
         }
-        Self.saveCachedCategories(merged, for: serverID)
     }
 
     /// Returns the URL AerioTV should pull XMLTV from for a
@@ -4554,6 +4610,17 @@ struct MainTabView: View {
             debugLog("🟢 [Orchestrator] BAILED: no servers, total elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
             return
         }
+        // v1.7.x: settle delay before the VOD phases. The tvOS 26.5 SwiftUI
+        // AttributeGraph "different namespace" crash fires when SELECT events
+        // flood the guide's display list WHILE VOD is publishing its @Published
+        // storm. Phase 2 (EPG) just finished, which dismisses the "Setting Up"
+        // cover and drops the user onto the freshly-interactive guide, so
+        // starting VOD immediately overlaps its churn with the user's first
+        // interaction. Holding VOD briefly lets the guide's display list settle
+        // (and any cold-start frustration-mashing subside) before VOD mutates
+        // @Published state again. VOD is rarely the first tab opened and On
+        // Demand shows its own spinner, so the delay is invisible in practice.
+        try? await Task.sleep(for: .seconds(3))
         debugLog("🟢 [Orchestrator] phase 3 BEGIN: VOD movies, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
         await vodStore.refreshMoviesAndWait(servers: allServers)
         debugLog("🟢 [Orchestrator] phase 3 done (movies), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count)")
@@ -4852,6 +4919,14 @@ struct MainTabView: View {
             // metadata and leaves the container rendering.
             debugLog("🎮 Menu pressed: mini player → stop playback")
             PlayerSession.shared.stop()
+            // Back-flow step 3: closing the mini drops to the full guide; keep
+            // focus on the channel that was playing (its NOW cell) instead of
+            // resetting to row 0. stop() preserves lastPlayedChannelID, which
+            // the .forceGuideFocus handler targets. Deferred so the teardown
+            // settles before the guide re-asserts focus.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+            }
         } else if isVODDetailPushed {
             // Pop the VOD detail view back to the browse list.
             // We must do this programmatically because .onExitCommand consumes

@@ -1,6 +1,11 @@
 #if canImport(Libmpv)
 import SwiftUI
-import AVFoundation
+// Xcode 26.5 / SDK 26.5 newly annotates AVSampleBufferDisplayLayer (a CALayer
+// subclass) as @MainActor, which would otherwise reject the long-standing
+// render-thread accesses to `.sampleBufferRenderer`. @preconcurrency restores
+// the pre-26.5 contract (the enqueue path is serialized and correct as-is)
+// by downgrading those isolation diagnostics to warnings.
+@preconcurrency import AVFoundation
 import AVKit
 import Combine
 import UIKit
@@ -79,8 +84,17 @@ enum MPVLibraryWarmup {
         guard !hasStarted else { return }
         hasStarted = true
 
+        // v1.7.x (tvOS 26.5): deferred 0.8s → 2.5s. The EAGL context
+        // creation inside doWarmUp() takes a process-wide GPU driver lock
+        // for ~1s; at 0.8s that lock landed on top of the channel-list first
+        // paint AND the cold-start EPG/category publishes, stalling the main
+        // thread (watchdog ~1.2s hang that coincided with the warmup-complete
+        // log). 2.5s lets first paint + the initial EPG publishes drain
+        // before the GPU allocation. First-tap warmth is still gated by
+        // waitUntilComplete(timeout:5.0), and the user cannot tap a channel
+        // within 2.5s of cold launch (the list is still mid-render).
         DispatchQueue.global(qos: .utility)
-            .asyncAfter(deadline: .now() + 0.8) {
+            .asyncAfter(deadline: .now() + 2.5) {
                 doWarmUp()
             }
     }
@@ -1688,6 +1702,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // in the log. Cumulative totals are kept alongside for
         // post-hoc correlation across an entire session.
         private var lastVideoReconfigAt: CFAbsoluteTime = 0
+        /// #37 (OTA): timestamp of the last MID-STREAM resolution change
+        /// (not the initial config). OTA broadcasts switch resolution at
+        /// commercial boundaries, which stalls the HDHomeRun feed for a
+        /// few seconds; without a grace window the stale-frame storm
+        /// watchdog mistakes that stall for a wedge and issues a `loadfile
+        /// replace` - the "stream stopping and restarting" + extended
+        /// black the reporter saw. Stamped only on a real change (the
+        /// previous size was already known), so same-resolution streams
+        /// are unaffected and genuine wedges on them still reload normally.
+        private var lastResolutionChangeAt: CFAbsoluteTime = 0
+        /// Grace after a resolution change during which the stale-frame
+        /// storm reload is suppressed, letting the stream finish the
+        /// switch on its own. GUESSED at 12s to cover the OTA switch plus
+        /// the proxy re-establishing; tune against a real OTA log.
+        private let resolutionChangeReloadGraceSec: CFTimeInterval = 12.0
         private var videoReconfigCount: Int64 = 0
         private var lastHwdecCurrentObserved: String = ""
 
@@ -3033,7 +3062,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                lastAppliedPause != true,
                hasReachedPlaybackRestartForStream {
                 let wallNow = CFAbsoluteTimeGetCurrent()
+                // #37: suppress the reload briefly after a real resolution
+                // change (OTA commercial boundary) so an expected switch
+                // stall is not mistaken for a wedge and force-restarted.
                 if wallNow - lastForcedBlackReloadAt >= blackFrameReloadCooldownSec,
+                   wallNow - lastResolutionChangeAt >= resolutionChangeReloadGraceSec,
                    let reloadURL = urls.first {
                     lastForcedBlackReloadAt = wallNow
                     let safeURL = DebugLogger.sanitize(reloadURL.absoluteString)
@@ -4978,6 +5011,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             mpv_get_property(mpv, "dheight", MPV_FORMAT_INT64, &dh)
                             if dw > 0 && dh > 0 &&
                                (Int(dw) != self.videoNativeWidth || Int(dh) != self.videoNativeHeight) {
+                                // #37: a change from a KNOWN size is a real
+                                // mid-stream resolution switch (vs initial config).
+                                if self.videoNativeWidth > 0 { self.lastResolutionChangeAt = CFAbsoluteTimeGetCurrent() }
                                 self.videoNativeWidth = Int(dw)
                                 self.videoNativeHeight = Int(dh)
                                 let curW = self.renderWidth
@@ -5133,6 +5169,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             mpv_get_property(mpv, "dheight", MPV_FORMAT_INT64, &dh)
             if dw <= 0 || dh <= 0 { dw = w; dh = h }
             if dw > 0, dh > 0, (Int(dw) != videoNativeWidth || Int(dh) != videoNativeHeight) {
+                // #37: stamp a real mid-stream resolution change (not the
+                // initial 0 -> size config) so the stale-frame storm
+                // watchdog grants the switch a grace window before reloading.
+                if videoNativeWidth > 0 { lastResolutionChangeAt = now }
                 videoNativeWidth = Int(dw)
                 videoNativeHeight = Int(dh)
                 let curW = renderWidth
