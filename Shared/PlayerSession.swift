@@ -278,10 +278,37 @@ final class PlayerSession: ObservableObject {
     /// channel is already playing — `add(...)` no-ops with
     /// `.alreadyPresent` which we treat as success from a
     /// "user clicked channel, they see playback happening" POV.
+    /// TEST (branch test/avplayer-hls-engine): non-nil presents the native
+    /// AVPlayer screen via HomeView's fullScreenCover. Set by the engine
+    /// router in begin() when a genuine HLS stream goes to AVPlayer.
+    @Published var nativeHLSItem: ChannelDisplayItem?
+    /// User-Agent captured alongside, for providers that filter requests.
+    var nativeHLSUserAgent: String?
+
     @discardableResult
     func begin(item: ChannelDisplayItem,
                server: ServerConnection?,
                isLive: Bool = true) -> Bool {
+        // TEST engine router (the UHF pattern: route, do not swap engines).
+        // Genuine HLS URLs (.m3u8, e.g. Xtream /live/.../id.m3u8) go to the
+        // native AVPlayer engine when the Developer toggle is on, which
+        // buys true HDR/Dolby Vision output, Atmos passthrough, and native
+        // AirPlay on those channels. Raw TS, MPEG-2, and everything else
+        // stays on the mpv pipeline. AVPlayer cannot play raw MPEG-TS over
+        // HTTP at all (CoreMedia -12939), so the classifier is the gate.
+        if PlaybackFeatureFlags.avPlayerForHLS,
+           isLive,
+           let url = item.streamURL ?? item.streamURLs.first,
+           classifyStreamURL(url) == .hls {
+            nativeHLSUserAgent = server?.effectiveUserAgent
+            nativeHLSItem = item
+            DebugLogger.shared.log(
+                "[AVP-HLS] engine router -> AVPlayer for channel id=\(item.id)",
+                category: "Playback", level: .info
+            )
+            return true
+        }
+
         let store = MultiviewStore.shared
 
         // Gate at the cap — `add(...)` will reject past `maxTiles` but
@@ -404,6 +431,14 @@ final class PlayerSession: ObservableObject {
 ///
 /// Naming matches the plan: key `"playback.unified"`.
 enum PlaybackFeatureFlags {
+    /// TEST (branch test/avplayer-hls-engine): when true, live streams
+    /// whose URL is genuine HLS (.m3u8) play through the native AVPlayer
+    /// engine instead of libmpv. Off by default; toggled in Settings >
+    /// Developer. mpv remains the engine for raw TS and all fallbacks.
+    static var avPlayerForHLS: Bool {
+        UserDefaults.standard.bool(forKey: "playback.avplayerHLS")
+    }
+
     /// `true` (default) while routing through the unified
     /// `PlayerSession.begin(...)` path; `false` keeps the legacy
     /// `NowPlayingManager.startPlaying` + `PlayerView` behaviour.

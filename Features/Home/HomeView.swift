@@ -4356,6 +4356,16 @@ struct MainTabView: View {
         .task(id: orchestratorKey) {
             await runChannelServerTaskBody()
         }
+        // TEST (branch test/avplayer-hls-engine): hosts the native AVPlayer
+        // screen when the engine router in PlayerSession.begin sends a
+        // genuine HLS stream to AVPlayer (Developer toggle gated). The mpv
+        // pipeline is untouched; dismissing returns to the guide.
+        .fullScreenCover(item: $playerSession.nativeHLSItem) { hlsItem in
+            NativeHLSPlayerScreen(
+                item: hlsItem,
+                userAgent: playerSession.nativeHLSUserAgent
+            )
+        }
         // DVR reconcile at tab-bar level so the DVR tab lights up as
         // soon as a Dispatcharr server reports a recording — even if
         // the user scheduled it from the web UI (no local row to

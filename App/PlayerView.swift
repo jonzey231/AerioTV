@@ -3259,3 +3259,94 @@ struct TVRemoteInputView: UIViewRepresentable {
 }
 #endif
 
+// MARK: - Native AVPlayer engine (TEST, branch test/avplayer-hls-engine)
+
+/// Full-screen native AVPlayer playback for genuine HLS streams, presented
+/// when the Developer "AVPlayer for HLS Streams" toggle routes a .m3u8 URL
+/// here instead of the mpv pipeline (see PlayerSession.begin). Uses
+/// AVPlayerViewController for the system transport/chrome: native HDR and
+/// Dolby Vision output, Atmos passthrough, AirPlay, and the standard
+/// scrubbing UI come along for free, which is the whole point of the test.
+/// Deliberately NOT integrated with the app's custom chrome, channel-flip,
+/// or multiview; this is an engine evaluation surface, not a replacement.
+struct NativeHLSPlayerScreen: View {
+    let item: ChannelDisplayItem
+    let userAgent: String?
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let player {
+                NativeAVPlayerController(player: player)
+                    .ignoresSafeArea()
+            }
+        }
+        #if os(tvOS)
+        .onExitCommand { dismiss() }
+        #else
+        .overlay(alignment: .topLeading) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(12)
+                    .background(Circle().fill(Color.black.opacity(0.55)))
+            }
+            .padding(.top, 24)
+            .padding(.leading, 16)
+        }
+        .statusBarHidden()
+        #endif
+        .onAppear {
+            AudioSessionRefCount.increment(caller: "native-hls")
+            IdleTimerRefCount.increment(caller: "native-hls")
+            guard let url = item.streamURL ?? item.streamURLs.first else { return }
+            var options: [String: Any] = [:]
+            if let userAgent, !userAgent.isEmpty {
+                options["AVURLAssetHTTPHeaderFieldsKey"] = ["User-Agent": userAgent]
+            }
+            let asset = AVURLAsset(url: url, options: options)
+            let avPlayer = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+            avPlayer.play()
+            player = avPlayer
+            NowPlayingManager.shared.lastPlayedChannelID = item.id
+            DebugLogger.shared.log(
+                "[AVP-HLS] native engine playing channel id=\(item.id)",
+                category: "Playback", level: .info
+            )
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+            AudioSessionRefCount.decrement(caller: "native-hls")
+            IdleTimerRefCount.decrement(caller: "native-hls")
+            DebugLogger.shared.log(
+                "[AVP-HLS] native engine closed",
+                category: "Playback", level: .info
+            )
+        }
+    }
+}
+
+/// Thin AVPlayerViewController wrapper. The system controller supplies the
+/// full native transport (and on tvOS, the swipe-down info panel).
+private struct NativeAVPlayerController: UIViewControllerRepresentable {
+    let player: AVPlayer
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = player
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        if controller.player !== player {
+            controller.player = player
+        }
+    }
+}
+
