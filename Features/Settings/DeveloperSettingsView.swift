@@ -201,8 +201,8 @@ struct DeveloperSettingsView: View {
                                 .font(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(avPlayerHLS
-                                 ? "On — .m3u8 channels use the native Apple player"
-                                 : "Off — all channels use the mpv engine")
+                                 ? "On: .m3u8 channels use the native Apple player"
+                                 : "Off: all channels use the mpv engine")
                                 .font(.labelSmall)
                                 .foregroundColor(avPlayerHLS ? .accentPrimary : .textTertiary)
                         }
@@ -604,8 +604,8 @@ struct DeveloperSettingsView: View {
                         iconColor: avPlayerHLS ? .accentPrimary : .textSecondary,
                         title: "AVPlayer for HLS Streams",
                         subtitle: avPlayerHLS
-                            ? "On — .m3u8 channels use the native Apple player"
-                            : "Off — all channels use the mpv engine",
+                            ? "On: .m3u8 channels use the native Apple player"
+                            : "Off: all channels use the mpv engine",
                         isOn: $avPlayerHLS
                     ) { _ in }
                 }
