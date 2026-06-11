@@ -462,6 +462,16 @@ struct VODDetailView: View {
             }
             .padding(16)
         }
+        // Android parity P2 (behavior only): tvOS scrolls by focus and the
+        // hero held no focusable, so once the user descended into the
+        // episode list the title/rating/poster band was unreachable (focus
+        // climbing back up stopped at the first header control ~500pt
+        // below the hero). A plain focus stop on the band gives D-pad Up a
+        // landing spot, and the focus engine scrolls the hero back into
+        // view natively. No action on select; it is a read-only stop.
+        #if os(tvOS)
+        .focusable()
+        #endif
     }
 
     // MARK: - Info
