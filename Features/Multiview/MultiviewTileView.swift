@@ -634,7 +634,8 @@ struct MultiviewTileView: View {
                 // MultiviewTileButtonStyle, so @Environment(\.isFocused)
                 // resolves per-tile, the same reliable context the center
                 // audio icon already uses. See TileFocusBorder.
-                TileFocusBorder(isRelocating: store.relocatingTileID == tile.id)
+                TileFocusBorder(tileID: tile.id,
+                                isRelocating: store.relocatingTileID == tile.id)
             }
             if let decodeErrorMessage {
                 decodeErrorOverlay(decodeErrorMessage)
@@ -1676,18 +1677,45 @@ struct MultiviewTileButtonStyle: ButtonStyle {
 /// borderless while the user is just watching, and suppressed on the
 /// relocating tile (which keeps its amber lift from the tile body).
 private struct TileFocusBorder: View {
+    let tileID: String
     let isRelocating: Bool
     @Environment(\.isFocused) private var isFocused
     @EnvironmentObject private var chromeState: MultiviewChromeState
+    @ObservedObject private var store = MultiviewStore.shared
     @AppStorage(multiviewTileCornersRoundedKey) private var cornersRounded: Bool = false
 
     var body: some View {
-        RoundedRectangle(cornerRadius: cornersRounded ? 12 : 0, style: .continuous)
-            .strokeBorder(ThemeManager.shared.accent, lineWidth: 5)
-            .opacity(isFocused && chromeState.focusIndicatorVisible && !isRelocating ? 1 : 0)
-            .allowsHitTesting(false)
-            .animation(.easeInOut(duration: 0.18), value: isFocused)
-            .animation(.easeInOut(duration: 0.25), value: chromeState.focusIndicatorVisible)
+        // TEST (branch test/avplayer-hls-engine): trace the VIDEO rect,
+        // not the tile frame. Spotlight and other non-16:9 panes
+        // letterbox the picture, and a border around the whole pane
+        // wraps black bars (user report). The tile's video view
+        // registers its real aspect when decode knows it (AVPlayer
+        // presentationSize); without an entry, assume 16:9, which is
+        // what live TV virtually always is.
+        GeometryReader { geo in
+            let aspect = store.tileVideoAspects[tileID] ?? (16.0 / 9.0)
+            let fitted = Self.fittedSize(aspect: aspect, in: geo.size)
+            RoundedRectangle(cornerRadius: cornersRounded ? 12 : 0, style: .continuous)
+                .strokeBorder(ThemeManager.shared.accent, lineWidth: 5)
+                .frame(width: fitted.width, height: fitted.height)
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+        }
+        .opacity(isFocused && chromeState.focusIndicatorVisible && !isRelocating ? 1 : 0)
+        .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.18), value: isFocused)
+        .animation(.easeInOut(duration: 0.25), value: chromeState.focusIndicatorVisible)
+    }
+
+    /// Aspect-fit: the largest rect of the given aspect that fits the
+    /// bounds, centered. Mirrors how both engines render video (fit).
+    static func fittedSize(aspect: CGFloat, in bounds: CGSize) -> CGSize {
+        guard bounds.width > 0, bounds.height > 0, aspect > 0 else { return bounds }
+        if bounds.width / bounds.height > aspect {
+            // Pane wider than the video: pillarbox left/right.
+            return CGSize(width: bounds.height * aspect, height: bounds.height)
+        }
+        // Pane taller than the video: letterbox top/bottom.
+        return CGSize(width: bounds.width, height: bounds.width / aspect)
     }
 }
 #endif

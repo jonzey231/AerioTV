@@ -2,6 +2,7 @@ import Foundation
 import Network
 import SwiftUI
 import AVFoundation
+import Combine
 
 // MARK: - TS-to-HLS remuxer (TEST, branch test/avplayer-hls-engine)
 
@@ -555,6 +556,9 @@ struct AVPlayerMultiviewTile: View {
     /// struct copies) makes startPlayer run from onChange on the FRESH
     /// struct, and the mute decision reads the store at that moment.
     @State private var readyLocalURL: URL?
+    /// KVO on the item's presentationSize; registers the tile's real
+    /// video aspect with the store so the focus border hugs the video.
+    @State private var sizeObservation: AnyCancellable?
 
     var body: some View {
         ZStack {
@@ -643,11 +647,20 @@ struct AVPlayerMultiviewTile: View {
             options["AVURLAssetHTTPHeaderFieldsKey"] = requestHeaders
         }
         let asset = AVURLAsset(url: url, options: options)
-        let avPlayer = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        let playerItem = AVPlayerItem(asset: asset)
+        let avPlayer = AVPlayer(playerItem: playerItem)
         // Live truth at this instant, never a captured snapshot.
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
         if !shouldPause { avPlayer.play() }
         player = avPlayer
+        // Report the real video aspect once decode knows it, so the
+        // focus border can trace the picture instead of the tile frame.
+        sizeObservation = playerItem.publisher(for: \.presentationSize)
+            .receive(on: DispatchQueue.main)
+            .sink { size in
+                guard size.width > 0, size.height > 0 else { return }
+                MultiviewStore.shared.registerVideoAspect(size.width / size.height, for: tileID)
+            }
     }
 
     private func stop() {
@@ -657,6 +670,8 @@ struct AVPlayerMultiviewTile: View {
         remuxer = nil
         statusText = nil
         readyLocalURL = nil
+        sizeObservation = nil
+        MultiviewStore.shared.unregisterVideoAspect(for: tileID)
     }
 }
 
