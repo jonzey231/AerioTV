@@ -620,9 +620,10 @@ struct AVPlayerMultiviewTile: View {
     private func start() {
         switch classifyStreamURL(streamURL) {
         case .hls:
-            var direct: [String: String] = [:]
-            if let ua = headers["User-Agent"] { direct["User-Agent"] = ua }
-            startPlayer(url: streamURL, requestHeaders: direct)
+            // Full headers, not just UA: server-side HLS upgrades hit the
+            // same Dispatcharr endpoints as the TS path and expect the
+            // same auth.
+            startPlayer(url: streamURL, requestHeaders: headers)
             debugLog("[AVP-MV] tile playing direct HLS channel=\(channelName)")
         default:
             statusText = "Preparing..."

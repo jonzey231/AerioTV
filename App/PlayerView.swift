@@ -3275,8 +3275,13 @@ struct NativeHLSPlayerScreen: View {
     /// When true, the stream is raw MPEG-TS: an on-device TSHLSRemuxer
     /// ingests it and AVPlayer plays the loopback playlist it serves.
     var useRemux = false
-    /// Ingest headers for the remuxer (Dispatcharr auth + UA).
+    /// Ingest headers for the remuxer (Dispatcharr auth + UA); also sent
+    /// on direct playback so the server's HLS endpoints see the same
+    /// auth the TS path sends.
     var ingestHeaders: [String: String] = [:]
+    /// Non-nil when the router upgraded the URL to the server's native
+    /// HLS output (?output_format=hls); played instead of item.streamURL.
+    var overrideURL: URL?
 
     @Environment(\.dismiss) private var dismiss
     @State private var player: AVPlayer?
@@ -3328,6 +3333,20 @@ struct NativeHLSPlayerScreen: View {
         .fullScreenCover(isPresented: $showRecordSheet) {
             recordSheet
         }
+        // Direct playback failure (e.g. a stale capability cache sent a
+        // server-side HLS request to a server that no longer answers it):
+        // fall back to mpv, same as the tile path. The per-session
+        // re-probe corrects the cache for next time.
+        .onReceive(NotificationCenter.default.publisher(
+            for: .AVPlayerItemFailedToPlayToEndTime)) { note in
+            guard let failed = note.object as? AVPlayerItem,
+                  failed === player?.currentItem else { return }
+            DebugLogger.shared.log(
+                "[AVP-HLS] native playback failed; falling back to mpv",
+                category: "Playback", level: .warning
+            )
+            fallbackToMPV()
+        }
         #if os(tvOS)
         // mpv parity: Menu means "minimize to the corner mini player
         // over the guide", not "kill the channel". AVPlayerViewController
@@ -3354,7 +3373,7 @@ struct NativeHLSPlayerScreen: View {
         .onAppear {
             AudioSessionRefCount.increment(caller: "native-hls")
             IdleTimerRefCount.increment(caller: "native-hls")
-            guard let url = item.streamURL ?? item.streamURLs.first else { return }
+            guard let url = overrideURL ?? item.streamURL ?? item.streamURLs.first else { return }
             NowPlayingManager.shared.lastPlayedChannelID = item.id
 
             if useRemux {
@@ -3381,11 +3400,13 @@ struct NativeHLSPlayerScreen: View {
                 remuxer = mux
                 mux.start()
             } else {
-                var headers: [String: String] = [:]
-                if let userAgent, !userAgent.isEmpty { headers["User-Agent"] = userAgent }
+                var headers = ingestHeaders
+                if headers.isEmpty, let userAgent, !userAgent.isEmpty {
+                    headers["User-Agent"] = userAgent
+                }
                 startPlayer(with: url, headers: headers)
                 DebugLogger.shared.log(
-                    "[AVP-HLS] native engine playing channel id=\(item.id)",
+                    "[AVP-HLS] native engine playing channel id=\(item.id)\(overrideURL != nil ? " (server-side HLS)" : "")",
                     category: "Playback", level: .info
                 )
             }

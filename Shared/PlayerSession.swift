@@ -292,6 +292,10 @@ final class PlayerSession: ObservableObject {
     /// Retained so the remux error path can fall back to mpv with the
     /// same server context.
     var nativeHLSServer: ServerConnection?
+    /// Non-nil when the router upgraded the channel URL to request the
+    /// server's native HLS output (?output_format=hls); the native
+    /// screen plays this instead of the item's raw-TS URL.
+    var nativeHLSOverrideURL: URL?
 
     /// TEST (branch test/avplayer-hls-engine): when the container holds
     /// exactly ONE tile and that tile chose the AVPlayer engine,
@@ -339,7 +343,41 @@ final class PlayerSession: ObservableObject {
         if !bypassNativeRouter, isLive,
            let url = item.streamURL ?? item.streamURLs.first {
             let format = classifyStreamURL(url)
-            let routesNative = (PlaybackFeatureFlags.avPlayerForHLS && format == .hls)
+            var headers: [String: String] = [:]
+            if let ua = server?.effectiveUserAgent, !ua.isEmpty {
+                headers["User-Agent"] = ua
+            }
+            if let server, server.type == .dispatcharrAPI {
+                let key = server.effectiveApiKey
+                if !key.isEmpty {
+                    headers["X-API-Key"] = key
+                    headers["Authorization"] = "ApiKey \(key)"
+                }
+            }
+
+            // Server-side HLS upgrade: Dispatcharr servers running the
+            // native HLS output answer ?output_format=hls with a 302 to
+            // a real playlist. The probe result is cached per host; on a
+            // capable server the raw-TS URL upgrades to an HLS request
+            // and rides the DIRECT AVPlayer path, no on-device remuxer.
+            // The probe primes lazily off whatever channel plays first,
+            // so the first-ever play on a server takes the fallback
+            // path below and later plays route directly.
+            var routeURL = url
+            var effectiveFormat = format
+            if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS {
+                HLSCapabilityStore.shared.probeIfNeeded(streamURL: url, headers: headers)
+                if HLSCapabilityStore.shared.isCapable(url) {
+                    routeURL = appendingHLSOutputFormat(url)
+                    effectiveFormat = .hls
+                    DebugLogger.shared.log(
+                        "[AVP-HLS] router: server-side HLS upgrade for channel id=\(item.id)",
+                        category: "Playback", level: .info
+                    )
+                }
+            }
+
+            let routesNative = (PlaybackFeatureFlags.avPlayerForHLS && effectiveFormat == .hls)
                 || (PlaybackFeatureFlags.avPlayerRemuxTS && format == .mpegTS)
             // Device-log bug: selecting a channel from the guide while
             // the MINI was up presented the native cover OVER the
@@ -354,32 +392,23 @@ final class PlayerSession: ObservableObject {
                 )
                 stop()
             }
-            if PlaybackFeatureFlags.avPlayerForHLS, format == .hls {
+            if PlaybackFeatureFlags.avPlayerForHLS, effectiveFormat == .hls {
                 nativeHLSUseRemux = false
-                nativeHLSHeaders = [:]
+                nativeHLSHeaders = headers
+                nativeHLSOverrideURL = routeURL != url ? routeURL : nil
                 nativeHLSUserAgent = server?.effectiveUserAgent
                 nativeHLSServer = server
                 nativeHLSItem = item
                 DebugLogger.shared.log(
-                    "[AVP-HLS] engine router -> AVPlayer (direct HLS) for channel id=\(item.id)",
+                    "[AVP-HLS] engine router -> AVPlayer (direct HLS\(routeURL != url ? ", server-side" : "")) for channel id=\(item.id)",
                     category: "Playback", level: .info
                 )
                 return true
             }
             if PlaybackFeatureFlags.avPlayerRemuxTS, format == .mpegTS {
-                var headers: [String: String] = [:]
-                if let ua = server?.effectiveUserAgent, !ua.isEmpty {
-                    headers["User-Agent"] = ua
-                }
-                if let server, server.type == .dispatcharrAPI {
-                    let key = server.effectiveApiKey
-                    if !key.isEmpty {
-                        headers["X-API-Key"] = key
-                        headers["Authorization"] = "ApiKey \(key)"
-                    }
-                }
                 nativeHLSUseRemux = true
                 nativeHLSHeaders = headers
+                nativeHLSOverrideURL = nil
                 nativeHLSUserAgent = server?.effectiveUserAgent
                 nativeHLSServer = server
                 nativeHLSItem = item

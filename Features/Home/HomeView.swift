@@ -4374,7 +4374,8 @@ struct MainTabView: View {
                 item: hlsItem,
                 userAgent: playerSession.nativeHLSUserAgent,
                 useRemux: playerSession.nativeHLSUseRemux,
-                ingestHeaders: playerSession.nativeHLSHeaders
+                ingestHeaders: playerSession.nativeHLSHeaders,
+                overrideURL: playerSession.nativeHLSOverrideURL
             )
         }
         // DVR reconcile at tab-bar level so the DVR tab lights up as

@@ -167,13 +167,39 @@ struct MultiviewTileView: View {
     /// TEST: per-tile engine routing, mirroring PlayerSession.begin's
     /// router. Live tiles only; VOD/DVR stay on mpv (proxy redirects,
     /// MKV, resume positions). Mixed-engine grids are expected.
+    /// Raw-TS tiles route to AVPlayer either via the on-device remuxer
+    /// (toggle 2) or, on servers with native HLS output, via the
+    /// server-side upgrade (toggle 1 + capability).
     private var usesAVPlayerEngine: Bool {
         guard !avEngineFallback, tile.kind == .live else { return false }
         switch classifyStreamURL(tile.streamURL) {
-        case .hls:    return PlaybackFeatureFlags.avPlayerForHLS
-        case .mpegTS: return PlaybackFeatureFlags.avPlayerRemuxTS
-        default:      return false
+        case .hls:
+            return PlaybackFeatureFlags.avPlayerForHLS
+        case .mpegTS:
+            if PlaybackFeatureFlags.avPlayerForHLS {
+                HLSCapabilityStore.shared.probeIfNeeded(
+                    streamURL: tile.streamURL, headers: tile.headers)
+                if HLSCapabilityStore.shared.isCapable(tile.streamURL) {
+                    return true
+                }
+            }
+            return PlaybackFeatureFlags.avPlayerRemuxTS
+        default:
+            return false
         }
+    }
+
+    /// TEST: the URL the AVPlayer tile actually plays. On a server with
+    /// native HLS output this is the raw-TS URL upgraded to request
+    /// server-side HLS, which the tile then plays DIRECT (its internal
+    /// classifier sees the hls query and skips the remuxer).
+    private var avPlayerTileURL: URL {
+        if classifyStreamURL(tile.streamURL) == .mpegTS,
+           PlaybackFeatureFlags.avPlayerForHLS,
+           HLSCapabilityStore.shared.isCapable(tile.streamURL) {
+            return appendingHLSOutputFormat(tile.streamURL)
+        }
+        return tile.streamURL
     }
 
     /// Computed: a tile should freeze its mpv decode when:
@@ -532,7 +558,7 @@ struct MultiviewTileView: View {
                 if usesAVPlayerEngine {
                     AVPlayerMultiviewTile(
                         tileID: tile.id,
-                        streamURL: tile.streamURL,
+                        streamURL: avPlayerTileURL,
                         headers: tile.headers,
                         shouldPause: shouldPause,
                         channelName: tile.item.name,

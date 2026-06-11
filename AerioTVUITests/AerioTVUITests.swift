@@ -234,7 +234,11 @@ final class AerioTVUITests: XCTestCase {
         app.launchArguments = ["-debugLoggingEnabled", "YES",
                                // Remux evaluation: route raw TS channels
                                // through the on-device TS-to-HLS remuxer.
-                               "-playback.avplayerRemuxTS", "YES"]
+                               "-playback.avplayerRemuxTS", "YES",
+                               // Also exercise the capability probe (the
+                               // sim's server has no native HLS, so this
+                               // validates the negative path + fallback).
+                               "-playback.avplayerHLS", "YES"]
         app.launch()
         pause(30)
         // A single Select can land on non-playable chrome; walk down into the
