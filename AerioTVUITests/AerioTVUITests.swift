@@ -294,4 +294,33 @@ final class AerioTVUITests: XCTestCase {
             NSLog("AERIO-UITEST: round \(round) complete; app alive after \(presses) presses")
         }
     }
+
+    /// Evidence probe: start remuxed playback in the native AVPlayer
+    /// screen, surface the transport, and dump the accessibility tree so
+    /// we can see EXACTLY which transportBarCustomMenuItems AVKit
+    /// rendered (the device report says only "Options" shows).
+    func testNativeTransportDump() throws {
+        let app = XCUIApplication()
+        let remote = XCUIRemote.shared
+        app.launchArguments = ["-debugLoggingEnabled", "YES",
+                               "-playback.avplayerRemuxTS", "YES"]
+        app.launch()
+        pause(30)
+        for _ in 0..<10 {
+            remote.press(.down)
+            pause(0.4)
+            remote.press(.select)
+            pause(3)
+        }
+        pause(10)   // remux spin-up + playback settle
+        try dump(app, to: "native_idle.txt")
+        remote.press(.down)   // surface transport / info
+        pause(3)
+        try dump(app, to: "native_transport.txt")
+        remote.press(.down)
+        pause(3)
+        try dump(app, to: "native_transport2.txt")
+        app.terminate()
+    }
+
 }

@@ -2565,6 +2565,17 @@ struct EPGGuideView: View {
                 // and @State mutations are accessed safely regardless
                 // of which thread NotificationCenter delivers on.
                 Task { @MainActor in
+                    // TEST (branch test/avplayer-hls-engine): the native
+                    // AVPlayer cover keeps PlayerSession.mode at .idle,
+                    // so without this guard the guide's focus restore
+                    // would steal focus from the presented cover (the
+                    // delayed resetFocus below lands AFTER the cover
+                    // presents), leaving the remote driving the guide
+                    // behind fullscreen video.
+                    guard PlayerSession.shared.nativeHLSItem == nil else {
+                        debugLog("[GuideFocus] forceGuideFocus suppressed (native player presented)")
+                        return
+                    }
                     // Resolve target: use the last-added multiview tile
                     // (keyed by addedAt, not array order which can change
                     // via drag-rearrange), then fall back to the single-

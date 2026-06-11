@@ -4971,6 +4971,16 @@ struct MainTabView: View {
     /// budget resets cleanly.
     private func handleMenuPress() {
         debugLog("🎮 [HMP] handleMenuPress | isActive=\(nowPlaying.isActive) isMinimized=\(nowPlaying.isMinimized) isVODDetailPushed=\(isVODDetailPushed) isSettingsSubviewPushed=\(isSettingsSubviewPushed) selectedTab=\(selectedTab.rawValue) playerSession.mode=\(playerSession.mode)")
+        // TEST (branch test/avplayer-hls-engine): if this handler runs
+        // while the native AVPlayer cover is presented, focus is stuck
+        // on the guide BEHIND the video (mode stays .idle on the native
+        // path, so no other branch knows playback is active). Menu must
+        // mean "close the player", not "navigate tabs behind it".
+        if playerSession.nativeHLSItem != nil {
+            debugLog("🎮 [HMP]   → branch: native player presented → dismissing it")
+            playerSession.nativeHLSItem = nil
+            return
+        }
         if nowPlaying.isActive && !nowPlaying.isMinimized {
             // GH #11: hand off to PlayerView's chrome cycle instead
             // of minimizing directly. PlayerView's `.onExitCommand`

@@ -3389,9 +3389,31 @@ struct NativeHLSPlayerScreen: View {
             options["AVURLAssetHTTPHeaderFieldsKey"] = headers
         }
         let asset = AVURLAsset(url: url, options: options)
-        let avPlayer = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        let playerItem = AVPlayerItem(asset: asset)
+        // Feed the native info panel real channel/program names instead
+        // of whatever stale Now Playing state it can scrape.
+        playerItem.externalMetadata = Self.nativeMetadata(
+            title: item.name,
+            subtitle: item.currentProgram
+        )
+        let avPlayer = AVPlayer(playerItem: playerItem)
         avPlayer.play()
         player = avPlayer
+    }
+
+    private static func nativeMetadata(title: String, subtitle: String?) -> [AVMetadataItem] {
+        func make(_ id: AVMetadataIdentifier, _ value: String) -> AVMetadataItem {
+            let entry = AVMutableMetadataItem()
+            entry.identifier = id
+            entry.value = value as NSString
+            entry.extendedLanguageTag = "und"
+            return entry
+        }
+        var entries = [make(.commonIdentifierTitle, title)]
+        if let subtitle, !subtitle.isEmpty {
+            entries.append(make(.iTunesMetadataTrackSubTitle, subtitle))
+        }
+        return entries
     }
 
     /// Remux failure path: dismiss this cover and restart the channel on
