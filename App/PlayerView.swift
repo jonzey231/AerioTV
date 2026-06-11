@@ -3282,13 +3282,20 @@ struct NativeHLSPlayerScreen: View {
     @State private var player: AVPlayer?
     @State private var remuxer: TSHLSRemuxer?
     @State private var statusText: String?
+    @State private var showRecordSheet = false
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             if let player {
-                NativeAVPlayerController(player: player)
-                    .ignoresSafeArea()
+                NativeAVPlayerController(
+                    player: player,
+                    canRecord: item.streamURL != nil,
+                    onRecord: { showRecordSheet = true },
+                    onAddStream: { switchToMPV(openAddStream: true) },
+                    onSwitchToMPV: { switchToMPV(openAddStream: false) }
+                )
+                .ignoresSafeArea()
             }
             if let statusText {
                 VStack(spacing: 12) {
@@ -3298,6 +3305,12 @@ struct NativeHLSPlayerScreen: View {
                         .foregroundColor(.white.opacity(0.85))
                 }
             }
+        }
+        // Record sheet over the native player. Same RecordProgramSheet
+        // the mpv chrome's Record pill presents, fed from the same
+        // ChannelDisplayItem EPG fields.
+        .fullScreenCover(isPresented: $showRecordSheet) {
+            recordSheet
         }
         #if os(tvOS)
         .onExitCommand { dismiss() }
@@ -3384,23 +3397,77 @@ struct NativeHLSPlayerScreen: View {
     /// Remux failure path: dismiss this cover and restart the channel on
     /// the mpv pipeline, bypassing the native router so it cannot loop.
     private func fallbackToMPV() {
+        switchToMPV(openAddStream: false)
+    }
+
+    /// Leave the native player and restart this channel on the mpv
+    /// pipeline (router bypassed). With `openAddStream`, additionally
+    /// asks the mounted multiview container to open its add-channel
+    /// sheet, which is what "Add Stream" means: multiview is an mpv
+    /// capability, so the engine switches first.
+    private func switchToMPV(openAddStream: Bool) {
         let session = PlayerSession.shared
         let server = session.nativeHLSServer
         session.nativeHLSItem = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
             session.begin(item: item, server: server, bypassNativeRouter: true)
+            if openAddStream {
+                // Give the container a beat to mount before asking it
+                // to present the sheet (same notification the iPad
+                // keyboard shortcut uses).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    NotificationCenter.default.post(
+                        name: .multiviewRequestOpenAddSheet, object: nil)
+                }
+            }
         }
+    }
+
+    /// Mirror of the mpv chrome's Record pill payload
+    /// (MultiviewContainerView.recordSheetContent): EPG-known program
+    /// name when available, generic live-recording fallback otherwise.
+    @ViewBuilder
+    private var recordSheet: some View {
+        let now = Date()
+        RecordProgramSheet(
+            programTitle: item.currentProgram ?? "\(item.name) live recording",
+            programDescription: item.currentProgramDescription ?? "",
+            channelID: item.id,
+            channelName: item.name,
+            scheduledStart: item.currentProgramStart ?? now,
+            scheduledEnd: (item.currentProgramEnd.flatMap { $0 > now ? $0 : nil })
+                ?? now.addingTimeInterval(3600),
+            isLive: true,
+            dispatcharrChannelID: item.dispatcharrChannelID,
+            streamURL: item.streamURL
+        )
     }
 }
 
 /// Thin AVPlayerViewController wrapper. The system controller supplies the
-/// full native transport (and on tvOS, the swipe-down info panel).
+/// full native transport (and on tvOS, the swipe-down info panel); the
+/// app's own actions ride the transport bar as custom items (tvOS 15+):
+/// Record, Add Stream, and an Options menu with aspect toggle and a
+/// switch-to-mpv escape hatch for A/B comparison.
 private struct NativeAVPlayerController: UIViewControllerRepresentable {
     let player: AVPlayer
+    var canRecord: Bool = false
+    var onRecord: (() -> Void)?
+    var onAddStream: (() -> Void)?
+    var onSwitchToMPV: (() -> Void)?
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
         controller.player = player
+        #if os(tvOS)
+        controller.transportBarCustomMenuItems = Self.transportItems(
+            for: controller,
+            canRecord: canRecord,
+            onRecord: onRecord,
+            onAddStream: onAddStream,
+            onSwitchToMPV: onSwitchToMPV
+        )
+        #endif
         return controller
     }
 
@@ -3409,5 +3476,62 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
             controller.player = player
         }
     }
+
+    #if os(tvOS)
+    /// Rebuilt after each aspect toggle so the menu state stays in
+    /// step with the controller's current videoGravity.
+    private static func transportItems(
+        for controller: AVPlayerViewController,
+        canRecord: Bool,
+        onRecord: (() -> Void)?,
+        onAddStream: (() -> Void)?,
+        onSwitchToMPV: (() -> Void)?
+    ) -> [UIMenuElement] {
+        var items: [UIMenuElement] = []
+
+        if canRecord, let onRecord {
+            items.append(UIAction(
+                title: "Record",
+                image: UIImage(systemName: "record.circle")
+            ) { _ in onRecord() })
+        }
+
+        if let onAddStream {
+            items.append(UIAction(
+                title: "Add Stream",
+                image: UIImage(systemName: "plus")
+            ) { _ in onAddStream() })
+        }
+
+        let isFill = controller.videoGravity == .resizeAspectFill
+        let aspectAction = UIAction(
+            title: isFill ? "Aspect: Fill" : "Aspect: Fit",
+            image: UIImage(systemName: "rectangle.arrowtriangle.2.outward"),
+            state: isFill ? .on : .off
+        ) { [weak controller] _ in
+            guard let controller else { return }
+            controller.videoGravity =
+                controller.videoGravity == .resizeAspectFill ? .resizeAspect : .resizeAspectFill
+            controller.transportBarCustomMenuItems = transportItems(
+                for: controller, canRecord: canRecord, onRecord: onRecord,
+                onAddStream: onAddStream, onSwitchToMPV: onSwitchToMPV)
+        }
+
+        var optionsChildren: [UIMenuElement] = [aspectAction]
+        if let onSwitchToMPV {
+            optionsChildren.append(UIAction(
+                title: "Switch to MPV Player",
+                image: UIImage(systemName: "arrow.triangle.2.circlepath")
+            ) { _ in onSwitchToMPV() })
+        }
+        items.append(UIMenu(
+            title: "Options",
+            image: UIImage(systemName: "slider.horizontal.3"),
+            children: optionsChildren
+        ))
+
+        return items
+    }
+    #endif
 }
 
