@@ -3290,6 +3290,13 @@ struct NativeHLSPlayerScreen: View {
     @State private var showRecordSheet = false
     @State private var showStreamInfo = false
     @State private var sleepWork: DispatchWorkItem?
+    #if os(iOS)
+    /// iOS overlay visibility, kept in step with the native chrome:
+    /// the same taps that toggle AVPlayerViewController's controls
+    /// toggle this, and the same ~5s auto-hide applies while playing.
+    @State private var overlayVisible = true
+    @State private var overlayHideWork: DispatchWorkItem?
+    #endif
 
     var body: some View {
         ZStack {
@@ -3302,7 +3309,12 @@ struct NativeHLSPlayerScreen: View {
                     onAddStream: { switchToMPV(openAddStream: true) },
                     onSwitchToMPV: { switchToMPV(openAddStream: false) },
                     onStreamInfo: { showStreamInfo.toggle() },
-                    onSleepTimer: { seconds in setSleepTimer(seconds) }
+                    onSleepTimer: { seconds in setSleepTimer(seconds) },
+                    onUserTap: {
+                        #if os(iOS)
+                        handleOverlayTap()
+                        #endif
+                    }
                 )
                 .ignoresSafeArea()
             }
@@ -3367,11 +3379,6 @@ struct NativeHLSPlayerScreen: View {
         // Record, Add Stream, Options (Stream Info, Sleep Timer,
         // Switch to MPV, Stop). Aspect is omitted: the native player
         // already has pinch zoom.
-        .overlay(alignment: .topLeading) {
-            iosOverlayCircle("chevron.down") { minimizeToMini() }
-                .padding(.top, 122)
-                .padding(.leading, 20)
-        }
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 26) {
                 if item.streamURL != nil {
@@ -3420,14 +3427,20 @@ struct NativeHLSPlayerScreen: View {
             .frame(height: 50)
             .background(.ultraThinMaterial, in: Capsule())
             .environment(\.colorScheme, .dark)
-            .padding(.top, 122)
+            .padding(.top, 68)
             .padding(.trailing, 20)
+            .opacity(overlayVisible ? 1 : 0)
+            .allowsHitTesting(overlayVisible)
+            .animation(.easeInOut(duration: 0.25), value: overlayVisible)
         }
         .statusBarHidden()
         #endif
         .onAppear {
             AudioSessionRefCount.increment(caller: "native-hls")
             IdleTimerRefCount.increment(caller: "native-hls")
+            #if os(iOS)
+            scheduleOverlayAutoHide()
+            #endif
             guard let url = overrideURL ?? item.streamURL ?? item.streamURLs.first else { return }
             NowPlayingManager.shared.lastPlayedChannelID = item.id
 
@@ -3473,6 +3486,10 @@ struct NativeHLSPlayerScreen: View {
             remuxer = nil
             sleepWork?.cancel()
             sleepWork = nil
+            #if os(iOS)
+            overlayHideWork?.cancel()
+            overlayHideWork = nil
+            #endif
             AudioSessionRefCount.decrement(caller: "native-hls")
             IdleTimerRefCount.decrement(caller: "native-hls")
             DebugLogger.shared.log(
@@ -3516,28 +3533,39 @@ struct NativeHLSPlayerScreen: View {
     }
 
     #if os(iOS)
-    /// A lone overlay action in the native chrome's vocabulary: the
-    /// same 50pt dark-material circle AVPlayerViewController uses for
-    /// its close and volume buttons.
-    @ViewBuilder
-    private func iosOverlayCircle(_ icon: String, tint: Color = .white,
-                                  action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            iosOverlayIcon(icon, tint: tint)
-                .frame(width: 50, height: 50)
-                .background(.ultraThinMaterial, in: Circle())
-                .environment(\.colorScheme, .dark)
-        }
-    }
-
-    /// Icon styling shared by the lone circles and the grouped capsule
-    /// (the capsule supplies its own material background, mirroring
-    /// the native PiP+AirPlay pill).
+    /// Icon styling for the grouped capsule (the capsule supplies its
+    /// own material background, mirroring the native PiP+AirPlay pill).
     @ViewBuilder
     private func iosOverlayIcon(_ icon: String, tint: Color = .white) -> some View {
         Image(systemName: icon)
             .font(.system(size: 19, weight: .medium))
             .foregroundColor(tint)
+    }
+
+    /// Mirrors the native chrome's show/hide rhythm: the same tap that
+    /// toggles AVPlayerViewController's controls toggles the capsule,
+    /// and the same ~5s auto-hide applies while playback is running
+    /// (the native player keeps its controls up while paused; so do we).
+    private func handleOverlayTap() {
+        if overlayVisible {
+            overlayVisible = false
+            overlayHideWork?.cancel()
+            overlayHideWork = nil
+        } else {
+            overlayVisible = true
+            scheduleOverlayAutoHide()
+        }
+    }
+
+    private func scheduleOverlayAutoHide() {
+        overlayHideWork?.cancel()
+        let work = DispatchWorkItem {
+            if player?.timeControlStatus == .playing {
+                overlayVisible = false
+            }
+        }
+        overlayHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
     }
     #endif
 
@@ -3640,6 +3668,14 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
     var onSwitchToMPV: (() -> Void)?
     var onStreamInfo: (() -> Void)?
     var onSleepTimer: ((TimeInterval?) -> Void)?
+    /// iOS: fired for every tap on the player surface WITHOUT consuming
+    /// it, so the SwiftUI overlay can mirror the native chrome's
+    /// tap-to-toggle visibility rhythm.
+    var onUserTap: (() -> Void)?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onUserTap: onUserTap)
+    }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
@@ -3654,6 +3690,14 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
             onStreamInfo: onStreamInfo,
             onSleepTimer: onSleepTimer
         )
+        #else
+        let tap = UITapGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.didTap)
+        )
+        tap.cancelsTouchesInView = false
+        tap.delegate = context.coordinator
+        controller.view.addGestureRecognizer(tap)
         #endif
         return controller
     }
@@ -3661,6 +3705,21 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
         if controller.player !== player {
             controller.player = player
+        }
+        context.coordinator.onUserTap = onUserTap
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onUserTap: (() -> Void)?
+        init(onUserTap: (() -> Void)?) { self.onUserTap = onUserTap }
+
+        @objc func didTap() { onUserTap?() }
+
+        // Observe alongside the player's own recognizers, never instead
+        // of them: the native chrome still gets every tap.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
         }
     }
 
