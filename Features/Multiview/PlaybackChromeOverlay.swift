@@ -725,8 +725,8 @@ struct PlaybackBottomChrome_tvOS: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 32)
             .padding(.vertical, 16)
-            .background(Capsule().fill(Color.black.opacity(0.45)))
-            .overlay(Capsule().stroke(Color.white.opacity(0.28), lineWidth: 1))
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
         }
         .buttonStyle(TVNoHighlightButtonStyle())
         .focused($focusedChrome, equals: .addStream)
@@ -749,8 +749,8 @@ struct PlaybackBottomChrome_tvOS: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 32)
             .padding(.vertical, 16)
-            .background(Capsule().fill(Color.black.opacity(0.45)))
-            .overlay(Capsule().stroke(Color.white.opacity(0.28), lineWidth: 1))
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
         }
         .buttonStyle(TVNoHighlightButtonStyle())
         .focused($focusedChrome, equals: .options)
@@ -780,8 +780,8 @@ struct PlaybackBottomChrome_tvOS: View {
             }
             .padding(.horizontal, 32)
             .padding(.vertical, 16)
-            .background(Capsule().fill(Color.black.opacity(0.45)))
-            .overlay(Capsule().stroke(Color.white.opacity(0.28), lineWidth: 1))
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
         }
         .buttonStyle(TVNoHighlightButtonStyle())
         .focused($focusedChrome, equals: .record)

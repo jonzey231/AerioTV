@@ -1751,7 +1751,10 @@ struct ChannelRow: View {
                 .padding(.leading, 8)
                 .padding(.trailing, 4)
             }
-            .buttonStyle(TVNoRingButtonStyle())
+            // The card already draws its own focused stroke (12pt, in the
+            // row background); the style's 14pt ring nested a SECOND
+            // rectangle around it. One highlight only.
+            .buttonStyle(TVNoRingButtonStyle(drawsFocusRing: false))
             .focused($mainFocused)
             .animation(.easeInOut(duration: 0.15), value: mainFocused)
 
