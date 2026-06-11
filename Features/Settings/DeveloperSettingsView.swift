@@ -105,14 +105,14 @@ struct DeveloperSettingsView: View {
         }
 
         // MARK: - Clear Confirmation
-        .confirmationDialog("Clear Log File?", isPresented: $showClearConfirmation, titleVisibility: .visible) {
-            Button("Clear Logs", role: .destructive) {
+        .confirmationDialog("Delete All Logs?", isPresented: $showClearConfirmation, titleVisibility: .visible) {
+            Button("Delete All Logs", role: .destructive) {
                 logger.clearLogs()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { refreshLogSize() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This permanently deletes the current aerio_debug_logs.txt. This cannot be undone.")
+            Text("This permanently deletes the current log file and any rotated archives. This cannot be undone.")
         }
         // MARK: - tvOS Share Sheet (LAN HTTP server + QR code)
         // Presented when the user taps Share Log File on tvOS. The server
@@ -401,7 +401,7 @@ struct DeveloperSettingsView: View {
                         Button(role: .destructive) {
                             showClearConfirmation = true
                         } label: {
-                            Label("Clear Log File", systemImage: "trash")
+                            Label("Delete All Logs", systemImage: "trash")
                                 .font(.bodyMedium)
                         }
                         .listRowBackground(Color.cardBackground)
@@ -590,7 +590,7 @@ struct DeveloperSettingsView: View {
 
                         TVSettingsActionRow(
                             icon: "trash",
-                            label: "Clear Log File",
+                            label: "Delete All Logs",
                             isDestructive: true,
                             action: { showClearConfirmation = true }
                         )

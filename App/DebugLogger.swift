@@ -136,9 +136,12 @@ final class DebugLogger: @unchecked Sendable {
 
     /// Human-readable file size of the current log.
     var logFileSizeString: String {
-        guard let url = logFileURL,
-              let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize else {
-            return "Empty"
+        // Total across the active log AND any rotated archives, so the
+        // size row reflects what "Delete All Logs" actually frees (the
+        // 10MB rotation parks an archive sibling that previously never
+        // showed up here and could never be deleted).
+        let size = Self.allLogFileURLs().reduce(0) { total, url in
+            total + ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
         switch size {
         case 0:                    return "Empty"
@@ -146,6 +149,16 @@ final class DebugLogger: @unchecked Sendable {
         case 1_024..<(1_024*1_024): return "\(size / 1_024) KB"
         default:                   return String(format: "%.1f MB", Double(size) / Double(1_024 * 1_024))
         }
+    }
+
+    /// Every log artifact in the caches directory: the active
+    /// aerio_debug_logs.txt plus any rotated archives. Prefix-matched so
+    /// a future rotation scheme (timestamped archives) is covered too.
+    private static func allLogFileURLs() -> [URL] {
+        guard let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first,
+              let contents = try? FileManager.default.contentsOfDirectory(
+                  at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return [] }
+        return contents.filter { $0.lastPathComponent.hasPrefix("aerio_debug_logs") }
     }
 
     private init() {}
@@ -241,10 +254,15 @@ final class DebugLogger: @unchecked Sendable {
         UserDefaults.standard.set(false, forKey: "debugLoggingEnabled")
     }
 
+    /// Delete EVERY log artifact: the active log plus all rotated
+    /// archives. The previous version removed only the active file, so
+    /// the 10MB rotation archive lingered forever with no way to delete
+    /// it from the app.
     func clearLogs() {
-        queue.async { [weak self] in
-            guard let url = self?.logFileURL else { return }
-            try? FileManager.default.removeItem(at: url)
+        queue.async {
+            for url in Self.allLogFileURLs() {
+                try? FileManager.default.removeItem(at: url)
+            }
         }
     }
 
