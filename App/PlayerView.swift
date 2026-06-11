@@ -3290,13 +3290,7 @@ struct NativeHLSPlayerScreen: View {
     @State private var showRecordSheet = false
     @State private var showStreamInfo = false
     @State private var sleepWork: DispatchWorkItem?
-    #if os(iOS)
-    /// iOS overlay visibility, kept in step with the native chrome:
-    /// the same taps that toggle AVPlayerViewController's controls
-    /// toggle this, and the same ~5s auto-hide applies while playing.
-    @State private var overlayVisible = true
-    @State private var overlayHideWork: DispatchWorkItem?
-    #endif
+
 
     var body: some View {
         ZStack {
@@ -3310,11 +3304,6 @@ struct NativeHLSPlayerScreen: View {
                     onSwitchToMPV: { switchToMPV(openAddStream: false) },
                     onStreamInfo: { showStreamInfo.toggle() },
                     onSleepTimer: { seconds in setSleepTimer(seconds) },
-                    onUserTap: {
-                        #if os(iOS)
-                        handleOverlayTap()
-                        #endif
-                    },
                     trailingAccessory: trailingAccessoryView
                 )
                 .ignoresSafeArea()
@@ -3385,9 +3374,6 @@ struct NativeHLSPlayerScreen: View {
         .onAppear {
             AudioSessionRefCount.increment(caller: "native-hls")
             IdleTimerRefCount.increment(caller: "native-hls")
-            #if os(iOS)
-            scheduleOverlayAutoHide()
-            #endif
             guard let url = overrideURL ?? item.streamURL ?? item.streamURLs.first else { return }
             NowPlayingManager.shared.lastPlayedChannelID = item.id
 
@@ -3433,10 +3419,6 @@ struct NativeHLSPlayerScreen: View {
             remuxer = nil
             sleepWork?.cancel()
             sleepWork = nil
-            #if os(iOS)
-            overlayHideWork?.cancel()
-            overlayHideWork = nil
-            #endif
             AudioSessionRefCount.decrement(caller: "native-hls")
             IdleTimerRefCount.decrement(caller: "native-hls")
             DebugLogger.shared.log(
@@ -3534,9 +3516,6 @@ struct NativeHLSPlayerScreen: View {
             .frame(height: 50)
             .background(.ultraThinMaterial, in: Capsule())
             .environment(\.colorScheme, .dark)
-            .opacity(overlayVisible ? 1 : 0)
-            .allowsHitTesting(overlayVisible)
-            .animation(.easeInOut(duration: 0.25), value: overlayVisible)
         )
         #else
         AnyView(EmptyView())
@@ -3551,32 +3530,6 @@ struct NativeHLSPlayerScreen: View {
         Image(systemName: icon)
             .font(.system(size: 19, weight: .medium))
             .foregroundColor(tint)
-    }
-
-    /// Mirrors the native chrome's show/hide rhythm: the same tap that
-    /// toggles AVPlayerViewController's controls toggles the capsule,
-    /// and the same ~5s auto-hide applies while playback is running
-    /// (the native player keeps its controls up while paused; so do we).
-    private func handleOverlayTap() {
-        if overlayVisible {
-            overlayVisible = false
-            overlayHideWork?.cancel()
-            overlayHideWork = nil
-        } else {
-            overlayVisible = true
-            scheduleOverlayAutoHide()
-        }
-    }
-
-    private func scheduleOverlayAutoHide() {
-        overlayHideWork?.cancel()
-        let work = DispatchWorkItem {
-            if player?.timeControlStatus == .playing {
-                overlayVisible = false
-            }
-        }
-        overlayHideWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
     }
     #endif
 
@@ -3679,17 +3632,13 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
     var onSwitchToMPV: (() -> Void)?
     var onStreamInfo: (() -> Void)?
     var onSleepTimer: ((TimeInterval?) -> Void)?
-    /// iOS: fired for every tap on the player surface WITHOUT consuming
-    /// it, so the SwiftUI overlay can mirror the native chrome's
-    /// tap-to-toggle visibility rhythm.
-    var onUserTap: (() -> Void)?
-    /// iOS: the app-action capsule, mounted inside the controller's
-    /// view and pinned to its layout-margin guides so it shares the
-    /// native chrome's margins in every orientation.
+    /// iOS: the app-action capsule, mounted INSIDE the native controls
+    /// hierarchy so it inherits the chrome's fade on Apple's own clock
+    /// (a parallel show/hide state machine drifted out of phase).
     var trailingAccessory: AnyView = AnyView(EmptyView())
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onUserTap: onUserTap)
+        Coordinator()
     }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
@@ -3706,35 +3655,14 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
             onSleepTimer: onSleepTimer
         )
         #else
-        let tap = UITapGestureRecognizer(
-            target: context.coordinator,
-            action: #selector(Coordinator.didTap)
-        )
-        tap.cancelsTouchesInView = false
-        tap.delegate = context.coordinator
-        controller.view.addGestureRecognizer(tap)
-
-        // Host the app-action capsule INSIDE the controller, pinned to
-        // the same guides the native chrome lays out against, so the
-        // trailing margin matches Apple's in portrait and landscape and
-        // the row sits exactly one control-row below the top chrome.
         let hosting = UIHostingController(rootView: trailingAccessory)
         hosting.view.backgroundColor = .clear
         hosting.view.translatesAutoresizingMaskIntoConstraints = false
         controller.addChild(hosting)
-        controller.view.addSubview(hosting.view)
-        hosting.didMove(toParent: controller)
-        // Same line as the native chrome: top matches the native row,
-        // leading clears the X + PiP/AirPlay cluster (which is identical
-        // in both orientations; the trailing volume control is not, it
-        // morphs between a circle and a slider).
-        NSLayoutConstraint.activate([
-            hosting.view.leadingAnchor.constraint(
-                equalTo: controller.view.layoutMarginsGuide.leadingAnchor, constant: 185),
-            hosting.view.topAnchor.constraint(
-                equalTo: controller.view.safeAreaLayoutGuide.topAnchor, constant: 8),
-        ])
         context.coordinator.hosting = hosting
+        // The native controls hierarchy does not exist yet; attach once
+        // it does so the capsule inherits the chrome's fade.
+        context.coordinator.attachAccessory(to: controller, attempts: 20)
         #endif
         return controller
     }
@@ -3743,30 +3671,70 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
         if controller.player !== player {
             controller.player = player
         }
-        context.coordinator.onUserTap = onUserTap
         #if os(iOS)
         context.coordinator.hosting?.rootView = trailingAccessory
-        if let hostingView = context.coordinator.hosting?.view {
-            controller.view.bringSubviewToFront(hostingView)
-        }
         #endif
     }
 
-    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
-        var onUserTap: (() -> Void)?
+    @MainActor
+    final class Coordinator: NSObject {
         #if os(iOS)
         var hosting: UIHostingController<AnyView>?
-        #endif
-        init(onUserTap: (() -> Void)?) { self.onUserTap = onUserTap }
 
-        @objc func didTap() { onUserTap?() }
+        /// Find the native playback-controls host by class-name lookup
+        /// (no private API calls, just the view tree) and mount the
+        /// capsule inside it: the capsule then fades exactly when the
+        /// chrome fades because it IS chrome. Retries briefly because
+        /// the controls hierarchy is built after the view appears;
+        /// falls back to the controller's view (always visible) if the
+        /// hierarchy ever changes shape in a future iOS.
+        func attachAccessory(to controller: AVPlayerViewController, attempts: Int) {
+            guard let hostingView = hosting?.view else { return }
+            guard hostingView.superview == nil else { return }
 
-        // Observe alongside the player's own recognizers, never instead
-        // of them: the native chrome still gets every tap.
-        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
-                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-            true
+            if let controlsHost = Self.findControlsHost(in: controller.view) {
+                mount(hostingView, in: controlsHost, controller: controller)
+                debugLog("[AVP-HLS] capsule mounted inside native controls (\(String(describing: type(of: controlsHost))))")
+            } else if attempts > 0 {
+                Task { @MainActor [weak self, weak controller] in
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    guard let self, let controller else { return }
+                    self.attachAccessory(to: controller, attempts: attempts - 1)
+                }
+            } else {
+                mount(hostingView, in: controller.view, controller: controller)
+                debugLog("[AVP-HLS] controls host not found; capsule mounted on controller view (always visible)")
+            }
         }
+
+        private func mount(_ view: UIView, in parent: UIView, controller: AVPlayerViewController) {
+            parent.addSubview(view)
+            hosting?.didMove(toParent: controller)
+            // Same line as the native chrome: top matches the native
+            // row, leading clears the X + PiP/AirPlay cluster (stable
+            // across orientations, unlike the morphing volume control).
+            NSLayoutConstraint.activate([
+                view.leadingAnchor.constraint(
+                    equalTo: controller.view.layoutMarginsGuide.leadingAnchor, constant: 185),
+                view.topAnchor.constraint(
+                    equalTo: controller.view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            ])
+        }
+
+        private static func findControlsHost(in root: UIView) -> UIView? {
+            var queue: [UIView] = [root]
+            while !queue.isEmpty {
+                let view = queue.removeFirst()
+                let name = String(describing: type(of: view))
+                if name.contains("PlaybackControls") || name.contains("Chromeless")
+                    || name.contains("ControlsView") {
+                    return view
+                }
+                queue.append(contentsOf: view.subviews)
+            }
+            return nil
+        }
+        #endif
     }
 
     #if os(tvOS)
