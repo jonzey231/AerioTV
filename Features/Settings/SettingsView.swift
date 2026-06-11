@@ -1039,9 +1039,12 @@ struct SettingsView: View {
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
                     tvAboutRow("Last Updated",    value: aboutUpdateDate)
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutRow("Developer Website", value: "github.com/jonzey231/AerioTV")
+                    // Android parity P2: these two were inert text rows the
+                    // user had to retype from a truncated label. Now focusable
+                    // rows that present a scannable QR (no browser on tvOS).
+                    tvAboutLinkRow("Developer Website", urlString: "https://github.com/jonzey231/AerioTV")
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    tvAboutRow("Report an Issue",   value: "github.com/jonzey231/AerioTV/issues")
+                    tvAboutLinkRow("Report an Issue",   urlString: "https://github.com/jonzey231/AerioTV/issues/new")
                 }
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Color.cardBackground))
@@ -1051,7 +1054,13 @@ struct SettingsView: View {
             .padding(.horizontal, 80)
             .padding(.vertical, 40)
         }
+        .sheet(item: $tvQRLink) { link in
+            TVQRLinkSheet(link: link)
+        }
     }
+
+    /// Non-nil presents the About-row QR sheet.
+    @State private var tvQRLink: TVQRLink?
 
     private func tvSettingsHeader(_ title: String) -> some View {
         Text(title)
@@ -1075,8 +1084,102 @@ struct SettingsView: View {
         .padding(.horizontal, 24)
         .padding(.vertical, 18)
     }
+
+    /// External-link About row: focusable, presents the URL as a QR the
+    /// user scans with a phone (Android parity P2; the row used to be
+    /// inert text the user had to retype).
+    private func tvAboutLinkRow(_ label: String, urlString: String) -> some View {
+        Button {
+            tvQRLink = TVQRLink(title: label, url: urlString)
+        } label: {
+            HStack {
+                Text(label)
+                    .font(.system(size: 26, weight: .medium))
+                    .foregroundColor(.textSecondary)
+                Spacer()
+                Image(systemName: "qrcode")
+                    .font(.system(size: 24))
+                    .foregroundColor(.textPrimary)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 18)
+        }
+        .buttonStyle(.plain)
+    }
     #endif
 }
+
+#if os(tvOS)
+/// A URL surfaced on tvOS as a scannable QR (Android parity:
+/// TvQrLinkDialog). Non-nil state presents the sheet.
+private struct TVQRLink: Identifiable {
+    let title: String
+    let url: String
+    var id: String { url }
+}
+
+/// Centered QR sheet: title, caption, QR on a white quiet-zone card, the
+/// URL as text fallback (typable when the code will not scan), Close.
+/// Keeps the screen awake while visible; the user is fumbling for a
+/// phone and aiming a camera at the TV.
+private struct TVQRLinkSheet: View {
+    let link: TVQRLink
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Text(link.title)
+                .font(.system(size: 38, weight: .bold))
+                .foregroundColor(.textPrimary)
+            Text("Scan with your phone to open this page.")
+                .font(.system(size: 26))
+                .foregroundColor(.textSecondary)
+                .multilineTextAlignment(.center)
+            if let qr = Self.qrCodeImage(from: link.url) {
+                Image(uiImage: qr)
+                    .interpolation(.none)
+                    .resizable()
+                    .frame(width: 280, height: 280)
+                    .padding(20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.white)
+                    )
+                    .padding(.vertical, 8)
+            }
+            Text(link.url)
+                .font(.system(size: 24, weight: .semibold, design: .monospaced))
+                .foregroundColor(.textPrimary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.elevatedBackground.opacity(0.55))
+                )
+            Button("Close") { dismiss() }
+                .padding(.top, 10)
+        }
+        .padding(48)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.appBackground.ignoresSafeArea())
+        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+
+    private static func qrCodeImage(from string: String) -> UIImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+        filter.setValue(Data(string.utf8), forKey: "inputMessage")
+        // Error correction H: a phone camera reads a TV screen at an
+        // angle through living-room lighting.
+        filter.setValue("H", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage else { return nil }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 12, y: 12))
+        let context = CIContext()
+        guard let cg = context.createCGImage(scaled, from: scaled.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+}
+#endif
 
 // MARK: - tvOS Settings Row Components
 

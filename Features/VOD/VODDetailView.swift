@@ -488,6 +488,7 @@ struct VODDetailView: View {
             // yet, so the buttons would be no-ops on Apple TV.
             #if os(tvOS)
             tvOSTrailerQR
+            tvOSTMDBQR
             #else
             externalLinks
             #endif
@@ -670,14 +671,17 @@ struct VODDetailView: View {
         )
     }
 
+    #endif
+
     /// Compose the TMDB page URL for a VOD item. `tmdbID` is the
     /// bare numeric ID Dispatcharr stores. TMDB uses different web
     /// paths for films vs. shows (`themoviedb.org/movie/<id>` and
     /// `themoviedb.org/tv/<id>`) even though both share a single
     /// numeric namespace, so we branch on `VODItemType`. Episodes
-    /// fall back to the show's path — there's no per-episode TMDB
+    /// fall back to the show's path; there's no per-episode TMDB
     /// page, and currently the episode rows aren't surfacing the
-    /// link anyway.
+    /// link anyway. Cross-platform: iOS uses it for the Link pill,
+    /// tvOS for the View on TMDB QR.
     private func tmdbURL(from id: String, type: VODItemType) -> URL? {
         let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -689,7 +693,6 @@ struct VODDetailView: View {
         }()
         return URL(string: "https://www.themoviedb.org/\(pathSegment)/\(trimmed)")
     }
-    #endif
 
     /// Build a YouTube watch URL from whatever shape Dispatcharr stores
     /// `youtube_trailer` in. Most providers send just the 11-char video
@@ -738,6 +741,43 @@ struct VODDetailView: View {
                     }
                     .foregroundStyle(Color.accentPrimary)
                     Text("Scan with your phone to watch the trailer on YouTube.")
+                        .font(.bodyMedium)
+                        .foregroundColor(.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    /// "View on TMDB" as a scannable QR (Android parity P2): the iOS
+    /// phone build shows a tappable Link pill, but tvOS compiled the whole
+    /// externalLinks row out, silently dropping the TMDB link on TV. Same
+    /// card styling as the trailer QR above.
+    @ViewBuilder
+    private var tvOSTMDBQR: some View {
+        let rawID = fullMovie?.tmdbID ?? fullSeries?.tmdbID
+            ?? item.movie?.tmdbID ?? item.series?.tmdbID ?? ""
+        if !rawID.isEmpty,
+           let url = tmdbURL(from: rawID, type: item.type),
+           let qr = Self.qrCodeImage(from: url.absoluteString) {
+            HStack(alignment: .center, spacing: 24) {
+                Image(uiImage: qr)
+                    .interpolation(.none)
+                    .resizable()
+                    .frame(width: 150, height: 150)
+                    .padding(14)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.white)
+                    )
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "info.circle.fill")
+                        Text("View on TMDB").font(.headlineSmall)
+                    }
+                    .foregroundStyle(Color.accentPrimary)
+                    Text("Scan with your phone to view this title on TMDB.")
                         .font(.bodyMedium)
                         .foregroundColor(.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
