@@ -3512,8 +3512,8 @@ struct NativeHLSPlayerScreen: View {
                     iosOverlayIcon("slider.horizontal.3")
                 }
             }
-            .padding(.horizontal, 18)
-            .frame(height: 50)
+            .padding(.horizontal, 16)
+            .frame(height: 46)
             // Material alone goes light over bright content; the native
             // pills hold a dark tone everywhere, so blur over a dark
             // underlay to match.
@@ -3532,7 +3532,7 @@ struct NativeHLSPlayerScreen: View {
     @ViewBuilder
     private func iosOverlayIcon(_ icon: String, tint: Color = .white) -> some View {
         Image(systemName: icon)
-            .font(.system(size: 19, weight: .medium))
+            .font(.system(size: 18, weight: .medium))
             .foregroundColor(tint)
     }
     #endif
@@ -3774,7 +3774,7 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
         /// measured from device screenshots; portrait tucks the row
         /// into the safe area band, landscape floats it lower.
         private static func fallbackCenterOffset(for traits: UITraitCollection) -> CGFloat {
-            traits.verticalSizeClass == .compact ? 44 : 23
+            traits.verticalSizeClass == .compact ? 44 : 20
         }
 
         /// The Glass controls build (and sometimes rebuild) after
