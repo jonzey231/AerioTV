@@ -3355,18 +3355,60 @@ struct NativeHLSPlayerScreen: View {
         // the mpv chrome cycle.
         .onExitCommand { minimizeToMini() }
         #else
+        // iOS parity with the tvOS transport items: AVPlayerViewController
+        // has no transportBarCustomMenuItems on iOS, so the app actions
+        // ride a floating overlay. Leading: minimize (chevron, mpv
+        // parity) and close. Trailing: Record, Add Stream, and an
+        // Options menu (Stream Info, Sleep Timer, Switch to MPV; aspect
+        // is omitted because iOS AVPlayerViewController already has the
+        // native pinch zoom gesture).
         .overlay(alignment: .topLeading) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(12)
-                    .background(Circle().fill(Color.black.opacity(0.55)))
+            HStack(spacing: 12) {
+                iosOverlayButton("chevron.down") { minimizeToMini() }
+                iosOverlayButton("xmark") { dismiss() }
             }
             .padding(.top, 24)
             .padding(.leading, 16)
+        }
+        .overlay(alignment: .topTrailing) {
+            HStack(spacing: 12) {
+                if item.streamURL != nil {
+                    iosOverlayButton("record.circle", tint: .red) {
+                        showRecordSheet = true
+                    }
+                }
+                iosOverlayButton("plus") { switchToMPV(openAddStream: true) }
+                Menu {
+                    Button {
+                        showStreamInfo.toggle()
+                    } label: {
+                        Label("Stream Info", systemImage: "info.circle")
+                    }
+                    Menu {
+                        ForEach([30, 60, 90, 120], id: \.self) { minutes in
+                            Button("\(minutes) minutes") {
+                                setSleepTimer(TimeInterval(minutes * 60))
+                            }
+                        }
+                        Button("Off", role: .destructive) { setSleepTimer(nil) }
+                    } label: {
+                        Label("Sleep Timer", systemImage: "moon.zzz")
+                    }
+                    Button {
+                        switchToMPV(openAddStream: false)
+                    } label: {
+                        Label("Switch to MPV Player", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(12)
+                        .background(Circle().fill(Color.black.opacity(0.55)))
+                }
+            }
+            .padding(.top, 24)
+            .padding(.trailing, 16)
         }
         .statusBarHidden()
         #endif
@@ -3459,6 +3501,22 @@ struct NativeHLSPlayerScreen: View {
         }
         return entries
     }
+
+    #if os(iOS)
+    /// One floating overlay control on the iOS native player, matching
+    /// the X button's existing visual language.
+    @ViewBuilder
+    private func iosOverlayButton(_ icon: String, tint: Color = .white,
+                                  action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(tint)
+                .padding(12)
+                .background(Circle().fill(Color.black.opacity(0.55)))
+        }
+    }
+    #endif
 
     /// Remux failure path: dismiss this cover and restart the channel on
     /// the mpv pipeline, bypassing the native router so it cannot loop.
