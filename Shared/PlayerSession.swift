@@ -293,6 +293,35 @@ final class PlayerSession: ObservableObject {
     /// same server context.
     var nativeHLSServer: ServerConnection?
 
+    /// TEST (branch test/avplayer-hls-engine): when the container holds
+    /// exactly ONE tile and that tile chose the AVPlayer engine,
+    /// fullscreen means the NATIVE player screen with system chrome
+    /// (user direction: never show the custom chrome for AVPlayer
+    /// playback at N=1). Called from NowPlayingManager.expand(); tears
+    /// down the container and re-routes through begin(), so the stream
+    /// restarts across the handoff. Returns false when the situation
+    /// does not apply (mpv tile, N >= 2, no tile), in which case the
+    /// caller expands the container as usual.
+    @discardableResult
+    func promoteSoleAVPlayerTileToNativeScreen() -> Bool {
+        let store = MultiviewStore.shared
+        guard mode == .multiview,
+              store.tiles.count == 1,
+              let tile = store.tiles.first,
+              store.tileEngines[tile.id] == "AVPlayer" else { return false }
+        let item = tile.item
+        let server = nativeHLSServer
+        DebugLogger.shared.log(
+            "[AVP-HLS] mini expand -> native screen (sole AVPlayer tile)",
+            category: "Playback", level: .info
+        )
+        stop()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.begin(item: item, server: server)
+        }
+        return true
+    }
+
     @discardableResult
     func begin(item: ChannelDisplayItem,
                server: ServerConnection?,

@@ -2935,6 +2935,15 @@ final class NowPlayingManager: ObservableObject {
 
     func expand() {
         debugLog("🎮 NowPlaying.expand: \(playingItem?.name ?? "nil")")
+        // TEST (branch test/avplayer-hls-engine): when the sole tile is
+        // AVPlayer-backed, "fullscreen" means the NATIVE player screen
+        // with system chrome, never the container with custom chrome
+        // (user direction: native controls are the only controls when
+        // AVPlayer is in use). The promotion tears down the container
+        // and routes through PlayerSession.begin, so this expand no-ops.
+        if PlayerSession.shared.promoteSoleAVPlayerTileToNativeScreen() {
+            return
+        }
         isMinimized = false
     }
 

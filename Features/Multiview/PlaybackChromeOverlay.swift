@@ -678,31 +678,66 @@ struct PlaybackBottomChrome_tvOS: View {
             PlaybackLiveProgressBand(store: store)
                 .padding(.horizontal, 80)
 
-            HStack(spacing: 20) {
-                // Render Options first (leftmost) so D-pad-right
-                // from it lands on `+`. User mental model:
-                // "[adjust this stream] | [record it] | [add another stream]".
-                optionsButton
-                if canRecordCurrentProgram {
-                    recordButton
-                }
-                addButton
-
-                // TEST (branch test/avplayer-hls-engine): engine badge.
-                // The custom chrome renders for BOTH engines, so without
-                // this a tester cannot tell whether the tile under it is
-                // AVPlayer or mpv. Non-focusable, informational.
+            // TEST (branch test/avplayer-hls-engine): the controls
+            // mirror the native AVPlayerViewController transport
+            // (frosted circular tool cells, bottom-RIGHT, label shown
+            // under the focused cell) so the custom chrome and the
+            // system player read as ONE design across surfaces (user
+            // direction: no differing control styles between screens).
+            HStack(alignment: .top, spacing: 18) {
+                // Engine badge (evaluation aid), bottom-left of the
+                // tool row. Non-focusable, informational.
                 if let audioID = store.audioTileID,
                    let engine = store.tileEngines[audioID] {
                     Text(engine)
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 12)
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
                         .background(.ultraThinMaterial, in: Capsule())
                         .focusable(false)
                 }
+
+                Spacer()
+
+                // Same ordering as the native transport custom items:
+                // Record, Add Stream, then Options rightmost.
+                if canRecordCurrentProgram {
+                    nativeToolButton(
+                        .record,
+                        icon: "record.circle",
+                        title: "Record",
+                        iconColor: .red,
+                        a11yLabel: "Record current program",
+                        a11yHint: "Schedule a recording of what's currently airing on this channel"
+                    ) {
+                        chromeState.reportInteraction()
+                        showRecordSheet = true
+                    }
+                }
+                nativeToolButton(
+                    .addStream,
+                    icon: "plus",
+                    title: "Add Stream",
+                    a11yLabel: "Add stream",
+                    a11yHint: "Pick another channel to watch alongside this one"
+                ) {
+                    chromeState.reportInteraction()
+                    showAddSheet = true
+                }
+                nativeToolButton(
+                    .options,
+                    icon: "slider.horizontal.3",
+                    title: "Options",
+                    a11yLabel: "Options",
+                    a11yHint: "Change audio track, subtitles, sleep timer, or stream info"
+                ) {
+                    chromeState.reportInteraction()
+                    debugLog("[MV-Cmd] Options pill pressed → showTVOptions=true | audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) audioStore=\(store.audioProgressStore == nil ? "nil" : "ok")")
+                    showTVOptions = true
+                }
             }
+            .padding(.horizontal, 80)
         }
         .padding(.vertical, 24)
         .frame(maxWidth: .infinity)
@@ -726,82 +761,53 @@ struct PlaybackBottomChrome_tvOS: View {
         .focusSection()
     }
 
-    private var addButton: some View {
-        Button {
-            chromeState.reportInteraction()
-            showAddSheet = true
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "plus")
-                    .font(.system(size: 26, weight: .semibold))
-                Text("Add Stream")
-                    .font(.system(size: 24, weight: .semibold))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 32)
-            .padding(.vertical, 16)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
-        }
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .focused($focusedChrome, equals: .addStream)
-        .accessibilityLabel("Add stream")
-        .accessibilityHint("Pick another channel to watch alongside this one")
-    }
+    /// One native-style tool cell: frosted circle, icon-only at rest;
+    /// the focused cell turns white with a dark icon and shows its
+    /// title underneath, exactly the AVPlayerViewController transport
+    /// behavior. The fixed-height label slot keeps the circles from
+    /// jumping when focus moves.
+    @ViewBuilder
+    private func nativeToolButton(
+        _ target: MultiviewContainerView.ChromeFocusTarget,
+        icon: String,
+        title: String,
+        iconColor: Color = .white,
+        a11yLabel: String,
+        a11yHint: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        let isFocused = focusedChrome == target
+        Button(action: action) {
+            VStack(spacing: 8) {
+                ZStack {
+                    Circle()
+                        .fill(.ultraThinMaterial)
+                        .opacity(isFocused ? 0 : 1)
+                    Circle()
+                        .fill(Color.white)
+                        .opacity(isFocused ? 1 : 0)
+                    Image(systemName: icon)
+                        .font(.system(size: 26, weight: .semibold))
+                        .foregroundStyle(
+                            iconColor == .red ? Color.red
+                                : (isFocused ? Color.black : Color.white)
+                        )
+                }
+                .frame(width: 68, height: 68)
+                .scaleEffect(isFocused ? 1.12 : 1.0)
+                .animation(.easeOut(duration: 0.15), value: isFocused)
 
-    private var optionsButton: some View {
-        Button {
-            chromeState.reportInteraction()
-            debugLog("[MV-Cmd] Options pill pressed → showTVOptions=true | audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) audioStore=\(store.audioProgressStore == nil ? "nil" : "ok")")
-            showTVOptions = true
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 24, weight: .semibold))
-                Text("Options")
-                    .font(.system(size: 24, weight: .semibold))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 32)
-            .padding(.vertical, 16)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
-        }
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .focused($focusedChrome, equals: .options)
-        .accessibilityLabel("Options")
-        .accessibilityHint("Change audio track, subtitles, sleep timer, or stream info")
-    }
-
-    /// Record pill — presents `RecordProgramSheet` for the audio
-    /// tile's currently-playing program. Saves the user a trip
-    /// back to the guide + long-press when they're already watching
-    /// something they want to record. Shown only when the audio
-    /// tile has EPG data (`canRecordCurrentProgram`). Red record
-    /// dot icon reads as the universal recording vocabulary; pill
-    /// style matches Options / Add Stream.
-    private var recordButton: some View {
-        Button {
-            chromeState.reportInteraction()
-            showRecordSheet = true
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "record.circle")
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundStyle(Color.red)
-                Text("Record")
-                    .font(.system(size: 24, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 20, weight: .medium))
                     .foregroundStyle(.white)
+                    .opacity(isFocused ? 1 : 0)
+                    .frame(height: 24)
             }
-            .padding(.horizontal, 32)
-            .padding(.vertical, 16)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .focused($focusedChrome, equals: .record)
-        .accessibilityLabel("Record current program")
-        .accessibilityHint("Schedule a recording of what's currently airing on this channel")
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
+        .focused($focusedChrome, equals: target)
+        .accessibilityLabel(a11yLabel)
+        .accessibilityHint(a11yHint)
     }
 }
 
