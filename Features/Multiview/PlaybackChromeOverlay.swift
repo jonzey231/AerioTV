@@ -691,6 +691,20 @@ struct PlaybackBottomChrome_tvOS: View {
         }
         .padding(.vertical, 24)
         .frame(maxWidth: .infinity)
+        // Bottom scrim. The chrome floats over whatever the video
+        // shows; a busy bright strip (sports tickers) used to swallow
+        // the idle pills entirely (the Android build grounds its
+        // controls on a scrim, which is why its buttons read better).
+        // Clear at the top so the video still shines through above
+        // the progress band.
+        .background(
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.45), .black.opacity(0.7)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .padding(.top, -30)
+        )
         // `.focusSection()` on the pill row's parent registers
         // this view as its own focus anchor so the engine routes
         // D-pad-down from the tile above cleanly into here.
@@ -711,8 +725,8 @@ struct PlaybackBottomChrome_tvOS: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 32)
             .padding(.vertical, 16)
-            .background(Capsule().fill(Color.white.opacity(0.10)))
-            .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
+            .background(Capsule().fill(Color.black.opacity(0.45)))
+            .overlay(Capsule().stroke(Color.white.opacity(0.28), lineWidth: 1))
         }
         .buttonStyle(TVNoHighlightButtonStyle())
         .focused($focusedChrome, equals: .addStream)
@@ -735,8 +749,8 @@ struct PlaybackBottomChrome_tvOS: View {
             .foregroundStyle(.white)
             .padding(.horizontal, 32)
             .padding(.vertical, 16)
-            .background(Capsule().fill(Color.white.opacity(0.10)))
-            .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
+            .background(Capsule().fill(Color.black.opacity(0.45)))
+            .overlay(Capsule().stroke(Color.white.opacity(0.28), lineWidth: 1))
         }
         .buttonStyle(TVNoHighlightButtonStyle())
         .focused($focusedChrome, equals: .options)
@@ -766,8 +780,8 @@ struct PlaybackBottomChrome_tvOS: View {
             }
             .padding(.horizontal, 32)
             .padding(.vertical, 16)
-            .background(Capsule().fill(Color.white.opacity(0.10)))
-            .overlay(Capsule().stroke(Color.white.opacity(0.18), lineWidth: 1))
+            .background(Capsule().fill(Color.black.opacity(0.45)))
+            .overlay(Capsule().stroke(Color.white.opacity(0.28), lineWidth: 1))
         }
         .buttonStyle(TVNoHighlightButtonStyle())
         .focused($focusedChrome, equals: .record)
