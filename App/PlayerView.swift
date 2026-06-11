@@ -3283,6 +3283,8 @@ struct NativeHLSPlayerScreen: View {
     @State private var remuxer: TSHLSRemuxer?
     @State private var statusText: String?
     @State private var showRecordSheet = false
+    @State private var showStreamInfo = false
+    @State private var sleepWork: DispatchWorkItem?
 
     var body: some View {
         ZStack {
@@ -3293,7 +3295,9 @@ struct NativeHLSPlayerScreen: View {
                     canRecord: item.streamURL != nil,
                     onRecord: { showRecordSheet = true },
                     onAddStream: { switchToMPV(openAddStream: true) },
-                    onSwitchToMPV: { switchToMPV(openAddStream: false) }
+                    onSwitchToMPV: { switchToMPV(openAddStream: false) },
+                    onStreamInfo: { showStreamInfo.toggle() },
+                    onSleepTimer: { seconds in setSleepTimer(seconds) }
                 )
                 .ignoresSafeArea()
             }
@@ -3305,6 +3309,18 @@ struct NativeHLSPlayerScreen: View {
                         .foregroundColor(.white.opacity(0.85))
                 }
             }
+            if showStreamInfo, let player {
+                NativeStreamInfoCard(
+                    player: player,
+                    channelName: item.name,
+                    program: item.currentProgram,
+                    engineNote: useRemux ? "AVPlayer (remuxed TS)" : "AVPlayer (direct HLS)"
+                )
+                .allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity,
+                       alignment: .topLeading)
+                .padding(60)
+            }
         }
         // Record sheet over the native player. Same RecordProgramSheet
         // the mpv chrome's Record pill presents, fed from the same
@@ -3313,7 +3329,12 @@ struct NativeHLSPlayerScreen: View {
             recordSheet
         }
         #if os(tvOS)
-        .onExitCommand { dismiss() }
+        // mpv parity: Menu means "minimize to the corner mini player
+        // over the guide", not "kill the channel". AVPlayerViewController
+        // consumes Menu while its transport is visible (hides it); the
+        // press only bubbles here once the transport is hidden, matching
+        // the mpv chrome cycle.
+        .onExitCommand { minimizeToMini() }
         #else
         .overlay(alignment: .topLeading) {
             Button {
@@ -3374,6 +3395,8 @@ struct NativeHLSPlayerScreen: View {
             player = nil
             remuxer?.stop()
             remuxer = nil
+            sleepWork?.cancel()
+            sleepWork = nil
             AudioSessionRefCount.decrement(caller: "native-hls")
             IdleTimerRefCount.decrement(caller: "native-hls")
             DebugLogger.shared.log(
@@ -3420,6 +3443,42 @@ struct NativeHLSPlayerScreen: View {
     /// the mpv pipeline, bypassing the native router so it cannot loop.
     private func fallbackToMPV() {
         switchToMPV(openAddStream: false)
+    }
+
+    /// Menu/Back, mpv parity: continue this channel in the corner mini
+    /// player over the guide. The unified container mounts (its per-tile
+    /// router keeps the tile on AVPlayer when eligible) and immediately
+    /// minimizes. The stream restarts across the handoff, which is the
+    /// cost of trading system chrome for the container; acceptable in
+    /// the corner mini.
+    private func minimizeToMini() {
+        let session = PlayerSession.shared
+        let server = session.nativeHLSServer
+        session.nativeHLSItem = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            session.begin(item: item, server: server, bypassNativeRouter: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                NowPlayingManager.shared.minimize()
+            }
+        }
+    }
+
+    /// Native Options parity with the mpv panel's sleep timer: nil
+    /// cancels; otherwise the native player closes when it fires.
+    private func setSleepTimer(_ seconds: TimeInterval?) {
+        sleepWork?.cancel()
+        sleepWork = nil
+        guard let seconds else {
+            debugLog("[AVP-HLS] sleep timer cancelled")
+            return
+        }
+        let work = DispatchWorkItem {
+            debugLog("[AVP-HLS] sleep timer fired; closing native player")
+            PlayerSession.shared.nativeHLSItem = nil
+        }
+        sleepWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+        debugLog("[AVP-HLS] sleep timer set: \(Int(seconds / 60))m")
     }
 
     /// Leave the native player and restart this channel on the mpv
@@ -3477,6 +3536,8 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
     var onRecord: (() -> Void)?
     var onAddStream: (() -> Void)?
     var onSwitchToMPV: (() -> Void)?
+    var onStreamInfo: (() -> Void)?
+    var onSleepTimer: ((TimeInterval?) -> Void)?
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
         let controller = AVPlayerViewController()
@@ -3487,7 +3548,9 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
             canRecord: canRecord,
             onRecord: onRecord,
             onAddStream: onAddStream,
-            onSwitchToMPV: onSwitchToMPV
+            onSwitchToMPV: onSwitchToMPV,
+            onStreamInfo: onStreamInfo,
+            onSleepTimer: onSleepTimer
         )
         #endif
         return controller
@@ -3501,13 +3564,17 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
 
     #if os(tvOS)
     /// Rebuilt after each aspect toggle so the menu state stays in
-    /// step with the controller's current videoGravity.
+    /// step with the controller's current videoGravity. Audio and
+    /// subtitle selection are deliberately absent: the native info
+    /// panel already provides them.
     private static func transportItems(
         for controller: AVPlayerViewController,
         canRecord: Bool,
         onRecord: (() -> Void)?,
         onAddStream: (() -> Void)?,
-        onSwitchToMPV: (() -> Void)?
+        onSwitchToMPV: (() -> Void)?,
+        onStreamInfo: (() -> Void)?,
+        onSleepTimer: ((TimeInterval?) -> Void)?
     ) -> [UIMenuElement] {
         var items: [UIMenuElement] = []
 
@@ -3536,10 +3603,36 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
                 controller.videoGravity == .resizeAspectFill ? .resizeAspect : .resizeAspectFill
             controller.transportBarCustomMenuItems = transportItems(
                 for: controller, canRecord: canRecord, onRecord: onRecord,
-                onAddStream: onAddStream, onSwitchToMPV: onSwitchToMPV)
+                onAddStream: onAddStream, onSwitchToMPV: onSwitchToMPV,
+                onStreamInfo: onStreamInfo, onSleepTimer: onSleepTimer)
         }
 
         var optionsChildren: [UIMenuElement] = [aspectAction]
+
+        if let onStreamInfo {
+            optionsChildren.append(UIAction(
+                title: "Stream Info",
+                image: UIImage(systemName: "info.circle")
+            ) { _ in onStreamInfo() })
+        }
+
+        if let onSleepTimer {
+            var sleepChildren: [UIMenuElement] = [30, 60, 90, 120].map { minutes in
+                UIAction(title: "\(minutes) minutes") { _ in
+                    onSleepTimer(TimeInterval(minutes * 60))
+                }
+            }
+            sleepChildren.append(UIAction(
+                title: "Off",
+                attributes: .destructive
+            ) { _ in onSleepTimer(nil) })
+            optionsChildren.append(UIMenu(
+                title: "Sleep Timer",
+                image: UIImage(systemName: "moon.zzz"),
+                children: sleepChildren
+            ))
+        }
+
         if let onSwitchToMPV {
             optionsChildren.append(UIAction(
                 title: "Switch to MPV Player",
@@ -3555,5 +3648,53 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
         return items
     }
     #endif
+}
+
+/// Stream-info overlay for the native player, the counterpart of the
+/// mpv Options panel's stream info. Values come straight from AVPlayer:
+/// presentation size and the HLS access log's bitrate figures, refreshed
+/// every 2 seconds while shown.
+private struct NativeStreamInfoCard: View {
+    let player: AVPlayer
+    let channelName: String
+    let program: String?
+    let engineNote: String
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 2)) { _ in
+            VStack(alignment: .leading, spacing: 6) {
+                Text(channelName)
+                    .font(.system(size: 28, weight: .bold))
+                if let program, !program.isEmpty {
+                    Text(program)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Divider()
+                Text(engineNote)
+                let size = player.currentItem?.presentationSize ?? .zero
+                if size != .zero {
+                    Text("\(Int(size.width))x\(Int(size.height))")
+                }
+                if let event = player.currentItem?.accessLog()?.events.last {
+                    if event.indicatedBitrate > 0 {
+                        Text(String(format: "%.1f Mbps indicated", event.indicatedBitrate / 1_000_000))
+                    }
+                    if event.observedBitrate > 0 {
+                        Text(String(format: "%.1f Mbps observed", event.observedBitrate / 1_000_000))
+                    }
+                    if event.numberOfStalls > 0 {
+                        Text("\(event.numberOfStalls) stall(s)")
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .font(.system(size: 20, weight: .regular))
+            .foregroundStyle(.white)
+            .padding(24)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .frame(maxWidth: 480, alignment: .leading)
+        }
+    }
 }
 

@@ -571,6 +571,10 @@ struct MultiviewTileView: View {
             // tile to mpv forever).
             .onChange(of: tile.streamURL) { _, _ in
                 avEngineFallback = false
+                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
+            }
+            .onChange(of: avEngineFallback) { _, _ in
+                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
             }
             .id(tile.id)
             .onAppear {
@@ -581,11 +585,13 @@ struct MultiviewTileView: View {
                 // the audio tile's store regardless of which tile it
                 // happens to be.
                 store.registerProgressStore(progressStore, for: tile.id)
+                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
                 applyVODIdentityToProgressStore()
             }
             .onDisappear {
                 debugLog("[MV-Tile] onDisappear id=\(tile.id)")
                 store.unregisterProgressStore(for: tile.id)
+                store.unregisterEngine(for: tile.id)
             }
             // v1.6.15.x: defensive belt + suspenders. The user
             // reported a UI freeze if they channel-flip then open
@@ -602,6 +608,7 @@ struct MultiviewTileView: View {
             .task(id: tile.id) {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
+                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
                 applyVODIdentityToProgressStore()
             }
 
@@ -819,6 +826,7 @@ struct MultiviewTileView: View {
             .task(id: tile.id) {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
+                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
                 applyVODIdentityToProgressStore()
             }
 

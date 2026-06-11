@@ -139,6 +139,23 @@ final class MultiviewStore: ObservableObject {
     /// window keeps decoding.
     @Published var isPiPActive: Bool = false
 
+    /// TEST (branch test/avplayer-hls-engine): which engine each tile's
+    /// video view chose ("AVPlayer" / "MPV"), keyed by tile id. The
+    /// custom chrome renders identically for both engines, so the
+    /// chrome shows the audio tile's engine as a badge; without it a
+    /// tester cannot tell which pipeline is actually playing.
+    @Published private(set) var tileEngines: [String: String] = [:]
+
+    func registerEngine(_ engine: String, for tileID: String) {
+        if tileEngines[tileID] != engine {
+            tileEngines[tileID] = engine
+        }
+    }
+
+    func unregisterEngine(for tileID: String) {
+        tileEngines.removeValue(forKey: tileID)
+    }
+
     /// Set to `true` while `AddToMultiviewSheet` is presented on tvOS
     /// at N=1. Pauses EVERY tile's mpv (including the audio tile) so
     /// the picker's channel-list rendering + image loading doesn't

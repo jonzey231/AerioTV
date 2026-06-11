@@ -687,6 +687,21 @@ struct PlaybackBottomChrome_tvOS: View {
                     recordButton
                 }
                 addButton
+
+                // TEST (branch test/avplayer-hls-engine): engine badge.
+                // The custom chrome renders for BOTH engines, so without
+                // this a tester cannot tell whether the tile under it is
+                // AVPlayer or mpv. Non-focusable, informational.
+                if let audioID = store.audioTileID,
+                   let engine = store.tileEngines[audioID] {
+                    Text(engine)
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.6))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 12)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .focusable(false)
+                }
             }
         }
         .padding(.vertical, 24)
