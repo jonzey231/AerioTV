@@ -3357,27 +3357,35 @@ struct NativeHLSPlayerScreen: View {
         #else
         // iOS: unlike tvOS, AVPlayerViewController draws its OWN top
         // chrome here (close, PiP, AirPlay, volume), so the overlay
-        // carries ONLY the actions the native player lacks, positioned
-        // BELOW the native control row so the two layers never collide
-        // (the first build duplicated close and crowded the corners).
-        // Leading: minimize to the corner mini (the native X fully
-        // stops, the chevron keeps watching). Trailing: Record,
-        // Add Stream, and an Options menu (Stream Info, Sleep Timer,
+        // carries ONLY the actions the native player lacks, styled in
+        // the native chrome's exact vocabulary: 50pt dark-material
+        // circles for lone actions, related actions grouped in ONE
+        // material capsule (mirroring the native PiP+AirPlay pill),
+        // aligned to the same screen margins one row below the native
+        // controls. Leading: minimize to the corner mini (the native X
+        // fully stops, the chevron keeps watching). Trailing capsule:
+        // Record, Add Stream, Options (Stream Info, Sleep Timer,
         // Switch to MPV, Stop). Aspect is omitted: the native player
         // already has pinch zoom.
         .overlay(alignment: .topLeading) {
-            iosOverlayButton("chevron.down") { minimizeToMini() }
-                .padding(.top, 96)
-                .padding(.leading, 16)
+            iosOverlayCircle("chevron.down") { minimizeToMini() }
+                .padding(.top, 122)
+                .padding(.leading, 20)
         }
         .overlay(alignment: .topTrailing) {
-            HStack(spacing: 12) {
+            HStack(spacing: 26) {
                 if item.streamURL != nil {
-                    iosOverlayButton("record.circle", tint: .red) {
+                    Button {
                         showRecordSheet = true
+                    } label: {
+                        iosOverlayIcon("record.circle", tint: .red)
                     }
                 }
-                iosOverlayButton("plus") { switchToMPV(openAddStream: true) }
+                Button {
+                    switchToMPV(openAddStream: true)
+                } label: {
+                    iosOverlayIcon("plus")
+                }
                 Menu {
                     Button {
                         showStreamInfo.toggle()
@@ -3405,15 +3413,15 @@ struct NativeHLSPlayerScreen: View {
                         Label("Stop Playback", systemImage: "stop.circle")
                     }
                 } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(12)
-                        .background(Circle().fill(Color.black.opacity(0.55)))
+                    iosOverlayIcon("slider.horizontal.3")
                 }
             }
-            .padding(.top, 96)
-            .padding(.trailing, 16)
+            .padding(.horizontal, 22)
+            .frame(height: 50)
+            .background(.ultraThinMaterial, in: Capsule())
+            .environment(\.colorScheme, .dark)
+            .padding(.top, 122)
+            .padding(.trailing, 20)
         }
         .statusBarHidden()
         #endif
@@ -3508,18 +3516,28 @@ struct NativeHLSPlayerScreen: View {
     }
 
     #if os(iOS)
-    /// One floating overlay control on the iOS native player, matching
-    /// the X button's existing visual language.
+    /// A lone overlay action in the native chrome's vocabulary: the
+    /// same 50pt dark-material circle AVPlayerViewController uses for
+    /// its close and volume buttons.
     @ViewBuilder
-    private func iosOverlayButton(_ icon: String, tint: Color = .white,
+    private func iosOverlayCircle(_ icon: String, tint: Color = .white,
                                   action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundColor(tint)
-                .padding(12)
-                .background(Circle().fill(Color.black.opacity(0.55)))
+            iosOverlayIcon(icon, tint: tint)
+                .frame(width: 50, height: 50)
+                .background(.ultraThinMaterial, in: Circle())
+                .environment(\.colorScheme, .dark)
         }
+    }
+
+    /// Icon styling shared by the lone circles and the grouped capsule
+    /// (the capsule supplies its own material background, mirroring
+    /// the native PiP+AirPlay pill).
+    @ViewBuilder
+    private func iosOverlayIcon(_ icon: String, tint: Color = .white) -> some View {
+        Image(systemName: icon)
+            .font(.system(size: 19, weight: .medium))
+            .foregroundColor(tint)
     }
     #endif
 
