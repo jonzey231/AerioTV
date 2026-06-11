@@ -531,9 +531,9 @@ struct MultiviewTileView: View {
             Group {
                 if usesAVPlayerEngine {
                     AVPlayerMultiviewTile(
+                        tileID: tile.id,
                         streamURL: tile.streamURL,
                         headers: tile.headers,
-                        isAudioActive: isAudioActive,
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
                         onEngineFallback: { _ in avEngineFallback = true }

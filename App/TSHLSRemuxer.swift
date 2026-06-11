@@ -531,9 +531,12 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
 /// bind to the mpv progress store, so they are inert while the audio
 /// tile is AVPlayer-backed; play/pause via `shouldPause` works.
 struct AVPlayerMultiviewTile: View {
+    /// The owning tile's id; mute state derives from comparing this to
+    /// the store's audioTileID LIVE (never from a captured snapshot,
+    /// see the audio note below).
+    let tileID: String
     let streamURL: URL
     let headers: [String: String]
-    let isAudioActive: Bool
     let shouldPause: Bool
     let channelName: String
     /// Parent flips this tile back to the mpv engine.
@@ -542,6 +545,16 @@ struct AVPlayerMultiviewTile: View {
     @State private var player: AVPlayer?
     @State private var remuxer: TSHLSRemuxer?
     @State private var statusText: String?
+    /// AUDIO CORRECTNESS: the remuxer's onReady closure captures this
+    /// view struct BY VALUE at start() time. Adding tiles moves
+    /// audioTileID to the newest tile while older tiles' remuxers are
+    /// still spinning up, so a closure that calls startPlayer directly
+    /// would create the player from a STALE "I own audio" snapshot,
+    /// unmuted. Multiple unmuted tiles was the audible result on
+    /// device. Routing READY through @State (shared storage across
+    /// struct copies) makes startPlayer run from onChange on the FRESH
+    /// struct, and the mute decision reads the store at that moment.
+    @State private var readyLocalURL: URL?
 
     var body: some View {
         ZStack {
@@ -566,8 +579,19 @@ struct AVPlayerMultiviewTile: View {
             stop()
             AudioSessionRefCount.decrement(caller: "avp-tile")
         }
-        .onChange(of: isAudioActive) { _, active in
-            player?.isMuted = !active
+        // Remux READY lands here with fresh property values.
+        .onChange(of: readyLocalURL) { _, url in
+            guard let url else { return }
+            statusText = nil
+            startPlayer(url: url, requestHeaders: [:])
+            debugLog("[AVP-MV] tile playing REMUXED channel=\(channelName) muted=\(player?.isMuted == true)")
+        }
+        // Mute follows the store's published audio owner directly:
+        // independent of SwiftUI prop diffing, fires for every change,
+        // and uses the EMITTED value (the store property itself is
+        // willSet-old inside this handler).
+        .onReceive(MultiviewStore.shared.$audioTileID) { newAudioID in
+            player?.isMuted = (newAudioID != tileID)
         }
         .onChange(of: shouldPause) { _, paused in
             if paused { player?.pause() } else { player?.play() }
@@ -600,9 +624,9 @@ struct AVPlayerMultiviewTile: View {
             statusText = "Preparing..."
             let mux = TSHLSRemuxer(sourceURL: streamURL, headers: headers)
             mux.onReady = { url in
-                statusText = nil
-                startPlayer(url: url, requestHeaders: [:])
-                debugLog("[AVP-MV] tile playing REMUXED channel=\(channelName)")
+                // @State write only; the fresh-struct onChange handler
+                // does the actual player start (see readyLocalURL doc).
+                readyLocalURL = url
             }
             mux.onError = { error in
                 debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName); falling back to mpv tile")
@@ -620,7 +644,8 @@ struct AVPlayerMultiviewTile: View {
         }
         let asset = AVURLAsset(url: url, options: options)
         let avPlayer = AVPlayer(playerItem: AVPlayerItem(asset: asset))
-        avPlayer.isMuted = !isAudioActive
+        // Live truth at this instant, never a captured snapshot.
+        avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
         if !shouldPause { avPlayer.play() }
         player = avPlayer
     }
@@ -631,6 +656,7 @@ struct AVPlayerMultiviewTile: View {
         remuxer?.stop()
         remuxer = nil
         statusText = nil
+        readyLocalURL = nil
     }
 }
 
