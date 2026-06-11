@@ -735,11 +735,17 @@ struct VODDetailView: View {
     #if os(tvOS)
     // MARK: - tvOS trailer QR
 
-    /// Apple TV has no browser and the YouTube tvOS app exposes no
-    /// working deep link, so a trailer can't be opened on-device. We
-    /// render the YouTube watch URL as a QR code the user scans with
-    /// their phone (where the iOS YouTube universal link opens the
-    /// video). ToS-safe and version-proof.
+    /// Apple TV has no browser and the YouTube tvOS app cannot open a
+    /// SPECIFIC video: probed on-device 2026-06-11 (tvOS 27.0, YouTube
+    /// installed, LSApplicationQueriesSchemes declared) via the DEBUG
+    /// -debugYouTubeProbe hook. canOpenURL("youtube://") = true and
+    /// open() returns true, but the app lands on its HOME feed with the
+    /// watch?v= parameter dropped (screenshot-verified); the https
+    /// universal link returns false outright. A "Play in YouTube" row
+    /// would therefore dump the user on YouTube's home screen, worse
+    /// than the QR. So we render the watch URL as a QR code the user
+    /// scans with their phone (where the iOS universal link opens the
+    /// video). Re-probe on future tvOS/YouTube releases via the hook.
     @ViewBuilder
     private var tvOSTrailerQR: some View {
         let rawTrailer = fullMovie?.youtubeTrailer ?? fullSeries?.youtubeTrailer ?? ""

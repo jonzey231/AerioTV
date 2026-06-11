@@ -23,6 +23,14 @@
 	</array>
 	<key>CFBundleDisplayName</key>
 	<string>AerioTV</string>
+	<!-- Trailer deep-link resolution (parity dossier P3 item 12):
+	     canOpenURL("youtube://...") always returns false unless the
+	     scheme is declared here, silently degrading the Trailer menu
+	     to QR-only with no error anywhere. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>youtube</string>
+	</array>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>

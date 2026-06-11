@@ -119,6 +119,48 @@ struct AerioApp: App {
     nonisolated(unsafe) static var sharedContainer: ModelContainer?
 
     init() {
+        #if DEBUG
+        // Test-harness hooks, DEBUG builds only. Both read standard
+        // launch arguments (UserDefaults maps "-key value" args).
+        //
+        // -tmdbAPIKeyOverride <key>: writes the supplied key into the
+        // SAME keychain slot the Settings field uses, so automated
+        // device runs can exercise the TMDB suite without driving the
+        // on-screen keyboard. The key itself is never logged.
+        if let key = UserDefaults.standard.string(forKey: "tmdbAPIKeyOverride"),
+           !key.isEmpty {
+            TMDBPosters.saveAPIKey(key)
+            debugLog("🎬 TMDB key override applied from launch argument (length \(key.count))")
+        }
+        // -debugYouTubeProbe <videoKey>: after the UI settles, probe
+        // whether the tvOS YouTube app accepts a deep link (parity
+        // dossier P3 item 12). Logs canOpenURL plus the open() result
+        // for both the youtube:// scheme and the https universal link.
+        if let probeKey = UserDefaults.standard.string(forKey: "debugYouTubeProbe"),
+           !probeKey.isEmpty {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(8))
+                if let deep = URL(string: "youtube://watch?v=\(probeKey)") {
+                    debugLog("[YT-PROBE] canOpen(youtube://) = \(UIApplication.shared.canOpenURL(deep))")
+                    // Log the attempt BEFORE calling open: if YouTube comes
+                    // foreground, this app suspends and a post-open write can
+                    // be lost, hiding the result.
+                    debugLog("[YT-PROBE] attempting open(youtube://watch?v=...)")
+                    UIApplication.shared.open(deep) { ok in
+                        debugLog("[YT-PROBE] open(youtube://watch?v=...) -> \(ok)")
+                    }
+                }
+                try? await Task.sleep(for: .seconds(8))
+                if let universal = URL(string: "https://www.youtube.com/watch?v=\(probeKey)") {
+                    debugLog("[YT-PROBE] attempting open(https universal link)")
+                    UIApplication.shared.open(universal) { ok in
+                        debugLog("[YT-PROBE] open(https universal link) -> \(ok)")
+                    }
+                }
+            }
+        }
+        #endif
+
         // Ensure the Application Support directory exists before SwiftData/CoreData
         // tries to create the SQLite store there. On a fresh install the directory
         // may not exist, causing noisy (but auto-recovered) CoreData errors.
