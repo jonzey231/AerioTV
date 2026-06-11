@@ -99,7 +99,7 @@ final class HLSCapabilityStore: NSObject {
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
 
         let delegate = ProbeDelegate { [weak self] status in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 self?.record(status: status, for: key)
             }
         }
@@ -131,10 +131,14 @@ final class HLSCapabilityStore: NSObject {
     /// refuses the redirect (so a capable server's 302 is observable)
     /// and cancels the body (so a non-capable server's endless TS
     /// stream never flows). Reports exactly once.
-    private final class ProbeDelegate: NSObject, URLSessionDataDelegate {
-        private let onStatus: (Int) -> Void
+    ///
+    /// @unchecked Sendable: URLSession delegates must be Sendable on
+    /// current SDKs; `reported` is only touched from the session's
+    /// serial delegate queue, so access is serialized by construction.
+    private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private let onStatus: @Sendable (Int) -> Void
         private var reported = false
-        init(onStatus: @escaping (Int) -> Void) { self.onStatus = onStatus }
+        init(onStatus: @escaping @Sendable (Int) -> Void) { self.onStatus = onStatus }
 
         private func report(_ status: Int) {
             guard !reported else { return }
