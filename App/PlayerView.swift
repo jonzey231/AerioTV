@@ -3658,7 +3658,6 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
         let hosting = UIHostingController(rootView: trailingAccessory)
         hosting.view.backgroundColor = .clear
         hosting.view.translatesAutoresizingMaskIntoConstraints = false
-        controller.addChild(hosting)
         context.coordinator.hosting = hosting
         // The native controls hierarchy does not exist yet; attach once
         // it does so the capsule inherits the chrome's fade.
@@ -3708,8 +3707,33 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
         }
 
         private func mount(_ view: UIView, in parent: UIView, controller: AVPlayerViewController) {
-            parent.addSubview(view)
-            hosting?.didMove(toParent: controller)
+            // UIKit requires the declared parent view controller to be
+            // the one whose view tree hosts the child's view. The native
+            // controls live under a PRIVATE view controller (e.g.
+            // AVMobileGlassControlsViewController), so resolve the real
+            // owner via the responder chain; declaring
+            // AVPlayerViewController while mounting inside the controls
+            // VC raises UIViewControllerHierarchyInconsistency (crashed
+            // on device).
+            var responder: UIResponder? = parent
+            var owner: UIViewController?
+            while let current = responder {
+                if let viewController = current as? UIViewController {
+                    owner = viewController
+                    break
+                }
+                responder = current.next
+            }
+            if let hosting, let owner {
+                owner.addChild(hosting)
+                parent.addSubview(view)
+                hosting.didMove(toParent: owner)
+            } else {
+                // No resolvable owner: mount the bare view without
+                // declaring containment (legal, loses only appearance
+                // callbacks the capsule does not use).
+                parent.addSubview(view)
+            }
             // Leading clears the X + PiP/AirPlay cluster (stable across
             // orientations, unlike the morphing volume control).
             view.leadingAnchor.constraint(
