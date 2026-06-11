@@ -1287,7 +1287,7 @@ extension TMDBService {
     // MARK: Title sanitation (typed search)
 
     /// Trailing "(YYYY)" where YYYY is 19xx/20xx.
-    nonisolated(unsafe) private static let trailingYearRegex =
+    private static let trailingYearRegex =
         try! NSRegularExpression(pattern: #"\(((?:19|20)\d{2})\)\s*$"#)
 
     /// Split a trailing year off a playlist title. A name that is ONLY
