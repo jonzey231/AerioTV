@@ -104,6 +104,10 @@ struct AppBehaviorsSettingsView: View {
 
     private func saveTMDBKey() {
         TMDBPosters.saveAPIKey(tmdbKeyDraft)
+        // Misses cached under the previous key (e.g. while a bad key was
+        // returning 401s) must not survive a key change; positives
+        // re-resolve cheaply on the next lookup.
+        TMDBService.clearCache()
         // Confirm the write to the user: both bodies render tmdbStatusView,
         // which shows a green "Saved" check for this state. Resets to .idle
         // on the next keystroke (the field's onChange).

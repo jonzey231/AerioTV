@@ -237,6 +237,11 @@ struct VODDetailView: View {
     /// True once the TMDB lookup has run to completion (hit or miss), so
     /// the source note can tell "still searching" from "searched, none".
     @State private var tmdbLookupDone = false
+    /// TMDB text-metadata backfill (Android parity): fetched once per
+    /// screen entry when the server AND provider-info leave any of
+    /// plot/genre/cast/director blank. Server values always win; TMDB
+    /// only fills the holes, so fully-described libraries never hit TMDB.
+    @State private var tmdbDetails: TMDBDetails?
     #if os(tvOS)
     /// Drives the top tab bar's visibility from this detail's scroll
     /// position so it reappears when the user scrolls back to the top
@@ -309,6 +314,9 @@ struct VODDetailView: View {
         #endif
         .task {
             await loadDetail()
+            // Provider-info has settled once loadDetail() returns (the
+            // task is sequential), satisfying the backfill's settled gate.
+            await loadTMDBDetailsIfNeeded()
             await loadTMDBPosterIfNeeded()
         }
         .fullScreenCover(item: $playingURL) { wrapper in
@@ -393,17 +401,23 @@ struct VODDetailView: View {
                         // grid-time `item` snapshot for backwards
                         // compatibility with Xtream payloads.
                         let detailYear = (fullMovie?.releaseYear ?? fullSeries?.releaseYear) ?? ""
-                        let displayYear = detailYear.isEmpty ? item.releaseYear : detailYear
+                        let serverYear = detailYear.isEmpty ? item.releaseYear : detailYear
+                        // TMDB backfill is LAST in the chain: server wins.
+                        let displayYear = serverYear.isEmpty ? (tmdbDetails?.year ?? "") : serverYear
                         if !displayYear.isEmpty {
                             Text(displayYear)
                                 .font(.labelSmall).foregroundColor(.textSecondary)
                         }
-                        if !item.rating.isEmpty {
+                        // Rating: server value first; TMDB vote average
+                        // backfills only when the server gave none (a TMDB
+                        // "0.0" is unrated and was already dropped at parse).
+                        let displayRating = item.rating.isEmpty ? (tmdbDetails?.voteAverage ?? "") : item.rating
+                        if !displayRating.isEmpty {
                             HStack(spacing: 3) {
                                 Image(systemName: "star.fill")
                                     .font(.system(size: 10))
                                     .foregroundColor(.statusWarning)
-                                Text(item.rating)
+                                Text(displayRating)
                                     .font(.labelSmall).foregroundColor(.textSecondary)
                             }
                         }
@@ -435,7 +449,10 @@ struct VODDetailView: View {
     // MARK: - Info
     private var infoSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            let plot = fullMovie?.plot ?? fullSeries?.plot ?? ""
+            // Server-wins merge per field: provider value first, TMDB
+            // backfill only when the server left the field blank.
+            let serverPlot = fullMovie?.plot ?? fullSeries?.plot ?? ""
+            let plot = serverPlot.isEmpty ? (tmdbDetails?.overview ?? "") : serverPlot
             if !plot.isEmpty {
                 Text(plot)
                     .font(.bodyMedium)
@@ -457,7 +474,8 @@ struct VODDetailView: View {
             externalLinks
             #endif
 
-            let genre = fullMovie?.genre ?? fullSeries?.genre ?? ""
+            let serverGenre = fullMovie?.genre ?? fullSeries?.genre ?? ""
+            let genre = serverGenre.isEmpty ? (tmdbDetails?.genres ?? "") : serverGenre
             if !genre.isEmpty {
                 metaRow(label: "Genre", value: genre)
             }
@@ -469,11 +487,13 @@ struct VODDetailView: View {
             if released.count > 4 {
                 metaRow(label: "Released", value: released)
             }
-            let cast = fullMovie?.cast ?? fullSeries?.cast ?? ""
+            let serverCast = fullMovie?.cast ?? fullSeries?.cast ?? ""
+            let cast = serverCast.isEmpty ? (tmdbDetails?.castTop ?? "") : serverCast
             if !cast.isEmpty {
                 metaRow(label: "Cast", value: cast)
             }
-            let director = fullMovie?.director ?? fullSeries?.director ?? ""
+            let serverDirector = fullMovie?.director ?? fullSeries?.director ?? ""
+            let director = serverDirector.isEmpty ? (tmdbDetails?.director ?? "") : serverDirector
             if !director.isEmpty {
                 metaRow(label: "Director", value: director)
             }
@@ -509,12 +529,26 @@ struct VODDetailView: View {
     // TMDB today; provider-supplied metadata is unchanged.
     @ViewBuilder
     private var tmdbSourceNote: some View {
-        if tmdbPosterURL != nil {
+        if tmdbPosterURL != nil && tmdbDetails != nil {
+            tmdbNoteRow(
+                icon: "checkmark.seal.fill",
+                tint: .accentPrimary,
+                text: "Poster and missing details pulled from TMDB using your API key."
+            )
+        } else if tmdbPosterURL != nil {
             // The poster shown above was supplied by TMDB.
             tmdbNoteRow(
                 icon: "checkmark.seal.fill",
                 tint: .accentPrimary,
                 text: "Poster pulled from TMDB using your API key."
+            )
+        } else if tmdbDetails != nil {
+            // Server artwork is present but TMDB filled in blank text
+            // fields (plot/genre/cast/director/year/rating).
+            tmdbNoteRow(
+                icon: "checkmark.seal.fill",
+                tint: .accentPrimary,
+                text: "Missing details filled in from TMDB using your API key."
             )
         } else if item.posterURL == nil {
             if !TMDBPosters.isEnabled || TMDBPosters.apiKey == nil {
@@ -944,6 +978,39 @@ struct VODDetailView: View {
         }
         if let url { tmdbPosterURL = url }
         tmdbLookupDone = true
+    }
+
+    /// TMDB text-metadata backfill (Android parity, dossier Part 1
+    /// section 2). Fires once per screen entry, only when the opt-in is
+    /// on, a key exists, AND at least one of plot/genre/cast/director is
+    /// still blank after the server's own enrichment settled (the caller
+    /// awaits loadDetail() first). Exact tmdb_id wins; title search
+    /// rescues stale or absent provider ids. Country is never backfilled.
+    private func loadTMDBDetailsIfNeeded() async {
+        guard tmdbDetails == nil,
+              TMDBPosters.isEnabled,
+              let apiKey = TMDBPosters.apiKey else { return }
+        let plot = fullMovie?.plot ?? fullSeries?.plot ?? ""
+        let genre = fullMovie?.genre ?? fullSeries?.genre ?? ""
+        let cast = fullMovie?.cast ?? fullSeries?.cast ?? ""
+        let director = fullMovie?.director ?? fullSeries?.director ?? ""
+        let missingMeta = plot.isEmpty || genre.isEmpty || cast.isEmpty || director.isEmpty
+        guard missingMeta else { return }
+
+        let isMovie = item.type == .movie
+        // fullMovie/fullSeries already merged provider-info over the list
+        // row (provider wins), so prefer their id, then the raw row's.
+        let tmdbID = [fullMovie?.tmdbID, fullSeries?.tmdbID,
+                      item.movie?.tmdbID, item.series?.tmdbID]
+            .compactMap { $0 }
+            .first { !$0.isEmpty }
+        if let id = tmdbID,
+           let details = await TMDBService.details(forTMDBID: id, isMovie: isMovie, apiKey: apiKey) {
+            tmdbDetails = details
+            return
+        }
+        guard !item.name.isEmpty else { return }
+        tmdbDetails = await TMDBService.details(forTitle: item.name, isMovie: isMovie, apiKey: apiKey)
     }
 
     private func loadDetail() async {

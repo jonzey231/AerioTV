@@ -1055,3 +1055,465 @@ enum TMDBService {
         return posterURL
     }
 }
+
+// MARK: - TMDB rich data models (Android parity: TMDBService.kt)
+
+/// Display-ready detail fields backfilled from TMDB when the server and
+/// provider-info leave them blank. Every field optional; blank strings are
+/// stripped to nil at parse.
+struct TMDBDetails: Sendable {
+    let overview: String?
+    let genres: String?
+    let castTop: String?
+    let director: String?
+    let year: String?
+    let voteAverage: String?
+    let posterPath: String?
+}
+
+/// One cast or crew member. `id` stays a String even though TMDB sends an
+/// Int, because every consumer round-trips it into the /person/{id} path.
+/// `role` is the character name for cast, "Director"/"Creator" for crew.
+struct TMDBPerson: Identifiable, Sendable {
+    let id: String
+    let name: String
+    let role: String?
+    let profilePath: String?
+}
+
+struct TMDBCredits: Sendable {
+    let cast: [TMDBPerson]
+    let directors: [TMDBPerson]
+}
+
+/// A Known For tile. `posterPath` is required (entries without art are
+/// filtered before display); `isMovie` routes the deep-link.
+struct TMDBKnownForItem: Identifiable, Sendable {
+    let id: String
+    let title: String
+    let posterPath: String
+    let isMovie: Bool
+}
+
+struct TMDBPersonBio: Sendable {
+    let name: String
+    let biography: String?
+    let birthday: String?
+    let deathday: String?
+    let placeOfBirth: String?
+    let profilePath: String?
+    let knownFor: [TMDBKnownForItem]
+}
+
+// MARK: - TMDB rich data endpoints (details / credits / person bio)
+
+extension TMDBService {
+
+    /// TMDB ids arrive as JSON Ints but some proxies stringify them;
+    /// decode either shape and keep the String (it round-trips into URL
+    /// paths).
+    private struct FlexID: Decodable {
+        let value: String?
+        init(from decoder: Decoder) throws {
+            let c = try decoder.singleValueContainer()
+            if let i = try? c.decode(Int.self) { value = String(i) }
+            else if let s = try? c.decode(String.self) { value = s.isEmpty ? nil : s }
+            else { value = nil }
+        }
+    }
+
+    /// Int-or-String tolerant integer (episode_count / order).
+    private struct FlexInt: Decodable {
+        let value: Int?
+        init(from decoder: Decoder) throws {
+            let c = try decoder.singleValueContainer()
+            if let i = try? c.decode(Int.self) { value = i }
+            else if let s = try? c.decode(String.self) { value = Int(s) }
+            else { value = nil }
+        }
+    }
+
+    private struct DetailsCreditsResponse: Decodable {
+        let overview: String?
+        let genres: [Genre]?
+        let releaseDate: String?
+        let firstAirDate: String?
+        let voteAverage: Double?
+        let posterPath: String?
+        let createdBy: [CreatedBy]?
+        let credits: CreditsBlock?
+        struct Genre: Decodable { let name: String? }
+        struct CreatedBy: Decodable {
+            let id: FlexID?
+            let name: String?
+            let profilePath: String?
+            enum CodingKeys: String, CodingKey {
+                case id, name
+                case profilePath = "profile_path"
+            }
+        }
+        struct CreditsBlock: Decodable {
+            let cast: [CastEntry]?
+            let crew: [CrewEntry]?
+        }
+        struct CastEntry: Decodable {
+            let id: FlexID?
+            let name: String?
+            let character: String?
+            let profilePath: String?
+            enum CodingKeys: String, CodingKey {
+                case id, name, character
+                case profilePath = "profile_path"
+            }
+        }
+        struct CrewEntry: Decodable {
+            let id: FlexID?
+            let name: String?
+            let job: String?
+            let profilePath: String?
+            enum CodingKeys: String, CodingKey {
+                case id, name, job
+                case profilePath = "profile_path"
+            }
+        }
+        enum CodingKeys: String, CodingKey {
+            case overview, genres, credits
+            case releaseDate = "release_date"
+            case firstAirDate = "first_air_date"
+            case voteAverage = "vote_average"
+            case posterPath = "poster_path"
+            case createdBy = "created_by"
+        }
+    }
+
+    private struct PersonResponse: Decodable {
+        let name: String?
+        let biography: String?
+        let birthday: String?
+        let deathday: String?
+        let placeOfBirth: String?
+        let profilePath: String?
+        let combinedCredits: CombinedCredits?
+        struct CombinedCredits: Decodable { let cast: [Entry]? }
+        struct Entry: Decodable {
+            let id: FlexID?
+            let title: String?
+            let name: String?
+            let posterPath: String?
+            let mediaType: String?
+            let genreIds: [Int]?
+            let character: String?
+            let episodeCount: FlexInt?
+            let order: FlexInt?
+            let popularity: Double?
+            enum CodingKeys: String, CodingKey {
+                case id, title, name, character, order, popularity
+                case posterPath = "poster_path"
+                case mediaType = "media_type"
+                case genreIds = "genre_ids"
+                case episodeCount = "episode_count"
+            }
+        }
+        enum CodingKeys: String, CodingKey {
+            case name, biography, birthday, deathday
+            case placeOfBirth = "place_of_birth"
+            case profilePath = "profile_path"
+            case combinedCredits = "combined_credits"
+        }
+    }
+
+    private struct TypedSearchResponse: Decodable {
+        let results: [Entry]?
+        struct Entry: Decodable { let id: FlexID? }
+    }
+
+    /// NSCache stores classes; tiny box for the struct payloads. All four
+    /// rich caches are success-only (a transport failure or non-200 is
+    /// never cached so it stays retryable; see the dossier gotcha about a
+    /// bad-key period poisoning titles forever).
+    private final class Box<T>: NSObject {
+        let value: T
+        init(_ value: T) { self.value = value }
+    }
+
+    nonisolated(unsafe) private static let detailsCache = NSCache<NSString, Box<TMDBDetails>>()
+    nonisolated(unsafe) private static let creditsCache = NSCache<NSString, Box<TMDBCredits>>()
+    nonisolated(unsafe) private static let personBioCache = NSCache<NSString, Box<TMDBPersonBio>>()
+
+    /// Drop ALL caches. Called when the user saves a new API key: misses
+    /// cached under the previous key (e.g. while a bad key 401ed) must not
+    /// survive a key change; positives re-resolve cheaply on next lookup.
+    static func clearCache() {
+        cache.removeAllObjects()
+        detailsCache.removeAllObjects()
+        creditsCache.removeAllObjects()
+        personBioCache.removeAllObjects()
+    }
+
+    /// Shared blank-stripping helper.
+    private static func nonBlank(_ s: String?) -> String? {
+        guard let t = s?.trimmingCharacters(in: .whitespacesAndNewlines), !t.isEmpty else { return nil }
+        return t
+    }
+
+    // MARK: Title sanitation (typed search)
+
+    /// Trailing "(YYYY)" where YYYY is 19xx/20xx.
+    nonisolated(unsafe) private static let trailingYearRegex =
+        try! NSRegularExpression(pattern: #"\(((?:19|20)\d{2})\)\s*$"#)
+
+    /// Split a trailing year off a playlist title. A name that is ONLY
+    /// "(2010)" keeps its original text with year nil rather than sending
+    /// an empty query.
+    static func splitTitleYear(_ raw: String) -> (title: String, year: String?) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let range = NSRange(trimmed.startIndex..., in: trimmed)
+        guard let m = trailingYearRegex.firstMatch(in: trimmed, range: range),
+              let whole = Range(m.range, in: trimmed),
+              let yearRange = Range(m.range(at: 1), in: trimmed) else {
+            return (trimmed, nil)
+        }
+        let cleaned = String(trimmed[..<whole.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return (trimmed, nil) }
+        return (cleaned, String(trimmed[yearRange]))
+    }
+
+    /// Query attempts in order: the cleaned title, then the title with
+    /// leading non-alphanumerics stripped (TMDB search trips on a leading
+    /// "#" etc.), filtered non-empty and deduplicated.
+    private static func searchAttempts(for cleaned: String) -> [String] {
+        var attempts = [cleaned]
+        let stripped = String(cleaned.drop { !$0.isLetter && !$0.isNumber })
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stripped.isEmpty { attempts.append(stripped) }
+        var seen = Set<String>()
+        return attempts.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    // MARK: Title -> id resolution (typed search, year-aware)
+
+    /// Resolve a TMDB id for a title via the TYPED search endpoint
+    /// (/search/movie or /search/tv), which accepts a year filter that
+    /// /search/multi lacks. Attempt order: each searchAttempts entry WITH
+    /// the year; then, only when a year was actually extracted, one final
+    /// no-year attempt (playlist years sometimes disagree with TMDB).
+    /// Cached in the shared cache under "details-id:<kind>:<orig lower>";
+    /// "" is a confirmed miss. Failed requests are never cached.
+    static func resolveID(forTitle title: String, isMovie: Bool, apiKey: String) async -> String? {
+        let kind = isMovie ? "movie" : "tv"
+        let cacheKey = "details-id:\(kind):\(title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())"
+        if let cached = cache.object(forKey: cacheKey as NSString) {
+            let s = cached as String
+            return s.isEmpty ? nil : s
+        }
+        let (cleaned, year) = splitTitleYear(title)
+        guard !cleaned.isEmpty else { return nil }
+        let yearParam = isMovie ? "year" : "first_air_date_year"
+
+        var plans: [(query: String, year: String?)] = searchAttempts(for: cleaned).map { ($0, year) }
+        if year != nil { plans.append((cleaned, nil)) }
+
+        var sawConfirmedMiss = false
+        for plan in plans {
+            var items = [
+                URLQueryItem(name: "query", value: plan.query),
+                URLQueryItem(name: "include_adult", value: "false")
+            ]
+            if let y = plan.year { items.append(URLQueryItem(name: yearParam, value: y)) }
+            guard let req = makeRequest(path: "/search/\(kind)", queryItems: items, key: apiKey) else { continue }
+            guard let (data, resp) = try? await session.data(for: req),
+                  let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let decoded = try? JSONDecoder().decode(TypedSearchResponse.self, from: data) else {
+                // Transport failure / non-200: never cache, stays retryable.
+                continue
+            }
+            sawConfirmedMiss = true
+            if let id = decoded.results?.first?.id?.value, !id.isEmpty {
+                cache.setObject(id as NSString, forKey: cacheKey as NSString)
+                debugLog("🎬 TMDB resolve '\(title)' (\(kind)) -> id \(id)")
+                return id
+            }
+        }
+        if sawConfirmedMiss {
+            cache.setObject("" as NSString, forKey: cacheKey as NSString)
+            debugLog("🎬 TMDB resolve '\(title)' (\(kind)) -> no match")
+        }
+        return nil
+    }
+
+    // MARK: Details (metadata backfill)
+
+    /// Detail fields by exact TMDB id. One request carries details AND
+    /// credits via append_to_response; details and credits still cache
+    /// independently (the second hit is cheap, mirrors Android).
+    static func details(forTMDBID id: String, isMovie: Bool, apiKey: String) async -> TMDBDetails? {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let kind = isMovie ? "movie" : "tv"
+        let cacheKey = "details:\(kind):\(trimmed)" as NSString
+        if let boxed = detailsCache.object(forKey: cacheKey) { return boxed.value }
+        guard let req = makeRequest(path: "/\(kind)/\(trimmed)",
+                                    queryItems: [URLQueryItem(name: "append_to_response", value: "credits")],
+                                    key: apiKey) else { return nil }
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(DetailsCreditsResponse.self, from: data)
+        else { return nil }
+
+        let genres = decoded.genres?.compactMap { nonBlank($0.name) }.joined(separator: ", ")
+        let castTop = decoded.credits?.cast?.prefix(6).compactMap { nonBlank($0.name) }.joined(separator: ", ")
+        let director: String?
+        if isMovie {
+            director = decoded.credits?.crew?
+                .filter { $0.job == "Director" }
+                .compactMap { nonBlank($0.name) }
+                .joined(separator: ", ")
+        } else {
+            director = decoded.createdBy?.compactMap { nonBlank($0.name) }.joined(separator: ", ")
+        }
+        let dateStr = isMovie ? decoded.releaseDate : decoded.firstAirDate
+        let year = nonBlank(dateStr).map { String($0.prefix(4)) }
+        // vote_average 0.0 means unrated on TMDB; drop it.
+        let vote: String? = (decoded.voteAverage ?? 0) > 0 ? String(format: "%.1f", decoded.voteAverage!) : nil
+
+        let details = TMDBDetails(
+            overview: nonBlank(decoded.overview),
+            genres: nonBlank(genres),
+            castTop: nonBlank(castTop),
+            director: nonBlank(director),
+            year: year,
+            voteAverage: vote,
+            posterPath: nonBlank(decoded.posterPath)
+        )
+        detailsCache.setObject(Box(details), forKey: cacheKey)
+        debugLog("🎬 TMDB details id \(trimmed) (\(kind)) -> ok")
+        return details
+    }
+
+    static func details(forTitle title: String, isMovie: Bool, apiKey: String) async -> TMDBDetails? {
+        guard let id = await resolveID(forTitle: title, isMovie: isMovie, apiKey: apiKey) else { return nil }
+        return await details(forTMDBID: id, isMovie: isMovie, apiKey: apiKey)
+    }
+
+    // MARK: Structured credits
+
+    private static func parsePerson(id: FlexID?, name: String?, role: String?, profilePath: String?) -> TMDBPerson? {
+        // Rows missing a name or id can neither render nor deep-link.
+        guard let pid = id?.value, !pid.isEmpty, let n = nonBlank(name) else { return nil }
+        return TMDBPerson(id: pid, name: n, role: nonBlank(role), profilePath: nonBlank(profilePath))
+    }
+
+    /// Structured cast (first 20) + directors. Movies: crew rows with
+    /// job=="Director" (role "Director"). TV: top-level created_by (role
+    /// "Creator"); TMDB tv has no per-series Director job.
+    static func credits(forTMDBID id: String, isMovie: Bool, apiKey: String) async -> TMDBCredits? {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let kind = isMovie ? "movie" : "tv"
+        let cacheKey = "credits:\(kind):\(trimmed)" as NSString
+        if let boxed = creditsCache.object(forKey: cacheKey) { return boxed.value }
+        guard let req = makeRequest(path: "/\(kind)/\(trimmed)",
+                                    queryItems: [URLQueryItem(name: "append_to_response", value: "credits")],
+                                    key: apiKey) else { return nil }
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(DetailsCreditsResponse.self, from: data)
+        else { return nil }
+
+        let cast = (decoded.credits?.cast ?? []).prefix(20).compactMap {
+            parsePerson(id: $0.id, name: $0.name, role: $0.character, profilePath: $0.profilePath)
+        }
+        let directors: [TMDBPerson]
+        if isMovie {
+            directors = (decoded.credits?.crew ?? [])
+                .filter { $0.job == "Director" }
+                .compactMap { parsePerson(id: $0.id, name: $0.name, role: "Director", profilePath: $0.profilePath) }
+        } else {
+            directors = (decoded.createdBy ?? [])
+                .compactMap { parsePerson(id: $0.id, name: $0.name, role: "Creator", profilePath: $0.profilePath) }
+        }
+        let credits = TMDBCredits(cast: Array(cast), directors: directors)
+        creditsCache.setObject(Box(credits), forKey: cacheKey)
+        debugLog("🎬 TMDB credits id \(trimmed) (\(kind)) -> cast \(credits.cast.count), directors \(credits.directors.count)")
+        return credits
+    }
+
+    static func credits(forTitle title: String, isMovie: Bool, apiKey: String) async -> TMDBCredits? {
+        guard let id = await resolveID(forTitle: title, isMovie: isMovie, apiKey: apiKey) else { return nil }
+        return await credits(forTMDBID: id, isMovie: isMovie, apiKey: apiKey)
+    }
+
+    // MARK: Person bio + Known For
+
+    /// Known For cameo filter (mirrors the Android heuristic, which itself
+    /// reproduces TMDB's own person-page intent): a row survives only when
+    /// it has id+title+poster, is not Talk(10767)/News(10763)/Reality(10764),
+    /// is not the person playing themselves, has episode_count >= 3 when
+    /// present, order <= 8 when present, and media_type is exactly movie
+    /// or tv. Survivors sort by popularity desc, dedupe by id (most
+    /// popular duplicate wins), cap 8.
+    private static func parseKnownFor(_ entries: [PersonResponse.Entry]?) -> [TMDBKnownForItem] {
+        guard let entries else { return [] }
+        let excludedGenres: Set<Int> = [10767, 10763, 10764]
+        let survivors: [(item: TMDBKnownForItem, popularity: Double)] = entries.compactMap { e in
+            guard let id = e.id?.value, !id.isEmpty,
+                  let title = nonBlank(e.title ?? e.name),
+                  let poster = nonBlank(e.posterPath) else { return nil }
+            if let gids = e.genreIds, gids.contains(where: { excludedGenres.contains($0) }) { return nil }
+            if let ch = e.character?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                if ch == "self" || ch.hasPrefix("self ") || ch == "herself" || ch == "himself" { return nil }
+            }
+            if let epCount = e.episodeCount?.value, epCount < 3 { return nil }
+            if let order = e.order?.value, order > 8 { return nil }
+            guard e.mediaType == "movie" || e.mediaType == "tv" else { return nil }
+            return (TMDBKnownForItem(id: id, title: title, posterPath: poster, isMovie: e.mediaType == "movie"),
+                    e.popularity ?? 0)
+        }
+        var seen = Set<String>()
+        return survivors
+            .sorted { $0.popularity > $1.popularity }
+            .filter { seen.insert($0.item.id).inserted }
+            .prefix(8)
+            .map(\.item)
+    }
+
+    /// Person bio with Known For riding the same response via
+    /// append_to_response=combined_credits. A missing name fails the whole
+    /// parse; a missing combined_credits block just yields empty knownFor.
+    static func personBio(forID id: String, apiKey: String) async -> TMDBPersonBio? {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let cacheKey = "person:\(trimmed)" as NSString
+        if let boxed = personBioCache.object(forKey: cacheKey) { return boxed.value }
+        guard let req = makeRequest(path: "/person/\(trimmed)",
+                                    queryItems: [URLQueryItem(name: "append_to_response", value: "combined_credits")],
+                                    key: apiKey) else { return nil }
+        guard let (data, resp) = try? await session.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let decoded = try? JSONDecoder().decode(PersonResponse.self, from: data),
+              let name = nonBlank(decoded.name)
+        else { return nil }
+
+        let bio = TMDBPersonBio(
+            name: name,
+            biography: nonBlank(decoded.biography),
+            birthday: nonBlank(decoded.birthday),
+            deathday: nonBlank(decoded.deathday),
+            placeOfBirth: nonBlank(decoded.placeOfBirth),
+            profilePath: nonBlank(decoded.profilePath),
+            knownFor: parseKnownFor(decoded.combinedCredits?.cast)
+        )
+        personBioCache.setObject(Box(bio), forKey: cacheKey)
+        debugLog("🎬 TMDB person \(trimmed) -> ok, knownFor \(bio.knownFor.count)")
+        return bio
+    }
+
+    /// Pure string concatenation, no network and no gating. TMDB omits
+    /// profile_path for most minor cast; nil/blank-safe.
+    /// Sizes used: w185 strip headshots and Known For tiles, w342 bio
+    /// headshot, w500 posters.
+    static func profileImageURL(path: String?, size: String = "w185") -> URL? {
+        guard let p = path, !p.isEmpty else { return nil }
+        return URL(string: "https://image.tmdb.org/t/p/\(size)\(p)")
+    }
+}
