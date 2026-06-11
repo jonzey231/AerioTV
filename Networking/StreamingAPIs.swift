@@ -34,17 +34,18 @@ func classifyStreamURL(_ url: URL) -> StreamFormat {
     return .unknown
 }
 
-/// TEST (branch test/avplayer-hls-engine): the same URL with
-/// `output_format=hls` appended, requesting Dispatcharr's native
-/// server-side HLS output. Returns the original URL when components
-/// cannot be parsed or the parameter is already present.
+/// TEST (branch test/avplayer-hls-engine): the same URL rewritten to
+/// request Dispatcharr's native server-side HLS output. REPLACES any
+/// existing output_format/output value: the app bakes
+/// `?output_format=mpegts` into Dispatcharr stream URLs for the mpv
+/// path, and an earlier defer-to-existing guard here made the probe
+/// ask for TS, caching "no native HLS" against capable servers.
 func appendingHLSOutputFormat(_ url: URL) -> URL {
     guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
         return url
     }
-    var items = components.queryItems ?? []
-    guard !items.contains(where: { $0.name == "output_format" || $0.name == "output" }) else {
-        return url
+    var items = (components.queryItems ?? []).filter {
+        $0.name != "output_format" && $0.name != "output"
     }
     items.append(URLQueryItem(name: "output_format", value: "hls"))
     components.queryItems = items
