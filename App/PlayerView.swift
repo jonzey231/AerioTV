@@ -3514,7 +3514,11 @@ struct NativeHLSPlayerScreen: View {
             }
             .padding(.horizontal, 18)
             .frame(height: 50)
+            // Material alone goes light over bright content; the native
+            // pills hold a dark tone everywhere, so blur over a dark
+            // underlay to match.
             .background(.ultraThinMaterial, in: Capsule())
+            .background(Color.black.opacity(0.4), in: Capsule())
             .environment(\.colorScheme, .dark)
         )
         #else
