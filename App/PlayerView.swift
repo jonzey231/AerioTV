@@ -3355,20 +3355,20 @@ struct NativeHLSPlayerScreen: View {
         // the mpv chrome cycle.
         .onExitCommand { minimizeToMini() }
         #else
-        // iOS parity with the tvOS transport items: AVPlayerViewController
-        // has no transportBarCustomMenuItems on iOS, so the app actions
-        // ride a floating overlay. Leading: minimize (chevron, mpv
-        // parity) and close. Trailing: Record, Add Stream, and an
-        // Options menu (Stream Info, Sleep Timer, Switch to MPV; aspect
-        // is omitted because iOS AVPlayerViewController already has the
-        // native pinch zoom gesture).
+        // iOS: unlike tvOS, AVPlayerViewController draws its OWN top
+        // chrome here (close, PiP, AirPlay, volume), so the overlay
+        // carries ONLY the actions the native player lacks, positioned
+        // BELOW the native control row so the two layers never collide
+        // (the first build duplicated close and crowded the corners).
+        // Leading: minimize to the corner mini (the native X fully
+        // stops, the chevron keeps watching). Trailing: Record,
+        // Add Stream, and an Options menu (Stream Info, Sleep Timer,
+        // Switch to MPV, Stop). Aspect is omitted: the native player
+        // already has pinch zoom.
         .overlay(alignment: .topLeading) {
-            HStack(spacing: 12) {
-                iosOverlayButton("chevron.down") { minimizeToMini() }
-                iosOverlayButton("xmark") { dismiss() }
-            }
-            .padding(.top, 24)
-            .padding(.leading, 16)
+            iosOverlayButton("chevron.down") { minimizeToMini() }
+                .padding(.top, 96)
+                .padding(.leading, 16)
         }
         .overlay(alignment: .topTrailing) {
             HStack(spacing: 12) {
@@ -3399,6 +3399,11 @@ struct NativeHLSPlayerScreen: View {
                     } label: {
                         Label("Switch to MPV Player", systemImage: "arrow.triangle.2.circlepath")
                     }
+                    Button(role: .destructive) {
+                        dismiss()
+                    } label: {
+                        Label("Stop Playback", systemImage: "stop.circle")
+                    }
                 } label: {
                     Image(systemName: "slider.horizontal.3")
                         .font(.system(size: 16, weight: .semibold))
@@ -3407,7 +3412,7 @@ struct NativeHLSPlayerScreen: View {
                         .background(Circle().fill(Color.black.opacity(0.55)))
                 }
             }
-            .padding(.top, 24)
+            .padding(.top, 96)
             .padding(.trailing, 16)
         }
         .statusBarHidden()
