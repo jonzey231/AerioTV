@@ -3710,15 +3710,47 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
         private func mount(_ view: UIView, in parent: UIView, controller: AVPlayerViewController) {
             parent.addSubview(view)
             hosting?.didMove(toParent: controller)
-            // Same line as the native chrome: top matches the native
-            // row, leading clears the X + PiP/AirPlay cluster (stable
-            // across orientations, unlike the morphing volume control).
-            NSLayoutConstraint.activate([
-                view.leadingAnchor.constraint(
-                    equalTo: controller.view.layoutMarginsGuide.leadingAnchor, constant: 185),
+            // Leading clears the X + PiP/AirPlay cluster (stable across
+            // orientations, unlike the morphing volume control).
+            view.leadingAnchor.constraint(
+                equalTo: controller.view.layoutMarginsGuide.leadingAnchor, constant: 185
+            ).isActive = true
+            // Vertical: align centerlines with a REAL native top-row
+            // control. Apple's row is not a constant offset from the
+            // safe area across orientations, so a fixed inset always
+            // rides high or low somewhere; anchoring to the measured
+            // button tracks the native row exactly, live, in both
+            // orientations. Fixed inset only as a fallback.
+            controller.view.layoutIfNeeded()
+            if let reference = Self.topRowReferenceControl(in: parent, host: controller.view) {
+                view.centerYAnchor.constraint(equalTo: reference.centerYAnchor).isActive = true
+            } else {
                 view.topAnchor.constraint(
-                    equalTo: controller.view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            ])
+                    equalTo: controller.view.safeAreaLayoutGuide.topAnchor, constant: 8
+                ).isActive = true
+            }
+        }
+
+        /// The highest plausibly button-sized native control in the top
+        /// band of the player, i.e. a member of the chrome's top row.
+        private static func topRowReferenceControl(in root: UIView, host: UIView) -> UIView? {
+            var best: (view: UIView, midY: CGFloat)?
+            var queue: [UIView] = [root]
+            while !queue.isEmpty {
+                let view = queue.removeFirst()
+                if view is UIControl,
+                   view.bounds.height >= 36, view.bounds.height <= 64 {
+                    let midY = view.convert(view.bounds, to: host).midY
+                    if best == nil || midY < best!.midY {
+                        best = (view, midY)
+                    }
+                }
+                queue.append(contentsOf: view.subviews)
+            }
+            guard let best, best.midY > 0, best.midY < host.bounds.height * 0.3 else {
+                return nil
+            }
+            return best.view
         }
 
         private static func findControlsHost(in root: UIView) -> UIView? {
