@@ -339,6 +339,21 @@ final class PlayerSession: ObservableObject {
         if !bypassNativeRouter, isLive,
            let url = item.streamURL ?? item.streamURLs.first {
             let format = classifyStreamURL(url)
+            let routesNative = (PlaybackFeatureFlags.avPlayerForHLS && format == .hls)
+                || (PlaybackFeatureFlags.avPlayerRemuxTS && format == .mpegTS)
+            // Device-log bug: selecting a channel from the guide while
+            // the MINI was up presented the native cover OVER the
+            // still-playing mini, two concurrent streams (and two audio
+            // paths, the mini is the unmuted audio tile). The container
+            // swap logic lives below this router, so tear the session
+            // down here before presenting the cover.
+            if routesNative, mode != .idle {
+                DebugLogger.shared.log(
+                    "[AVP-HLS] router: stopping active session (mode=\(mode)) before native present",
+                    category: "Playback", level: .info
+                )
+                stop()
+            }
             if PlaybackFeatureFlags.avPlayerForHLS, format == .hls {
                 nativeHLSUseRemux = false
                 nativeHLSHeaders = [:]
