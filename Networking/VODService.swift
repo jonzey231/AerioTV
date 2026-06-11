@@ -954,10 +954,14 @@ enum TMDBService {
             let posterPath: String?
             let mediaType: String?
             let popularity: Double?
+            let releaseDate: String?
+            let firstAirDate: String?
             enum CodingKeys: String, CodingKey {
                 case posterPath = "poster_path"
                 case mediaType = "media_type"
                 case popularity
+                case releaseDate = "release_date"
+                case firstAirDate = "first_air_date"
             }
         }
     }
@@ -1007,20 +1011,44 @@ enum TMDBService {
             let path = cached as String
             return path.isEmpty ? nil : URL(string: imageBase + "/\(size)" + path)
         }
-        guard let req = makeRequest(path: "/search/multi", queryItems: [
-            URLQueryItem(name: "query", value: title),
-            URLQueryItem(name: "include_adult", value: "false")
-        ], key: apiKey) else { return nil }
-        guard let (data, resp) = try? await session.data(for: req),
-              let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let decoded = try? JSONDecoder().decode(SearchResponse.self, from: data)
-        else { return nil }
-        // Prefer a movie/tv hit with a poster; else any hit with a poster.
-        let path = decoded.results.first {
-            ($0.posterPath?.isEmpty == false) && ($0.mediaType == "movie" || $0.mediaType == "tv")
-        }?.posterPath
-            ?? decoded.results.first { $0.posterPath?.isEmpty == false }?.posterPath
-        cache.setObject((path ?? "") as NSString, forKey: cacheKey as NSString)
+        // Android-parity sanitation: split the trailing "(YYYY)" off the
+        // query text (a year embedded in the query reliably misses on
+        // /search/multi) and retry once with leading punctuation stripped.
+        // /search/multi has no year parameter, so the year is re-applied to
+        // the RESULTS as a preference tier, not a hard filter; a playlist
+        // year disagreeing with TMDB still finds art.
+        let (cleaned, year) = splitTitleYear(title)
+        guard !cleaned.isEmpty else { return nil }
+        var path: String?
+        var sawResponse = false
+        for attempt in searchAttempts(for: cleaned) {
+            guard let req = makeRequest(path: "/search/multi", queryItems: [
+                URLQueryItem(name: "query", value: attempt),
+                URLQueryItem(name: "include_adult", value: "false")
+            ], key: apiKey) else { continue }
+            guard let (data, resp) = try? await session.data(for: req),
+                  let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                  let decoded = try? JSONDecoder().decode(SearchResponse.self, from: data)
+            else { continue } // transport failure / non-200: never cached
+            sawResponse = true
+            let typedHits = decoded.results.filter {
+                ($0.posterPath?.isEmpty == false) && ($0.mediaType == "movie" || $0.mediaType == "tv")
+            }
+            if let y = year,
+               let hit = typedHits.first(where: { ($0.releaseDate ?? $0.firstAirDate ?? "").hasPrefix(y) }) {
+                path = hit.posterPath
+            } else if let hit = typedHits.first {
+                path = hit.posterPath
+            } else if let any = decoded.results.first(where: { $0.posterPath?.isEmpty == false }) {
+                path = any.posterPath
+            }
+            if path != nil { break }
+        }
+        // Cache "" only when TMDB actually answered (confirmed miss);
+        // keep transport failures retryable.
+        if sawResponse {
+            cache.setObject((path ?? "") as NSString, forKey: cacheKey as NSString)
+        }
         let posterURL = (path?.isEmpty == false) ? URL(string: imageBase + "/\(size)" + path!) : nil
         // Verification breadcrumb: proves TMDB was queried and shows what
         // came back (the API key is never logged). Logs misses too, unlike
@@ -1361,7 +1389,9 @@ extension TMDBService {
         else { return nil }
 
         let genres = decoded.genres?.compactMap { nonBlank($0.name) }.joined(separator: ", ")
-        let castTop = decoded.credits?.cast?.prefix(6).compactMap { nonBlank($0.name) }.joined(separator: ", ")
+        // Filter THEN cap: an invalid row among the first 6 should backfill
+        // from later entries instead of shrinking the list.
+        let castTop = decoded.credits?.cast?.compactMap { nonBlank($0.name) }.prefix(6).joined(separator: ", ")
         let director: String?
         if isMovie {
             director = decoded.credits?.crew?
@@ -1420,9 +1450,10 @@ extension TMDBService {
               let decoded = try? JSONDecoder().decode(DetailsCreditsResponse.self, from: data)
         else { return nil }
 
-        let cast = (decoded.credits?.cast ?? []).prefix(20).compactMap {
+        // Filter THEN cap (same rationale as castTop above).
+        let cast = (decoded.credits?.cast ?? []).compactMap {
             parsePerson(id: $0.id, name: $0.name, role: $0.character, profilePath: $0.profilePath)
-        }
+        }.prefix(20)
         let directors: [TMDBPerson]
         if isMovie {
             directors = (decoded.credits?.crew ?? [])

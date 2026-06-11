@@ -1162,8 +1162,11 @@ private struct TVQRLinkSheet: View {
         .padding(48)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.appBackground.ignoresSafeArea())
-        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
-        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        // Route through the refcount helper rather than assigning
+        // isIdleTimerDisabled directly: a direct write on dismiss would
+        // clobber any concurrent holder (e.g. active playback).
+        .onAppear { IdleTimerRefCount.increment(caller: "about-qr-sheet") }
+        .onDisappear { IdleTimerRefCount.decrement(caller: "about-qr-sheet") }
     }
 
     private static func qrCodeImage(from string: String) -> UIImage? {

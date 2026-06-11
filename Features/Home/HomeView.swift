@@ -204,7 +204,7 @@ final class VODStore: ObservableObject {
                 for try await batch in api.searchVODMoviesStream(query: query) {
                     guard !Task.isCancelled else { break }
                     let items = batch.map { m -> VODDisplayItem in
-                        let movie = VODMovie(
+                        var movie = VODMovie(
                             id: String(m.id), name: m.title,
                             posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
                             backdropURL: nil,
@@ -216,6 +216,11 @@ final class VODStore: ObservableObject {
                                                          preferredStreamID: m.streams?.first?.streamID),
                             containerExtension: "mp4", serverID: sID
                         )
+                        // Stamp the tmdb id: the Known For deep-link's strict
+                        // id tier walks search results too, and an id-less row
+                        // would fall through to the title fallback where a
+                        // same-named remake could hijack the match.
+                        movie.tmdbID = m.tmdbID ?? ""
                         return VODDisplayItem(movie: movie)
                     }
                     results += items
@@ -276,7 +281,7 @@ final class VODStore: ObservableObject {
                 for try await batch in api.searchVODSeriesStream(query: query) {
                     guard !Task.isCancelled else { break }
                     let items = batch.map { s -> VODDisplayItem in
-                        let show = VODSeries(
+                        var show = VODSeries(
                             id: String(s.id), name: s.name,
                             posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
                             backdropURL: nil,
@@ -286,6 +291,9 @@ final class VODStore: ObservableObject {
                             categoryID: "", categoryName: "Series",
                             serverID: sID, seasons: [], episodeCount: 0
                         )
+                        // Same tmdb-id stamping rationale as the movie
+                        // search mapper above (Known For strict-id tier).
+                        show.tmdbID = s.tmdbID ?? ""
                         return VODDisplayItem(series: show)
                     }
                     results += items

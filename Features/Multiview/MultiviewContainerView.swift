@@ -1020,7 +1020,7 @@ struct MultiviewContainerView: View {
         if PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1 {
             return "Stops playback and returns to the channel guide."
         }
-        return "Collapses the grid back to the stream you were listening to. You can re-add streams from the single view."
+        return "Exit Multiview collapses the grid back to the stream you were listening to. Back to TV Guide keeps your staged tiles so you can resume from the guide."
     }
 
     /// Run the actual exit action that the confirmation dialog was

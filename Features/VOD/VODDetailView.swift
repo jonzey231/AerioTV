@@ -426,10 +426,18 @@ struct VODDetailView: View {
                             Text(displayYear)
                                 .font(.labelSmall).foregroundColor(.textSecondary)
                         }
-                        // Rating: server value first; TMDB vote average
-                        // backfills only when the server gave none (a TMDB
-                        // "0.0" is unrated and was already dropped at parse).
-                        let displayRating = item.rating.isEmpty ? (tmdbDetails?.voteAverage ?? "") : item.rating
+                        // Rating, server-wins per the parity spec: the
+                        // provider-info merged rating first, then the grid-row
+                        // snapshot. A server "0"/"0.0" means unrated and is
+                        // dropped; it would otherwise render a starred zero AND
+                        // block the TMDB vote backfill (common on Xtream list
+                        // payloads). TMDB's vote average is last in the chain
+                        // (its own 0.0 was already dropped at parse).
+                        let infoRating = (fullMovie?.rating ?? fullSeries?.rating) ?? ""
+                        let rawServerRating = (infoRating.isEmpty ? item.rating : infoRating)
+                            .trimmingCharacters(in: .whitespaces)
+                        let serverRating = (rawServerRating == "0" || rawServerRating == "0.0") ? "" : rawServerRating
+                        let displayRating = serverRating.isEmpty ? (tmdbDetails?.voteAverage ?? "") : serverRating
                         if !displayRating.isEmpty {
                             HStack(spacing: 3) {
                                 Image(systemName: "star.fill")
@@ -469,8 +477,11 @@ struct VODDetailView: View {
         // below the hero). A plain focus stop on the band gives D-pad Up a
         // landing spot, and the focus engine scrolls the hero back into
         // view natively. No action on select; it is a read-only stop.
+        // SERIES ONLY: movies never had the gap (their Play button lives
+        // inside the hero) and nesting a focusable container around an
+        // already-focusable child invites focus-engine surprises.
         #if os(tvOS)
-        .focusable()
+        .focusable(item.type == .series)
         #endif
     }
 
@@ -804,7 +815,9 @@ struct VODDetailView: View {
     fileprivate static func qrCodeImage(from string: String) -> UIImage? {
         guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
         filter.setValue(Data(string.utf8), forKey: "inputMessage")
-        filter.setValue("M", forKey: "inputCorrectionLevel")
+        // Error correction H (parity spec): a phone camera reads a TV
+        // screen at an angle through living-room lighting.
+        filter.setValue("H", forKey: "inputCorrectionLevel")
         guard let output = filter.outputImage else { return nil }
         let scaled = output.transformed(by: CGAffineTransform(scaleX: 12, y: 12))
         let context = CIContext()
@@ -1062,6 +1075,10 @@ struct VODDetailView: View {
     /// awaits loadDetail() first). Exact tmdb_id wins; title search
     /// rescues stale or absent provider ids. Country is never backfilled.
     private func loadTMDBDetailsIfNeeded() async {
+        // Episode-typed items (reachable via global Search) have no
+        // movie/series payload; a title search with an episode display
+        // name risks matching the wrong show entirely.
+        guard item.type == .movie || item.type == .series else { return }
         guard tmdbDetails == nil,
               TMDBPosters.isEnabled,
               let apiKey = TMDBPosters.apiKey else { return }
@@ -1093,6 +1110,8 @@ struct VODDetailView: View {
     /// behavior, but NO missing-metadata condition: server text strings
     /// can never supply headshots.
     private func loadTMDBCreditsIfNeeded() async {
+        // Same episode guard as the details backfill above.
+        guard item.type == .movie || item.type == .series else { return }
         guard tmdbCredits == nil,
               TMDBPosters.isEnabled,
               let apiKey = TMDBPosters.apiKey else { return }
@@ -1609,6 +1628,19 @@ private struct PersonBioSheet: View {
                                     .font(.bodyMedium)
                                     .foregroundColor(.textTertiary)
                             }
+                            // iOS half of the person TMDB-page surface (the
+                            // tvOS half is the corner QR): a tappable link to
+                            // the full filmography.
+                            #if !os(tvOS)
+                            if let personURL = URL(string: "https://www.themoviedb.org/person/\(person.id)") {
+                                Link(destination: personURL) {
+                                    Label("View on TMDB", systemImage: "arrow.up.right.square")
+                                        .font(.labelMedium)
+                                        .foregroundColor(.accentPrimary)
+                                }
+                                .padding(.top, 8)
+                            }
+                            #endif
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         #if os(tvOS)

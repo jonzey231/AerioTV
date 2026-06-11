@@ -1848,14 +1848,24 @@ struct DispatcharrAPI {
         return "/api/vod/series/?page_size=100&category=\(encoded)"
     }
 
+    /// Query-VALUE-safe percent encoding. `.urlQueryAllowed` describes the
+    /// whole query STRING, so it leaves "&" and "+" bare; a title like
+    /// "Law & Order" then truncates the DRF ?search= value server-side and
+    /// the search silently misses.
+    private static func encodeQueryValue(_ raw: String) -> String {
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&+=?")
+        return raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? raw
+    }
+
     /// Server-side search — uses DRF's ?search= filter so items not yet locally fetched are found.
     func searchVODMoviesStream(query: String) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let encoded = Self.encodeQueryValue(query)
         return makePageStream(firstPath: "/api/vod/movies/?search=\(encoded)&page_size=100")
     }
 
     func searchVODSeriesStream(query: String) -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+        let encoded = Self.encodeQueryValue(query)
         return makePageStream(firstPath: "/api/vod/series/?search=\(encoded)&page_size=100")
     }
 
