@@ -1,5 +1,7 @@
 import Foundation
 import Network
+import SwiftUI
+import AVFoundation
 
 // MARK: - TS-to-HLS remuxer (TEST, branch test/avplayer-hls-engine)
 
@@ -506,5 +508,152 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error, (error as NSError).code != NSURLErrorCancelled else { return }
         queue.async { [weak self] in self?.fail(.ingestFailed(error.localizedDescription)) }
+    }
+}
+
+// MARK: - AVPlayer multiview tile (TEST, branch test/avplayer-hls-engine)
+
+/// AVPlayer-backed video surface for ONE multiview tile, the per-tile
+/// engine-swap counterpart of `MPVPlayerViewRepresentable`. Multiview's
+/// features (layouts, spotlight, relocate, audio routing, staging,
+/// chrome, focus) all live in the container and store and are
+/// tile-agnostic, so swapping the video view per tile is all that
+/// AVPlayer multiview requires; nothing else is duplicated.
+///
+/// Direct HLS URLs play as-is; raw TS rides a per-tile TSHLSRemuxer
+/// instance (each binds its own loopback port, so N concurrent tiles
+/// remux independently). On any remux/codec-gate/playback failure the
+/// tile reports back and the parent swaps it to an mpv tile, so
+/// mixed-engine grids (e.g. an HEVC UHD channel on mpv next to H.264
+/// channels on AVPlayer) are the normal failure mode, not an error.
+///
+/// Known evaluation limitations: the chrome scrubber and track pickers
+/// bind to the mpv progress store, so they are inert while the audio
+/// tile is AVPlayer-backed; play/pause via `shouldPause` works.
+struct AVPlayerMultiviewTile: View {
+    let streamURL: URL
+    let headers: [String: String]
+    let isAudioActive: Bool
+    let shouldPause: Bool
+    let channelName: String
+    /// Parent flips this tile back to the mpv engine.
+    let onEngineFallback: (String) -> Void
+
+    @State private var player: AVPlayer?
+    @State private var remuxer: TSHLSRemuxer?
+    @State private var statusText: String?
+
+    var body: some View {
+        ZStack {
+            Color.black
+            if let player {
+                AVPlayerLayerView(player: player)
+            }
+            if let statusText {
+                VStack(spacing: 8) {
+                    ProgressView()
+                    Text(statusText)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.8))
+                }
+            }
+        }
+        .onAppear {
+            AudioSessionRefCount.increment(caller: "avp-tile")
+            start()
+        }
+        .onDisappear {
+            stop()
+            AudioSessionRefCount.decrement(caller: "avp-tile")
+        }
+        .onChange(of: isAudioActive) { _, active in
+            player?.isMuted = !active
+        }
+        .onChange(of: shouldPause) { _, paused in
+            if paused { player?.pause() } else { player?.play() }
+        }
+        // In-place channel swap on the same tile id (the container
+        // swaps `tile.streamURL` without changing tile identity).
+        .onChange(of: streamURL) { _, _ in
+            stop()
+            start()
+        }
+        // Direct-HLS playback failures have no remuxer to report them;
+        // catch the item-level failure and fall back to mpv.
+        .onReceive(NotificationCenter.default.publisher(
+            for: .AVPlayerItemFailedToPlayToEndTime)) { note in
+            guard let failed = note.object as? AVPlayerItem,
+                  failed === player?.currentItem else { return }
+            debugLog("[AVP-MV] tile playback failed channel=\(channelName); falling back to mpv tile")
+            onEngineFallback("playback failed")
+        }
+    }
+
+    private func start() {
+        switch classifyStreamURL(streamURL) {
+        case .hls:
+            var direct: [String: String] = [:]
+            if let ua = headers["User-Agent"] { direct["User-Agent"] = ua }
+            startPlayer(url: streamURL, requestHeaders: direct)
+            debugLog("[AVP-MV] tile playing direct HLS channel=\(channelName)")
+        default:
+            statusText = "Preparing..."
+            let mux = TSHLSRemuxer(sourceURL: streamURL, headers: headers)
+            mux.onReady = { url in
+                statusText = nil
+                startPlayer(url: url, requestHeaders: [:])
+                debugLog("[AVP-MV] tile playing REMUXED channel=\(channelName)")
+            }
+            mux.onError = { error in
+                debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName); falling back to mpv tile")
+                onEngineFallback("\(error)")
+            }
+            remuxer = mux
+            mux.start()
+        }
+    }
+
+    private func startPlayer(url: URL, requestHeaders: [String: String]) {
+        var options: [String: Any] = [:]
+        if !requestHeaders.isEmpty {
+            options["AVURLAssetHTTPHeaderFieldsKey"] = requestHeaders
+        }
+        let asset = AVURLAsset(url: url, options: options)
+        let avPlayer = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        avPlayer.isMuted = !isAudioActive
+        if !shouldPause { avPlayer.play() }
+        player = avPlayer
+    }
+
+    private func stop() {
+        player?.pause()
+        player = nil
+        remuxer?.stop()
+        remuxer = nil
+        statusText = nil
+    }
+}
+
+/// Bare AVPlayerLayer host: video only, no system chrome, sized by
+/// SwiftUI like any other tile content.
+struct AVPlayerLayerView: UIViewRepresentable {
+    let player: AVPlayer
+
+    final class HostView: UIView {
+        override class var layerClass: AnyClass { AVPlayerLayer.self }
+        var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+    }
+
+    func makeUIView(context: Context) -> HostView {
+        let view = HostView()
+        view.playerLayer.player = player
+        view.playerLayer.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateUIView(_ view: HostView, context: Context) {
+        if view.playerLayer.player !== player {
+            view.playerLayer.player = player
+        }
     }
 }

@@ -157,6 +157,25 @@ struct MultiviewTileView: View {
 
     var isAudioActive: Bool { store.audioTileID == tile.id }
 
+    /// TEST (branch test/avplayer-hls-engine): set when this tile's
+    /// AVPlayer attempt failed (codec gate, ingest, playback error);
+    /// the video branch then renders the mpv representable instead.
+    /// Reset on channel swap so the new channel gets a fresh routing
+    /// decision.
+    @State private var avEngineFallback = false
+
+    /// TEST: per-tile engine routing, mirroring PlayerSession.begin's
+    /// router. Live tiles only; VOD/DVR stay on mpv (proxy redirects,
+    /// MKV, resume positions). Mixed-engine grids are expected.
+    private var usesAVPlayerEngine: Bool {
+        guard !avEngineFallback, tile.kind == .live else { return false }
+        switch classifyStreamURL(tile.streamURL) {
+        case .hls:    return PlaybackFeatureFlags.avPlayerForHLS
+        case .mpegTS: return PlaybackFeatureFlags.avPlayerRemuxTS
+        default:      return false
+        }
+    }
+
     /// Computed: a tile should freeze its mpv decode when:
     /// - PiP is currently active AND this is NOT the audio tile
     ///   (PiP-source tile keeps decoding; others pause for
@@ -505,31 +524,54 @@ struct MultiviewTileView: View {
             // v1.7.x: black backdrop behind the representable, same
             // pattern as `tappableRegion` and `PlayerView.playerView`.
             Color.black
-            MPVPlayerViewRepresentable(
-                urls: [tile.streamURL],
-                headers: tile.headers,
-                isLive: tile.kind == .live,
-                isDVR: tile.kind == .dvr,
-                nowPlayingTitle: tile.item.name,
-                nowPlayingSubtitle: tile.item.currentProgram,
-                nowPlayingArtworkURL: tile.item.logoURL,
-                progressStore: progressStore,
-                logStore: logStore,
-                onFatalError: { message in
-                    decodeErrorMessage = message
-                    DebugLogger.shared.log(
-                        "[MV-Tile] decode error: channel=\(tile.item.name) msg=\(Self.sanitizedErrorMessage(message))",
-                        category: "Playback", level: .warning
+            // TEST (branch test/avplayer-hls-engine): per-tile engine
+            // swap. Container/store features (layouts, spotlight,
+            // relocate, audio routing, chrome, focus) are tile-agnostic,
+            // so this branch is the entirety of AVPlayer multiview.
+            Group {
+                if usesAVPlayerEngine {
+                    AVPlayerMultiviewTile(
+                        streamURL: tile.streamURL,
+                        headers: tile.headers,
+                        isAudioActive: isAudioActive,
+                        shouldPause: shouldPause,
+                        channelName: tile.item.name,
+                        onEngineFallback: { _ in avEngineFallback = true }
                     )
-                },
-                tileID: tile.id,
-                isAudioActive: isAudioActive,
-                shouldPause: shouldPause,
-                // Snapshot tile count for setupMPV's pre-init audio
-                // strategy (mute-only ≤6, decoder-off ≥7). See the
-                // !initialIsAudioActive branch in setupMPV.
-                initialTileCount: store.tiles.count
-            )
+                } else {
+                    MPVPlayerViewRepresentable(
+                        urls: [tile.streamURL],
+                        headers: tile.headers,
+                        isLive: tile.kind == .live,
+                        isDVR: tile.kind == .dvr,
+                        nowPlayingTitle: tile.item.name,
+                        nowPlayingSubtitle: tile.item.currentProgram,
+                        nowPlayingArtworkURL: tile.item.logoURL,
+                        progressStore: progressStore,
+                        logStore: logStore,
+                        onFatalError: { message in
+                            decodeErrorMessage = message
+                            DebugLogger.shared.log(
+                                "[MV-Tile] decode error: channel=\(tile.item.name) msg=\(Self.sanitizedErrorMessage(message))",
+                                category: "Playback", level: .warning
+                            )
+                        },
+                        tileID: tile.id,
+                        isAudioActive: isAudioActive,
+                        shouldPause: shouldPause,
+                        // Snapshot tile count for setupMPV's pre-init audio
+                        // strategy (mute-only ≤6, decoder-off ≥7). See the
+                        // !initialIsAudioActive branch in setupMPV.
+                        initialTileCount: store.tiles.count
+                    )
+                }
+            }
+            // Channel swap on the same tile id: give the NEW channel a
+            // fresh engine decision (a prior fallback must not pin the
+            // tile to mpv forever).
+            .onChange(of: tile.streamURL) { _, _ in
+                avEngineFallback = false
+            }
             .id(tile.id)
             .onAppear {
                 debugLog("[MV-Tile] onAppear id=\(tile.id) name=\(tile.item.name)")
