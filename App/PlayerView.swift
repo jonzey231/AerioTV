@@ -3272,8 +3272,16 @@ struct TVRemoteInputView: UIViewRepresentable {
 struct NativeHLSPlayerScreen: View {
     let item: ChannelDisplayItem
     let userAgent: String?
+    /// When true, the stream is raw MPEG-TS: an on-device TSHLSRemuxer
+    /// ingests it and AVPlayer plays the loopback playlist it serves.
+    var useRemux = false
+    /// Ingest headers for the remuxer (Dispatcharr auth + UA).
+    var ingestHeaders: [String: String] = [:]
+
     @Environment(\.dismiss) private var dismiss
     @State private var player: AVPlayer?
+    @State private var remuxer: TSHLSRemuxer?
+    @State private var statusText: String?
 
     var body: some View {
         ZStack {
@@ -3281,6 +3289,14 @@ struct NativeHLSPlayerScreen: View {
             if let player {
                 NativeAVPlayerController(player: player)
                     .ignoresSafeArea()
+            }
+            if let statusText {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text(statusText)
+                        .font(.bodyMedium)
+                        .foregroundColor(.white.opacity(0.85))
+                }
             }
         }
         #if os(tvOS)
@@ -3305,29 +3321,74 @@ struct NativeHLSPlayerScreen: View {
             AudioSessionRefCount.increment(caller: "native-hls")
             IdleTimerRefCount.increment(caller: "native-hls")
             guard let url = item.streamURL ?? item.streamURLs.first else { return }
-            var options: [String: Any] = [:]
-            if let userAgent, !userAgent.isEmpty {
-                options["AVURLAssetHTTPHeaderFieldsKey"] = ["User-Agent": userAgent]
-            }
-            let asset = AVURLAsset(url: url, options: options)
-            let avPlayer = AVPlayer(playerItem: AVPlayerItem(asset: asset))
-            avPlayer.play()
-            player = avPlayer
             NowPlayingManager.shared.lastPlayedChannelID = item.id
-            DebugLogger.shared.log(
-                "[AVP-HLS] native engine playing channel id=\(item.id)",
-                category: "Playback", level: .info
-            )
+
+            if useRemux {
+                // Raw TS: stand up the loopback remuxer, then play its
+                // playlist URL once two segments exist. The codec gate
+                // (H.264 + AC-3/AAC only) falls back to mpv otherwise.
+                statusText = "Preparing stream..."
+                let mux = TSHLSRemuxer(sourceURL: url, headers: ingestHeaders)
+                mux.onReady = { localURL in
+                    statusText = nil
+                    startPlayer(with: localURL, headers: [:])
+                    DebugLogger.shared.log(
+                        "[AVP-HLS] native engine playing REMUXED channel id=\(item.id)",
+                        category: "Playback", level: .info
+                    )
+                }
+                mux.onError = { error in
+                    DebugLogger.shared.log(
+                        "[AVP-HLS] remux failed (\(error)); falling back to mpv",
+                        category: "Playback", level: .warning
+                    )
+                    fallbackToMPV()
+                }
+                remuxer = mux
+                mux.start()
+            } else {
+                var headers: [String: String] = [:]
+                if let userAgent, !userAgent.isEmpty { headers["User-Agent"] = userAgent }
+                startPlayer(with: url, headers: headers)
+                DebugLogger.shared.log(
+                    "[AVP-HLS] native engine playing channel id=\(item.id)",
+                    category: "Playback", level: .info
+                )
+            }
         }
         .onDisappear {
             player?.pause()
             player = nil
+            remuxer?.stop()
+            remuxer = nil
             AudioSessionRefCount.decrement(caller: "native-hls")
             IdleTimerRefCount.decrement(caller: "native-hls")
             DebugLogger.shared.log(
                 "[AVP-HLS] native engine closed",
                 category: "Playback", level: .info
             )
+        }
+    }
+
+    private func startPlayer(with url: URL, headers: [String: String]) {
+        var options: [String: Any] = [:]
+        if !headers.isEmpty {
+            options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+        }
+        let asset = AVURLAsset(url: url, options: options)
+        let avPlayer = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+        avPlayer.play()
+        player = avPlayer
+    }
+
+    /// Remux failure path: dismiss this cover and restart the channel on
+    /// the mpv pipeline, bypassing the native router so it cannot loop.
+    private func fallbackToMPV() {
+        let session = PlayerSession.shared
+        let server = session.nativeHLSServer
+        session.nativeHLSItem = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            session.begin(item: item, server: server, bypassNativeRouter: true)
         }
     }
 }

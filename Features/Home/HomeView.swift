@@ -4363,7 +4363,9 @@ struct MainTabView: View {
         .fullScreenCover(item: $playerSession.nativeHLSItem) { hlsItem in
             NativeHLSPlayerScreen(
                 item: hlsItem,
-                userAgent: playerSession.nativeHLSUserAgent
+                userAgent: playerSession.nativeHLSUserAgent,
+                useRemux: playerSession.nativeHLSUseRemux,
+                ingestHeaders: playerSession.nativeHLSHeaders
             )
         }
         // DVR reconcile at tab-bar level so the DVR tab lights up as

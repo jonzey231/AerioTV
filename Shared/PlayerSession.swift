@@ -284,29 +284,67 @@ final class PlayerSession: ObservableObject {
     @Published var nativeHLSItem: ChannelDisplayItem?
     /// User-Agent captured alongside, for providers that filter requests.
     var nativeHLSUserAgent: String?
+    /// True when the routed stream is raw MPEG-TS and must pass through
+    /// the on-device TS-to-HLS remuxer before AVPlayer can play it.
+    var nativeHLSUseRemux = false
+    /// Ingest headers for the remuxer (Dispatcharr auth + UA).
+    var nativeHLSHeaders: [String: String] = [:]
+    /// Retained so the remux error path can fall back to mpv with the
+    /// same server context.
+    var nativeHLSServer: ServerConnection?
 
     @discardableResult
     func begin(item: ChannelDisplayItem,
                server: ServerConnection?,
-               isLive: Bool = true) -> Bool {
+               isLive: Bool = true,
+               bypassNativeRouter: Bool = false) -> Bool {
         // TEST engine router (the UHF pattern: route, do not swap engines).
         // Genuine HLS URLs (.m3u8, e.g. Xtream /live/.../id.m3u8) go to the
         // native AVPlayer engine when the Developer toggle is on, which
         // buys true HDR/Dolby Vision output, Atmos passthrough, and native
-        // AirPlay on those channels. Raw TS, MPEG-2, and everything else
-        // stays on the mpv pipeline. AVPlayer cannot play raw MPEG-TS over
-        // HTTP at all (CoreMedia -12939), so the classifier is the gate.
-        if PlaybackFeatureFlags.avPlayerForHLS,
-           isLive,
-           let url = item.streamURL ?? item.streamURLs.first,
-           classifyStreamURL(url) == .hls {
-            nativeHLSUserAgent = server?.effectiveUserAgent
-            nativeHLSItem = item
-            DebugLogger.shared.log(
-                "[AVP-HLS] engine router -> AVPlayer for channel id=\(item.id)",
-                category: "Playback", level: .info
-            )
-            return true
+        // AirPlay on those channels. With the second toggle, raw MPEG-TS
+        // streams route through the on-device TS-to-HLS remuxer first
+        // (H.264 + AC-3/AAC only; the remuxer's codec gate falls back to
+        // mpv otherwise). Everything else stays on the mpv pipeline.
+        // `bypassNativeRouter` is the remux-failure fallback path.
+        if !bypassNativeRouter, isLive,
+           let url = item.streamURL ?? item.streamURLs.first {
+            let format = classifyStreamURL(url)
+            if PlaybackFeatureFlags.avPlayerForHLS, format == .hls {
+                nativeHLSUseRemux = false
+                nativeHLSHeaders = [:]
+                nativeHLSUserAgent = server?.effectiveUserAgent
+                nativeHLSServer = server
+                nativeHLSItem = item
+                DebugLogger.shared.log(
+                    "[AVP-HLS] engine router -> AVPlayer (direct HLS) for channel id=\(item.id)",
+                    category: "Playback", level: .info
+                )
+                return true
+            }
+            if PlaybackFeatureFlags.avPlayerRemuxTS, format == .mpegTS {
+                var headers: [String: String] = [:]
+                if let ua = server?.effectiveUserAgent, !ua.isEmpty {
+                    headers["User-Agent"] = ua
+                }
+                if let server, server.type == .dispatcharrAPI {
+                    let key = server.effectiveApiKey
+                    if !key.isEmpty {
+                        headers["X-API-Key"] = key
+                        headers["Authorization"] = "ApiKey \(key)"
+                    }
+                }
+                nativeHLSUseRemux = true
+                nativeHLSHeaders = headers
+                nativeHLSUserAgent = server?.effectiveUserAgent
+                nativeHLSServer = server
+                nativeHLSItem = item
+                DebugLogger.shared.log(
+                    "[AVP-HLS] engine router -> AVPlayer (TS remux) for channel id=\(item.id)",
+                    category: "Playback", level: .info
+                )
+                return true
+            }
         }
 
         let store = MultiviewStore.shared
@@ -437,6 +475,15 @@ enum PlaybackFeatureFlags {
     /// Developer. mpv remains the engine for raw TS and all fallbacks.
     static var avPlayerForHLS: Bool {
         UserDefaults.standard.bool(forKey: "playback.avplayerHLS")
+    }
+
+    /// TEST (branch test/avplayer-hls-engine): when true, raw MPEG-TS
+    /// live streams (Dispatcharr /proxy/ts/) route through the on-device
+    /// TS-to-HLS remuxer and play in AVPlayer. H.264 + AC-3/AAC only;
+    /// the remuxer's codec gate auto-falls back to mpv for anything else
+    /// (HEVC, MPEG-2, MP2 audio). Off by default.
+    static var avPlayerRemuxTS: Bool {
+        UserDefaults.standard.bool(forKey: "playback.avplayerRemuxTS")
     }
 
     /// `true` (default) while routing through the unified

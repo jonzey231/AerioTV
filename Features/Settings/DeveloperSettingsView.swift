@@ -30,6 +30,10 @@ struct DeveloperSettingsView: View {
     /// TEST (branch test/avplayer-hls-engine): routes genuine HLS (.m3u8)
     /// live streams to the native AVPlayer engine. Off by default.
     @AppStorage("playback.avplayerHLS") private var avPlayerHLS = false
+    /// TEST: routes raw MPEG-TS live streams through the on-device
+    /// TS-to-HLS remuxer into AVPlayer (H.264 + AC-3/AAC only; auto
+    /// fallback to mpv otherwise). Off by default.
+    @AppStorage("playback.avplayerRemuxTS") private var avPlayerRemuxTS = false
 
     /// **Experimental** — iPhone-only. When on, the Live TV chrome is
     /// compacted: Manage Groups moves into the nav bar toolbar, and the
@@ -210,6 +214,38 @@ struct DeveloperSettingsView: View {
                         Spacer()
 
                         Toggle("", isOn: $avPlayerHLS)
+                            .labelsHidden()
+                            .tint(.accentPrimary)
+                    }
+                    .padding(.vertical, 4)
+                    .listRowBackground(Color.cardBackground)
+
+                    HStack(spacing: 14) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(avPlayerRemuxTS
+                                      ? Color.accentPrimary.opacity(0.18)
+                                      : Color.elevatedBackground)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: avPlayerRemuxTS ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath.circle")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(avPlayerRemuxTS ? .accentPrimary : .textSecondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("AVPlayer Remux for TS Streams")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Text(avPlayerRemuxTS
+                                 ? "On: raw TS channels remux to HLS on-device"
+                                 : "Off: raw TS channels use the mpv engine")
+                                .font(.labelSmall)
+                                .foregroundColor(avPlayerRemuxTS ? .accentPrimary : .textTertiary)
+                        }
+
+                        Spacer()
+
+                        Toggle("", isOn: $avPlayerRemuxTS)
                             .labelsHidden()
                             .tint(.accentPrimary)
                     }
@@ -607,6 +643,16 @@ struct DeveloperSettingsView: View {
                             ? "On: .m3u8 channels use the native Apple player"
                             : "Off: all channels use the mpv engine",
                         isOn: $avPlayerHLS
+                    ) { _ in }
+
+                    TVSettingsToggleRow(
+                        icon: avPlayerRemuxTS ? "arrow.triangle.2.circlepath.circle.fill" : "arrow.triangle.2.circlepath.circle",
+                        iconColor: avPlayerRemuxTS ? .accentPrimary : .textSecondary,
+                        title: "AVPlayer Remux for TS Streams",
+                        subtitle: avPlayerRemuxTS
+                            ? "On: raw TS channels remux to HLS on-device"
+                            : "Off: raw TS channels use the mpv engine",
+                        isOn: $avPlayerRemuxTS
                     ) { _ in }
                 }
 
