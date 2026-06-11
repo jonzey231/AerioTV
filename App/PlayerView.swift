@@ -3487,7 +3487,7 @@ struct NativeHLSPlayerScreen: View {
     private var trailingAccessoryView: AnyView {
         #if os(iOS)
         AnyView(
-            HStack(spacing: 26) {
+            HStack(spacing: 22) {
                 if item.streamURL != nil {
                     Button {
                         showRecordSheet = true
@@ -3530,7 +3530,7 @@ struct NativeHLSPlayerScreen: View {
                     iosOverlayIcon("slider.horizontal.3")
                 }
             }
-            .padding(.horizontal, 22)
+            .padding(.horizontal, 18)
             .frame(height: 50)
             .background(.ultraThinMaterial, in: Capsule())
             .environment(\.colorScheme, .dark)
@@ -3724,11 +3724,15 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
         controller.addChild(hosting)
         controller.view.addSubview(hosting.view)
         hosting.didMove(toParent: controller)
+        // Same line as the native chrome: top matches the native row,
+        // leading clears the X + PiP/AirPlay cluster (which is identical
+        // in both orientations; the trailing volume control is not, it
+        // morphs between a circle and a slider).
         NSLayoutConstraint.activate([
-            hosting.view.trailingAnchor.constraint(
-                equalTo: controller.view.layoutMarginsGuide.trailingAnchor),
+            hosting.view.leadingAnchor.constraint(
+                equalTo: controller.view.layoutMarginsGuide.leadingAnchor, constant: 185),
             hosting.view.topAnchor.constraint(
-                equalTo: controller.view.safeAreaLayoutGuide.topAnchor, constant: 66),
+                equalTo: controller.view.safeAreaLayoutGuide.topAnchor, constant: 8),
         ])
         context.coordinator.hosting = hosting
         #endif
