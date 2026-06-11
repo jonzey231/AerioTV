@@ -242,6 +242,16 @@ struct VODDetailView: View {
     /// plot/genre/cast/director blank. Server values always win; TMDB
     /// only fills the holes, so fully-described libraries never hit TMDB.
     @State private var tmdbDetails: TMDBDetails?
+    /// Structured credits driving the Cast & Crew photo strip. NOT gated
+    /// on missing metadata: servers only ever send comma-separated name
+    /// strings, so headshots always need TMDB. Nil when the opt-in or
+    /// key is absent, and the strip simply does not render.
+    @State private var tmdbCredits: TMDBCredits?
+    /// Non-nil presents the person bio sheet.
+    @State private var bioPerson: TMDBPerson?
+    /// Non-nil pushes that title's detail (Known For deep-link). A plain
+    /// push, so Back returns to THIS title with the bio sheet closed.
+    @State private var knownForPush: VODDisplayItem?
     #if os(tvOS)
     /// Drives the top tab bar's visibility from this detail's scroll
     /// position so it reappears when the user scrolls back to the top
@@ -280,6 +290,7 @@ struct VODDetailView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     heroSection
                     infoSection
+                    castCrewSection
                     if item.type == .series {
                         episodeSection
                     }
@@ -317,7 +328,14 @@ struct VODDetailView: View {
             // Provider-info has settled once loadDetail() returns (the
             // task is sequential), satisfying the backfill's settled gate.
             await loadTMDBDetailsIfNeeded()
+            await loadTMDBCreditsIfNeeded()
             await loadTMDBPosterIfNeeded()
+        }
+        .sheet(item: $bioPerson) { person in
+            PersonBioSheet(person: person, resolve: resolveKnownFor)
+        }
+        .navigationDestination(item: $knownForPush) { pushed in
+            VODDetailView(item: pushed, isPlaying: $isPlaying)
         }
         .fullScreenCover(item: $playingURL) { wrapper in
             PlayerView(
@@ -487,15 +505,21 @@ struct VODDetailView: View {
             if released.count > 4 {
                 metaRow(label: "Released", value: released)
             }
-            let serverCast = fullMovie?.cast ?? fullSeries?.cast ?? ""
-            let cast = serverCast.isEmpty ? (tmdbDetails?.castTop ?? "") : serverCast
-            if !cast.isEmpty {
-                metaRow(label: "Cast", value: cast)
-            }
-            let serverDirector = fullMovie?.director ?? fullSeries?.director ?? ""
-            let director = serverDirector.isEmpty ? (tmdbDetails?.director ?? "") : serverDirector
-            if !director.isEmpty {
-                metaRow(label: "Director", value: director)
+            // The classic Cast/Director text rows are suppressed while the
+            // Cast & Crew photo strip renders (it carries the same names
+            // with headshots); they remain as the fallback when TMDB
+            // enrichment is off or returned nothing.
+            if castCrewPeople.isEmpty {
+                let serverCast = fullMovie?.cast ?? fullSeries?.cast ?? ""
+                let cast = serverCast.isEmpty ? (tmdbDetails?.castTop ?? "") : serverCast
+                if !cast.isEmpty {
+                    metaRow(label: "Cast", value: cast)
+                }
+                let serverDirector = fullMovie?.director ?? fullSeries?.director ?? ""
+                let director = serverDirector.isEmpty ? (tmdbDetails?.director ?? "") : serverDirector
+                if !director.isEmpty {
+                    metaRow(label: "Director", value: director)
+                }
             }
             let country = fullMovie?.country ?? fullSeries?.country ?? ""
             if !country.isEmpty {
@@ -725,8 +749,9 @@ struct VODDetailView: View {
 
     /// Render a string as a QR-code image via CoreImage, scaled up with
     /// a nearest-neighbor transform so the modules stay crisp. Returns
-    /// nil if generation fails.
-    private static func qrCodeImage(from string: String) -> UIImage? {
+    /// nil if generation fails. fileprivate so PersonBioSheet's person QR
+    /// reuses the same generator.
+    fileprivate static func qrCodeImage(from string: String) -> UIImage? {
         guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
         filter.setValue(Data(string.utf8), forKey: "inputMessage")
         filter.setValue("M", forKey: "inputCorrectionLevel")
@@ -1011,6 +1036,79 @@ struct VODDetailView: View {
         }
         guard !item.name.isEmpty else { return }
         tmdbDetails = await TMDBService.details(forTitle: item.name, isMovie: isMovie, apiKey: apiKey)
+    }
+
+    /// Structured credits for the Cast & Crew strip. Same settled gate as
+    /// the details backfill (runs after loadDetail()), same once-per-entry
+    /// behavior, but NO missing-metadata condition: server text strings
+    /// can never supply headshots.
+    private func loadTMDBCreditsIfNeeded() async {
+        guard tmdbCredits == nil,
+              TMDBPosters.isEnabled,
+              let apiKey = TMDBPosters.apiKey else { return }
+        let isMovie = item.type == .movie
+        let tmdbID = [fullMovie?.tmdbID, fullSeries?.tmdbID,
+                      item.movie?.tmdbID, item.series?.tmdbID]
+            .compactMap { $0 }
+            .first { !$0.isEmpty }
+        if let id = tmdbID,
+           let credits = await TMDBService.credits(forTMDBID: id, isMovie: isMovie, apiKey: apiKey) {
+            tmdbCredits = credits
+            return
+        }
+        guard !item.name.isEmpty else { return }
+        tmdbCredits = await TMDBService.credits(forTitle: item.name, isMovie: isMovie, apiKey: apiKey)
+    }
+
+    /// Combined people list for the strip: cast first, then directors,
+    /// deduped by person id, so an actor-director appears once with their
+    /// character name.
+    private var castCrewPeople: [TMDBPerson] {
+        guard let credits = tmdbCredits else { return [] }
+        var seen = Set<String>()
+        return (credits.cast + credits.directors).filter { seen.insert($0.id).inserted }
+    }
+
+    // MARK: - Cast & Crew strip
+    @ViewBuilder
+    private var castCrewSection: some View {
+        if !castCrewPeople.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Cast & Crew")
+                    .font(.headlineSmall)
+                    .foregroundColor(.textPrimary)
+                    .padding(.horizontal, 16)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 12) {
+                        ForEach(castCrewPeople) { person in
+                            PersonCard(person: person) { bioPerson = person }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    // Headroom for the tvOS focus scale so the focused
+                    // card's ring is not clipped by the scroll view.
+                    .padding(.vertical, 12)
+                }
+            }
+            .padding(.bottom, 8)
+        }
+    }
+
+    /// Resolve a Known For tile against the user's library and push the
+    /// match. Returns false when the title is not in the library (the
+    /// sheet shows the miss message). On success the sheet is dismissed
+    /// first so remote Back from the pushed title returns here with the
+    /// sheet closed.
+    private func resolveKnownFor(_ kf: TMDBKnownForItem) async -> Bool {
+        guard let hit = await VODStore.shared.resolveKnownForItem(kf, server: server) else {
+            return false
+        }
+        bioPerson = nil
+        // Let the sheet dismissal settle before pushing, so the navigation
+        // transition does not race the modal teardown.
+        try? await Task.sleep(for: .milliseconds(350))
+        knownForPush = hit
+        return true
     }
 
     private func loadDetail() async {
@@ -1337,4 +1435,377 @@ private struct TVPlayButton: View {
 struct IdentifiableURL: Identifiable {
     let url: URL
     var id: String { url.absoluteString }
+}
+
+// MARK: - Cast & Crew person card
+
+/// One headshot card in the Cast & Crew strip. tvOS sizes are roughly
+/// double the Android dp values (the Android TV design canvas is 960x540dp
+/// against tvOS's 1920x1080pt).
+private struct PersonCard: View {
+    let person: TMDBPerson
+    let onSelect: () -> Void
+
+    #if os(tvOS)
+    private let cardWidth: CGFloat = 180
+    #else
+    private let cardWidth: CGFloat = 90
+    #endif
+
+    var body: some View {
+        Button(action: onSelect) {
+            VStack(alignment: .leading, spacing: 6) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.elevatedBackground.opacity(0.55))
+                    if let url = TMDBService.profileImageURL(path: person.profilePath, size: "w185") {
+                        AsyncImage(url: url) { phase in
+                            if let image = phase.image {
+                                image.resizable().aspectRatio(contentMode: .fill)
+                            } else {
+                                personGlyph
+                            }
+                        }
+                    } else {
+                        personGlyph
+                    }
+                }
+                .frame(width: cardWidth, height: cardWidth * 1.5)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                Text(person.name)
+                    .font(.labelMedium)
+                    .foregroundColor(.textPrimary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                if let role = person.role {
+                    Text(role)
+                        .font(.labelSmall)
+                        .foregroundColor(.textSecondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+            }
+            .frame(width: cardWidth, alignment: .leading)
+        }
+        #if os(tvOS)
+        .buttonStyle(.card)
+        #else
+        .buttonStyle(.plain)
+        #endif
+    }
+
+    private var personGlyph: some View {
+        Image(systemName: "person.fill")
+            .font(.system(size: 32))
+            .foregroundColor(.textTertiary)
+    }
+}
+
+// MARK: - Person bio sheet
+
+/// TMDB person biography sheet (Android parity: PersonBioDialog). Opens
+/// from a Cast & Crew card; the fetch is lazy (fired on present) so
+/// browsing the strip costs nothing until a card is picked. The header
+/// name and headshot show immediately from the tapped TMDBPerson while
+/// the bio loads. The Close button stays pinned below the scrolling body
+/// so long biographies never push it off-screen for remote users.
+private struct PersonBioSheet: View {
+    let person: TMDBPerson
+    /// Parent-supplied Known For resolver: returns false when the title
+    /// is not in the user's library (the sheet shows the miss message);
+    /// on success the parent dismisses this sheet and pushes the title.
+    let resolve: (TMDBKnownForItem) async -> Bool
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var bio: TMDBPersonBio?
+    @State private var loaded = false
+    /// Double-fire latch: a Known For resolve can hit the network; a
+    /// second press while one is in flight would stack two pushes.
+    @State private var resolving = false
+    @State private var missText: String?
+
+    #if os(tvOS)
+    private let headshotWidth: CGFloat = 260
+    private let tileWidth: CGFloat = 170
+    #else
+    private let headshotWidth: CGFloat = 140
+    private let tileWidth: CGFloat = 96
+    #endif
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack(alignment: .top, spacing: 20) {
+                        headshot
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(bio?.name ?? person.name)
+                                .font(.headlineLarge)
+                                .foregroundColor(.textPrimary)
+                            lifeLine(label: "Born", value: bio?.birthday, isDate: true)
+                            lifeLine(label: "Died", value: bio?.deathday, isDate: true)
+                            lifeLine(label: "Birthplace", value: bio?.placeOfBirth, isDate: false)
+                            Spacer().frame(height: 10)
+                            if !loaded {
+                                ProgressView()
+                            } else if let text = bio?.biography {
+                                Text(text)
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            } else {
+                                Text("No biography available.")
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textTertiary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        #if os(tvOS)
+                        personQR
+                        #endif
+                    }
+                    knownForStrip
+                }
+                .padding(24)
+            }
+
+            HStack(spacing: 16) {
+                if let missText {
+                    Text(missText)
+                        .font(.labelMedium)
+                        .foregroundColor(.statusWarning)
+                        .transition(.opacity)
+                }
+                Spacer()
+                Button("Close") { dismiss() }
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 14)
+        }
+        .background(Color.appBackground.ignoresSafeArea())
+        .task(id: person.id) {
+            guard TMDBPosters.isEnabled, let key = TMDBPosters.apiKey else {
+                loaded = true
+                return
+            }
+            bio = await TMDBService.personBio(forID: person.id, apiKey: key)
+            loaded = true
+        }
+    }
+
+    private var headshot: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.elevatedBackground.opacity(0.55))
+            // w342: the sheet photo renders about 2x the strip card; the
+            // w185 thumb would upscale soft on a TV.
+            if let url = TMDBService.profileImageURL(path: bio?.profilePath ?? person.profilePath, size: "w342") {
+                AsyncImage(url: url) { phase in
+                    if let image = phase.image {
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 48))
+                            .foregroundColor(.textTertiary)
+                    }
+                }
+            } else {
+                Image(systemName: "person.fill")
+                    .font(.system(size: 48))
+                    .foregroundColor(.textTertiary)
+            }
+        }
+        .frame(width: headshotWidth, height: headshotWidth * 1.5)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func lifeLine(label: String, value: String?, isDate: Bool) -> some View {
+        if let value, !value.isEmpty {
+            Text("\(label): \(isDate ? Self.formatBioDate(value) : value)")
+                .font(.bodyMedium)
+                .foregroundColor(.textSecondary)
+                .padding(.top, 4)
+        }
+    }
+
+    /// TMDB dates arrive as yyyy-MM-dd; show the locale MEDIUM style with
+    /// the raw string as the parse-failure fallback.
+    private static func formatBioDate(_ raw: String) -> String {
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.timeZone = TimeZone(identifier: "UTC")
+        parser.dateFormat = "yyyy-MM-dd"
+        guard let date = parser.date(from: raw) else { return raw }
+        return date.formatted(date: .abbreviated, time: .omitted)
+    }
+
+    @ViewBuilder
+    private var knownForStrip: some View {
+        if let items = bio?.knownFor, !items.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Known For")
+                    .font(.headlineSmall)
+                    .foregroundColor(.textPrimary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(alignment: .top, spacing: 12) {
+                        ForEach(items) { item in
+                            knownForTile(item)
+                        }
+                    }
+                    .padding(.vertical, 12)
+                }
+            }
+        }
+    }
+
+    private func knownForTile(_ item: TMDBKnownForItem) -> some View {
+        Button {
+            tapKnownFor(item)
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.elevatedBackground.opacity(0.55))
+                    if let url = TMDBService.profileImageURL(path: item.posterPath, size: "w185") {
+                        AsyncImage(url: url) { phase in
+                            if let image = phase.image {
+                                image.resizable().aspectRatio(contentMode: .fill)
+                            } else {
+                                Image(systemName: "film")
+                                    .font(.system(size: 28))
+                                    .foregroundColor(.textTertiary)
+                            }
+                        }
+                    }
+                }
+                .frame(width: tileWidth, height: tileWidth * 1.5)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+                Text(item.title)
+                    .font(.labelMedium)
+                    .foregroundColor(.textSecondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+            }
+            .frame(width: tileWidth, alignment: .leading)
+        }
+        #if os(tvOS)
+        .buttonStyle(.card)
+        #else
+        .buttonStyle(.plain)
+        #endif
+    }
+
+    private func tapKnownFor(_ item: TMDBKnownForItem) {
+        guard !resolving else { return }
+        resolving = true
+        Task { @MainActor in
+            let found = await resolve(item)
+            if !found {
+                withAnimation { missText = "Not in your library." }
+                try? await Task.sleep(for: .seconds(2))
+                withAnimation { missText = nil }
+            }
+            resolving = false
+        }
+    }
+
+    #if os(tvOS)
+    /// Mini person QR in the sheet's corner: Apple TV has no browser, so
+    /// the user scans with a phone to open the full filmography on TMDB.
+    @ViewBuilder
+    private var personQR: some View {
+        if let qr = VODDetailView.qrCodeImage(from: "https://www.themoviedb.org/person/\(person.id)") {
+            VStack(spacing: 4) {
+                Image(uiImage: qr)
+                    .interpolation(.none)
+                    .resizable()
+                    .frame(width: 120, height: 120)
+                    .padding(8)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.white)
+                    )
+                Text("View on TMDB")
+                    .font(.labelSmall)
+                    .foregroundColor(.textSecondary)
+            }
+        }
+    }
+    #endif
+}
+
+// MARK: - Known For library deep-link resolution
+
+extension VODStore {
+    /// Strip ONE trailing "(YYYY)" and lowercase; keeps a year-only title
+    /// intact (mirrors TMDBService.splitTitleYear).
+    fileprivate static func normalizeVodTitle(_ raw: String) -> String {
+        TMDBService.splitTitleYear(raw).title.lowercased()
+    }
+
+    fileprivate func storedTMDBID(of item: VODDisplayItem) -> String? {
+        let id = item.movie?.tmdbID ?? item.series?.tmdbID ?? ""
+        return id.isEmpty ? nil : id
+    }
+
+    /// Resolve a Known For tile to an item in the user's library
+    /// (Android parity, dossier Part 1 section 6).
+    ///
+    /// Matching order: loaded lists (browse + server-search results)
+    /// first, with a STRICT tmdb-id match; an entity that carries a
+    /// tmdb id can ONLY match by that id (this stops a remake with the
+    /// same name hijacking the match), so the normalized-title fallback
+    /// applies to id-less rows only. When both miss on a Dispatcharr
+    /// source, a one-shot server search runs and the hit is merged into
+    /// the browse list BEFORE returning, so the pushed detail screen can
+    /// resolve its own item. XC sources load their whole library up
+    /// front, making a loaded-list miss a real miss: the server fallback
+    /// is skipped there.
+    @MainActor
+    func resolveKnownForItem(_ kf: TMDBKnownForItem, server: ServerConnection?) async -> VODDisplayItem? {
+        let loaded = kf.isMovie ? movies + movieSearchResults : series + seriesSearchResults
+        if let hit = loaded.first(where: { storedTMDBID(of: $0) == kf.id }) { return hit }
+        let wanted = Self.normalizeVodTitle(kf.title)
+        if let hit = loaded.first(where: {
+            storedTMDBID(of: $0) == nil && Self.normalizeVodTitle($0.name) == wanted
+        }) { return hit }
+
+        guard let server, server.type == .dispatcharrAPI, server.supportsVOD else { return nil }
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode)
+        let baseURL = server.effectiveBaseURL
+        let sID = server.id
+
+        var rows: [VODDisplayItem] = []
+        do {
+            if kf.isMovie {
+                // The query is the tile's exact display title, so the
+                // first page is plenty.
+                for try await batch in api.searchVODMoviesStream(query: kf.title) {
+                    rows = batch.map { makeSearchMovieItem($0, api: api, baseURL: baseURL, serverID: sID) }
+                    break
+                }
+            } else {
+                for try await batch in api.searchVODSeriesStream(query: kf.title) {
+                    rows = batch.map { makeSearchSeriesItem($0, baseURL: baseURL, serverID: sID) }
+                    break
+                }
+            }
+        } catch {
+            // Any fetch failure is treated identically to not-in-library.
+            return nil
+        }
+
+        // Within server results: strict tmdb-id first, then normalized
+        // title (no id-blank precondition here).
+        let hit = rows.first(where: { storedTMDBID(of: $0) == kf.id })
+            ?? rows.first(where: { Self.normalizeVodTitle($0.name) == wanted })
+        if let hit { mergeKnownForHit(hit) }
+        return hit
+    }
 }

@@ -309,6 +309,61 @@ final class VODStore: ObservableObject {
         }
     }
 
+    /// Known For deep-link support (Android parity dossier Part 1 sec 6):
+    /// merge a one-shot server-search hit into the browse list BEFORE the
+    /// detail push, so the pushed screen's own lookups can resolve the
+    /// item. Appended only when absent (movies dedupe by id, series too;
+    /// both ids are stable server ids here).
+    func mergeKnownForHit(_ item: VODDisplayItem) {
+        switch item.type {
+        case .movie:
+            guard !movies.contains(where: { $0.id == item.id }) else { return }
+            movies.append(item)
+        case .series:
+            guard !series.contains(where: { $0.id == item.id }) else { return }
+            series.append(item)
+        case .episode:
+            // Known For tiles only ever resolve to movies or series.
+            break
+        }
+    }
+
+    /// Exposes the search-result row mapper for the Known For one-shot
+    /// lookup so its rows are shaped identically to regular search hits
+    /// (including the resolved poster URL and proxy stream URL).
+    func makeSearchMovieItem(_ m: DispatcharrVODMovie, api: DispatcharrAPI, baseURL: String, serverID: UUID) -> VODDisplayItem {
+        let movie = VODMovie(
+            id: String(m.id), name: m.title,
+            posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
+            backdropURL: nil,
+            rating: m.rating ?? "", plot: m.plot ?? "",
+            genre: m.genre ?? "", releaseDate: "", duration: "",
+            cast: "", director: "", imdbID: "",
+            categoryID: "", categoryName: "Movies",
+            streamURL: api.proxyMovieURL(uuid: m.uuid,
+                                         preferredStreamID: m.streams?.first?.streamID),
+            containerExtension: "mp4", serverID: serverID
+        )
+        var item = movie
+        item.tmdbID = m.tmdbID ?? ""
+        return VODDisplayItem(movie: item)
+    }
+
+    func makeSearchSeriesItem(_ s: DispatcharrVODSeries, baseURL: String, serverID: UUID) -> VODDisplayItem {
+        var show = VODSeries(
+            id: String(s.id), name: s.name,
+            posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
+            backdropURL: nil,
+            rating: s.rating ?? "", plot: s.plot ?? "",
+            genre: s.genre ?? "", releaseDate: "",
+            cast: "", director: "",
+            categoryID: "", categoryName: "Series",
+            serverID: serverID, seasons: [], episodeCount: 0
+        )
+        show.tmdbID = s.tmdbID ?? ""
+        return VODDisplayItem(series: show)
+    }
+
     private func loadMovies(servers: [ServerConnection]) async {
         debugLog("🎬 VODStore.loadMovies: starting, servers=\(servers.count)")
         let activeServer = servers.first(where: { $0.isActive })
