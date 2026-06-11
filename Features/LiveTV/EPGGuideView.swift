@@ -2932,6 +2932,32 @@ struct EPGGuideView: View {
                 .font(.system(size: 15, weight: .semibold))
                 .foregroundColor(.textPrimary)
             Spacer()
+            // Clear (Android parity P2): one-press way to abandon a
+            // staged set without launching it. The banner persists
+            // across tabs, so without this the only outs were Play or
+            // unstaging channels one by one.
+            Button {
+                let staged = multiviewStore.tiles.count
+                multiviewStore.reset()
+                multiviewStore.isStagingFromGuide = false
+                DebugLogger.shared.log(
+                    "[MV-Tile] staging mode: user tapped Clear (count=\(staged))",
+                    category: "Playback", level: .info
+                )
+            } label: {
+                Text("Clear")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.textSecondary)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 6)
+            }
+            #if os(tvOS)
+            .buttonStyle(TVNoHighlightButtonStyle())
+            #else
+            .buttonStyle(.plain)
+            #endif
+            .disabled(count == 0)
+            .opacity(count == 0 ? 0.5 : 1.0)
             // Play (primary action). Disabled when no tiles are
             // staged so the user doesn't fire `enterMultiview` with
             // an empty store.

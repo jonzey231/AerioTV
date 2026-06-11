@@ -911,6 +911,15 @@ struct MultiviewContainerView: View {
             isPresented: $showExitConfirmation,
             titleVisibility: .visible
         ) {
+            // Android parity P2: at N>=2 offer a guide-return that KEEPS
+            // the staged set; the guide's staging banner lets the user
+            // resume the same grid via Play. N=1 unified playback keeps
+            // the plain Exit dialog (nothing staged worth keeping).
+            if !(PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1) {
+                Button("Back to TV Guide") {
+                    session.exitMultiviewKeepingStagedTiles()
+                }
+            }
             Button(exitConfirmationPrimary, role: .destructive) {
                 performConfirmedExit()
             }

@@ -214,6 +214,30 @@ final class PlayerSession: ObservableObject {
         )
     }
 
+    /// "Back to TV Guide" from the multiview exit dialog (Android
+    /// parity): the same full playback teardown as `exit()`, except the
+    /// staged tile SET survives and staging mode is re-armed, so the
+    /// guide greets the user with its "N tiles staged" banner and Play
+    /// resumes the same grid. The tile players themselves die with the
+    /// container unmount; Play mounts fresh ones against the surviving
+    /// tile list (the banner path never re-seeds).
+    func exitMultiviewKeepingStagedTiles() {
+        let store = MultiviewStore.shared
+        if let audioID = store.audioTileID,
+           let audioTile = store.tiles.first(where: { $0.id == audioID }) {
+            NowPlayingManager.shared.lastPlayedChannelID = audioTile.item.id
+        }
+        mode = .idle
+        NowPlayingManager.shared.configuredAsMultiviewAdapter = false
+        NowPlayingBridge.shared.teardown()
+        NowPlayingManager.shared.stop()
+        store.isStagingFromGuide = true
+        DebugLogger.shared.log(
+            "[MV-Mode] exit→idle keeping staged tiles (Back to TV Guide, count=\(store.tiles.count))",
+            category: "Playback", level: .info
+        )
+    }
+
     /// Enter `.single` mode. No-op if already there. Doesn't touch
     /// `NowPlayingManager` — the caller is expected to have set up
     /// the single-stream playing item before or after this call.
