@@ -3684,20 +3684,24 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
         #if os(iOS)
         var hosting: UIHostingController<AnyView>?
 
-        /// Find the native playback-controls host by class-name lookup
-        /// (no private API calls, just the view tree) and mount the
-        /// capsule inside it: the capsule then fades exactly when the
-        /// chrome fades because it IS chrome. Retries briefly because
-        /// the controls hierarchy is built after the view appears;
-        /// falls back to the controller's view (always visible) if the
-        /// hierarchy ever changes shape in a future iOS.
+        /// Mount the capsule into the SAME fading container that holds a
+        /// real native top-row button, and align its centerline to that
+        /// button. Living under the button's fading ancestor means the
+        /// capsule inherits Apple's show/hide animation by compositing,
+        /// frame-for-frame, with no timer of our own (the earlier
+        /// approaches mounted on the always-visible controller view and
+        /// only fixed position, so the capsule never truly faded with
+        /// the chrome). The controls build after the view appears, so
+        /// retry until a native button exists; only if none ever does
+        /// do we fall back to the controller view (always visible).
         func attachAccessory(to controller: AVPlayerViewController, attempts: Int) {
-            guard let hostingView = hosting?.view else { return }
-            guard hostingView.superview == nil else { return }
+            guard let hostingView = hosting?.view, hostingView.superview == nil else { return }
+            controller.view.layoutIfNeeded()
 
-            if let controlsHost = Self.findControlsHost(in: controller.view) {
-                mount(hostingView, in: controlsHost, controller: controller)
-                debugLog("[AVP-HLS] capsule mounted inside native controls (\(String(describing: type(of: controlsHost))))")
+            if let button = Self.topRowReferenceControl(in: controller.view, host: controller.view) {
+                let parent = Self.fadingParent(of: button, playerView: controller.view)
+                mount(hostingView, in: parent, controller: controller, alignedTo: button)
+                debugLog("[AVP-HLS] capsule mounted in native controls layer (\(String(describing: type(of: parent))))")
             } else if attempts > 0 {
                 Task { @MainActor [weak self, weak controller] in
                     try? await Task.sleep(nanoseconds: 150_000_000)
@@ -3705,12 +3709,13 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
                     self.attachAccessory(to: controller, attempts: attempts - 1)
                 }
             } else {
-                mount(hostingView, in: controller.view, controller: controller)
-                debugLog("[AVP-HLS] controls host not found; capsule mounted on controller view (always visible)")
+                mount(hostingView, in: controller.view, controller: controller, alignedTo: nil)
+                debugLog("[AVP-HLS] native control not found; capsule on controller view (always visible)")
             }
         }
 
-        private func mount(_ view: UIView, in parent: UIView, controller: AVPlayerViewController) {
+        private func mount(_ view: UIView, in parent: UIView,
+                           controller: AVPlayerViewController, alignedTo anchor: UIView?) {
             // UIKit requires the declared parent view controller to be
             // the one whose view tree hosts the child's view. The native
             // controls live under a PRIVATE view controller (e.g.
@@ -3733,9 +3738,6 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
                 parent.addSubview(view)
                 hosting.didMove(toParent: owner)
             } else {
-                // No resolvable owner: mount the bare view without
-                // declaring containment (legal, loses only appearance
-                // callbacks the capsule does not use).
                 parent.addSubview(view)
             }
             // Leading clears the X + PiP/AirPlay cluster (stable across
@@ -3743,17 +3745,13 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
             view.leadingAnchor.constraint(
                 equalTo: controller.view.layoutMarginsGuide.leadingAnchor, constant: 185
             ).isActive = true
-            // Vertical: align centerlines with a REAL native top-row
-            // control when one is discoverable. The Glass-era chrome
-            // renders its buttons inside hosting views, so the hunt can
-            // fail; the fallback uses orientation-aware constants
-            // measured against the native row (which is NOT a constant
-            // safe-area offset across orientations), updated on size
-            // class changes so rotation stays aligned.
-            controller.view.layoutIfNeeded()
-            if let reference = Self.topRowReferenceControl(in: parent, host: controller.view) {
-                view.centerYAnchor.constraint(equalTo: reference.centerYAnchor).isActive = true
+            if let anchor {
+                // Exact centerline lock to the native row's button.
+                view.centerYAnchor.constraint(equalTo: anchor.centerYAnchor).isActive = true
             } else {
+                // No native button found: orientation-aware constant
+                // measured against the native row, updated on size class
+                // changes so rotation stays aligned.
                 let constraint = view.centerYAnchor.constraint(
                     equalTo: controller.view.safeAreaLayoutGuide.topAnchor,
                     constant: Self.fallbackCenterOffset(for: controller.traitCollection)
@@ -3764,9 +3762,6 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
                     constraint.constant = Self.fallbackCenterOffset(
                         for: registered.traitCollection)
                 }
-                retryReferenceAlignment(view: view, parent: parent,
-                                        controller: controller,
-                                        fallback: constraint, attempts: 10)
             }
         }
 
@@ -3777,28 +3772,21 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
             traits.verticalSizeClass == .compact ? 44 : 20
         }
 
-        /// The Glass controls build (and sometimes rebuild) after
-        /// mount; keep looking for a real reference button briefly and
-        /// swap the fallback for an exact centerline lock when found.
-        private func retryReferenceAlignment(view: UIView, parent: UIView,
-                                             controller: AVPlayerViewController,
-                                             fallback: NSLayoutConstraint,
-                                             attempts: Int) {
-            guard attempts > 0 else { return }
-            Task { @MainActor [weak self, weak view, weak parent, weak controller] in
-                try? await Task.sleep(nanoseconds: 200_000_000)
-                guard let self, let view, let parent, let controller else { return }
-                if let reference = Self.topRowReferenceControl(in: parent, host: controller.view) {
-                    fallback.isActive = false
-                    view.centerYAnchor.constraint(equalTo: reference.centerYAnchor).isActive = true
-                    debugLog("[AVP-HLS] capsule centerline locked to native control")
-                } else {
-                    self.retryReferenceAlignment(view: view, parent: parent,
-                                                 controller: controller,
-                                                 fallback: fallback,
-                                                 attempts: attempts - 1)
+        /// The fading controls container that holds `button`: the
+        /// nearest ancestor wide enough to host the capsule without
+        /// clipping (the top bar / controls overlay), which is part of
+        /// the layer Apple fades, so a child of it fades in lockstep.
+        private static func fadingParent(of button: UIView, playerView: UIView) -> UIView {
+            var candidate = button.superview ?? button
+            var ancestor: UIView? = button.superview
+            while let current = ancestor, current !== playerView {
+                if current.bounds.width >= playerView.bounds.width * 0.6 {
+                    return current
                 }
+                candidate = current
+                ancestor = current.superview
             }
+            return candidate
         }
 
         /// The highest plausibly button-sized native control in the top
@@ -3821,20 +3809,6 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
                 return nil
             }
             return best.view
-        }
-
-        private static func findControlsHost(in root: UIView) -> UIView? {
-            var queue: [UIView] = [root]
-            while !queue.isEmpty {
-                let view = queue.removeFirst()
-                let name = String(describing: type(of: view))
-                if name.contains("PlaybackControls") || name.contains("Chromeless")
-                    || name.contains("ControlsView") {
-                    return view
-                }
-                queue.append(contentsOf: view.subviews)
-            }
-            return nil
         }
         #endif
     }
