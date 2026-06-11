@@ -3314,7 +3314,8 @@ struct NativeHLSPlayerScreen: View {
                         #if os(iOS)
                         handleOverlayTap()
                         #endif
-                    }
+                    },
+                    trailingAccessory: trailingAccessoryView
                 )
                 .ignoresSafeArea()
             }
@@ -3379,60 +3380,6 @@ struct NativeHLSPlayerScreen: View {
         // Record, Add Stream, Options (Stream Info, Sleep Timer,
         // Switch to MPV, Stop). Aspect is omitted: the native player
         // already has pinch zoom.
-        .overlay(alignment: .topTrailing) {
-            HStack(spacing: 26) {
-                if item.streamURL != nil {
-                    Button {
-                        showRecordSheet = true
-                    } label: {
-                        iosOverlayIcon("record.circle", tint: .red)
-                    }
-                }
-                Button {
-                    switchToMPV(openAddStream: true)
-                } label: {
-                    iosOverlayIcon("plus")
-                }
-                Menu {
-                    Button {
-                        showStreamInfo.toggle()
-                    } label: {
-                        Label("Stream Info", systemImage: "info.circle")
-                    }
-                    Menu {
-                        ForEach([30, 60, 90, 120], id: \.self) { minutes in
-                            Button("\(minutes) minutes") {
-                                setSleepTimer(TimeInterval(minutes * 60))
-                            }
-                        }
-                        Button("Off", role: .destructive) { setSleepTimer(nil) }
-                    } label: {
-                        Label("Sleep Timer", systemImage: "moon.zzz")
-                    }
-                    Button {
-                        switchToMPV(openAddStream: false)
-                    } label: {
-                        Label("Switch to MPV Player", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                    Button(role: .destructive) {
-                        dismiss()
-                    } label: {
-                        Label("Stop Playback", systemImage: "stop.circle")
-                    }
-                } label: {
-                    iosOverlayIcon("slider.horizontal.3")
-                }
-            }
-            .padding(.horizontal, 22)
-            .frame(height: 50)
-            .background(.ultraThinMaterial, in: Capsule())
-            .environment(\.colorScheme, .dark)
-            .padding(.top, 68)
-            .padding(.trailing, 20)
-            .opacity(overlayVisible ? 1 : 0)
-            .allowsHitTesting(overlayVisible)
-            .animation(.easeInOut(duration: 0.25), value: overlayVisible)
-        }
         .statusBarHidden()
         #endif
         .onAppear {
@@ -3530,6 +3477,70 @@ struct NativeHLSPlayerScreen: View {
             entries.append(make(.iTunesMetadataTrackSubTitle, subtitle))
         }
         return entries
+    }
+
+    /// The app-action capsule, hosted INSIDE the player controller and
+    /// pinned to its layout-margin guides so it aligns with the native
+    /// chrome by construction in every orientation (an external overlay
+    /// could only approximate Apple's margins). Empty on tvOS, where
+    /// the actions live in the transport bar instead.
+    private var trailingAccessoryView: AnyView {
+        #if os(iOS)
+        AnyView(
+            HStack(spacing: 26) {
+                if item.streamURL != nil {
+                    Button {
+                        showRecordSheet = true
+                    } label: {
+                        iosOverlayIcon("record.circle", tint: .red)
+                    }
+                }
+                Button {
+                    switchToMPV(openAddStream: true)
+                } label: {
+                    iosOverlayIcon("plus")
+                }
+                Menu {
+                    Button {
+                        showStreamInfo.toggle()
+                    } label: {
+                        Label("Stream Info", systemImage: "info.circle")
+                    }
+                    Menu {
+                        ForEach([30, 60, 90, 120], id: \.self) { minutes in
+                            Button("\(minutes) minutes") {
+                                setSleepTimer(TimeInterval(minutes * 60))
+                            }
+                        }
+                        Button("Off", role: .destructive) { setSleepTimer(nil) }
+                    } label: {
+                        Label("Sleep Timer", systemImage: "moon.zzz")
+                    }
+                    Button {
+                        switchToMPV(openAddStream: false)
+                    } label: {
+                        Label("Switch to MPV Player", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    Button(role: .destructive) {
+                        dismiss()
+                    } label: {
+                        Label("Stop Playback", systemImage: "stop.circle")
+                    }
+                } label: {
+                    iosOverlayIcon("slider.horizontal.3")
+                }
+            }
+            .padding(.horizontal, 22)
+            .frame(height: 50)
+            .background(.ultraThinMaterial, in: Capsule())
+            .environment(\.colorScheme, .dark)
+            .opacity(overlayVisible ? 1 : 0)
+            .allowsHitTesting(overlayVisible)
+            .animation(.easeInOut(duration: 0.25), value: overlayVisible)
+        )
+        #else
+        AnyView(EmptyView())
+        #endif
     }
 
     #if os(iOS)
@@ -3672,6 +3683,10 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
     /// it, so the SwiftUI overlay can mirror the native chrome's
     /// tap-to-toggle visibility rhythm.
     var onUserTap: (() -> Void)?
+    /// iOS: the app-action capsule, mounted inside the controller's
+    /// view and pinned to its layout-margin guides so it shares the
+    /// native chrome's margins in every orientation.
+    var trailingAccessory: AnyView = AnyView(EmptyView())
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onUserTap: onUserTap)
@@ -3698,6 +3713,24 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
         tap.cancelsTouchesInView = false
         tap.delegate = context.coordinator
         controller.view.addGestureRecognizer(tap)
+
+        // Host the app-action capsule INSIDE the controller, pinned to
+        // the same guides the native chrome lays out against, so the
+        // trailing margin matches Apple's in portrait and landscape and
+        // the row sits exactly one control-row below the top chrome.
+        let hosting = UIHostingController(rootView: trailingAccessory)
+        hosting.view.backgroundColor = .clear
+        hosting.view.translatesAutoresizingMaskIntoConstraints = false
+        controller.addChild(hosting)
+        controller.view.addSubview(hosting.view)
+        hosting.didMove(toParent: controller)
+        NSLayoutConstraint.activate([
+            hosting.view.trailingAnchor.constraint(
+                equalTo: controller.view.layoutMarginsGuide.trailingAnchor),
+            hosting.view.topAnchor.constraint(
+                equalTo: controller.view.safeAreaLayoutGuide.topAnchor, constant: 66),
+        ])
+        context.coordinator.hosting = hosting
         #endif
         return controller
     }
@@ -3707,10 +3740,19 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
             controller.player = player
         }
         context.coordinator.onUserTap = onUserTap
+        #if os(iOS)
+        context.coordinator.hosting?.rootView = trailingAccessory
+        if let hostingView = context.coordinator.hosting?.view {
+            controller.view.bringSubviewToFront(hostingView)
+        }
+        #endif
     }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var onUserTap: (() -> Void)?
+        #if os(iOS)
+        var hosting: UIHostingController<AnyView>?
+        #endif
         init(onUserTap: (() -> Void)?) { self.onUserTap = onUserTap }
 
         @objc func didTap() { onUserTap?() }
