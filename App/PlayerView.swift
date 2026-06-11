@@ -3744,18 +3744,60 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
                 equalTo: controller.view.layoutMarginsGuide.leadingAnchor, constant: 185
             ).isActive = true
             // Vertical: align centerlines with a REAL native top-row
-            // control. Apple's row is not a constant offset from the
-            // safe area across orientations, so a fixed inset always
-            // rides high or low somewhere; anchoring to the measured
-            // button tracks the native row exactly, live, in both
-            // orientations. Fixed inset only as a fallback.
+            // control when one is discoverable. The Glass-era chrome
+            // renders its buttons inside hosting views, so the hunt can
+            // fail; the fallback uses orientation-aware constants
+            // measured against the native row (which is NOT a constant
+            // safe-area offset across orientations), updated on size
+            // class changes so rotation stays aligned.
             controller.view.layoutIfNeeded()
             if let reference = Self.topRowReferenceControl(in: parent, host: controller.view) {
                 view.centerYAnchor.constraint(equalTo: reference.centerYAnchor).isActive = true
             } else {
-                view.topAnchor.constraint(
-                    equalTo: controller.view.safeAreaLayoutGuide.topAnchor, constant: 8
-                ).isActive = true
+                let constraint = view.centerYAnchor.constraint(
+                    equalTo: controller.view.safeAreaLayoutGuide.topAnchor,
+                    constant: Self.fallbackCenterOffset(for: controller.traitCollection)
+                )
+                constraint.isActive = true
+                view.registerForTraitChanges([UITraitVerticalSizeClass.self]) {
+                    (registered: UIView, _: UITraitCollection) in
+                    constraint.constant = Self.fallbackCenterOffset(
+                        for: registered.traitCollection)
+                }
+                retryReferenceAlignment(view: view, parent: parent,
+                                        controller: controller,
+                                        fallback: constraint, attempts: 10)
+            }
+        }
+
+        /// Native top-row center, relative to the safe-area top:
+        /// measured from device screenshots; portrait tucks the row
+        /// into the safe area band, landscape floats it lower.
+        private static func fallbackCenterOffset(for traits: UITraitCollection) -> CGFloat {
+            traits.verticalSizeClass == .compact ? 44 : 23
+        }
+
+        /// The Glass controls build (and sometimes rebuild) after
+        /// mount; keep looking for a real reference button briefly and
+        /// swap the fallback for an exact centerline lock when found.
+        private func retryReferenceAlignment(view: UIView, parent: UIView,
+                                             controller: AVPlayerViewController,
+                                             fallback: NSLayoutConstraint,
+                                             attempts: Int) {
+            guard attempts > 0 else { return }
+            Task { @MainActor [weak self, weak view, weak parent, weak controller] in
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard let self, let view, let parent, let controller else { return }
+                if let reference = Self.topRowReferenceControl(in: parent, host: controller.view) {
+                    fallback.isActive = false
+                    view.centerYAnchor.constraint(equalTo: reference.centerYAnchor).isActive = true
+                    debugLog("[AVP-HLS] capsule centerline locked to native control")
+                } else {
+                    self.retryReferenceAlignment(view: view, parent: parent,
+                                                 controller: controller,
+                                                 fallback: fallback,
+                                                 attempts: attempts - 1)
+                }
             }
         }
 
@@ -3766,7 +3808,7 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
             var queue: [UIView] = [root]
             while !queue.isEmpty {
                 let view = queue.removeFirst()
-                if view is UIControl,
+                if view is UIControl || view.accessibilityTraits.contains(.button),
                    view.bounds.height >= 36, view.bounds.height <= 64 {
                     let midY = view.convert(view.bounds, to: host).midY
                     if best == nil || midY < best!.midY {
