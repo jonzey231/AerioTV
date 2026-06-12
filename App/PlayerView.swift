@@ -2065,14 +2065,8 @@ private struct PlayerRootView: View {
                 progressStore.isAudioOnly = isAudioOnly
             },
             recordAction: nil,
-            onMenuOpen: {
-                debugLog("[MPV-FADE] menu open: hide canceled")
-                controlsHideTask?.cancel()
-            },
-            onMenuClose: {
-                debugLog("[MPV-FADE] menu close")
-                if !progressStore.isPaused { scheduleControlsHide() }
-            }
+            onMenuOpen: { controlsHideTask?.cancel() },
+            onMenuClose: { if !progressStore.isPaused { scheduleControlsHide() } }
         )
         .equatable()
     }
@@ -2365,20 +2359,15 @@ private struct PlayerRootView: View {
     }
 
     private func scheduleControlsHide() {
-        guard !progressStore.isPaused else {
-            debugLog("[MPV-FADE] hide NOT scheduled (isPaused)")
-            return
-        }
+        guard !progressStore.isPaused else { return }
         #if os(tvOS)
         guard !isScrubbing else { return }  // Never auto-hide while user is scrubbing
         #endif
         controlsHideTask?.cancel()
-        debugLog("[MPV-FADE] hide scheduled (4s)")
         controlsHideTask = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                debugLog("[MPV-FADE] controls HIDDEN (auto)")
                 withAnimation(.easeInOut(duration: 0.3)) { showControls = false }
             }
         }
@@ -3284,7 +3273,13 @@ struct TVRemoteInputView: UIViewRepresentable {
 /// track pickers work identically regardless of which engine is live.
 @MainActor
 final class AVPlayerProgressDriver {
-    private weak var player: AVPlayer?
+    /// Held strongly: the driver's lifetime is strictly inside the
+    /// player's (the screen owns both and tears the driver down first),
+    /// and every capture back to the driver is weak, so there is no
+    /// cycle. Strong ownership lets teardown/deinit always reach a live
+    /// player to remove the time observer (AVFoundation requires removal
+    /// before the player deallocates).
+    private let player: AVPlayer
     private let store: PlayerProgressStore
     private let isLive: Bool
     /// Host-provided sink for aspect changes (the overlay has no handle
@@ -3293,6 +3288,10 @@ final class AVPlayerProgressDriver {
 
     private var timeObserver: Any?
     private var observations: [NSKeyValueObservation] = []
+    /// Item-scoped KVO, replaced wholesale on every currentItem swap so
+    /// a discarded item's late callbacks can't clobber the store and the
+    /// observation set can't grow per swap.
+    private var itemObservations: [NSKeyValueObservation] = []
     private var aspectCancellable: AnyCancellable?
     // AVPlayer selects tracks by AVMediaSelectionOption, not integer id.
     // We hand the overlay synthetic 1-based ids (0 = auto/off, matching
@@ -3351,17 +3350,22 @@ final class AVPlayerProgressDriver {
     }
 
     private func observeCurrentItem(_ item: AVPlayerItem?) {
+        // Drop the previous item's observers first, so a swapped-out
+        // item's late .status/.duration/.presentationSize callbacks can
+        // never re-run populateTracks/populateStreamInfo with stale data.
+        itemObservations.forEach { $0.invalidate() }
+        itemObservations.removeAll()
         guard let item else { return }
         // Duration (VOD / seekable). Live HLS reports indefinite, which
         // we leave as durationMs == 0.
-        observations.append(item.observe(\.duration, options: [.initial, .new]) {
+        itemObservations.append(item.observe(\.duration, options: [.initial, .new]) {
             [weak self] i, _ in
             let d = i.duration
             guard let self, !self.isLive, d.isNumeric, d.seconds.isFinite, d.seconds > 0 else { return }
             Task { @MainActor in self.store.durationMs = Int32(d.seconds * 1000) }
         })
         // Ready -> populate tracks + stream info once metadata exists.
-        observations.append(item.observe(\.status, options: [.initial, .new]) {
+        itemObservations.append(item.observe(\.status, options: [.initial, .new]) {
             [weak self] i, _ in
             guard let self, i.status == .readyToPlay else { return }
             Task { @MainActor in
@@ -3370,7 +3374,7 @@ final class AVPlayerProgressDriver {
             }
         })
         // Presentation size -> stream info resolution.
-        observations.append(item.observe(\.presentationSize, options: [.initial, .new]) {
+        itemObservations.append(item.observe(\.presentationSize, options: [.initial, .new]) {
             [weak self] i, _ in
             let size = i.presentationSize
             guard let self, size.width > 0 else { return }
@@ -3478,22 +3482,24 @@ final class AVPlayerProgressDriver {
         }
         store.setAudioTrackAction = { [weak self] id in
             guard let self, let group = self.audibleGroup else { return }
-            self.player?.currentItem?.select(self.audioOptionByID[id], in: group)
+            self.player.currentItem?.select(self.audioOptionByID[id], in: group)
             self.store.currentAudioTrackID = id
         }
         store.setSubtitleTrackAction = { [weak self] id in
             guard let self, let group = self.legibleGroup else { return }
             // id 0 = off (mpv sid 0 parity).
-            self.player?.currentItem?.select(id == 0 ? nil : self.subtitleOptionByID[id], in: group)
+            self.player.currentItem?.select(id == 0 ? nil : self.subtitleOptionByID[id], in: group)
             self.store.currentSubtitleTrackID = id
         }
     }
 
     func teardown() {
-        if let timeObserver { player?.removeTimeObserver(timeObserver) }
+        if let timeObserver { player.removeTimeObserver(timeObserver) }
         timeObserver = nil
         observations.forEach { $0.invalidate() }
         observations.removeAll()
+        itemObservations.forEach { $0.invalidate() }
+        itemObservations.removeAll()
         aspectCancellable?.cancel()
         aspectCancellable = nil
         // Drop the closures so a torn-down driver can't drive a dead player.
@@ -3504,6 +3510,13 @@ final class AVPlayerProgressDriver {
         store.setAudioTrackAction = nil
         store.setSubtitleTrackAction = nil
     }
+    // No deinit safety net: a @MainActor class's nonisolated deinit
+    // cannot legally touch the non-Sendable timeObserver. It is
+    // unnecessary anyway, the driver holds `player` strongly (so the
+    // player outlives the observer), the screen always calls teardown()
+    // in onDisappear before releasing the driver, and the late-remux
+    // path that could once create an orphan driver is now closed by
+    // niling the remuxer callbacks in onDisappear.
 }
 
 #if os(iOS)
@@ -3531,6 +3544,11 @@ struct UnifiedPlayerChrome: View {
     let onSleepTimer: (TimeInterval?) -> Void
     /// Bump the host's auto-hide timer (called on every interaction).
     let onInteract: () -> Void
+    /// Cancel/restart the auto-hide while the overflow menu is open, so
+    /// the chrome can't fade out (and unmount the menu's anchor) under
+    /// the user's finger. Same hooks the mpv overflow menu uses.
+    var onMenuOpen: (() -> Void)? = nil
+    var onMenuClose: (() -> Void)? = nil
 
     /// Ticks the live progress band once a minute.
     @State private var bandNow = Date()
@@ -3726,6 +3744,12 @@ struct UnifiedPlayerChrome: View {
             } label: {
                 Label("AirPlay", systemImage: "airplay.video")
             }
+            // Auto-hide hooks ride an always-present menu item: it
+            // appears when the popover opens and disappears when it
+            // closes, so onMenuOpen/onMenuClose bracket the menu's
+            // lifetime (same trick the mpv overflow menu uses).
+            .onAppear { onMenuOpen?() }
+            .onDisappear { onMenuClose?() }
             if let onSwitchToMPV {
                 Button {
                     onSwitchToMPV()
@@ -3846,6 +3870,7 @@ struct NativeHLSPlayerScreen: View {
     @State private var driver: AVPlayerProgressDriver?
     @State private var showControls = true
     @State private var controlsHideTask: Task<Void, Never>?
+    @State private var selfTestTask: Task<Void, Never>?
     #endif
 
 
@@ -3864,6 +3889,17 @@ struct NativeHLSPlayerScreen: View {
                     videoGravity: progressStore.aspectMode.videoGravity
                 )
                 .ignoresSafeArea()
+                .contentShape(Rectangle())
+                // Toggle lives on the VIDEO layer, not the container: a
+                // tap on a chrome button hit-tests to the button (z-above
+                // the video) and never reaches here, so pressing Record /
+                // Add / overflow does not also flip the chrome. During
+                // remux warm-up the layer is absent (player == nil), so a
+                // stray tap can't pre-hide the chrome either.
+                // simultaneousGesture (not onTapGesture): the
+                // AVPlayerLayer's UIView claims raw touches at the UIKit
+                // layer and a plain tap loses that recognizer race.
+                .simultaneousGesture(TapGesture().onEnded { toggleControls() })
                 #else
                 NativeAVPlayerController(
                     player: player,
@@ -3894,7 +3930,9 @@ struct NativeHLSPlayerScreen: View {
                     onAddStream: { switchToMPV(openAddStream: true) },
                     onStreamInfo: { showStreamInfo.toggle() },
                     onSleepTimer: { setSleepTimer($0) },
-                    onInteract: { scheduleControlsHide() }
+                    onInteract: { scheduleControlsHide() },
+                    onMenuOpen: { controlsHideTask?.cancel() },
+                    onMenuClose: { if !progressStore.isPaused { scheduleControlsHide() } }
                 )
                 .transition(.opacity)
             }
@@ -3920,15 +3958,6 @@ struct NativeHLSPlayerScreen: View {
                 .padding(60)
             }
         }
-        #if os(iOS)
-        .contentShape(Rectangle())
-        // simultaneousGesture, not onTapGesture: the AVPlayerLayer's
-        // UIView claims raw touches at the UIKit layer, and a plain
-        // high-level tap gesture loses that race. Simultaneous
-        // recognition fires regardless of who else claims the touch.
-        .simultaneousGesture(TapGesture().onEnded { toggleControls() })
-        .onAppear { debugLog("[AVP-CHROME] screen appeared (tap container active)") }
-        #endif
         // Record sheet over the native player. Same RecordProgramSheet
         // the mpv chrome's Record pill presents, fed from the same
         // ChannelDisplayItem EPG fields.
@@ -4017,9 +4046,17 @@ struct NativeHLSPlayerScreen: View {
             driver = nil
             controlsHideTask?.cancel()
             controlsHideTask = nil
+            selfTestTask?.cancel()
+            selfTestTask = nil
             #endif
             player?.pause()
             player = nil
+            // Detach remuxer callbacks BEFORE stop(): stop() only enqueues
+            // teardown, so a main-queued late onReady/onError could still
+            // land after this view is gone and start an orphan player or
+            // trigger a fallback into a dismissed screen.
+            remuxer?.onReady = nil
+            remuxer?.onError = nil
             remuxer?.stop()
             remuxer = nil
             sleepWork?.cancel()
@@ -4096,17 +4133,22 @@ struct NativeHLSPlayerScreen: View {
         // exact same paths a finger would: the visibility toggle and the
         // store's pause command (which must pin the chrome visible).
         if ProcessInfo.processInfo.arguments.contains("-AerioChromeSelfTest") {
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 6_000_000_000)
-                toggleControls()
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                toggleControls()
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                debugLog("[AVP-CHROME] selftest: pausing")
-                progressStore.togglePauseAction?()
-                try? await Task.sleep(nanoseconds: 4_000_000_000)
-                debugLog("[AVP-CHROME] selftest: resuming")
-                progressStore.togglePauseAction?()
+            // Stored + throwing sleeps so onDisappear's cancel actually
+            // aborts the script; otherwise a mid-run dismissal would
+            // resurrect controlsHideTask after teardown nil'd it.
+            selfTestTask = Task { @MainActor in
+                do {
+                    try await Task.sleep(nanoseconds: 6_000_000_000)
+                    toggleControls()
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                    toggleControls()
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                    debugLog("[AVP-CHROME] selftest: pausing")
+                    progressStore.togglePauseAction?()
+                    try await Task.sleep(nanoseconds: 4_000_000_000)
+                    debugLog("[AVP-CHROME] selftest: resuming")
+                    progressStore.togglePauseAction?()
+                } catch { /* cancelled on dismissal */ }
             }
         }
         #endif
