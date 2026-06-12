@@ -167,15 +167,26 @@ final class MultiviewStore: ObservableObject {
     /// The upgraded route URL for the seed tile when the lock is
     /// direct-HLS (server-side TS->HLS upgrade); nil otherwise.
     @Published private(set) var sessionRouteURL: URL?
+    /// The auth headers resolveEngine built for AVPlayer tiles. These use
+    /// the X-API-Key + `Authorization: ApiKey` shape the Dispatcharr HLS
+    /// endpoint requires, which differs from a server's configured
+    /// authHeaders mode (e.g. X-API-Key only). The mpv/TS endpoint
+    /// accepts the leaner headers, but the HLS playlist/segment endpoint
+    /// 404s without the Authorization header, so AVPlayer tiles must use
+    /// these, not tile.headers. Server-scoped, so they apply to every
+    /// tile in the session.
+    @Published private(set) var sessionHeaders: [String: String] = [:]
 
     func lockEngine(_ resolved: ResolvedEngine) {
         sessionEngine = resolved.engine
         sessionRouteURL = resolved.engine == .avPlayerDirectHLS ? resolved.routeURL : nil
+        sessionHeaders = resolved.engine.isAVPlayer ? resolved.headers : [:]
     }
 
     func clearEngineLock() {
         sessionEngine = .mpv
         sessionRouteURL = nil
+        sessionHeaders = [:]
     }
 
     /// One-way downgrade: a runtime AVPlayer failure (codec gate, fatal

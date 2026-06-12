@@ -180,6 +180,15 @@ struct MultiviewTileView: View {
         return tile.streamURL
     }
 
+    /// Headers for the AVPlayer tile. The Dispatcharr HLS endpoint needs
+    /// the `Authorization: ApiKey` header that a server's lean authHeaders
+    /// (X-API-Key only) omits, so AVPlayer tiles use the resolveEngine
+    /// headers carried on the session lock. Falls back to tile.headers if
+    /// the lock somehow carries none.
+    private var avPlayerTileHeaders: [String: String] {
+        store.sessionHeaders.isEmpty ? tile.headers : store.sessionHeaders
+    }
+
     /// Computed: a tile should freeze its mpv decode when:
     /// - PiP is currently active AND this is NOT the audio tile
     ///   (PiP-source tile keeps decoding; others pause for
@@ -537,7 +546,7 @@ struct MultiviewTileView: View {
                     AVPlayerMultiviewTile(
                         tileID: tile.id,
                         streamURL: avPlayerTileURL,
-                        headers: tile.headers,
+                        headers: avPlayerTileHeaders,
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
                         progressStore: progressStore,
@@ -785,7 +794,7 @@ struct MultiviewTileView: View {
                     AVPlayerMultiviewTile(
                         tileID: tile.id,
                         streamURL: avPlayerTileURL,
-                        headers: tile.headers,
+                        headers: avPlayerTileHeaders,
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
                         progressStore: progressStore,
