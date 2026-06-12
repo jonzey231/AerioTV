@@ -157,47 +157,25 @@ struct MultiviewTileView: View {
 
     var isAudioActive: Bool { store.audioTileID == tile.id }
 
-    /// TEST (branch test/avplayer-hls-engine): set when this tile's
-    /// AVPlayer attempt failed (codec gate, ingest, playback error);
-    /// the video branch then renders the mpv representable instead.
-    /// Reset on channel swap so the new channel gets a fresh routing
-    /// decision.
-    @State private var avEngineFallback = false
-
-    /// TEST: per-tile engine routing, mirroring PlayerSession.begin's
-    /// router. Live tiles only; VOD/DVR stay on mpv (proxy redirects,
-    /// MKV, resume positions). Mixed-engine grids are expected.
-    /// Raw-TS tiles route to AVPlayer either via the on-device remuxer
-    /// (toggle 2) or, on servers with native HLS output, via the
-    /// server-side upgrade (toggle 1 + capability).
+    /// Engine for this tile = the SESSION's locked engine (resolved once
+    /// at multiview entry), never a per-tile decision. So every tile in a
+    /// session uses the same engine; a session can never silently go
+    /// half-mpv. VOD/DVR carve-out stays (proxy redirects, MKV, resume).
+    /// Toggle-off sessions lock to .mpv, so this is always false then.
     private var usesAVPlayerEngine: Bool {
-        guard !avEngineFallback, tile.kind == .live else { return false }
-        switch classifyStreamURL(tile.streamURL) {
-        case .hls:
-            return PlaybackFeatureFlags.avPlayerForHLS
-        case .mpegTS:
-            if PlaybackFeatureFlags.avPlayerForHLS {
-                HLSCapabilityStore.shared.probeIfNeeded(
-                    streamURL: tile.streamURL, headers: tile.headers)
-                if HLSCapabilityStore.shared.isCapable(tile.streamURL) {
-                    return true
-                }
-            }
-            return PlaybackFeatureFlags.avPlayerRemuxTS
-        default:
-            return false
-        }
+        guard tile.kind == .live else { return false }
+        return store.sessionEngine.isAVPlayer
     }
 
-    /// TEST: the URL the AVPlayer tile actually plays. On a server with
-    /// native HLS output this is the raw-TS URL upgraded to request
-    /// server-side HLS, which the tile then plays DIRECT (its internal
-    /// classifier sees the hls query and skips the remuxer).
+    /// The URL the AVPlayer tile plays. The seed tile uses the locked
+    /// upgraded URL (server-side TS->HLS); added tiles already carry their
+    /// upgraded URL on tile.streamURL (MultiviewStore.add does the upgrade
+    /// at add-time under a direct-HLS lock), so this falls through.
     private var avPlayerTileURL: URL {
-        if classifyStreamURL(tile.streamURL) == .mpegTS,
-           PlaybackFeatureFlags.avPlayerForHLS,
-           HLSCapabilityStore.shared.isCapable(tile.streamURL) {
-            return appendingHLSOutputFormat(tile.streamURL)
+        if store.sessionEngine == .avPlayerDirectHLS,
+           let routeURL = store.sessionRouteURL,
+           tile.id == store.tiles.first?.id {
+            return routeURL
         }
         return tile.streamURL
     }
@@ -562,7 +540,12 @@ struct MultiviewTileView: View {
                         headers: tile.headers,
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
-                        onEngineFallback: { _ in avEngineFallback = true }
+                        // A hard AVPlayer failure (codec gate, fatal item
+                        // error) downgrades the WHOLE session to mpv,
+                        // one-way, so the grid stays pure rather than
+                        // going half-mpv. Every tile re-renders mpv on the
+                        // next sessionEngine change.
+                        onEngineFallback: { _ in store.downgradeToMPV() }
                     )
                 } else {
                     MPVPlayerViewRepresentable(
@@ -592,14 +575,12 @@ struct MultiviewTileView: View {
                     )
                 }
             }
-            // Channel swap on the same tile id: give the NEW channel a
-            // fresh engine decision (a prior fallback must not pin the
-            // tile to mpv forever).
+            // Channel swap on the same tile id: refresh the engine badge.
+            // The engine itself is session-locked, so the swapped-in
+            // channel uses the same engine (a swapped-in AVPlayer-
+            // incompatible channel will hit onEngineFallback ->
+            // downgradeToMPV, the deliberate one-way session policy).
             .onChange(of: tile.streamURL) { _, _ in
-                avEngineFallback = false
-                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
-            }
-            .onChange(of: avEngineFallback) { _, _ in
                 store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
             }
             .id(tile.id)

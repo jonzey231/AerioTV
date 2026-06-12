@@ -489,12 +489,24 @@ final class MultiviewStore: ObservableObject {
             )
             return .needsWarning
         }
+        // Under a direct-HLS session lock, a raw-TS channel added to the
+        // grid must request the server-side HLS upgrade so it plays
+        // DIRECT on AVPlayer (the locked engine) instead of feeding raw
+        // TS to AVPlayer and tripping the one-way downgrade. Mirrors the
+        // seed tile's upgrade. Only fires for a capable host; otherwise
+        // the raw URL stands (and would downgrade, the honest edge case).
+        var tileURL = resolved.url
+        if sessionEngine == .avPlayerDirectHLS,
+           classifyStreamURL(resolved.url) == .mpegTS,
+           HLSCapabilityStore.shared.isCapable(resolved.url) {
+            tileURL = appendingHLSOutputFormat(resolved.url)
+        }
         // Commit. `resolved.url` + `resolved.headers` are
         // DELIBERATELY NOT LOGGED — they contain auth credentials.
         let tile = MultiviewTile(
             id: UUID().uuidString,
             item: item,
-            streamURL: resolved.url,
+            streamURL: tileURL,
             headers: resolved.headers,
             addedAt: Date()
         )
