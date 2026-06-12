@@ -678,12 +678,16 @@ struct PlaybackBottomChrome_tvOS: View {
             PlaybackLiveProgressBand(store: store)
                 .padding(.horizontal, 80)
 
-            // TEST (branch test/avplayer-hls-engine): the controls
-            // mirror the native AVPlayerViewController transport
-            // (frosted circular tool cells, bottom-RIGHT, label shown
-            // under the focused cell) so the custom chrome and the
-            // system player read as ONE design across surfaces (user
-            // direction: no differing control styles between screens).
+            // TEST (branch test/avplayer-hls-engine): when an AVPlayer
+            // toggle is on, the controls mirror the native
+            // AVPlayerViewController transport (frosted circular tool
+            // cells, bottom-RIGHT, label shown under the focused cell)
+            // so the custom chrome and the system player read as ONE
+            // design across surfaces (user direction: no differing
+            // control styles between screens). With both toggles off
+            // the stock labeled pill row renders, identical to main,
+            // so the experiment is invisible to regular users.
+            if PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS {
             HStack(alignment: .top, spacing: 18) {
                 // Engine badge (evaluation aid), bottom-left of the
                 // tool row. Non-focusable, informational.
@@ -738,6 +742,18 @@ struct PlaybackBottomChrome_tvOS: View {
                 }
             }
             .padding(.horizontal, 80)
+            } else {
+                HStack(spacing: 20) {
+                    // Render Options first (leftmost) so D-pad-right
+                    // from it lands on `+`. User mental model:
+                    // "[adjust this stream] | [record it] | [add another stream]".
+                    optionsButton
+                    if canRecordCurrentProgram {
+                        recordButton
+                    }
+                    addButton
+                }
+            }
         }
         .padding(.vertical, 24)
         .frame(maxWidth: .infinity)
@@ -767,6 +783,85 @@ struct PlaybackBottomChrome_tvOS: View {
     /// behavior. The fixed-height label slot keeps the circles from
     /// jumping when focus moves.
     @ViewBuilder
+
+    private var addButton: some View {
+        Button {
+            chromeState.reportInteraction()
+            showAddSheet = true
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "plus")
+                    .font(.system(size: 26, weight: .semibold))
+                Text("Add Stream")
+                    .font(.system(size: 24, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 16)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($focusedChrome, equals: .addStream)
+        .accessibilityLabel("Add stream")
+        .accessibilityHint("Pick another channel to watch alongside this one")
+    }
+
+    private var optionsButton: some View {
+        Button {
+            chromeState.reportInteraction()
+            debugLog("[MV-Cmd] Options pill pressed → showTVOptions=true | audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) audioStore=\(store.audioProgressStore == nil ? "nil" : "ok")")
+            showTVOptions = true
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 24, weight: .semibold))
+                Text("Options")
+                    .font(.system(size: 24, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 32)
+            .padding(.vertical, 16)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($focusedChrome, equals: .options)
+        .accessibilityLabel("Options")
+        .accessibilityHint("Change audio track, subtitles, sleep timer, or stream info")
+    }
+
+    /// Record pill — presents `RecordProgramSheet` for the audio
+    /// tile's currently-playing program. Saves the user a trip
+    /// back to the guide + long-press when they're already watching
+    /// something they want to record. Shown only when the audio
+    /// tile has EPG data (`canRecordCurrentProgram`). Red record
+    /// dot icon reads as the universal recording vocabulary; pill
+    /// style matches Options / Add Stream.
+    private var recordButton: some View {
+        Button {
+            chromeState.reportInteraction()
+            showRecordSheet = true
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "record.circle")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(Color.red)
+                Text("Record")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .padding(.horizontal, 32)
+            .padding(.vertical, 16)
+            .background(.ultraThinMaterial, in: Capsule())
+            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($focusedChrome, equals: .record)
+        .accessibilityLabel("Record current program")
+        .accessibilityHint("Schedule a recording of what's currently airing on this channel")
+    }
+
     private func nativeToolButton(
         _ target: MultiviewContainerView.ChromeFocusTarget,
         icon: String,
@@ -777,7 +872,7 @@ struct PlaybackBottomChrome_tvOS: View {
         action: @escaping () -> Void
     ) -> some View {
         let isFocused = focusedChrome == target
-        Button(action: action) {
+        return Button(action: action) {
             VStack(spacing: 8) {
                 ZStack {
                     Circle()

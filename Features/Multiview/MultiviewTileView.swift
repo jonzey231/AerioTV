@@ -1714,13 +1714,14 @@ private struct TileFocusBorder: View {
         // TEST (branch test/avplayer-hls-engine): trace the VIDEO rect,
         // not the tile frame. Spotlight and other non-16:9 panes
         // letterbox the picture, and a border around the whole pane
-        // wraps black bars (user report). The tile's video view
-        // registers its real aspect when decode knows it (AVPlayer
-        // presentationSize); without an entry, assume 16:9, which is
-        // what live TV virtually always is.
+        // wraps black bars (user report). Only AVPlayer tiles report
+        // their real aspect (presentationSize KVO); when no aspect was
+        // registered (every mpv tile, i.e. all tiles with the AVPlayer
+        // toggles off) the border traces the full cell, identical to
+        // main, rather than guessing.
         GeometryReader { geo in
-            let aspect = store.tileVideoAspects[tileID] ?? (16.0 / 9.0)
-            let fitted = Self.fittedSize(aspect: aspect, in: geo.size)
+            let fitted = store.tileVideoAspects[tileID]
+                .map { Self.fittedSize(aspect: $0, in: geo.size) } ?? geo.size
             RoundedRectangle(cornerRadius: cornersRounded ? 12 : 0, style: .continuous)
                 .strokeBorder(ThemeManager.shared.accent, lineWidth: 5)
                 .frame(width: fitted.width, height: fitted.height)
