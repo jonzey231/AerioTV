@@ -156,6 +156,39 @@ final class MultiviewStore: ObservableObject {
         tileEngines.removeValue(forKey: tileID)
     }
 
+    // MARK: - Session-locked engine
+    /// The engine for THIS session, resolved once at multiview entry and
+    /// inherited by every tile for the session's life. A single value
+    /// makes a mixed-engine grid unrepresentable: every tile reads this,
+    /// so an "AVPlayer session" can never silently go half-mpv. Defaults
+    /// to `.mpv` (the toggle-off behavior); cleared on exit so the next
+    /// session re-resolves and honors a freshly-toggled flag.
+    @Published private(set) var sessionEngine: PlaybackEngine = .mpv
+    /// The upgraded route URL for the seed tile when the lock is
+    /// direct-HLS (server-side TS->HLS upgrade); nil otherwise.
+    @Published private(set) var sessionRouteURL: URL?
+
+    func lockEngine(_ resolved: ResolvedEngine) {
+        sessionEngine = resolved.engine
+        sessionRouteURL = resolved.engine == .avPlayerDirectHLS ? resolved.routeURL : nil
+    }
+
+    func clearEngineLock() {
+        sessionEngine = .mpv
+        sessionRouteURL = nil
+    }
+
+    /// One-way downgrade: a runtime AVPlayer failure (codec gate, fatal
+    /// item error) pins the WHOLE session to mpv for the rest of its
+    /// life, so no tile or re-begin can flip back. Idempotent.
+    func downgradeToMPV() {
+        guard sessionEngine.isAVPlayer else { return }
+        sessionEngine = .mpv
+        sessionRouteURL = nil
+        DebugLogger.shared.log("[Engine] session downgraded to mpv (AVPlayer failure)",
+                               category: "Playback", level: .warning)
+    }
+
     /// TEST (branch test/avplayer-hls-engine): each tile's actual video
     /// aspect ratio (width/height), registered by the tile's video view
     /// when known. The focus border uses it to hug the VIDEO rect
@@ -733,6 +766,10 @@ final class MultiviewStore: ObservableObject {
         // tile asynchronously, but this wipe runs now and covers
         // the window between mode flip and disappear.
         progressStoresByTileID = [:]
+        tileEngines = [:]
+        // Engine lock is per-session: clear it so the next session
+        // re-resolves (and honors a freshly-toggled Developer flag).
+        clearEngineLock()
         // Intentionally NOT resetting `warningLastShownAt` — it's
         // a 2h throttle across multiview sessions, not per-session.
     }
