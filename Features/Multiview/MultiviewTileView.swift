@@ -157,6 +157,51 @@ struct MultiviewTileView: View {
 
     var isAudioActive: Bool { store.audioTileID == tile.id }
 
+    /// TEST (branch test/avplayer-hls-engine): set when this tile's
+    /// AVPlayer attempt failed (codec gate, ingest, playback error);
+    /// the video branch then renders the mpv representable instead.
+    /// Reset on channel swap so the new channel gets a fresh routing
+    /// decision.
+    @State private var avEngineFallback = false
+
+    /// TEST: per-tile engine routing, mirroring PlayerSession.begin's
+    /// router. Live tiles only; VOD/DVR stay on mpv (proxy redirects,
+    /// MKV, resume positions). Mixed-engine grids are expected.
+    /// Raw-TS tiles route to AVPlayer either via the on-device remuxer
+    /// (toggle 2) or, on servers with native HLS output, via the
+    /// server-side upgrade (toggle 1 + capability).
+    private var usesAVPlayerEngine: Bool {
+        guard !avEngineFallback, tile.kind == .live else { return false }
+        switch classifyStreamURL(tile.streamURL) {
+        case .hls:
+            return PlaybackFeatureFlags.avPlayerForHLS
+        case .mpegTS:
+            if PlaybackFeatureFlags.avPlayerForHLS {
+                HLSCapabilityStore.shared.probeIfNeeded(
+                    streamURL: tile.streamURL, headers: tile.headers)
+                if HLSCapabilityStore.shared.isCapable(tile.streamURL) {
+                    return true
+                }
+            }
+            return PlaybackFeatureFlags.avPlayerRemuxTS
+        default:
+            return false
+        }
+    }
+
+    /// TEST: the URL the AVPlayer tile actually plays. On a server with
+    /// native HLS output this is the raw-TS URL upgraded to request
+    /// server-side HLS, which the tile then plays DIRECT (its internal
+    /// classifier sees the hls query and skips the remuxer).
+    private var avPlayerTileURL: URL {
+        if classifyStreamURL(tile.streamURL) == .mpegTS,
+           PlaybackFeatureFlags.avPlayerForHLS,
+           HLSCapabilityStore.shared.isCapable(tile.streamURL) {
+            return appendingHLSOutputFormat(tile.streamURL)
+        }
+        return tile.streamURL
+    }
+
     /// Computed: a tile should freeze its mpv decode when:
     /// - PiP is currently active AND this is NOT the audio tile
     ///   (PiP-source tile keeps decoding; others pause for
@@ -505,31 +550,58 @@ struct MultiviewTileView: View {
             // v1.7.x: black backdrop behind the representable, same
             // pattern as `tappableRegion` and `PlayerView.playerView`.
             Color.black
-            MPVPlayerViewRepresentable(
-                urls: [tile.streamURL],
-                headers: tile.headers,
-                isLive: tile.kind == .live,
-                isDVR: tile.kind == .dvr,
-                nowPlayingTitle: tile.item.name,
-                nowPlayingSubtitle: tile.item.currentProgram,
-                nowPlayingArtworkURL: tile.item.logoURL,
-                progressStore: progressStore,
-                logStore: logStore,
-                onFatalError: { message in
-                    decodeErrorMessage = message
-                    DebugLogger.shared.log(
-                        "[MV-Tile] decode error: channel=\(tile.item.name) msg=\(Self.sanitizedErrorMessage(message))",
-                        category: "Playback", level: .warning
+            // TEST (branch test/avplayer-hls-engine): per-tile engine
+            // swap. Container/store features (layouts, spotlight,
+            // relocate, audio routing, chrome, focus) are tile-agnostic,
+            // so this branch is the entirety of AVPlayer multiview.
+            Group {
+                if usesAVPlayerEngine {
+                    AVPlayerMultiviewTile(
+                        tileID: tile.id,
+                        streamURL: avPlayerTileURL,
+                        headers: tile.headers,
+                        shouldPause: shouldPause,
+                        channelName: tile.item.name,
+                        onEngineFallback: { _ in avEngineFallback = true }
                     )
-                },
-                tileID: tile.id,
-                isAudioActive: isAudioActive,
-                shouldPause: shouldPause,
-                // Snapshot tile count for setupMPV's pre-init audio
-                // strategy (mute-only ≤6, decoder-off ≥7). See the
-                // !initialIsAudioActive branch in setupMPV.
-                initialTileCount: store.tiles.count
-            )
+                } else {
+                    MPVPlayerViewRepresentable(
+                        urls: [tile.streamURL],
+                        headers: tile.headers,
+                        isLive: tile.kind == .live,
+                        isDVR: tile.kind == .dvr,
+                        nowPlayingTitle: tile.item.name,
+                        nowPlayingSubtitle: tile.item.currentProgram,
+                        nowPlayingArtworkURL: tile.item.logoURL,
+                        progressStore: progressStore,
+                        logStore: logStore,
+                        onFatalError: { message in
+                            decodeErrorMessage = message
+                            DebugLogger.shared.log(
+                                "[MV-Tile] decode error: channel=\(tile.item.name) msg=\(Self.sanitizedErrorMessage(message))",
+                                category: "Playback", level: .warning
+                            )
+                        },
+                        tileID: tile.id,
+                        isAudioActive: isAudioActive,
+                        shouldPause: shouldPause,
+                        // Snapshot tile count for setupMPV's pre-init audio
+                        // strategy (mute-only ≤6, decoder-off ≥7). See the
+                        // !initialIsAudioActive branch in setupMPV.
+                        initialTileCount: store.tiles.count
+                    )
+                }
+            }
+            // Channel swap on the same tile id: give the NEW channel a
+            // fresh engine decision (a prior fallback must not pin the
+            // tile to mpv forever).
+            .onChange(of: tile.streamURL) { _, _ in
+                avEngineFallback = false
+                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
+            }
+            .onChange(of: avEngineFallback) { _, _ in
+                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
+            }
             .id(tile.id)
             .onAppear {
                 debugLog("[MV-Tile] onAppear id=\(tile.id) name=\(tile.item.name)")
@@ -539,11 +611,13 @@ struct MultiviewTileView: View {
                 // the audio tile's store regardless of which tile it
                 // happens to be.
                 store.registerProgressStore(progressStore, for: tile.id)
+                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
                 applyVODIdentityToProgressStore()
             }
             .onDisappear {
                 debugLog("[MV-Tile] onDisappear id=\(tile.id)")
                 store.unregisterProgressStore(for: tile.id)
+                store.unregisterEngine(for: tile.id)
             }
             // v1.6.15.x: defensive belt + suspenders. The user
             // reported a UI freeze if they channel-flip then open
@@ -560,6 +634,7 @@ struct MultiviewTileView: View {
             .task(id: tile.id) {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
+                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
                 applyVODIdentityToProgressStore()
             }
 
@@ -585,7 +660,8 @@ struct MultiviewTileView: View {
                 // MultiviewTileButtonStyle, so @Environment(\.isFocused)
                 // resolves per-tile, the same reliable context the center
                 // audio icon already uses. See TileFocusBorder.
-                TileFocusBorder(isRelocating: store.relocatingTileID == tile.id)
+                TileFocusBorder(tileID: tile.id,
+                                isRelocating: store.relocatingTileID == tile.id)
             }
             if let decodeErrorMessage {
                 decodeErrorOverlay(decodeErrorMessage)
@@ -777,6 +853,7 @@ struct MultiviewTileView: View {
             .task(id: tile.id) {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
+                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
                 applyVODIdentityToProgressStore()
             }
 
@@ -1626,18 +1703,46 @@ struct MultiviewTileButtonStyle: ButtonStyle {
 /// borderless while the user is just watching, and suppressed on the
 /// relocating tile (which keeps its amber lift from the tile body).
 private struct TileFocusBorder: View {
+    let tileID: String
     let isRelocating: Bool
     @Environment(\.isFocused) private var isFocused
     @EnvironmentObject private var chromeState: MultiviewChromeState
+    @ObservedObject private var store = MultiviewStore.shared
     @AppStorage(multiviewTileCornersRoundedKey) private var cornersRounded: Bool = false
 
     var body: some View {
-        RoundedRectangle(cornerRadius: cornersRounded ? 12 : 0, style: .continuous)
-            .strokeBorder(ThemeManager.shared.accent, lineWidth: 5)
-            .opacity(isFocused && chromeState.focusIndicatorVisible && !isRelocating ? 1 : 0)
-            .allowsHitTesting(false)
-            .animation(.easeInOut(duration: 0.18), value: isFocused)
-            .animation(.easeInOut(duration: 0.25), value: chromeState.focusIndicatorVisible)
+        // TEST (branch test/avplayer-hls-engine): trace the VIDEO rect,
+        // not the tile frame. Spotlight and other non-16:9 panes
+        // letterbox the picture, and a border around the whole pane
+        // wraps black bars (user report). Only AVPlayer tiles report
+        // their real aspect (presentationSize KVO); when no aspect was
+        // registered (every mpv tile, i.e. all tiles with the AVPlayer
+        // toggles off) the border traces the full cell, identical to
+        // main, rather than guessing.
+        GeometryReader { geo in
+            let fitted = store.tileVideoAspects[tileID]
+                .map { Self.fittedSize(aspect: $0, in: geo.size) } ?? geo.size
+            RoundedRectangle(cornerRadius: cornersRounded ? 12 : 0, style: .continuous)
+                .strokeBorder(ThemeManager.shared.accent, lineWidth: 5)
+                .frame(width: fitted.width, height: fitted.height)
+                .position(x: geo.size.width / 2, y: geo.size.height / 2)
+        }
+        .opacity(isFocused && chromeState.focusIndicatorVisible && !isRelocating ? 1 : 0)
+        .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.18), value: isFocused)
+        .animation(.easeInOut(duration: 0.25), value: chromeState.focusIndicatorVisible)
+    }
+
+    /// Aspect-fit: the largest rect of the given aspect that fits the
+    /// bounds, centered. Mirrors how both engines render video (fit).
+    static func fittedSize(aspect: CGFloat, in bounds: CGSize) -> CGSize {
+        guard bounds.width > 0, bounds.height > 0, aspect > 0 else { return bounds }
+        if bounds.width / bounds.height > aspect {
+            // Pane wider than the video: pillarbox left/right.
+            return CGSize(width: bounds.height * aspect, height: bounds.height)
+        }
+        // Pane taller than the video: letterbox top/bottom.
+        return CGSize(width: bounds.width, height: bounds.width / aspect)
     }
 }
 #endif

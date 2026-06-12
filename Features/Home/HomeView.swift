@@ -2935,6 +2935,15 @@ final class NowPlayingManager: ObservableObject {
 
     func expand() {
         debugLog("🎮 NowPlaying.expand: \(playingItem?.name ?? "nil")")
+        // TEST (branch test/avplayer-hls-engine): when the sole tile is
+        // AVPlayer-backed, "fullscreen" means the NATIVE player screen
+        // with system chrome, never the container with custom chrome
+        // (user direction: native controls are the only controls when
+        // AVPlayer is in use). The promotion tears down the container
+        // and routes through PlayerSession.begin, so this expand no-ops.
+        if PlayerSession.shared.promoteSoleAVPlayerTileToNativeScreen() {
+            return
+        }
         isMinimized = false
     }
 
@@ -4356,6 +4365,19 @@ struct MainTabView: View {
         .task(id: orchestratorKey) {
             await runChannelServerTaskBody()
         }
+        // TEST (branch test/avplayer-hls-engine): hosts the native AVPlayer
+        // screen when the engine router in PlayerSession.begin sends a
+        // genuine HLS stream to AVPlayer (Developer toggle gated). The mpv
+        // pipeline is untouched; dismissing returns to the guide.
+        .fullScreenCover(item: $playerSession.nativeHLSItem) { hlsItem in
+            NativeHLSPlayerScreen(
+                item: hlsItem,
+                userAgent: playerSession.nativeHLSUserAgent,
+                useRemux: playerSession.nativeHLSUseRemux,
+                ingestHeaders: playerSession.nativeHLSHeaders,
+                overrideURL: playerSession.nativeHLSOverrideURL
+            )
+        }
         // DVR reconcile at tab-bar level so the DVR tab lights up as
         // soon as a Dispatcharr server reports a recording — even if
         // the user scheduled it from the web UI (no local row to
@@ -4959,6 +4981,16 @@ struct MainTabView: View {
     /// budget resets cleanly.
     private func handleMenuPress() {
         debugLog("🎮 [HMP] handleMenuPress | isActive=\(nowPlaying.isActive) isMinimized=\(nowPlaying.isMinimized) isVODDetailPushed=\(isVODDetailPushed) isSettingsSubviewPushed=\(isSettingsSubviewPushed) selectedTab=\(selectedTab.rawValue) playerSession.mode=\(playerSession.mode)")
+        // TEST (branch test/avplayer-hls-engine): if this handler runs
+        // while the native AVPlayer cover is presented, focus is stuck
+        // on the guide BEHIND the video (mode stays .idle on the native
+        // path, so no other branch knows playback is active). Menu must
+        // mean "close the player", not "navigate tabs behind it".
+        if playerSession.nativeHLSItem != nil {
+            debugLog("🎮 [HMP]   → branch: native player presented → dismissing it")
+            playerSession.nativeHLSItem = nil
+            return
+        }
         if nowPlaying.isActive && !nowPlaying.isMinimized {
             // GH #11: hand off to PlayerView's chrome cycle instead
             // of minimizing directly. PlayerView's `.onExitCommand`

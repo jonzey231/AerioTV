@@ -9,13 +9,22 @@ enum StreamFormat {
 }
 
 /// Inspects a URL's path/extension to determine the likely stream format.
-/// Conservative: only classifies as HLS when the extension is literally `.m3u8`.
-/// Path-based heuristics (e.g. "/proxy/hls/") are unreliable because many
-/// servers return raw MPEG-TS from those endpoints despite the name.
+/// Conservative: only classifies as HLS when the extension is literally `.m3u8`
+/// or the URL explicitly requests Dispatcharr's HLS output. Path-based
+/// heuristics (e.g. "/proxy/hls/") are unreliable because many servers
+/// return raw MPEG-TS from those endpoints despite the name.
 func classifyStreamURL(_ url: URL) -> StreamFormat {
     let ext  = url.pathExtension.lowercased()
     // HLS — only trust the file extension, not the path
     if ext == "m3u8" {
+        return .hls
+    }
+    // TEST (branch test/avplayer-hls-engine): Dispatcharr's native HLS
+    // output is requested via an explicit query parameter; only the app
+    // itself appends it (after a capability probe), so it is as
+    // trustworthy as the extension.
+    if let query = url.query,
+       query.contains("output_format=hls") || query.contains("output=hls") {
         return .hls
     }
     // MPEG-TS
@@ -23,6 +32,142 @@ func classifyStreamURL(_ url: URL) -> StreamFormat {
         return .mpegTS
     }
     return .unknown
+}
+
+/// TEST (branch test/avplayer-hls-engine): the same URL rewritten to
+/// request Dispatcharr's native server-side HLS output. REPLACES any
+/// existing output_format/output value: the app bakes
+/// `?output_format=mpegts` into Dispatcharr stream URLs for the mpv
+/// path, and an earlier defer-to-existing guard here made the probe
+/// ask for TS, caching "no native HLS" against capable servers.
+func appendingHLSOutputFormat(_ url: URL) -> URL {
+    guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        return url
+    }
+    var items = (components.queryItems ?? []).filter {
+        $0.name != "output_format" && $0.name != "output"
+    }
+    items.append(URLQueryItem(name: "output_format", value: "hls"))
+    components.queryItems = items
+    return components.url ?? url
+}
+
+/// TEST (branch test/avplayer-hls-engine): per-host capability cache for
+/// Dispatcharr's native HLS output. Probes a real stream URL with
+/// `output_format=hls` WITHOUT following redirects: a 302 means the
+/// server segments HLS natively (the new feature), a 200 with raw TS
+/// means an older server that ignored the parameter. Results persist
+/// across launches (the answer rarely changes) and are re-verified in
+/// the background once per session, so the first-ever play on a server
+/// uses the fallback path and every later session routes directly.
+@MainActor
+final class HLSCapabilityStore: NSObject {
+    static let shared = HLSCapabilityStore()
+
+    private static let defaultsKey = "playback.hlsCapableHosts"
+    private var capable: Set<String>
+    private var probedThisSession: Set<String> = []
+    private var inFlight: Set<String> = []
+
+    private override init() {
+        capable = Set(UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? [])
+        super.init()
+    }
+
+    private func hostKey(_ url: URL) -> String? {
+        guard let host = url.host else { return nil }
+        return "\(host):\(url.port ?? (url.scheme == "https" ? 443 : 80))"
+    }
+
+    func isCapable(_ url: URL) -> Bool {
+        guard let key = hostKey(url) else { return false }
+        return capable.contains(key)
+    }
+
+    /// Fire-and-forget probe using the channel URL the user just played.
+    /// Cheap on the server: the connection is cancelled at the response
+    /// HEADERS (a non-capable server would otherwise stream endless TS),
+    /// and any briefly-started channel is reaped by the ghost window.
+    func probeIfNeeded(streamURL: URL, headers: [String: String]) {
+        guard let key = hostKey(streamURL),
+              !probedThisSession.contains(key),
+              !inFlight.contains(key) else { return }
+        inFlight.insert(key)
+
+        let probeURL = appendingHLSOutputFormat(streamURL)
+        var request = URLRequest(url: probeURL)
+        request.timeoutInterval = 6
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+
+        let delegate = ProbeDelegate { [weak self] status in
+            Task { @MainActor [weak self] in
+                self?.record(status: status, for: key)
+            }
+        }
+        let session = URLSession(configuration: .ephemeral,
+                                 delegate: delegate,
+                                 delegateQueue: nil)
+        session.dataTask(with: request).resume()
+        session.finishTasksAndInvalidate()
+    }
+
+    private func record(status: Int, for key: String) {
+        inFlight.remove(key)
+        probedThisSession.insert(key)
+        let wasCapable = capable.contains(key)
+        if status == 302 || status == 301 {
+            capable.insert(key)
+        } else if status != 0 {
+            // Definitive non-redirect answer: not capable.
+            capable.remove(key)
+        }
+        // status == 0 (network error): keep the cached answer.
+        if capable.contains(key) != wasCapable {
+            UserDefaults.standard.set(Array(capable), forKey: Self.defaultsKey)
+        }
+        debugLog("[HLS-CAP] \(key) -> \(capable.contains(key) ? "HLS capable" : "no native HLS") (status \(status))")
+    }
+
+    /// Captures the FIRST status the server gives and stops there:
+    /// refuses the redirect (so a capable server's 302 is observable)
+    /// and cancels the body (so a non-capable server's endless TS
+    /// stream never flows). Reports exactly once.
+    ///
+    /// @unchecked Sendable: URLSession delegates must be Sendable on
+    /// current SDKs; `reported` is only touched from the session's
+    /// serial delegate queue, so access is serialized by construction.
+    private final class ProbeDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+        private let onStatus: @Sendable (Int) -> Void
+        private var reported = false
+        init(onStatus: @escaping @Sendable (Int) -> Void) { self.onStatus = onStatus }
+
+        private func report(_ status: Int) {
+            guard !reported else { return }
+            reported = true
+            onStatus(status)
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest,
+                        completionHandler: @escaping (URLRequest?) -> Void) {
+            report(response.statusCode)
+            completionHandler(nil)
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                        didReceive response: URLResponse,
+                        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+            report((response as? HTTPURLResponse)?.statusCode ?? 0)
+            completionHandler(.cancel)
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask,
+                        didCompleteWithError error: Error?) {
+            // Network failure before any response: report unknown.
+            report(0)
+        }
+    }
 }
 
 // MARK: - Shared Date Parser

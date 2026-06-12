@@ -139,6 +139,41 @@ final class MultiviewStore: ObservableObject {
     /// window keeps decoding.
     @Published var isPiPActive: Bool = false
 
+    /// TEST (branch test/avplayer-hls-engine): which engine each tile's
+    /// video view chose ("AVPlayer" / "MPV"), keyed by tile id. The
+    /// custom chrome renders identically for both engines, so the
+    /// chrome shows the audio tile's engine as a badge; without it a
+    /// tester cannot tell which pipeline is actually playing.
+    @Published private(set) var tileEngines: [String: String] = [:]
+
+    func registerEngine(_ engine: String, for tileID: String) {
+        if tileEngines[tileID] != engine {
+            tileEngines[tileID] = engine
+        }
+    }
+
+    func unregisterEngine(for tileID: String) {
+        tileEngines.removeValue(forKey: tileID)
+    }
+
+    /// TEST (branch test/avplayer-hls-engine): each tile's actual video
+    /// aspect ratio (width/height), registered by the tile's video view
+    /// when known. The focus border uses it to hug the VIDEO rect
+    /// instead of the tile frame (which includes letterbox bars in
+    /// spotlight and other non-16:9 panes). Missing entry = assume 16:9.
+    @Published private(set) var tileVideoAspects: [String: CGFloat] = [:]
+
+    func registerVideoAspect(_ aspect: CGFloat, for tileID: String) {
+        guard aspect > 0.1, aspect < 10 else { return }
+        if tileVideoAspects[tileID] != aspect {
+            tileVideoAspects[tileID] = aspect
+        }
+    }
+
+    func unregisterVideoAspect(for tileID: String) {
+        tileVideoAspects.removeValue(forKey: tileID)
+    }
+
     /// Set to `true` while `AddToMultiviewSheet` is presented on tvOS
     /// at N=1. Pauses EVERY tile's mpv (including the audio tile) so
     /// the picker's channel-list rendering + image loading doesn't

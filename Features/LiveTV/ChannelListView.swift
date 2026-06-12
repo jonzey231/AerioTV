@@ -707,6 +707,14 @@ struct ChannelListView: View {
                     // instant-scroll the target to center and re-assert
                     // focusedGuideRowID until the engine accepts it.
                     Task { @MainActor in
+                        // TEST (branch test/avplayer-hls-engine): never
+                        // steal focus from the presented native AVPlayer
+                        // cover (PlayerSession.mode stays .idle there, so
+                        // mode checks cannot catch this).
+                        guard PlayerSession.shared.nativeHLSItem == nil else {
+                            debugLog("[GuideFocus] forceGuideFocus suppressed (native player presented)")
+                            return
+                        }
                         try? await Task.sleep(nanoseconds: 400_000_000)  // minimize spring
                         let resolved = nowPlaying.playingItem?.id ?? nowPlaying.lastPlayedChannelID
                         let valid = resolved.flatMap { id in

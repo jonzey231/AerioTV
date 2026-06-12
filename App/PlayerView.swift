@@ -3259,3 +3259,702 @@ struct TVRemoteInputView: UIViewRepresentable {
 }
 #endif
 
+// MARK: - Native AVPlayer engine (TEST, branch test/avplayer-hls-engine)
+
+/// Full-screen native AVPlayer playback for genuine HLS streams, presented
+/// when the Developer "AVPlayer for HLS Streams" toggle routes a .m3u8 URL
+/// here instead of the mpv pipeline (see PlayerSession.begin). Uses
+/// AVPlayerViewController for the system transport/chrome: native HDR and
+/// Dolby Vision output, Atmos passthrough, AirPlay, and the standard
+/// scrubbing UI come along for free, which is the whole point of the test.
+/// Deliberately NOT integrated with the app's custom chrome, channel-flip,
+/// or multiview; this is an engine evaluation surface, not a replacement.
+struct NativeHLSPlayerScreen: View {
+    let item: ChannelDisplayItem
+    let userAgent: String?
+    /// When true, the stream is raw MPEG-TS: an on-device TSHLSRemuxer
+    /// ingests it and AVPlayer plays the loopback playlist it serves.
+    var useRemux = false
+    /// Ingest headers for the remuxer (Dispatcharr auth + UA); also sent
+    /// on direct playback so the server's HLS endpoints see the same
+    /// auth the TS path sends.
+    var ingestHeaders: [String: String] = [:]
+    /// Non-nil when the router upgraded the URL to the server's native
+    /// HLS output (?output_format=hls); played instead of item.streamURL.
+    var overrideURL: URL?
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer?
+    @State private var remuxer: TSHLSRemuxer?
+    @State private var statusText: String?
+    @State private var showRecordSheet = false
+    @State private var showStreamInfo = false
+    @State private var sleepWork: DispatchWorkItem?
+
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            if let player {
+                NativeAVPlayerController(
+                    player: player,
+                    canRecord: item.streamURL != nil,
+                    onRecord: { showRecordSheet = true },
+                    onAddStream: { switchToMPV(openAddStream: true) },
+                    onSwitchToMPV: { switchToMPV(openAddStream: false) },
+                    onStreamInfo: { showStreamInfo.toggle() },
+                    onSleepTimer: { seconds in setSleepTimer(seconds) },
+                    trailingAccessory: trailingAccessoryView
+                )
+                .ignoresSafeArea()
+            }
+            if let statusText {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text(statusText)
+                        .font(.bodyMedium)
+                        .foregroundColor(.white.opacity(0.85))
+                }
+            }
+            if showStreamInfo, let player {
+                NativeStreamInfoCard(
+                    player: player,
+                    channelName: item.name,
+                    program: item.currentProgram,
+                    engineNote: useRemux ? "AVPlayer (remuxed TS)" : "AVPlayer (direct HLS)"
+                )
+                .allowsHitTesting(false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity,
+                       alignment: .topLeading)
+                .padding(60)
+            }
+        }
+        // Record sheet over the native player. Same RecordProgramSheet
+        // the mpv chrome's Record pill presents, fed from the same
+        // ChannelDisplayItem EPG fields.
+        .fullScreenCover(isPresented: $showRecordSheet) {
+            recordSheet
+        }
+        // Direct playback failure (e.g. a stale capability cache sent a
+        // server-side HLS request to a server that no longer answers it):
+        // fall back to mpv, same as the tile path. The per-session
+        // re-probe corrects the cache for next time.
+        .onReceive(NotificationCenter.default.publisher(
+            for: .AVPlayerItemFailedToPlayToEndTime)) { note in
+            guard let failed = note.object as? AVPlayerItem,
+                  failed === player?.currentItem else { return }
+            DebugLogger.shared.log(
+                "[AVP-HLS] native playback failed; falling back to mpv",
+                category: "Playback", level: .warning
+            )
+            fallbackToMPV()
+        }
+        #if os(tvOS)
+        // mpv parity: Menu means "minimize to the corner mini player
+        // over the guide", not "kill the channel". AVPlayerViewController
+        // consumes Menu while its transport is visible (hides it); the
+        // press only bubbles here once the transport is hidden, matching
+        // the mpv chrome cycle.
+        .onExitCommand { minimizeToMini() }
+        #else
+        // iOS: unlike tvOS, AVPlayerViewController draws its OWN top
+        // chrome here (close, PiP, AirPlay, volume), so the overlay
+        // carries ONLY the actions the native player lacks, styled in
+        // the native chrome's exact vocabulary: 50pt dark-material
+        // circles for lone actions, related actions grouped in ONE
+        // material capsule (mirroring the native PiP+AirPlay pill),
+        // aligned to the same screen margins one row below the native
+        // controls. Leading: minimize to the corner mini (the native X
+        // fully stops, the chevron keeps watching). Trailing capsule:
+        // Record, Add Stream, Options (Stream Info, Sleep Timer,
+        // Switch to MPV, Stop). Aspect is omitted: the native player
+        // already has pinch zoom.
+        .statusBarHidden()
+        #endif
+        .onAppear {
+            AudioSessionRefCount.increment(caller: "native-hls")
+            IdleTimerRefCount.increment(caller: "native-hls")
+            guard let url = overrideURL ?? item.streamURL ?? item.streamURLs.first else { return }
+            NowPlayingManager.shared.lastPlayedChannelID = item.id
+
+            if useRemux {
+                // Raw TS: stand up the loopback remuxer, then play its
+                // playlist URL once two segments exist. The codec gate
+                // (H.264 + AC-3/AAC only) falls back to mpv otherwise.
+                statusText = "Preparing stream..."
+                let mux = TSHLSRemuxer(sourceURL: url, headers: ingestHeaders)
+                mux.onReady = { localURL in
+                    statusText = nil
+                    startPlayer(with: localURL, headers: [:])
+                    DebugLogger.shared.log(
+                        "[AVP-HLS] native engine playing REMUXED channel id=\(item.id)",
+                        category: "Playback", level: .info
+                    )
+                }
+                mux.onError = { error in
+                    DebugLogger.shared.log(
+                        "[AVP-HLS] remux failed (\(error)); falling back to mpv",
+                        category: "Playback", level: .warning
+                    )
+                    fallbackToMPV()
+                }
+                remuxer = mux
+                mux.start()
+            } else {
+                var headers = ingestHeaders
+                if headers.isEmpty, let userAgent, !userAgent.isEmpty {
+                    headers["User-Agent"] = userAgent
+                }
+                startPlayer(with: url, headers: headers)
+                DebugLogger.shared.log(
+                    "[AVP-HLS] native engine playing channel id=\(item.id)\(overrideURL != nil ? " (server-side HLS)" : "")",
+                    category: "Playback", level: .info
+                )
+            }
+        }
+        .onDisappear {
+            player?.pause()
+            player = nil
+            remuxer?.stop()
+            remuxer = nil
+            sleepWork?.cancel()
+            sleepWork = nil
+            AudioSessionRefCount.decrement(caller: "native-hls")
+            IdleTimerRefCount.decrement(caller: "native-hls")
+            DebugLogger.shared.log(
+                "[AVP-HLS] native engine closed",
+                category: "Playback", level: .info
+            )
+        }
+    }
+
+    private func startPlayer(with url: URL, headers: [String: String]) {
+        var options: [String: Any] = [:]
+        if !headers.isEmpty {
+            options["AVURLAssetHTTPHeaderFieldsKey"] = headers
+        }
+        let asset = AVURLAsset(url: url, options: options)
+        let playerItem = AVPlayerItem(asset: asset)
+        // Feed the native info panel real channel/program names instead
+        // of whatever stale Now Playing state it can scrape.
+        playerItem.externalMetadata = Self.nativeMetadata(
+            title: item.name,
+            subtitle: item.currentProgram
+        )
+        let avPlayer = AVPlayer(playerItem: playerItem)
+        avPlayer.play()
+        player = avPlayer
+    }
+
+    private static func nativeMetadata(title: String, subtitle: String?) -> [AVMetadataItem] {
+        func make(_ id: AVMetadataIdentifier, _ value: String) -> AVMetadataItem {
+            let entry = AVMutableMetadataItem()
+            entry.identifier = id
+            entry.value = value as NSString
+            entry.extendedLanguageTag = "und"
+            return entry
+        }
+        var entries = [make(.commonIdentifierTitle, title)]
+        if let subtitle, !subtitle.isEmpty {
+            entries.append(make(.iTunesMetadataTrackSubTitle, subtitle))
+        }
+        return entries
+    }
+
+    /// The app-action capsule, hosted INSIDE the player controller and
+    /// pinned to its layout-margin guides so it aligns with the native
+    /// chrome by construction in every orientation (an external overlay
+    /// could only approximate Apple's margins). Empty on tvOS, where
+    /// the actions live in the transport bar instead.
+    private var trailingAccessoryView: AnyView {
+        #if os(iOS)
+        AnyView(
+            HStack(spacing: 22) {
+                if item.streamURL != nil {
+                    Button {
+                        showRecordSheet = true
+                    } label: {
+                        iosOverlayIcon("record.circle", tint: .red)
+                    }
+                }
+                Button {
+                    switchToMPV(openAddStream: true)
+                } label: {
+                    iosOverlayIcon("plus")
+                }
+                Menu {
+                    Button {
+                        showStreamInfo.toggle()
+                    } label: {
+                        Label("Stream Info", systemImage: "info.circle")
+                    }
+                    Menu {
+                        ForEach([30, 60, 90, 120], id: \.self) { minutes in
+                            Button("\(minutes) minutes") {
+                                setSleepTimer(TimeInterval(minutes * 60))
+                            }
+                        }
+                        Button("Off", role: .destructive) { setSleepTimer(nil) }
+                    } label: {
+                        Label("Sleep Timer", systemImage: "moon.zzz")
+                    }
+                    Button {
+                        switchToMPV(openAddStream: false)
+                    } label: {
+                        Label("Switch to MPV Player", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    Button(role: .destructive) {
+                        dismiss()
+                    } label: {
+                        Label("Stop Playback", systemImage: "stop.circle")
+                    }
+                } label: {
+                    iosOverlayIcon("slider.horizontal.3")
+                }
+            }
+            .padding(.horizontal, 16)
+            .frame(height: 46)
+            // Material alone goes light over bright content; the native
+            // pills hold a dark tone everywhere, so blur over a dark
+            // underlay to match.
+            .background(.ultraThinMaterial, in: Capsule())
+            .background(Color.black.opacity(0.4), in: Capsule())
+            .environment(\.colorScheme, .dark)
+        )
+        #else
+        AnyView(EmptyView())
+        #endif
+    }
+
+    #if os(iOS)
+    /// Icon styling for the grouped capsule (the capsule supplies its
+    /// own material background, mirroring the native PiP+AirPlay pill).
+    @ViewBuilder
+    private func iosOverlayIcon(_ icon: String, tint: Color = .white) -> some View {
+        Image(systemName: icon)
+            .font(.system(size: 18, weight: .medium))
+            .foregroundColor(tint)
+    }
+    #endif
+
+    /// Remux failure path: dismiss this cover and restart the channel on
+    /// the mpv pipeline, bypassing the native router so it cannot loop.
+    private func fallbackToMPV() {
+        switchToMPV(openAddStream: false)
+    }
+
+    /// Menu/Back, mpv parity: continue this channel in the corner mini
+    /// player over the guide. The unified container mounts (its per-tile
+    /// router keeps the tile on AVPlayer when eligible) and immediately
+    /// minimizes. The stream restarts across the handoff, which is the
+    /// cost of trading system chrome for the container; acceptable in
+    /// the corner mini.
+    private func minimizeToMini() {
+        let session = PlayerSession.shared
+        let server = session.nativeHLSServer
+        session.nativeHLSItem = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            session.begin(item: item, server: server, bypassNativeRouter: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                NowPlayingManager.shared.minimize()
+            }
+        }
+    }
+
+    /// Native Options parity with the mpv panel's sleep timer: nil
+    /// cancels; otherwise the native player closes when it fires.
+    private func setSleepTimer(_ seconds: TimeInterval?) {
+        sleepWork?.cancel()
+        sleepWork = nil
+        guard let seconds else {
+            debugLog("[AVP-HLS] sleep timer cancelled")
+            return
+        }
+        let work = DispatchWorkItem {
+            debugLog("[AVP-HLS] sleep timer fired; closing native player")
+            PlayerSession.shared.nativeHLSItem = nil
+        }
+        sleepWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+        debugLog("[AVP-HLS] sleep timer set: \(Int(seconds / 60))m")
+    }
+
+    /// Leave the native player and restart this channel on the mpv
+    /// pipeline (router bypassed). With `openAddStream`, additionally
+    /// asks the mounted multiview container to open its add-channel
+    /// sheet, which is what "Add Stream" means: multiview is an mpv
+    /// capability, so the engine switches first.
+    private func switchToMPV(openAddStream: Bool) {
+        let session = PlayerSession.shared
+        let server = session.nativeHLSServer
+        session.nativeHLSItem = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            session.begin(item: item, server: server, bypassNativeRouter: true)
+            if openAddStream {
+                // Give the container a beat to mount before asking it
+                // to present the sheet (same notification the iPad
+                // keyboard shortcut uses).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    NotificationCenter.default.post(
+                        name: .multiviewRequestOpenAddSheet, object: nil)
+                }
+            }
+        }
+    }
+
+    /// Mirror of the mpv chrome's Record pill payload
+    /// (MultiviewContainerView.recordSheetContent): EPG-known program
+    /// name when available, generic live-recording fallback otherwise.
+    @ViewBuilder
+    private var recordSheet: some View {
+        let now = Date()
+        RecordProgramSheet(
+            programTitle: item.currentProgram ?? "\(item.name) live recording",
+            programDescription: item.currentProgramDescription ?? "",
+            channelID: item.id,
+            channelName: item.name,
+            scheduledStart: item.currentProgramStart ?? now,
+            scheduledEnd: (item.currentProgramEnd.flatMap { $0 > now ? $0 : nil })
+                ?? now.addingTimeInterval(3600),
+            isLive: true,
+            dispatcharrChannelID: item.dispatcharrChannelID,
+            streamURL: item.streamURL
+        )
+    }
+}
+
+/// Thin AVPlayerViewController wrapper. The system controller supplies the
+/// full native transport (and on tvOS, the swipe-down info panel); the
+/// app's own actions ride the transport bar as custom items (tvOS 15+):
+/// Record, Add Stream, and an Options menu with aspect toggle and a
+/// switch-to-mpv escape hatch for A/B comparison.
+private struct NativeAVPlayerController: UIViewControllerRepresentable {
+    let player: AVPlayer
+    var canRecord: Bool = false
+    var onRecord: (() -> Void)?
+    var onAddStream: (() -> Void)?
+    var onSwitchToMPV: (() -> Void)?
+    var onStreamInfo: (() -> Void)?
+    var onSleepTimer: ((TimeInterval?) -> Void)?
+    /// iOS: the app-action capsule, mounted INSIDE the native controls
+    /// hierarchy so it inherits the chrome's fade on Apple's own clock
+    /// (a parallel show/hide state machine drifted out of phase).
+    var trailingAccessory: AnyView = AnyView(EmptyView())
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = player
+        #if os(tvOS)
+        controller.transportBarCustomMenuItems = Self.transportItems(
+            for: controller,
+            canRecord: canRecord,
+            onRecord: onRecord,
+            onAddStream: onAddStream,
+            onSwitchToMPV: onSwitchToMPV,
+            onStreamInfo: onStreamInfo,
+            onSleepTimer: onSleepTimer
+        )
+        #else
+        let hosting = UIHostingController(rootView: trailingAccessory)
+        hosting.view.backgroundColor = .clear
+        hosting.view.translatesAutoresizingMaskIntoConstraints = false
+        context.coordinator.hosting = hosting
+        // The native controls hierarchy does not exist yet; attach once
+        // it does so the capsule inherits the chrome's fade.
+        context.coordinator.attachAccessory(to: controller, attempts: 20)
+        #endif
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        if controller.player !== player {
+            controller.player = player
+        }
+        #if os(iOS)
+        context.coordinator.hosting?.rootView = trailingAccessory
+        #endif
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        #if os(iOS)
+        var hosting: UIHostingController<AnyView>?
+        private weak var controllerRef: AVPlayerViewController?
+        private weak var fadeSource: UIView?
+        private var displayLink: CADisplayLink?
+        // No deinit invalidate: the display link retains this
+        // coordinator, and tickFade invalidates itself once the player
+        // leaves the window, which releases the retain so the
+        // coordinator can deinit normally.
+
+        /// Mount the capsule on the controller's own view at the
+        /// calibrated position (decoupled from Apple's fragile control
+        /// tree, which rebuilds), then mirror the fade by SAMPLING a
+        /// real native button's on-screen opacity every frame onto the
+        /// capsule. Sampling the composited presentation opacity tracks
+        /// whatever Apple animates, on any view, with any curve, exactly
+        /// (mounting inside a guessed "fading" container kept landing on
+        /// a non-fading layer). Retries until the controls exist.
+        func attachAccessory(to controller: AVPlayerViewController, attempts: Int) {
+            guard let hostingView = hosting?.view, hostingView.superview == nil else { return }
+            controllerRef = controller
+            controller.view.layoutIfNeeded()
+            mount(hostingView, controller: controller)
+            startFadeMirror(attempts: attempts)
+        }
+
+        private func mount(_ view: UIView, controller: AVPlayerViewController) {
+            // controller.view is the AVPlayerViewController's OWN view,
+            // so declaring it the parent is consistent (the earlier
+            // crash was declaring AVPlayerViewController while mounting
+            // inside a private controls VC's view).
+            if let hosting {
+                controller.addChild(hosting)
+                controller.view.addSubview(view)
+                hosting.didMove(toParent: controller)
+            } else {
+                controller.view.addSubview(view)
+            }
+            // Leading clears the X + PiP/AirPlay cluster; centerline is
+            // the calibrated orientation-aware constant (approved on
+            // device), updated on size-class change so rotation holds.
+            view.leadingAnchor.constraint(
+                equalTo: controller.view.layoutMarginsGuide.leadingAnchor, constant: 185
+            ).isActive = true
+            let constraint = view.centerYAnchor.constraint(
+                equalTo: controller.view.safeAreaLayoutGuide.topAnchor,
+                constant: Self.fallbackCenterOffset(for: controller.traitCollection)
+            )
+            constraint.isActive = true
+            view.registerForTraitChanges([UITraitVerticalSizeClass.self]) {
+                (registered: UIView, _: UITraitCollection) in
+                constraint.constant = Self.fallbackCenterOffset(for: registered.traitCollection)
+            }
+        }
+
+        private func startFadeMirror(attempts: Int) {
+            guard let controller = controllerRef else { return }
+            if let button = Self.topRowReferenceControl(in: controller.view, host: controller.view) {
+                fadeSource = button
+                let link = CADisplayLink(target: self, selector: #selector(tickFade))
+                link.add(to: .main, forMode: .common)
+                displayLink = link
+                debugLog("[AVP-HLS] capsule fade mirroring native control")
+            } else if attempts > 0 {
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    self?.startFadeMirror(attempts: attempts - 1)
+                }
+            } else {
+                debugLog("[AVP-HLS] native control not found; capsule stays visible")
+            }
+        }
+
+        @objc private func tickFade() {
+            guard let capsule = hosting?.view else { return }
+            // Player dismissed: stop sampling.
+            if capsule.window == nil {
+                displayLink?.invalidate()
+                displayLink = nil
+                return
+            }
+            // Native button gone (Glass rebuilt its tree): re-find it.
+            guard let source = fadeSource else {
+                displayLink?.invalidate()
+                displayLink = nil
+                startFadeMirror(attempts: 8)
+                return
+            }
+            let target = Self.onScreenAlpha(of: source)
+            if abs(capsule.alpha - target) > 0.001 {
+                capsule.alpha = target
+            }
+        }
+
+        /// Composited on-screen opacity of `view`: the product of every
+        /// ancestor's presentation-layer opacity up to the window, so it
+        /// reflects an in-flight fade no matter which ancestor Apple is
+        /// animating. Zero if anything in the chain is hidden.
+        private static func onScreenAlpha(of view: UIView) -> CGFloat {
+            var current: UIView? = view
+            var alpha: CGFloat = 1
+            while let v = current {
+                if v.isHidden { return 0 }
+                let opacity = v.layer.presentation()?.opacity ?? Float(v.alpha)
+                alpha *= CGFloat(opacity)
+                current = v.superview
+            }
+            return alpha
+        }
+
+        /// Native top-row center, relative to the safe-area top:
+        /// measured from device screenshots; portrait tucks the row
+        /// into the safe area band, landscape floats it lower.
+        private static func fallbackCenterOffset(for traits: UITraitCollection) -> CGFloat {
+            traits.verticalSizeClass == .compact ? 44 : 20
+        }
+
+        /// The highest plausibly button-sized native control in the top
+        /// band of the player, i.e. a member of the chrome's top row.
+        private static func topRowReferenceControl(in root: UIView, host: UIView) -> UIView? {
+            var best: (view: UIView, midY: CGFloat)?
+            var queue: [UIView] = [root]
+            while !queue.isEmpty {
+                let view = queue.removeFirst()
+                if view is UIControl || view.accessibilityTraits.contains(.button),
+                   view.bounds.height >= 36, view.bounds.height <= 64 {
+                    let midY = view.convert(view.bounds, to: host).midY
+                    if best == nil || midY < best!.midY {
+                        best = (view, midY)
+                    }
+                }
+                queue.append(contentsOf: view.subviews)
+            }
+            guard let best, best.midY > 0, best.midY < host.bounds.height * 0.3 else {
+                return nil
+            }
+            return best.view
+        }
+        #endif
+    }
+
+    #if os(tvOS)
+    /// Rebuilt after each aspect toggle so the menu state stays in
+    /// step with the controller's current videoGravity. Audio and
+    /// subtitle selection are deliberately absent: the native info
+    /// panel already provides them.
+    private static func transportItems(
+        for controller: AVPlayerViewController,
+        canRecord: Bool,
+        onRecord: (() -> Void)?,
+        onAddStream: (() -> Void)?,
+        onSwitchToMPV: (() -> Void)?,
+        onStreamInfo: (() -> Void)?,
+        onSleepTimer: ((TimeInterval?) -> Void)?
+    ) -> [UIMenuElement] {
+        var items: [UIMenuElement] = []
+
+        if canRecord, let onRecord {
+            items.append(UIAction(
+                title: "Record",
+                image: UIImage(systemName: "record.circle")
+            ) { _ in onRecord() })
+        }
+
+        if let onAddStream {
+            items.append(UIAction(
+                title: "Add Stream",
+                image: UIImage(systemName: "plus")
+            ) { _ in onAddStream() })
+        }
+
+        let isFill = controller.videoGravity == .resizeAspectFill
+        let aspectAction = UIAction(
+            title: isFill ? "Aspect: Fill" : "Aspect: Fit",
+            image: UIImage(systemName: "rectangle.arrowtriangle.2.outward"),
+            state: isFill ? .on : .off
+        ) { [weak controller] _ in
+            guard let controller else { return }
+            controller.videoGravity =
+                controller.videoGravity == .resizeAspectFill ? .resizeAspect : .resizeAspectFill
+            controller.transportBarCustomMenuItems = transportItems(
+                for: controller, canRecord: canRecord, onRecord: onRecord,
+                onAddStream: onAddStream, onSwitchToMPV: onSwitchToMPV,
+                onStreamInfo: onStreamInfo, onSleepTimer: onSleepTimer)
+        }
+
+        var optionsChildren: [UIMenuElement] = [aspectAction]
+
+        if let onStreamInfo {
+            optionsChildren.append(UIAction(
+                title: "Stream Info",
+                image: UIImage(systemName: "info.circle")
+            ) { _ in onStreamInfo() })
+        }
+
+        if let onSleepTimer {
+            var sleepChildren: [UIMenuElement] = [30, 60, 90, 120].map { minutes in
+                UIAction(title: "\(minutes) minutes") { _ in
+                    onSleepTimer(TimeInterval(minutes * 60))
+                }
+            }
+            sleepChildren.append(UIAction(
+                title: "Off",
+                attributes: .destructive
+            ) { _ in onSleepTimer(nil) })
+            optionsChildren.append(UIMenu(
+                title: "Sleep Timer",
+                image: UIImage(systemName: "moon.zzz"),
+                children: sleepChildren
+            ))
+        }
+
+        if let onSwitchToMPV {
+            optionsChildren.append(UIAction(
+                title: "Switch to MPV Player",
+                image: UIImage(systemName: "arrow.triangle.2.circlepath")
+            ) { _ in onSwitchToMPV() })
+        }
+        items.append(UIMenu(
+            title: "Options",
+            image: UIImage(systemName: "slider.horizontal.3"),
+            children: optionsChildren
+        ))
+
+        return items
+    }
+    #endif
+}
+
+/// Stream-info overlay for the native player, the counterpart of the
+/// mpv Options panel's stream info. Values come straight from AVPlayer:
+/// presentation size and the HLS access log's bitrate figures, refreshed
+/// every 2 seconds while shown.
+private struct NativeStreamInfoCard: View {
+    let player: AVPlayer
+    let channelName: String
+    let program: String?
+    let engineNote: String
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 2)) { _ in
+            VStack(alignment: .leading, spacing: 6) {
+                Text(channelName)
+                    .font(.system(size: 28, weight: .bold))
+                if let program, !program.isEmpty {
+                    Text(program)
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Divider()
+                Text(engineNote)
+                let size = player.currentItem?.presentationSize ?? .zero
+                if size != .zero {
+                    Text("\(Int(size.width))x\(Int(size.height))")
+                }
+                if let event = player.currentItem?.accessLog()?.events.last {
+                    if event.indicatedBitrate > 0 {
+                        Text(String(format: "%.1f Mbps indicated", event.indicatedBitrate / 1_000_000))
+                    }
+                    if event.observedBitrate > 0 {
+                        Text(String(format: "%.1f Mbps observed", event.observedBitrate / 1_000_000))
+                    }
+                    if event.numberOfStalls > 0 {
+                        Text("\(event.numberOfStalls) stall(s)")
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+            .font(.system(size: 20, weight: .regular))
+            .foregroundStyle(.white)
+            .padding(24)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .frame(maxWidth: 480, alignment: .leading)
+        }
+    }
+}
+
