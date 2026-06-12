@@ -3301,6 +3301,22 @@ final class AVPlayerProgressDriver {
     private var audioOptionByID: [Int: AVMediaSelectionOption] = [:]
     private var subtitleOptionByID: [Int: AVMediaSelectionOption] = [:]
 
+    // MARK: instrumentation ([AVP-STREAM]/[AVP-PERF], mpv-path parity)
+    /// Wall clock at construction; time-to-first-frame is measured from
+    /// here so it includes asset load, not just decode.
+    private let launchStart = CACurrentMediaTime()
+    private var firstPlayLogged = false
+    private var streamSummaryLogged = false
+    /// NotificationCenter tokens scoped to the current item, torn down
+    /// on swap alongside itemObservations.
+    private var itemNotificationTokens: [NSObjectProtocol] = []
+    private var perfTimer: Timer?
+    /// Access-log deltas: last-seen counters so each [AVP-PERF] line
+    /// reports stalls/dropped-frames since the previous line, like the
+    /// mpv vo_drops/dec_drops deltas.
+    private var lastStallCount = 0
+    private var lastDroppedFrames = 0
+
     init(player: AVPlayer,
          store: PlayerProgressStore,
          isLive: Bool,
@@ -3336,7 +3352,28 @@ final class AVPlayerProgressDriver {
         // paused so the spinner logic matches the mpv path.
         observations.append(player.observe(\.timeControlStatus, options: [.initial, .new]) {
             [weak self] p, _ in
-            Task { @MainActor in self?.store.isPaused = (p.timeControlStatus == .paused) }
+            Task { @MainActor in
+                guard let self else { return }
+                self.store.isPaused = (p.timeControlStatus == .paused)
+                switch p.timeControlStatus {
+                case .playing:
+                    if !self.firstPlayLogged {
+                        self.firstPlayLogged = true
+                        let ms = Int((CACurrentMediaTime() - self.launchStart) * 1000)
+                        debugLog("[AVP-STREAM] first frame playing in \(ms)ms from screen open")
+                    }
+                case .waitingToPlayAtSpecifiedRate:
+                    // The cause of any mid-stream "skip"/rebuffer. Reason
+                    // codes: evaluatingBufferingRate, toMinimizeStalls,
+                    // noItemToPlay.
+                    let reason = p.reasonForWaitingToPlay?.rawValue ?? "unknown"
+                    debugLog("[AVP-STREAM] waiting to play (reason=\(reason))")
+                case .paused:
+                    break
+                @unknown default:
+                    break
+                }
+            }
         })
 
         observeCurrentItem(player.currentItem)
@@ -3383,6 +3420,78 @@ final class AVPlayerProgressDriver {
                 self.store.streamInfo.height = Int(size.height)
             }
         })
+        instrument(item: item)
+    }
+
+    // MARK: - Stream instrumentation ([AVP-STREAM]/[AVP-PERF])
+
+    /// AVPlayer telemetry parity with the mpv `[MPV-STREAM]/[MPV-PERF]`
+    /// block: startup time, stalls, dropped frames, and observed
+    /// bitrate, sourced from the item's access/error logs and the stall
+    /// notification. Scoped to `item`; replaced on every swap.
+    private func instrument(item: AVPlayerItem) {
+        itemNotificationTokens.forEach { NotificationCenter.default.removeObserver($0) }
+        itemNotificationTokens.removeAll()
+        let nc = NotificationCenter.default
+
+        // Access log: AVFoundation's own measurement of startup time and
+        // stalls. The first event's startupTime is the authoritative
+        // "time to first frame" answer for the slow-load report.
+        itemNotificationTokens.append(nc.addObserver(
+            forName: AVPlayerItem.newAccessLogEntryNotification,
+            object: item, queue: .main) { [weak self] _ in
+            guard let self, let event = item.accessLog()?.events.last else { return }
+            if !self.streamSummaryLogged, event.startupTime > 0 {
+                self.streamSummaryLogged = true
+                let bitrate = event.indicatedBitrate > 0 ? event.indicatedBitrate : event.observedBitrate
+                debugLog(String(format:
+                    "[AVP-STREAM] startup=%.0fms indicatedBitrate=%.0fkbps observed=%.0fkbps uri-changes=%d",
+                    event.startupTime * 1000,
+                    event.indicatedBitrate / 1000,
+                    event.observedBitrate / 1000,
+                    event.numberOfStalls))
+            }
+        })
+
+        // Error log: surfaces transient HLS fetch errors (segment 404,
+        // bitrate switch failures) that show as skips but never throw.
+        itemNotificationTokens.append(nc.addObserver(
+            forName: AVPlayerItem.newErrorLogEntryNotification,
+            object: item, queue: .main) { _ in
+            guard let event = item.errorLog()?.events.last else { return }
+            debugLog("[AVP-STREAM] error log: status=\(event.errorStatusCode) domain=\(event.errorDomain) \(event.errorComment ?? "")")
+        })
+
+        // Hard stall: the player ran dry. This is the "skipping in the
+        // feed" smoking gun if it fires after first frame.
+        itemNotificationTokens.append(nc.addObserver(
+            forName: AVPlayerItem.playbackStalledNotification,
+            object: item, queue: .main) { [weak self] _ in
+            let ms = Int((CACurrentMediaTime() - (self?.launchStart ?? 0)) * 1000)
+            debugLog("[AVP-STREAM] STALL at +\(ms)ms (buffer ran empty)")
+        })
+
+        // Periodic summary (15s), mpv [STREAM-SUMMARY] cadence: report
+        // stall + dropped-frame deltas and the current observed bitrate.
+        perfTimer?.invalidate()
+        perfTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.logPerfSummary() }
+        }
+    }
+
+    private func logPerfSummary() {
+        guard let event = player.currentItem?.accessLog()?.events.last else { return }
+        let stalls = event.numberOfStalls
+        let dropped = event.numberOfDroppedVideoFrames
+        let dStalls = max(0, stalls - lastStallCount)
+        let dDropped = max(0, dropped - lastDroppedFrames)
+        lastStallCount = stalls
+        lastDroppedFrames = dropped
+        debugLog(String(format:
+            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d",
+            dStalls, stalls, dDropped, dropped,
+            event.observedBitrate / 1000,
+            event.numberOfMediaRequests))
     }
 
     /// Map AVMediaSelectionGroups to the overlay's integer-id track lists.
@@ -3500,6 +3609,10 @@ final class AVPlayerProgressDriver {
         observations.removeAll()
         itemObservations.forEach { $0.invalidate() }
         itemObservations.removeAll()
+        itemNotificationTokens.forEach { NotificationCenter.default.removeObserver($0) }
+        itemNotificationTokens.removeAll()
+        perfTimer?.invalidate()
+        perfTimer = nil
         aspectCancellable?.cancel()
         aspectCancellable = nil
         // Drop the closures so a torn-down driver can't drive a dead player.
@@ -4112,6 +4225,12 @@ struct NativeHLSPlayerScreen: View {
             title: item.name,
             subtitle: item.currentProgram
         )
+        // No startup tuning yet, deliberately. "Slow load" and "skipping
+        // in the first few seconds" pull in opposite directions
+        // (buffer headroom vs latency), so the next device run's
+        // [AVP-STREAM] startup= and stall numbers decide the lever
+        // (configuredTimeOffsetFromLive, preferredForwardBufferDuration,
+        // or automaticallyWaitsToMinimizeStalling) rather than a guess.
         let avPlayer = AVPlayer(playerItem: playerItem)
         avPlayer.play()
         player = avPlayer
