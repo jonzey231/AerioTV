@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import AVKit
+import Combine
 import MediaPlayer
 #if os(iOS)
 import UIKit
@@ -2064,8 +2065,14 @@ private struct PlayerRootView: View {
                 progressStore.isAudioOnly = isAudioOnly
             },
             recordAction: nil,
-            onMenuOpen: { controlsHideTask?.cancel() },
-            onMenuClose: { if !progressStore.isPaused { scheduleControlsHide() } }
+            onMenuOpen: {
+                debugLog("[MPV-FADE] menu open: hide canceled")
+                controlsHideTask?.cancel()
+            },
+            onMenuClose: {
+                debugLog("[MPV-FADE] menu close")
+                if !progressStore.isPaused { scheduleControlsHide() }
+            }
         )
         .equatable()
     }
@@ -2358,15 +2365,20 @@ private struct PlayerRootView: View {
     }
 
     private func scheduleControlsHide() {
-        guard !progressStore.isPaused else { return }
+        guard !progressStore.isPaused else {
+            debugLog("[MPV-FADE] hide NOT scheduled (isPaused)")
+            return
+        }
         #if os(tvOS)
         guard !isScrubbing else { return }  // Never auto-hide while user is scrubbing
         #endif
         controlsHideTask?.cancel()
+        debugLog("[MPV-FADE] hide scheduled (4s)")
         controlsHideTask = Task {
             try? await Task.sleep(nanoseconds: 4_000_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
+                debugLog("[MPV-FADE] controls HIDDEN (auto)")
                 withAnimation(.easeInOut(duration: 0.3)) { showControls = false }
             }
         }
@@ -3260,6 +3272,239 @@ struct TVRemoteInputView: UIViewRepresentable {
 #endif
 
 // MARK: - Native AVPlayer engine (TEST, branch test/avplayer-hls-engine)
+
+/// Bridges an `AVPlayer`'s playback state into the shared
+/// `PlayerProgressStore`, the SAME store the mpv path populates, so ONE
+/// custom control overlay can drive both engines. This is the AVPlayer
+/// analog of `MPVPlayerView.Coordinator`'s store wiring: KVO + a
+/// periodic time observer push state IN (currentMs / durationMs /
+/// isPaused / tracks / streamInfo), and the store's command closures
+/// route user intents OUT (play-pause / seek / speed / track select /
+/// aspect). With this in place the overlay's scrubber, play-pause, and
+/// track pickers work identically regardless of which engine is live.
+@MainActor
+final class AVPlayerProgressDriver {
+    private weak var player: AVPlayer?
+    private let store: PlayerProgressStore
+    private let isLive: Bool
+    /// Host-provided sink for aspect changes (the overlay has no handle
+    /// to the AVPlayerLayer; the host owns it and applies the gravity).
+    private let applyGravity: (AVLayerVideoGravity) -> Void
+
+    private var timeObserver: Any?
+    private var observations: [NSKeyValueObservation] = []
+    private var aspectCancellable: AnyCancellable?
+    // AVPlayer selects tracks by AVMediaSelectionOption, not integer id.
+    // We hand the overlay synthetic 1-based ids (0 = auto/off, matching
+    // mpv's aid/sid convention) and map them back here.
+    private var audibleGroup: AVMediaSelectionGroup?
+    private var legibleGroup: AVMediaSelectionGroup?
+    private var audioOptionByID: [Int: AVMediaSelectionOption] = [:]
+    private var subtitleOptionByID: [Int: AVMediaSelectionOption] = [:]
+
+    init(player: AVPlayer,
+         store: PlayerProgressStore,
+         isLive: Bool,
+         applyGravity: @escaping (AVLayerVideoGravity) -> Void) {
+        self.player = player
+        self.store = store
+        self.isLive = isLive
+        self.applyGravity = applyGravity
+        wireCommands(player)
+        observe(player)
+        // Apply the persisted aspect immediately and on every change.
+        applyGravity(store.aspectMode.videoGravity)
+        aspectCancellable = store.$aspectMode
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] mode in self?.applyGravity(mode.videoGravity) }
+    }
+
+    /// State IN: observers that mirror AVPlayer -> store.
+    private func observe(_ player: AVPlayer) {
+        // Position. 0.5s cadence matches the overlay's needs without
+        // churning the main thread; live streams keep durationMs == 0,
+        // which the overlay already reads as "live" (no scrubber).
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: interval, queue: .main) { [weak self] time in
+            guard let self, !self.isLive else { return }
+            let secs = time.seconds
+            if secs.isFinite { self.store.currentMs = Int32(secs * 1000) }
+        }
+
+        // Play/pause. timeControlStatus is authoritative (covers the
+        // buffering-vs-paused distinction); treat waiting-to-play as not
+        // paused so the spinner logic matches the mpv path.
+        observations.append(player.observe(\.timeControlStatus, options: [.initial, .new]) {
+            [weak self] p, _ in
+            Task { @MainActor in self?.store.isPaused = (p.timeControlStatus == .paused) }
+        })
+
+        observeCurrentItem(player.currentItem)
+        // Re-observe if the item is swapped (remux ready, fallback, etc.).
+        observations.append(player.observe(\.currentItem, options: [.new]) {
+            [weak self] _, change in
+            Task { @MainActor in
+                if let item = change.newValue ?? nil { self?.observeCurrentItem(item) }
+            }
+        })
+    }
+
+    private func observeCurrentItem(_ item: AVPlayerItem?) {
+        guard let item else { return }
+        // Duration (VOD / seekable). Live HLS reports indefinite, which
+        // we leave as durationMs == 0.
+        observations.append(item.observe(\.duration, options: [.initial, .new]) {
+            [weak self] i, _ in
+            let d = i.duration
+            guard let self, !self.isLive, d.isNumeric, d.seconds.isFinite, d.seconds > 0 else { return }
+            Task { @MainActor in self.store.durationMs = Int32(d.seconds * 1000) }
+        })
+        // Ready -> populate tracks + stream info once metadata exists.
+        observations.append(item.observe(\.status, options: [.initial, .new]) {
+            [weak self] i, _ in
+            guard let self, i.status == .readyToPlay else { return }
+            Task { @MainActor in
+                self.populateTracks(item: i)
+                self.populateStreamInfo(item: i)
+            }
+        })
+        // Presentation size -> stream info resolution.
+        observations.append(item.observe(\.presentationSize, options: [.initial, .new]) {
+            [weak self] i, _ in
+            let size = i.presentationSize
+            guard let self, size.width > 0 else { return }
+            Task { @MainActor in
+                self.store.streamInfo.width = Int(size.width)
+                self.store.streamInfo.height = Int(size.height)
+            }
+        })
+    }
+
+    /// Map AVMediaSelectionGroups to the overlay's integer-id track lists.
+    /// Uses the synchronous accessor (deprecated since iOS 16 but still
+    /// functional) deliberately: the async `loadMediaSelectionGroup`
+    /// sends the non-Sendable `AVAsset` off the main actor, which Swift 6
+    /// strict concurrency rejects. At `status == .readyToPlay` the groups
+    /// are loaded, so the sync read returns them without blocking.
+    private func populateTracks(item: AVPlayerItem) {
+        let asset = item.asset
+        let audioGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .audible)
+        let subGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .legible)
+
+        audibleGroup = audioGroup
+        legibleGroup = subGroup
+        audioOptionByID.removeAll()
+        subtitleOptionByID.removeAll()
+
+        var audioTracks: [MediaTrack] = []
+        if let audioGroup {
+            for (index, option) in audioGroup.options.enumerated() {
+                let id = index + 1
+                audioOptionByID[id] = option
+                audioTracks.append(MediaTrack(
+                    id: id, type: "audio",
+                    title: option.displayName,
+                    lang: option.extendedLanguageTag ?? "",
+                    codec: "", isDefault: index == 0))
+            }
+        }
+        var subtitleTracks: [MediaTrack] = []
+        if let subGroup {
+            for (index, option) in subGroup.options.enumerated() {
+                let id = index + 1
+                subtitleOptionByID[id] = option
+                subtitleTracks.append(MediaTrack(
+                    id: id, type: "sub",
+                    title: option.displayName,
+                    lang: option.extendedLanguageTag ?? "",
+                    codec: "", isDefault: false))
+            }
+        }
+
+        store.audioTracks = audioTracks
+        store.subtitleTracks = subtitleTracks
+        // Reflect the current selection back as the highlighted id.
+        let selection = item.currentMediaSelection
+        if let audioGroup, let selected = selection.selectedMediaOption(in: audioGroup),
+           let id = audioOptionByID.first(where: { $0.value == selected })?.key {
+            store.currentAudioTrackID = id
+        }
+        if let subGroup, let selected = selection.selectedMediaOption(in: subGroup),
+           let id = subtitleOptionByID.first(where: { $0.value == selected })?.key {
+            store.currentSubtitleTrackID = id
+        } else {
+            store.currentSubtitleTrackID = 0
+        }
+    }
+
+    private func populateStreamInfo(item: AVPlayerItem) {
+        let size = item.presentationSize
+        if size.width > 0 {
+            store.streamInfo.width = Int(size.width)
+            store.streamInfo.height = Int(size.height)
+        }
+        // Observed bitrate from the access log, when available.
+        if let event = item.accessLog()?.events.last {
+            if event.observedBitrate > 0 {
+                store.streamInfo.bitrate = event.observedBitrate / 8
+            }
+            if event.indicatedBitrate > 0, store.streamInfo.videoCodec.isEmpty {
+                store.streamInfo.videoCodec = "HLS"
+            }
+        }
+    }
+
+    /// Intents OUT: store command closures -> AVPlayer.
+    private func wireCommands(_ player: AVPlayer) {
+        store.togglePauseAction = { [weak player] in
+            guard let player else { return }
+            if player.timeControlStatus == .paused { player.play() } else { player.pause() }
+        }
+        store.seekAction = { [weak player] ms in
+            guard let player else { return }
+            let target = CMTime(value: CMTimeValue(ms), timescale: 1000)
+            player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        store.replayFromStartAction = { [weak player] in
+            guard let player else { return }
+            player.seek(to: .zero)
+            player.play()
+        }
+        store.setSpeedAction = { [weak self, weak player] rate in
+            guard let player else { return }
+            player.rate = Float(rate)
+            self?.store.speed = rate
+        }
+        store.setAudioTrackAction = { [weak self] id in
+            guard let self, let group = self.audibleGroup else { return }
+            self.player?.currentItem?.select(self.audioOptionByID[id], in: group)
+            self.store.currentAudioTrackID = id
+        }
+        store.setSubtitleTrackAction = { [weak self] id in
+            guard let self, let group = self.legibleGroup else { return }
+            // id 0 = off (mpv sid 0 parity).
+            self.player?.currentItem?.select(id == 0 ? nil : self.subtitleOptionByID[id], in: group)
+            self.store.currentSubtitleTrackID = id
+        }
+    }
+
+    func teardown() {
+        if let timeObserver { player?.removeTimeObserver(timeObserver) }
+        timeObserver = nil
+        observations.forEach { $0.invalidate() }
+        observations.removeAll()
+        aspectCancellable?.cancel()
+        aspectCancellable = nil
+        // Drop the closures so a torn-down driver can't drive a dead player.
+        store.togglePauseAction = nil
+        store.seekAction = nil
+        store.replayFromStartAction = nil
+        store.setSpeedAction = nil
+        store.setAudioTrackAction = nil
+        store.setSubtitleTrackAction = nil
+    }
+}
 
 /// Full-screen native AVPlayer playback for genuine HLS streams, presented
 /// when the Developer "AVPlayer for HLS Streams" toggle routes a .m3u8 URL
