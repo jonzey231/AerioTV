@@ -3736,42 +3736,75 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
             }
         }
 
+        private var ticksSinceHunt = 0
+        private var lastLoggedVisible: Bool?
+
+        /// The sampler never gives up: the display link always runs,
+        /// and any tick without a usable fade source re-hunts
+        /// (throttled). The earlier one-shot hunt (8 x 150ms, then
+        /// "capsule stays visible" forever) lost on devices where the
+        /// Glass chrome finished building after the retry budget, the
+        /// exact failure seen in the field.
         private func startFadeMirror(attempts: Int) {
+            guard displayLink == nil else { return }
+            huntFadeSource()
+            let link = CADisplayLink(target: self, selector: #selector(tickFade))
+            link.add(to: .main, forMode: .common)
+            displayLink = link
+        }
+
+        private func huntFadeSource() {
             guard let controller = controllerRef else { return }
-            if let button = Self.topRowReferenceControl(in: controller.view, host: controller.view) {
-                fadeSource = button
-                let link = CADisplayLink(target: self, selector: #selector(tickFade))
-                link.add(to: .main, forMode: .common)
-                displayLink = link
-                debugLog("[AVP-HLS] capsule fade mirroring native control")
-            } else if attempts > 0 {
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(nanoseconds: 150_000_000)
-                    self?.startFadeMirror(attempts: attempts - 1)
-                }
-            } else {
-                debugLog("[AVP-HLS] native control not found; capsule stays visible")
+            if let source = Self.controlsReferenceView(in: controller.view, host: controller.view) {
+                fadeSource = source
+                debugLog("[AVP-FADE] mirroring \(String(describing: type(of: source)))")
             }
         }
 
         @objc private func tickFade() {
             guard let capsule = hosting?.view else { return }
-            // Player dismissed: stop sampling.
+            // Player dismissed: stop sampling (releases the link's
+            // retain on this coordinator, see the deinit note above).
             if capsule.window == nil {
                 displayLink?.invalidate()
                 displayLink = nil
                 return
             }
-            // Native button gone (Glass rebuilt its tree): re-find it.
-            guard let source = fadeSource else {
-                displayLink?.invalidate()
-                displayLink = nil
-                startFadeMirror(attempts: 8)
+            // No usable source: re-hunt twice a second. Before the
+            // FIRST source is found the capsule keeps its current
+            // (visible) alpha, since the chrome shows at presentation
+            // and hiding here would invert the desync on devices whose
+            // chrome builds slowly. A source that DETACHES means the
+            // controls left the hierarchy, which is a hide, so the
+            // capsule hides with them instead of freezing at its last
+            // alpha, and stays hidden until a new source reports in.
+            guard let source = fadeSource, source.window != nil else {
+                if fadeSource != nil {
+                    fadeSource = nil
+                    applyFade(0, to: capsule, reason: "source detached")
+                }
+                ticksSinceHunt += 1
+                if ticksSinceHunt >= 30 {
+                    ticksSinceHunt = 0
+                    huntFadeSource()
+                }
                 return
             }
-            let target = Self.onScreenAlpha(of: source)
+            ticksSinceHunt = 0
+            applyFade(Self.onScreenAlpha(of: source), to: capsule, reason: nil)
+        }
+
+        private func applyFade(_ target: CGFloat, to capsule: UIView, reason: String?) {
             if abs(capsule.alpha - target) > 0.001 {
                 capsule.alpha = target
+            }
+            // Edge-triggered visibility log so simulator/device runs can
+            // assert the capsule tracks the native chrome.
+            let visible: Bool? = target >= 0.99 ? true : (target <= 0.01 ? false : nil)
+            if let visible, visible != lastLoggedVisible {
+                lastLoggedVisible = visible
+                let via = reason ?? "mirroring \(String(describing: type(of: fadeSource ?? UIView())))"
+                debugLog("[AVP-FADE] capsule \(visible ? "VISIBLE" : "HIDDEN") (\(via))")
             }
         }
 
@@ -3796,6 +3829,29 @@ private struct NativeAVPlayerController: UIViewControllerRepresentable {
         /// into the safe area band, landscape floats it lower.
         private static func fallbackCenterOffset(for traits: UITraitCollection) -> CGFloat {
             traits.verticalSizeClass == .compact ? 44 : 20
+        }
+
+        /// A view inside Apple's fading controls subtree to sample.
+        /// Because `onScreenAlpha` multiplies EVERY ancestor up to the
+        /// window, any descendant of the fading node reports the right
+        /// composited value, so the hunt can be loose: first a view
+        /// whose class name marks it as part of the playback controls
+        /// (device-proven names across iOS 17-26 chrome generations),
+        /// then the old top-row-button heuristic as fallback.
+        private static func controlsReferenceView(in root: UIView, host: UIView) -> UIView? {
+            let markers = ["GlassControls", "PlaybackControls", "ChromelessControls", "ControlsView", "TransportControls"]
+            var queue: [UIView] = [root]
+            while !queue.isEmpty {
+                let view = queue.removeFirst()
+                let name = String(describing: type(of: view))
+                if markers.contains(where: { name.contains($0) }) {
+                    // Sample a child if one exists: some chrome roots
+                    // pin alpha at 1 and fade only their content view.
+                    return view.subviews.first ?? view
+                }
+                queue.append(contentsOf: view.subviews)
+            }
+            return topRowReferenceControl(in: root, host: host)
         }
 
         /// The highest plausibly button-sized native control in the top

@@ -1068,11 +1068,50 @@ final class TVLANProbe: ObservableObject {
 // backgrounds and foregrounds the app the process stays alive, @State keeps
 // its true value, and the splash is not replayed. No persistence needed.
 struct AppEntryView: View {
+    #if DEBUG
+    /// `-AerioFadeProbeURL <url>`: see the body comment.
+    static var fadeProbeURL: URL? {
+        let args = ProcessInfo.processInfo.arguments
+        guard let i = args.firstIndex(of: "-AerioFadeProbeURL"),
+              args.indices.contains(i + 1) else { return nil }
+        return URL(string: args[i + 1])
+    }
+    #endif
     @State private var splashFinished = false
     @Environment(\.modelContext) private var modelContext
 
     var body: some View {
         ZStack {
+            #if DEBUG
+            if let probeURL = Self.fadeProbeURL {
+                // Test-only harness: boots straight into the native
+                // AVPlayer screen with the URL from the launch
+                // arguments, bypassing onboarding/server state, so a
+                // simulator run can exercise the chrome fade with zero
+                // configuration. DEBUG builds only; the URL arrives
+                // via launch args, so nothing is bundled.
+                NativeHLSPlayerScreen(
+                    item: ChannelDisplayItem(
+                        id: "fade-probe",
+                        name: "Fade Probe",
+                        number: "0",
+                        logoURL: nil,
+                        group: "",
+                        categoryOrder: 0,
+                        streamURL: probeURL,
+                        streamURLs: [probeURL]
+                    ),
+                    userAgent: nil,
+                    overrideURL: probeURL
+                )
+            } else if splashFinished {
+                RootView()
+                    .transition(.opacity)
+            } else {
+                SplashView(isFinished: $splashFinished)
+                    .transition(.opacity)
+            }
+            #else
             if splashFinished {
                 RootView()
                     .transition(.opacity)
@@ -1080,6 +1119,7 @@ struct AppEntryView: View {
                 SplashView(isFinished: $splashFinished)
                     .transition(.opacity)
             }
+            #endif
         }
         .animation(.easeIn(duration: 0.3), value: splashFinished)
         .preferredColorScheme(.dark)
