@@ -680,6 +680,11 @@ struct AVPlayerMultiviewTile: View {
 /// SwiftUI like any other tile content.
 struct AVPlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
+    /// Sizing mode for the video inside the layer. Defaults to the
+    /// previous hardcoded letterbox so existing call sites (multiview
+    /// tiles) are unaffected; the unified player chrome drives it from
+    /// the shared aspect setting.
+    var videoGravity: AVLayerVideoGravity = .resizeAspect
 
     final class HostView: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
@@ -689,13 +694,16 @@ struct AVPlayerLayerView: UIViewRepresentable {
     func makeUIView(context: Context) -> HostView {
         let view = HostView()
         view.playerLayer.player = player
-        view.playerLayer.videoGravity = .resizeAspect
+        view.playerLayer.videoGravity = videoGravity
         return view
     }
 
     func updateUIView(_ view: HostView, context: Context) {
         if view.playerLayer.player !== player {
             view.playerLayer.player = player
+        }
+        if view.playerLayer.videoGravity != videoGravity {
+            view.playerLayer.videoGravity = videoGravity
         }
     }
 }

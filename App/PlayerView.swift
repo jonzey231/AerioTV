@@ -3506,6 +3506,309 @@ final class AVPlayerProgressDriver {
     }
 }
 
+#if os(iOS)
+/// The unified liquid-glass player chrome: ONE SwiftUI container, ONE
+/// visibility Bool, so every control fades in and out together as a
+/// single unit (the UHF-style smoothness the old mounted-capsule
+/// approach could only approximate). Engine-agnostic by construction:
+/// everything it renders reads `PlayerProgressStore` and everything it
+/// does goes through the store's command closures or host-provided
+/// intents, so the SAME view can sit over an AVPlayerLayer today and
+/// the mpv render surface when that host migrates.
+struct UnifiedPlayerChrome: View {
+    @ObservedObject var progress: PlayerProgressStore
+    let title: String
+    let programName: String?
+    let programStart: Date?
+    let programEnd: Date?
+    let canRecord: Bool
+    /// Shows the engine escape hatch row when non-nil (AVPlayer host).
+    let onSwitchToMPV: (() -> Void)?
+    let onClose: () -> Void
+    let onRecord: () -> Void
+    let onAddStream: () -> Void
+    let onStreamInfo: () -> Void
+    let onSleepTimer: (TimeInterval?) -> Void
+    /// Bump the host's auto-hide timer (called on every interaction).
+    let onInteract: () -> Void
+
+    /// Ticks the live progress band once a minute.
+    @State private var bandNow = Date()
+    private let bandTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        ZStack {
+            // Top scrim + bar
+            VStack(spacing: 0) {
+                HStack(alignment: .center, spacing: 12) {
+                    glassCircle("xmark") {
+                        onInteract()
+                        onClose()
+                    }
+                    .accessibilityLabel("Close player")
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .shadow(color: .black.opacity(0.6), radius: 4)
+                        if let programName, !programName.isEmpty {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(programName)
+                                    .lineLimit(1)
+                                if let programStart, let programEnd {
+                                    HStack(spacing: 3) {
+                                        Text(programStart, style: .time)
+                                        Text("-")
+                                        Text(programEnd, style: .time)
+                                    }
+                                } else if let programEnd {
+                                    HStack(spacing: 3) {
+                                        Text("ends")
+                                        Text(programEnd, style: .time)
+                                    }
+                                }
+                            }
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundColor(.white.opacity(0.72))
+                            .shadow(color: .black.opacity(0.5), radius: 3)
+                        }
+                    }
+
+                    Spacer()
+
+                    HStack(spacing: 10) {
+                        if canRecord {
+                            glassCircle("record.circle", tint: .red) {
+                                onInteract()
+                                onRecord()
+                            }
+                            .accessibilityLabel("Record current program")
+                        }
+                        glassCircle("plus") {
+                            onInteract()
+                            onAddStream()
+                        }
+                        .accessibilityLabel("Add stream")
+                        overflowMenu
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 18)
+                .background(
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.65), Color.clear],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .ignoresSafeArea(edges: .top)
+                )
+
+                Spacer()
+
+                liveProgressBand
+            }
+
+            centerPlayPause
+        }
+        .environment(\.colorScheme, .dark)
+        .onReceive(bandTimer) { bandNow = $0 }
+    }
+
+    // MARK: pieces
+
+    /// 52pt frosted circle, the app's liquid-glass button vocabulary
+    /// (material blur over a dark underlay so it reads on bright video).
+    private func glassCircle(_ icon: String, tint: Color = .white,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundColor(tint)
+                .frame(width: 52, height: 52)
+                .background(.ultraThinMaterial, in: Circle())
+                .background(Color.black.opacity(0.35), in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var overflowMenu: some View {
+        Menu {
+            Button {
+                onInteract()
+                onStreamInfo()
+            } label: {
+                Label("Stream Info", systemImage: "info.circle")
+            }
+            if progress.audioTracks.count > 1 {
+                Menu {
+                    ForEach(progress.audioTracks) { track in
+                        Button {
+                            onInteract()
+                            progress.setAudioTrackAction?(track.id)
+                        } label: {
+                            if progress.currentAudioTrackID == track.id {
+                                Label(track.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(track.displayName)
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Audio", systemImage: "waveform")
+                }
+            }
+            if !progress.subtitleTracks.isEmpty {
+                Menu {
+                    Button {
+                        onInteract()
+                        progress.setSubtitleTrackAction?(0)
+                    } label: {
+                        if progress.currentSubtitleTrackID == 0 {
+                            Label("Off", systemImage: "checkmark")
+                        } else {
+                            Text("Off")
+                        }
+                    }
+                    ForEach(progress.subtitleTracks) { track in
+                        Button {
+                            onInteract()
+                            progress.setSubtitleTrackAction?(track.id)
+                        } label: {
+                            if progress.currentSubtitleTrackID == track.id {
+                                Label(track.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(track.displayName)
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Subtitles", systemImage: "captions.bubble")
+                }
+            }
+            Menu {
+                ForEach(VideoAspectMode.allCases) { mode in
+                    Button {
+                        onInteract()
+                        progress.aspectMode = mode
+                        UserDefaults.standard.set(mode.rawValue, forKey: "player.aspectMode")
+                    } label: {
+                        if progress.aspectMode == mode {
+                            Label(mode.label, systemImage: "checkmark")
+                        } else {
+                            Label(mode.label, systemImage: mode.icon)
+                        }
+                    }
+                }
+            } label: {
+                Label("Aspect Ratio", systemImage: "aspectratio")
+            }
+            Menu {
+                ForEach([30, 60, 90, 120], id: \.self) { minutes in
+                    Button("\(minutes) minutes") {
+                        onInteract()
+                        onSleepTimer(TimeInterval(minutes * 60))
+                    }
+                }
+                Button("Off", role: .destructive) {
+                    onInteract()
+                    onSleepTimer(nil)
+                }
+            } label: {
+                Label("Sleep Timer", systemImage: "moon.zzz")
+            }
+            Button {
+                onInteract()
+                AirPlayMenuTrigger.present()
+            } label: {
+                Label("AirPlay", systemImage: "airplay.video")
+            }
+            if let onSwitchToMPV {
+                Button {
+                    onSwitchToMPV()
+                } label: {
+                    Label("Switch to MPV Player", systemImage: "arrow.triangle.2.circlepath")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 52, height: 52)
+                .background(.ultraThinMaterial, in: Circle())
+                .background(Color.black.opacity(0.35), in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+        }
+    }
+
+    private var centerPlayPause: some View {
+        Button {
+            onInteract()
+            progress.togglePauseAction?()
+        } label: {
+            Image(systemName: progress.isPaused ? "play.fill" : "pause.fill")
+                .font(.system(size: 30, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 76, height: 76)
+                .background(.ultraThinMaterial, in: Circle())
+                .background(Color.black.opacity(0.35), in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.5), radius: 10, y: 2)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(progress.isPaused ? "Play" : "Pause")
+    }
+
+    /// Live program band, mpv parity: program name + progress between
+    /// start/end + minutes remaining, over the bottom scrim.
+    @ViewBuilder
+    private var liveProgressBand: some View {
+        if let programStart, let programEnd, programEnd > programStart {
+            let total = programEnd.timeIntervalSince(programStart)
+            let done = min(max(bandNow.timeIntervalSince(programStart), 0), total)
+            let remaining = max(programEnd.timeIntervalSince(bandNow), 0)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    if let programName, !programName.isEmpty {
+                        Text(programName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Text("\(Int(remaining / 60)) min remaining")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.75))
+                }
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.25))
+                        Capsule()
+                            .fill(ThemeManager.shared.accent)
+                            .frame(width: geo.size.width * (total > 0 ? done / total : 0))
+                    }
+                }
+                .frame(height: 4)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 24)
+            .background(
+                LinearGradient(
+                    colors: [Color.clear, Color.black.opacity(0.6)],
+                    startPoint: .top, endPoint: .bottom
+                )
+                .ignoresSafeArea(edges: .bottom)
+            )
+        }
+    }
+}
+#endif
+
 /// Full-screen native AVPlayer playback for genuine HLS streams, presented
 /// when the Developer "AVPlayer for HLS Streams" toggle routes a .m3u8 URL
 /// here instead of the mpv pipeline (see PlayerSession.begin). Uses
@@ -3535,12 +3838,33 @@ struct NativeHLSPlayerScreen: View {
     @State private var showRecordSheet = false
     @State private var showStreamInfo = false
     @State private var sleepWork: DispatchWorkItem?
+    #if os(iOS)
+    /// Unified chrome state: one store, one driver, one visibility Bool.
+    /// The store is the same observable type the mpv overlay reads, fed
+    /// by AVPlayerProgressDriver, so the chrome is engine-agnostic.
+    @StateObject private var progressStore = PlayerProgressStore()
+    @State private var driver: AVPlayerProgressDriver?
+    @State private var showControls = true
+    @State private var controlsHideTask: Task<Void, Never>?
+    #endif
 
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             if let player {
+                #if os(iOS)
+                // Bare video layer + the app's own liquid-glass chrome.
+                // Replaces AVPlayerViewController so BOTH engines can
+                // share one overlay that fades as a single unit (the
+                // mounted-capsule + display-link approach this replaces
+                // could only chase Apple's fade from outside).
+                AVPlayerLayerView(
+                    player: player,
+                    videoGravity: progressStore.aspectMode.videoGravity
+                )
+                .ignoresSafeArea()
+                #else
                 NativeAVPlayerController(
                     player: player,
                     canRecord: item.streamURL != nil,
@@ -3552,7 +3876,29 @@ struct NativeHLSPlayerScreen: View {
                     trailingAccessory: trailingAccessoryView
                 )
                 .ignoresSafeArea()
+                #endif
             }
+
+            #if os(iOS)
+            if showControls, player != nil {
+                UnifiedPlayerChrome(
+                    progress: progressStore,
+                    title: item.name,
+                    programName: item.currentProgram,
+                    programStart: item.currentProgramStart,
+                    programEnd: item.currentProgramEnd,
+                    canRecord: item.streamURL != nil,
+                    onSwitchToMPV: { switchToMPV(openAddStream: false) },
+                    onClose: { dismiss() },
+                    onRecord: { showRecordSheet = true },
+                    onAddStream: { switchToMPV(openAddStream: true) },
+                    onStreamInfo: { showStreamInfo.toggle() },
+                    onSleepTimer: { setSleepTimer($0) },
+                    onInteract: { scheduleControlsHide() }
+                )
+                .transition(.opacity)
+            }
+            #endif
             if let statusText {
                 VStack(spacing: 12) {
                     ProgressView()
@@ -3574,6 +3920,15 @@ struct NativeHLSPlayerScreen: View {
                 .padding(60)
             }
         }
+        #if os(iOS)
+        .contentShape(Rectangle())
+        // simultaneousGesture, not onTapGesture: the AVPlayerLayer's
+        // UIView claims raw touches at the UIKit layer, and a plain
+        // high-level tap gesture loses that race. Simultaneous
+        // recognition fires regardless of who else claims the touch.
+        .simultaneousGesture(TapGesture().onEnded { toggleControls() })
+        .onAppear { debugLog("[AVP-CHROME] screen appeared (tap container active)") }
+        #endif
         // Record sheet over the native player. Same RecordProgramSheet
         // the mpv chrome's Record pill presents, fed from the same
         // ChannelDisplayItem EPG fields.
@@ -3602,19 +3957,18 @@ struct NativeHLSPlayerScreen: View {
         // the mpv chrome cycle.
         .onExitCommand { minimizeToMini() }
         #else
-        // iOS: unlike tvOS, AVPlayerViewController draws its OWN top
-        // chrome here (close, PiP, AirPlay, volume), so the overlay
-        // carries ONLY the actions the native player lacks, styled in
-        // the native chrome's exact vocabulary: 50pt dark-material
-        // circles for lone actions, related actions grouped in ONE
-        // material capsule (mirroring the native PiP+AirPlay pill),
-        // aligned to the same screen margins one row below the native
-        // controls. Leading: minimize to the corner mini (the native X
-        // fully stops, the chevron keeps watching). Trailing capsule:
-        // Record, Add Stream, Options (Stream Info, Sleep Timer,
-        // Switch to MPV, Stop). Aspect is omitted: the native player
-        // already has pinch zoom.
+        // iOS: the bare-layer + UnifiedPlayerChrome path above. Pause
+        // pins the chrome visible; resume restarts the hide clock
+        // (mpv chrome parity).
         .statusBarHidden()
+        .onChange(of: progressStore.isPaused) { _, paused in
+            if paused {
+                controlsHideTask?.cancel()
+                withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+            } else {
+                scheduleControlsHide()
+            }
+        }
         #endif
         .onAppear {
             AudioSessionRefCount.increment(caller: "native-hls")
@@ -3658,6 +4012,12 @@ struct NativeHLSPlayerScreen: View {
             }
         }
         .onDisappear {
+            #if os(iOS)
+            driver?.teardown()
+            driver = nil
+            controlsHideTask?.cancel()
+            controlsHideTask = nil
+            #endif
             player?.pause()
             player = nil
             remuxer?.stop()
@@ -3672,6 +4032,35 @@ struct NativeHLSPlayerScreen: View {
             )
         }
     }
+
+    #if os(iOS)
+    private func toggleControls() {
+        withAnimation(.easeInOut(duration: 0.25)) { showControls.toggle() }
+        if showControls {
+            scheduleControlsHide()
+        } else {
+            // Cancel the pending auto-hide so it cannot fire a stale,
+            // duplicate hide after a manual one.
+            controlsHideTask?.cancel()
+        }
+        debugLog("[AVP-CHROME] controls \(showControls ? "VISIBLE (tap)" : "HIDDEN (tap)")")
+    }
+
+    /// One auto-hide clock for the whole chrome. Paused playback pins
+    /// the chrome visible (the onChange above cancels and re-shows).
+    private func scheduleControlsHide() {
+        controlsHideTask?.cancel()
+        guard !progressStore.isPaused else { return }
+        controlsHideTask = Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.3)) { showControls = false }
+                debugLog("[AVP-CHROME] controls HIDDEN (auto)")
+            }
+        }
+    }
+    #endif
 
     private func startPlayer(with url: URL, headers: [String: String]) {
         var options: [String: Any] = [:]
@@ -3689,6 +4078,39 @@ struct NativeHLSPlayerScreen: View {
         let avPlayer = AVPlayer(playerItem: playerItem)
         avPlayer.play()
         player = avPlayer
+        #if os(iOS)
+        // Bridge AVPlayer state into the shared store the chrome reads.
+        // Gravity is applied declaratively (the layer view reads
+        // aspectMode each render), so the driver's gravity sink is a
+        // no-op here.
+        driver = AVPlayerProgressDriver(
+            player: avPlayer,
+            store: progressStore,
+            isLive: true,
+            applyGravity: { _ in }
+        )
+        scheduleControlsHide()
+        #if DEBUG
+        // -AerioChromeSelfTest: scripted chrome exercise for simulator
+        // verification when synthetic clicks are unavailable. Drives the
+        // exact same paths a finger would: the visibility toggle and the
+        // store's pause command (which must pin the chrome visible).
+        if ProcessInfo.processInfo.arguments.contains("-AerioChromeSelfTest") {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 6_000_000_000)
+                toggleControls()
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                toggleControls()
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                debugLog("[AVP-CHROME] selftest: pausing")
+                progressStore.togglePauseAction?()
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                debugLog("[AVP-CHROME] selftest: resuming")
+                progressStore.togglePauseAction?()
+            }
+        }
+        #endif
+        #endif
     }
 
     private static func nativeMetadata(title: String, subtitle: String?) -> [AVMetadataItem] {
