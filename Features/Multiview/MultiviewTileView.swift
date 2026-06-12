@@ -540,6 +540,7 @@ struct MultiviewTileView: View {
                         headers: tile.headers,
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
+                        progressStore: progressStore,
                         // A hard AVPlayer failure (codec gate, fatal item
                         // error) downgrades the WHOLE session to mpv,
                         // one-way, so the grid stays pure rather than
@@ -775,39 +776,55 @@ struct MultiviewTileView: View {
             // during the ~1.5s window before the first decoded frame
             // lands. Mirror of the same fix in PlayerView.swift.
             Color.black
-            // The actual mpv-backed video view. It's at the bottom of
-            // the ZStack so overlays paint on top.
-            MPVPlayerViewRepresentable(
-                urls: [tile.streamURL],
-                headers: tile.headers,
-                isLive: tile.kind == .live,
-                isDVR: tile.kind == .dvr,
-                nowPlayingTitle: tile.item.name,
-                nowPlayingSubtitle: tile.item.currentProgram,
-                nowPlayingArtworkURL: tile.item.logoURL,
-                progressStore: progressStore,
-                logStore: logStore,
-                onFatalError: { message in
-                    // Surface on the tile instead of killing the
-                    // whole app. The overlay exposes a Remove button.
-                    decodeErrorMessage = message
-                    // Log the sanitized message — the raw message can
-                    // echo server-controlled bytes (HLS errors, HTTP
-                    // response bodies). `sanitizedErrorMessage` strips
-                    // control/bidi chars and caps length.
-                    DebugLogger.shared.log(
-                        "[MV-Tile] decode error: channel=\(tile.item.name) msg=\(Self.sanitizedErrorMessage(message))",
-                        category: "Playback", level: .warning
+            // The video view. Engine is the session lock (Step: iOS
+            // body now supports AVPlayer tiles, was mpv-only). Same
+            // branch the tvOS body uses; the surrounding gestures /
+            // chrome / focus are engine-agnostic.
+            Group {
+                if usesAVPlayerEngine {
+                    AVPlayerMultiviewTile(
+                        tileID: tile.id,
+                        streamURL: avPlayerTileURL,
+                        headers: tile.headers,
+                        shouldPause: shouldPause,
+                        channelName: tile.item.name,
+                        progressStore: progressStore,
+                        onEngineFallback: { _ in store.downgradeToMPV() }
                     )
-                },
-                tileID: tile.id,
-                isAudioActive: isAudioActive,
-                shouldPause: shouldPause,
-                // Snapshot tile count for setupMPV's pre-init audio
-                // strategy (mute-only ≤6, decoder-off ≥7). See the
-                // !initialIsAudioActive branch in setupMPV.
-                initialTileCount: store.tiles.count
-            )
+                } else {
+                    MPVPlayerViewRepresentable(
+                        urls: [tile.streamURL],
+                        headers: tile.headers,
+                        isLive: tile.kind == .live,
+                        isDVR: tile.kind == .dvr,
+                        nowPlayingTitle: tile.item.name,
+                        nowPlayingSubtitle: tile.item.currentProgram,
+                        nowPlayingArtworkURL: tile.item.logoURL,
+                        progressStore: progressStore,
+                        logStore: logStore,
+                        onFatalError: { message in
+                            // Surface on the tile instead of killing the
+                            // whole app. The overlay exposes a Remove button.
+                            decodeErrorMessage = message
+                            // Log the sanitized message. The raw message can
+                            // echo server-controlled bytes (HLS errors, HTTP
+                            // response bodies), so `sanitizedErrorMessage`
+                            // strips control/bidi chars and caps length.
+                            DebugLogger.shared.log(
+                                "[MV-Tile] decode error: channel=\(tile.item.name) msg=\(Self.sanitizedErrorMessage(message))",
+                                category: "Playback", level: .warning
+                            )
+                        },
+                        tileID: tile.id,
+                        isAudioActive: isAudioActive,
+                        shouldPause: shouldPause,
+                        // Snapshot tile count for setupMPV's pre-init audio
+                        // strategy (mute-only ≤6, decoder-off ≥7). See the
+                        // !initialIsAudioActive branch in setupMPV.
+                        initialTileCount: store.tiles.count
+                    )
+                }
+            }
             // SwiftUI identity is the TILE id, not the item.id, so
             // rearrange (which shuffles `tiles` but keeps ids) doesn't
             // recreate the coordinator. Seed-from-single has

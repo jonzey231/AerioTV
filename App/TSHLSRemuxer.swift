@@ -540,10 +540,16 @@ struct AVPlayerMultiviewTile: View {
     let headers: [String: String]
     let shouldPause: Bool
     let channelName: String
+    /// The per-tile store the container chrome binds to (scrubber,
+    /// play-pause, track pickers, stream info). AVPlayerProgressDriver
+    /// feeds it from this tile's AVPlayer, so the unified chrome works
+    /// identically over an AVPlayer tile as over an mpv tile.
+    let progressStore: PlayerProgressStore
     /// Parent flips this tile back to the mpv engine.
     let onEngineFallback: (String) -> Void
 
     @State private var player: AVPlayer?
+    @State private var driver: AVPlayerProgressDriver?
     @State private var remuxer: TSHLSRemuxer?
     @State private var statusText: String?
     /// AUDIO CORRECTNESS: the remuxer's onReady closure captures this
@@ -654,6 +660,14 @@ struct AVPlayerMultiviewTile: View {
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
         if !shouldPause { avPlayer.play() }
         player = avPlayer
+        // Bridge this tile's AVPlayer into the chrome's store. When this
+        // tile is the audio tile, the container chrome's scrubber /
+        // play-pause / track pickers / stream info now drive it (they
+        // were inert over an AVPlayer tile before). Tear any prior one
+        // down first (channel swap reuses the tile).
+        driver?.teardown()
+        driver = AVPlayerProgressDriver(
+            player: avPlayer, store: progressStore, isLive: true, applyGravity: { _ in })
         // Report the real video aspect once decode knows it, so the
         // focus border can trace the picture instead of the tile frame.
         sizeObservation = playerItem.publisher(for: \.presentationSize)
@@ -665,6 +679,8 @@ struct AVPlayerMultiviewTile: View {
     }
 
     private func stop() {
+        driver?.teardown()
+        driver = nil
         player?.pause()
         player = nil
         remuxer?.stop()
