@@ -463,7 +463,7 @@ final class VODStore: ObservableObject {
 
             // If the user has no movie categories enabled anywhere, the
             // library is empty by construction. Don't fall back to a
-            // flat unfiltered fetch — that was the old bug where we'd
+            // flat unfiltered fetch; that was the old bug where we'd
             // show everything Dispatcharr had.
             if enabledMovieCats.isEmpty {
                 movies = []
@@ -472,33 +472,6 @@ final class VODStore: ObservableObject {
                 return
             }
 
-            // v1.6.17 — single-fetch, group client-side by
-            // `custom_properties.category_id`. Pre-1.6.17 we iterated
-            // each enabled category and called
-            // `/api/vod/movies/?category=<name>` in a loop, deduping
-            // by uuid. That worked on Archie's Dispatcharr where the
-            // `?category=` filter was effectively ignored (each
-            // request returned the FULL library, dedup made it look
-            // like per-category isolation). On a stricter Dispatcharr
-            // build (verified against
-            // dispatcharr-freynas.frey-home.synology.me on
-            // 2026-04-29 — see release notes for the four-test
-            // matrix), the same `?category=Action` query returns
-            // `count: 0` because the filter expects something the
-            // categories endpoint never tells us. The Series/Movie
-            // schemas have NO top-level category field at all; the
-            // only place a VOD item's category appears in the list
-            // response is `custom_properties.category_id`.
-            //
-            // Switching to a single unfiltered `/api/vod/movies/?page_size=25`
-            // sweep + client-side filter is therefore the only
-            // approach that's correct on both lenient and strict
-            // builds. Total HTTP volume is comparable (the per-cat
-            // loop was redundantly fetching the same pages on
-            // Archie's setup anyway), and as a bonus each item now
-            // gets tagged with its ACTUAL category — pre-1.6.17 the
-            // outer-loop variable owned the tag, so an item in two
-            // enabled categories was credited to whichever ran first.
             // v1.7.5: per-category fetch so every movie carries its REAL
             // Dispatcharr category. The movie LIST response omits the
             // category (it lives on the m3u_relations reverse relation, not
@@ -519,8 +492,19 @@ final class VODStore: ObservableObject {
             var accumulated: [VODDisplayItem] = []
             var seenUUIDs: Set<String> = []
             var lastError: APIError?
-            let totalCap = 5000   // bound memory on huge libraries (matches the prior cap)
-            debugLog("🎬 VODStore.loadMovies: per-category fetch across \(enabledMovieCats.count) enabled categories")
+            let totalCap = 5000   // global memory ceiling on huge libraries
+            // Fair share per category so one big early category can't drain
+            // the whole budget and leave later enabled categories empty
+            // (verified against the test server: 21 enabled movie categories,
+            // several with thousands of titles). Page-align the share to the
+            // 100-item page size so makePageStream stops exactly on a page
+            // boundary (a non-aligned share overshoots by up to a page and
+            // re-starves the tail). All N categories then fit inside totalCap
+            // (21 x 200 = 4200 <= 5000), so every enabled category is
+            // represented; server-side search covers anything past a
+            // category's browsable sample.
+            let perCatCap = max((totalCap / 100 / max(enabledMovieCats.count, 1)) * 100, 100)
+            debugLog("🎬 VODStore.loadMovies: per-category fetch across \(enabledMovieCats.count) enabled categories (cap \(perCatCap)/cat, \(totalCap) total)")
 
             categoryLoop: for cat in enabledMovieCats {
                 guard !Task.isCancelled else { isLoadingMovies = false; return }
@@ -528,7 +512,7 @@ final class VODStore: ObservableObject {
                 let before = accumulated.count
                 do {
                     // getVODMoviesStream pins the `|movie` type on the name.
-                    for try await batch in api.getVODMoviesStream(category: cat.name) {
+                    for try await batch in api.getVODMoviesStream(category: cat.name, itemCap: perCatCap) {
                         guard !Task.isCancelled else { isLoadingMovies = false; return }
                         for m in batch {
                             guard seenUUIDs.insert(m.uuid).inserted else { continue }
@@ -681,25 +665,23 @@ final class VODStore: ObservableObject {
                 return
             }
 
-            // v1.6.17 — single-fetch + group client-side. See the
-            // identical block in `loadMovies` for the full rationale.
-            // tl;dr: Dispatcharr's documented `?category=<string>`
-            // filter is broken on stricter builds and silently ignored
-            // on lenient ones; the only place a series's category
-            // reliably appears in the list response is
-            // `custom_properties.category_id`.
             // v1.7.5: per-category fetch (mirrors loadMovies). The series
             // list response omits the category, so a single unfiltered
             // sweep could only tag everything to one fallback bucket,
             // breaking the On Demand category filter. Dispatcharr's
-            // SeriesFilter filters on `?category=<name>|series`, so fetch
-            // one stream per enabled category and tag from what we asked
-            // for. Sequential; dedup by uuid across categories.
+            // SeriesFilter DOES filter on `?category=<name>|series`
+            // (verified against the live server), so fetch one stream per
+            // enabled category and tag from what we asked for. Sequential;
+            // dedup by uuid across categories.
             var accumulated: [VODDisplayItem] = []
             var seenUUIDs: Set<String> = []
             var lastError: APIError?
-            let totalCap = 5000
-            debugLog("📺 VODStore.loadSeries: per-category fetch across \(enabledSeriesCats.count) enabled categories")
+            let totalCap = 5000   // global memory ceiling on huge libraries
+            // Fair share per category, page-aligned (see loadMovies) so a
+            // big early category can't drain the budget and leave later
+            // enabled categories empty.
+            let perCatCap = max((totalCap / 100 / max(enabledSeriesCats.count, 1)) * 100, 100)
+            debugLog("📺 VODStore.loadSeries: per-category fetch across \(enabledSeriesCats.count) enabled categories (cap \(perCatCap)/cat, \(totalCap) total)")
 
             categoryLoop: for cat in enabledSeriesCats {
                 guard !Task.isCancelled else { isLoadingSeries = false; return }
@@ -707,7 +689,7 @@ final class VODStore: ObservableObject {
                 let before = accumulated.count
                 do {
                     // getVODSeriesStream pins the `|series` type on the name.
-                    for try await batch in api.getVODSeriesStream(category: cat.name) {
+                    for try await batch in api.getVODSeriesStream(category: cat.name, itemCap: perCatCap) {
                         guard !Task.isCancelled else { isLoadingSeries = false; return }
                         for s in batch {
                             guard seenUUIDs.insert(s.uuid).inserted else { continue }

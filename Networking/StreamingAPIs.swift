@@ -1969,12 +1969,15 @@ struct DispatcharrAPI {
     /// Dispatcharr category name at ingest time — fixes GH #1 where
     /// `categoryName` was previously parsed from the movie's `genre`
     /// string and therefore never matched the category picker.
-    func getVODMoviesStream(category: String? = nil) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
-        makePageStream(firstPath: Self.moviesPath(category: category))
+    /// `itemCap` overrides the default per-stream `vodPaginationItemCap`.
+    /// VODStore passes a per-category fair share so one big category can't
+    /// drain the whole memory budget and starve later enabled categories.
+    func getVODMoviesStream(category: String? = nil, itemCap: Int? = nil) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
+        makePageStream(firstPath: Self.moviesPath(category: category), itemCap: itemCap)
     }
 
-    func getVODSeriesStream(category: String? = nil) -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
-        makePageStream(firstPath: Self.seriesPath(category: category))
+    func getVODSeriesStream(category: String? = nil, itemCap: Int? = nil) -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
+        makePageStream(firstPath: Self.seriesPath(category: category), itemCap: itemCap)
     }
 
     private static func moviesPath(category: String?) -> String {
@@ -2063,9 +2066,10 @@ struct DispatcharrAPI {
     ///   a usable subset immediately. When the cap is hit, the
     ///   stream finishes successfully (not as an error) so the UI
     ///   shows what we did fetch.
-    private func makePageStream<T: Decodable & Sendable>(firstPath: String) -> AsyncThrowingStream<[T], Error> {
+    private func makePageStream<T: Decodable & Sendable>(firstPath: String, itemCap: Int? = nil) -> AsyncThrowingStream<[T], Error> {
         return AsyncThrowingStream { [self] continuation in
             Task {
+                let pageItemCap = itemCap ?? Self.vodPaginationItemCap
                 guard var nextURL = try? buildURL(path: firstPath) else {
                     continuation.finish(throwing: APIError.invalidURL)
                     return
@@ -2147,9 +2151,9 @@ struct DispatcharrAPI {
                         // and the user wouldn't scroll through them
                         // anyway. Finishes the stream cleanly so the
                         // already-yielded items show up in the UI.
-                        if totalYielded >= Self.vodPaginationItemCap {
+                        if totalYielded >= pageItemCap {
                             let serverTotal = wrapped.count.map { "\($0)" } ?? "unknown"
-                            debugLog("📺 VOD pagination: hit item cap \(Self.vodPaginationItemCap) for \(firstPath) (server reported total: \(serverTotal))")
+                            debugLog("📺 VOD pagination: hit item cap \(pageItemCap) for \(firstPath) (server reported total: \(serverTotal))")
                             continuation.finish()
                             return
                         }
