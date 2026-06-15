@@ -306,6 +306,11 @@ struct TVShowsView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
+            // Search + Filter are their own focus section so Down from
+            // the Movies/Series pills lands here and Up from the rows
+            // below returns here, instead of the tvOS focus engine
+            // resolving geometrically and skipping the whole bar.
+            .focusSection()
             #endif
 
             // Hidden groups indicator
@@ -327,6 +332,12 @@ struct TVShowsView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
+                #if os(tvOS)
+                // Its own focus section so "Show All" is a reachable
+                // stop between the Search/Filter bar and Continue
+                // Watching, instead of being skipped in both directions.
+                .focusSection()
+                #endif
             }
 
             if !searchText.isEmpty && vodStore.isSearchingSeries && filteredShows.isEmpty {
