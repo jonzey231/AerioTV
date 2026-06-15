@@ -1981,7 +1981,14 @@ struct DispatcharrAPI {
         guard let category, !category.isEmpty else {
             return "/api/vod/movies/?page_size=100"
         }
-        let encoded = category.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? category
+        // Dispatcharr's MovieFilter.filter_category matches
+        // `m3u_relations__category__name` AND `category_type` when the
+        // value is `name|type`. A bare name is ambiguous (the same name
+        // can exist for both a movie and a series category, unique only
+        // on name+type), so pin the movie type. The `|`
+        // percent-encodes to %7C inside the query value.
+        let typed = category.contains("|") ? category : "\(category)|movie"
+        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
         return "/api/vod/movies/?page_size=100&category=\(encoded)"
     }
 
@@ -1989,7 +1996,9 @@ struct DispatcharrAPI {
         guard let category, !category.isEmpty else {
             return "/api/vod/series/?page_size=100"
         }
-        let encoded = category.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? category
+        // Same name|type filter as movies; pin the series type.
+        let typed = category.contains("|") ? category : "\(category)|series"
+        let encoded = typed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? typed
         return "/api/vod/series/?page_size=100&category=\(encoded)"
     }
 

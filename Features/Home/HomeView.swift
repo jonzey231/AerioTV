@@ -499,118 +499,92 @@ final class VODStore: ObservableObject {
             // gets tagged with its ACTUAL category — pre-1.6.17 the
             // outer-loop variable owned the tag, so an item in two
             // enabled categories was credited to whichever ran first.
-            var enabledByID: [String: VODCategory] = [:]
-            for cat in enabledMovieCats {
-                enabledByID[String(cat.id)] = VODCategory(id: String(cat.id), name: cat.name)
-            }
-            // v1.6.17 — fallback bucket for movies that arrive without
-            // a `custom_properties.category_id`. Empirically Dispatcharr
-            // serializes that field for series (every list item carries
-            // it) but NOT for movies (most items have a null/sparse
-            // `custom_properties` blob on the list endpoint). The
-            // filter-by-category and per-movie provider-info paths are
-            // both broken or unviable (see comment in `loadSeries` for
-            // the matrix). To avoid showing an empty Movies grid on a
-            // server with thousands of movies that we just can't map
-            // to one of the user's enabled categories, fall back to
-            // the FIRST enabled category — matches the v1.6.16 behavior
-            // exactly, where the broken `?category=` filter was being
-            // ignored and the dedup picked the first enabled category
-            // for every movie. The user sees content; per-category
-            // grouping for movies on these servers is best-effort.
-            let fallbackCategory: VODCategory? = enabledMovieCats.first.map {
-                VODCategory(id: String($0.id), name: $0.name)
-            }
-
+            // v1.7.5: per-category fetch so every movie carries its REAL
+            // Dispatcharr category. The movie LIST response omits the
+            // category (it lives on the m3u_relations reverse relation, not
+            // a top-level field), so the prior single unfiltered sweep
+            // could only tag everything to one fallback bucket, which is
+            // why the On Demand category filter appeared to do nothing
+            // (sjsteve, v1.7.5). Dispatcharr's MovieFilter DOES filter on
+            // `?category=<name>|movie` (apps/vod/api_views.py
+            // filter_category, matching m3u_relations__category name+type),
+            // the same category data TiviMate/iMPlayer filter via the
+            // Xtream `category_id`. So fetch one stream per enabled category
+            // and tag each movie from the category we asked for. Sequential
+            // (not parallel) to avoid saturating Dispatcharr's uwsgi pool.
+            // Dedup by uuid across categories: a movie in two categories is
+            // tagged with whichever loads first. The per-category [VOD-CAT]
+            // counts confirm the server honored the filter (each category a
+            // subset) vs ignored it (first category claims everything).
             var accumulated: [VODDisplayItem] = []
             var seenUUIDs: Set<String> = []
-            var lastPublishTime = Date.distantPast
-            // v1.7.x: widened from 0.5s to 2.0s. On a large library (e.g.
-            // 5000 movies over a ~30s paginated load) the old cadence
-            // republished the whole growing array up to 2x/sec on the main
-            // actor, each reassign forcing a full SwiftUI diff. Under the
-            // tvOS 26.5 SwiftUI runtime that cold-start churn (alongside the
-            // channel/EPG publishes) drives heavy display-list rebuilds that
-            // both produce the watchdog hangs AND raise the odds of the
-            // AttributeGraph "different namespace" abort. The user lands on
-            // Live TV during this load, so a chunkier VOD fill is invisible.
-            let publishInterval: TimeInterval = 2.0
-            var taggedFromCategoryID = 0
-            var taggedFromFallback = 0
-            debugLog("🎬 VODStore.loadMovies: starting unfiltered stream fetch — will tag by custom_properties.category_id when present, else fall back to first enabled category (\(enabledMovieCats.count) total)")
+            var lastError: APIError?
+            let totalCap = 5000   // bound memory on huge libraries (matches the prior cap)
+            debugLog("🎬 VODStore.loadMovies: per-category fetch across \(enabledMovieCats.count) enabled categories")
 
-            do {
-                for try await batch in api.getVODMoviesStream(category: nil) {
-                    guard !Task.isCancelled else { isLoadingMovies = false; return }
-                    for m in batch {
-                        // Resolve category: prefer the per-item
-                        // category_id when Dispatcharr supplies one;
-                        // otherwise use the user's first enabled
-                        // category as the bucket. Drop only when the
-                        // user has zero enabled categories — and that
-                        // case was already short-circuited above.
-                        let category: VODCategory
-                        if let catID = m.customProperties?.categoryID,
-                           let resolved = enabledByID[catID] {
-                            category = resolved
-                            taggedFromCategoryID += 1
-                        } else if let fallback = fallbackCategory {
-                            category = fallback
-                            taggedFromFallback += 1
-                        } else {
-                            continue
+            categoryLoop: for cat in enabledMovieCats {
+                guard !Task.isCancelled else { isLoadingMovies = false; return }
+                let category = VODCategory(id: String(cat.id), name: cat.name)
+                let before = accumulated.count
+                do {
+                    // getVODMoviesStream pins the `|movie` type on the name.
+                    for try await batch in api.getVODMoviesStream(category: cat.name) {
+                        guard !Task.isCancelled else { isLoadingMovies = false; return }
+                        for m in batch {
+                            guard seenUUIDs.insert(m.uuid).inserted else { continue }
+                            let streamURL = api.proxyMovieURL(
+                                uuid: m.uuid,
+                                preferredStreamID: m.streams?.first?.streamID
+                            )
+                            let movie = VODMovie(
+                                id: String(m.id), name: m.title,
+                                posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
+                                backdropURL: nil,
+                                rating: m.rating ?? "", plot: m.plot ?? "",
+                                genre: m.genre ?? "", releaseDate: "", duration: "",
+                                cast: "", director: "", imdbID: "",
+                                categoryID: category.id,
+                                categoryName: category.name,
+                                streamURL: streamURL, containerExtension: "mp4",
+                                serverID: sID
+                            )
+                            accumulated.append(VODDisplayItem(movie: movie))
                         }
-                        guard seenUUIDs.insert(m.uuid).inserted else { continue }
-                        let streamURL = api.proxyMovieURL(
-                            uuid: m.uuid,
-                            preferredStreamID: m.streams?.first?.streamID
-                        )
-                        let movie = VODMovie(
-                            id: String(m.id), name: m.title,
-                            posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                            backdropURL: nil,
-                            rating: m.rating ?? "", plot: m.plot ?? "",
-                            genre: m.genre ?? "", releaseDate: "", duration: "",
-                            cast: "", director: "", imdbID: "",
-                            categoryID: category.id,
-                            categoryName: category.name,
-                            streamURL: streamURL, containerExtension: "mp4",
-                            serverID: sID
-                        )
-                        accumulated.append(VODDisplayItem(movie: movie))
+                        // First batch overall: reveal content + hide the
+                        // spinner. Then accumulate silently; the full set
+                        // publishes once after the sweep. Two publishes
+                        // total preserves the tvOS AttributeGraph-crash
+                        // mitigation (no progressive per-batch churn).
+                        if isLoadingMovies {
+                            movies = accumulated
+                            isLoadingMovies = false
+                        }
+                        if accumulated.count >= totalCap { break }
                     }
-                    // v1.7.x: publish ONLY the first batch during the initial
-                    // cold-start load (reveal content + hide the spinner); the
-                    // full set is published once after the loop. Progressive
-                    // throttled publishing reassigned `movies` ~15x across the
-                    // ~30s load, and under tvOS 26.5 that foreground display-list
-                    // churn (while the user navigates the Live TV guide) is what
-                    // tripped the AttributeGraph "different namespace" crash. Two
-                    // publishes (first batch + final) instead of ~15 collapses
-                    // that crash window. The user is on Live TV during this load
-                    // and On Demand has its own spinner, so progressive fill is
-                    // not observed in practice.
-                    let allowProgressivePublish = false   // initial load: batch once
-                    let now = Date()
-                    if isLoadingMovies || (allowProgressivePublish && now.timeIntervalSince(lastPublishTime) >= publishInterval) {
-                        movies = accumulated
-                        lastPublishTime = now
-                    }
-                    if isLoadingMovies { isLoadingMovies = false }
+                } catch let err as APIError {
+                    // One category failing must not abort the whole sweep.
+                    lastError = err
+                    DebugLogger.shared.logError(err, context: "VODStore.loadMovies(\(server.name)) cat=\(cat.name)")
+                } catch {
+                    DebugLogger.shared.log(
+                        "VODStore.loadMovies(\(server.name)) cat=\(cat.name) error: \(error.localizedDescription)",
+                        category: "Movies", level: .warning
+                    )
                 }
-            } catch let err as APIError {
-                DebugLogger.shared.logError(err, context: "VODStore.loadMovies(\(server.name))")
-                moviesError = err.errorDescription
-            } catch {
-                DebugLogger.shared.log(
-                    "VODStore.loadMovies(\(server.name)) error: \(error.localizedDescription)",
-                    category: "Movies", level: .warning
-                )
+                debugLog("🎬 [VOD-CAT] \(cat.name): +\(accumulated.count - before) (total \(accumulated.count))")
+                if accumulated.count >= totalCap {
+                    debugLog("🎬 VODStore.loadMovies: hit total cap \(totalCap), stopping category sweep")
+                    break categoryLoop
+                }
             }
 
+            // Surface an error only if the whole sweep produced nothing.
+            if accumulated.isEmpty, let lastError {
+                moviesError = lastError.errorDescription
+            }
             movies = accumulated
             isLoadingMovies = false
-            debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) movies (tagged via category_id=\(taggedFromCategoryID), via fallback=\(taggedFromFallback))")
+            debugLog("🎬 VODStore.loadMovies: done, \(accumulated.count) movies across \(enabledMovieCats.count) categories")
             return
         }
 
@@ -714,109 +688,70 @@ final class VODStore: ObservableObject {
             // on lenient ones; the only place a series's category
             // reliably appears in the list response is
             // `custom_properties.category_id`.
-            var enabledByID: [String: VODCategory] = [:]
-            for cat in enabledSeriesCats {
-                enabledByID[String(cat.id)] = VODCategory(id: String(cat.id), name: cat.name)
-            }
-
-            // v1.6.22 (Freyguy1975 repro on a Synology Dispatcharr
-            // 0.23.0 server with 16,357 movies + a Series library
-            // that returned 0): some Dispatcharr deployments don't
-            // populate `custom_properties.category_id` on series
-            // list items. Without a fallback, the per-item filter
-            // below skipped every series and the user saw "No
-            // Series" even when their server clearly had a series
-            // library configured.
-            //
-            // Movies has had this fallback since v1.6.16/17.
-            // Mirroring it here: when the API doesn't supply a
-            // `category_id`, bucket the series under the user's
-            // first enabled series category. Per-category grouping
-            // for series on these servers becomes best-effort
-            // (everything lands in one bucket) but the user sees
-            // their content. Search and per-show detail are
-            // unaffected.
-            let fallbackCategory: VODCategory? = enabledSeriesCats.first.map {
-                VODCategory(id: String($0.id), name: $0.name)
-            }
-
+            // v1.7.5: per-category fetch (mirrors loadMovies). The series
+            // list response omits the category, so a single unfiltered
+            // sweep could only tag everything to one fallback bucket,
+            // breaking the On Demand category filter. Dispatcharr's
+            // SeriesFilter filters on `?category=<name>|series`, so fetch
+            // one stream per enabled category and tag from what we asked
+            // for. Sequential; dedup by uuid across categories.
             var accumulated: [VODDisplayItem] = []
             var seenUUIDs: Set<String> = []
-            var lastPublishTime = Date.distantPast
-            // v1.7.x: widened from 0.5s to 2.0s. On a large library (e.g.
-            // 5000 movies over a ~30s paginated load) the old cadence
-            // republished the whole growing array up to 2x/sec on the main
-            // actor, each reassign forcing a full SwiftUI diff. Under the
-            // tvOS 26.5 SwiftUI runtime that cold-start churn (alongside the
-            // channel/EPG publishes) drives heavy display-list rebuilds that
-            // both produce the watchdog hangs AND raise the odds of the
-            // AttributeGraph "different namespace" abort. The user lands on
-            // Live TV during this load, so a chunkier VOD fill is invisible.
-            let publishInterval: TimeInterval = 2.0
-            var taggedFromCategoryID = 0
-            var taggedFromFallback = 0
-            debugLog("📺 VODStore.loadSeries: starting unfiltered stream fetch. Tag by custom_properties.category_id when present, else fall back to first enabled category (\(enabledSeriesCats.count) total)")
+            var lastError: APIError?
+            let totalCap = 5000
+            debugLog("📺 VODStore.loadSeries: per-category fetch across \(enabledSeriesCats.count) enabled categories")
 
-            do {
-                for try await batch in api.getVODSeriesStream(category: nil) {
-                    guard !Task.isCancelled else { isLoadingSeries = false; return }
-                    for s in batch {
-                        // Resolve category: prefer the per-item
-                        // category_id when Dispatcharr supplies one;
-                        // otherwise use the user's first enabled
-                        // category as the bucket. Drop only when
-                        // the user has zero enabled categories,
-                        // which the early-return above already
-                        // covered.
-                        let category: VODCategory
-                        if let catID = s.customProperties?.categoryID,
-                           let resolved = enabledByID[catID] {
-                            category = resolved
-                            taggedFromCategoryID += 1
-                        } else if let fallback = fallbackCategory {
-                            category = fallback
-                            taggedFromFallback += 1
-                        } else {
-                            continue
+            categoryLoop: for cat in enabledSeriesCats {
+                guard !Task.isCancelled else { isLoadingSeries = false; return }
+                let category = VODCategory(id: String(cat.id), name: cat.name)
+                let before = accumulated.count
+                do {
+                    // getVODSeriesStream pins the `|series` type on the name.
+                    for try await batch in api.getVODSeriesStream(category: cat.name) {
+                        guard !Task.isCancelled else { isLoadingSeries = false; return }
+                        for s in batch {
+                            guard seenUUIDs.insert(s.uuid).inserted else { continue }
+                            let show = VODSeries(
+                                id: String(s.id), name: s.name,
+                                posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
+                                backdropURL: nil,
+                                rating: s.rating ?? "", plot: s.plot ?? "",
+                                genre: s.genre ?? "", releaseDate: "",
+                                cast: "", director: "",
+                                categoryID: category.id,
+                                categoryName: category.name,
+                                serverID: sID, seasons: [], episodeCount: 0
+                            )
+                            accumulated.append(VODDisplayItem(series: show))
                         }
-                        guard seenUUIDs.insert(s.uuid).inserted else { continue }
-                        let show = VODSeries(
-                            id: String(s.id), name: s.name,
-                            posterURL: s.posterURL.flatMap { resolveURL($0, base: baseURL) },
-                            backdropURL: nil,
-                            rating: s.rating ?? "", plot: s.plot ?? "",
-                            genre: s.genre ?? "", releaseDate: "",
-                            cast: "", director: "",
-                            categoryID: category.id,
-                            categoryName: category.name,
-                            serverID: sID, seasons: [], episodeCount: 0
-                        )
-                        accumulated.append(VODDisplayItem(series: show))
+                        if isLoadingSeries {
+                            series = accumulated
+                            isLoadingSeries = false
+                        }
+                        if accumulated.count >= totalCap { break }
                     }
-                    // v1.7.x: first-batch-only during the initial cold-start
-                    // load (same tvOS 26.5 display-list-churn crash mitigation as
-                    // loadMovies above); the full set publishes once after the loop.
-                    let allowProgressivePublish = false   // initial load: batch once
-                    let now = Date()
-                    if isLoadingSeries || (allowProgressivePublish && now.timeIntervalSince(lastPublishTime) >= publishInterval) {
-                        series = accumulated
-                        lastPublishTime = now
-                    }
-                    if isLoadingSeries { isLoadingSeries = false }
+                } catch let err as APIError {
+                    lastError = err
+                    DebugLogger.shared.logError(err, context: "VODStore.loadSeries(\(server.name)) cat=\(cat.name)")
+                } catch {
+                    DebugLogger.shared.log(
+                        "VODStore.loadSeries(\(server.name)) cat=\(cat.name) error: \(error.localizedDescription)",
+                        category: "TVShows", level: .warning
+                    )
                 }
-            } catch let err as APIError {
-                DebugLogger.shared.logError(err, context: "VODStore.loadSeries(\(server.name))")
-                seriesError = err.errorDescription
-            } catch {
-                DebugLogger.shared.log(
-                    "VODStore.loadSeries(\(server.name)) error: \(error.localizedDescription)",
-                    category: "TVShows", level: .warning
-                )
+                debugLog("📺 [VOD-CAT] \(cat.name): +\(accumulated.count - before) (total \(accumulated.count))")
+                if accumulated.count >= totalCap {
+                    debugLog("📺 VODStore.loadSeries: hit total cap \(totalCap), stopping category sweep")
+                    break categoryLoop
+                }
             }
 
+            if accumulated.isEmpty, let lastError {
+                seriesError = lastError.errorDescription
+            }
             series = accumulated
             isLoadingSeries = false
-            debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) series (tagged via category_id=\(taggedFromCategoryID), via fallback=\(taggedFromFallback)) across \(enabledSeriesCats.count) enabled categories")
+            debugLog("📺 VODStore.loadSeries: done, \(accumulated.count) series across \(enabledSeriesCats.count) enabled categories")
             return
         }
 
