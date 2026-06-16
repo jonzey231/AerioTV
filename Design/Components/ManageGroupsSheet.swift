@@ -522,41 +522,55 @@ struct TVGroupToggleRow: View {
     let isOn: Bool
     let onToggle: () -> Void
 
-    @FocusState private var isFocused: Bool
+    // @State (not @FocusState): the UIKit-backed TVPressOverlay owns focus
+    // and reports it here. A plain SwiftUI Button draws the squared system
+    // focus platter on tvOS; the overlay path (same as the Manual rows)
+    // gives a clean rounded highlight instead.
+    @State private var isFocused = false
 
     var body: some View {
-        Button(action: onToggle) {
-            HStack {
-                Text(group)
-                    .font(.system(size: 28, weight: .medium))
-                    .foregroundColor(isFocused ? .white : .textPrimary)
-                    .lineLimit(1)
-
-                Spacer()
-
-                HStack(spacing: 6) {
-                    Circle()
-                        .fill(isOn ? Color.accentPrimary : Color.textTertiary)
-                        .frame(width: 8, height: 8)
-                    Text(isOn ? "On" : "Off")
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundColor(isOn
-                            ? (isFocused ? .white : .accentPrimary)
-                            : (isFocused ? .white : .textTertiary))
-                }
-            }
-            .padding(.horizontal, 48)
-            .padding(.vertical, 22)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(isFocused
-                        ? Color.accentPrimary.opacity(0.18)
-                        : Color.clear)
-                    .padding(.horizontal, 32)
+        rowBody.overlay(
+            TVPressOverlay(
+                minimumPressDuration: 0.35,
+                isFocused: $isFocused,
+                onTap: onToggle,
+                onLongPress: {}
             )
+        )
+    }
+
+    private var rowBody: some View {
+        HStack {
+            Text(group)
+                .font(.system(size: 28, weight: .medium))
+                .foregroundColor(isFocused ? .white : .textPrimary)
+                .lineLimit(1)
+
+            Spacer()
+
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(isOn ? Color.accentPrimary : Color.textTertiary)
+                    .frame(width: 8, height: 8)
+                Text(isOn ? "On" : "Off")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundColor(isOn
+                        ? (isFocused ? .white : .accentPrimary)
+                        : (isFocused ? .white : .textTertiary))
+            }
         }
-        .buttonStyle(TVNoRingButtonStyle())
-        .focused($isFocused)
+        .padding(.horizontal, 48)
+        .padding(.vertical, 22)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isFocused ? Color.accentPrimary.opacity(0.18) : Color.clear)
+                .padding(.horizontal, 32)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(isFocused ? Color.accentPrimary : Color.clear, lineWidth: 3)
+                .padding(.horizontal, 32)
+        )
         .animation(.easeInOut(duration: 0.12), value: isFocused)
     }
 }
@@ -643,7 +657,8 @@ private struct TVReorderableGroupRow: View {
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isGrabbed ? Color.accentPrimary : Color.clear, lineWidth: 4)
+                .strokeBorder(isGrabbed || isFocused ? Color.accentPrimary : Color.clear,
+                              lineWidth: isGrabbed ? 4 : 3)
                 .padding(.horizontal, 32)
         )
         .animation(.easeInOut(duration: 0.12), value: isFocused)
