@@ -485,25 +485,14 @@ private struct TVModeChip: View {
     let selected: Bool
     let action: () -> Void
 
-    @FocusState private var isFocused: Bool
-
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(.system(size: 22, weight: .semibold))
-                .padding(.horizontal, 22)
-                .padding(.vertical, 10)
-                .background(
-                    Capsule().fill(
-                        selected ? Color.accentPrimary.opacity(0.9)
-                            : (isFocused ? Color.accentPrimary.opacity(0.30) : Color.elevatedBackground))
-                )
-                .foregroundColor(selected || isFocused ? .white : .textSecondary)
+                .font(.system(size: 22, weight: .medium))
         }
-        .buttonStyle(TVNoRingButtonStyle())
-        .focused($isFocused)
-        .scaleEffect(isFocused ? 1.05 : 1.0)
-        .animation(.easeInOut(duration: 0.12), value: isFocused)
+        // Reuse the Live TV filter-pill style so the focus highlight is a
+        // capsule matching the pill shape, not the squared system platter.
+        .buttonStyle(TVGroupPillButtonStyle(isSelected: selected))
     }
 }
 

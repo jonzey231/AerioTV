@@ -2912,7 +2912,7 @@ private struct TVGroupPill: View {
     }
 }
 
-private struct TVGroupPillButtonStyle: ButtonStyle {
+struct TVGroupPillButtonStyle: ButtonStyle {
     let isSelected: Bool
     @Environment(\.isFocused) private var isFocused
 
