@@ -432,17 +432,14 @@ struct ManageGroupsButton: View {
     let action: () -> Void
     let hiddenCount: Int
 
-    #if os(tvOS)
-    @FocusState private var isFocused: Bool
-    #endif
-
     var body: some View {
         Button(action: action) {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: "line.3.horizontal.decrease.circle")
                     #if os(tvOS)
+                    // Color is owned by TVManageGroupsButtonStyle so focus
+                    // tints it the same way the filter pills tint on focus.
                     .font(.system(size: 28, weight: .medium))
-                    .foregroundColor(isFocused ? .white : .accentPrimary)
                     #else
                     .font(.system(size: 16, weight: .medium))
                     .foregroundColor(.accentPrimary)
@@ -462,15 +459,7 @@ struct ManageGroupsButton: View {
             }
         }
         #if os(tvOS)
-        .buttonStyle(TVNoRingButtonStyle())
-        .focused($isFocused)
-        .padding(16)
-        .background(
-            Circle()
-                .fill(isFocused ? Color.accentPrimary.opacity(0.30) : Color.elevatedBackground)
-        )
-        .scaleEffect(isFocused ? 1.08 : 1.0)
-        .animation(.easeInOut(duration: 0.13), value: isFocused)
+        .buttonStyle(TVManageGroupsButtonStyle())
         #else
         .buttonStyle(.plain)
         #endif
@@ -493,6 +482,30 @@ private struct TVModeChip: View {
         // Reuse the Live TV filter-pill style so the focus highlight is a
         // capsule matching the pill shape, not the squared system platter.
         .buttonStyle(TVGroupPillButtonStyle(isSelected: selected))
+    }
+}
+
+// MARK: - tvOS Manage Groups Icon Button Style
+
+/// Round-icon counterpart to `TVGroupPillButtonStyle`: same elevated fill +
+/// accent focus stroke + scale, but a Circle so the Manage Groups icon
+/// button's focus highlight matches the filter pills beside it instead of
+/// the squared system focus platter.
+private struct TVManageGroupsButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        let focused = isFocused
+        return configuration.label
+            .foregroundColor(focused ? .white : .accentPrimary)
+            .padding(16)
+            .background(Circle().fill(Color.elevatedBackground))
+            .overlay(
+                Circle().stroke(focused ? Color.accentPrimary : Color.clear, lineWidth: 2)
+            )
+            .scaleEffect(focused ? 1.05 : 1.0)
+            .opacity(focused ? 1.0 : 0.85)
+            .animation(.easeInOut(duration: 0.15), value: focused)
     }
 }
 
