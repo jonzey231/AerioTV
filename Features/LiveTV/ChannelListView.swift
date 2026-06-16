@@ -995,6 +995,13 @@ struct ChannelListView: View {
                 }
             }
             .padding(.horizontal, 16)
+            #if os(tvOS)
+            // Vertical headroom so a focused pill's 1.05 scale + focus stroke
+            // is not clipped by the horizontal ScrollView (which sizes its
+            // height to the row). Previously the taller Manage Groups button
+            // supplied this slack; the compact circle no longer does.
+            .padding(.vertical, 6)
+            #endif
         }
     }
 
