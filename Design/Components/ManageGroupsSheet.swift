@@ -294,7 +294,7 @@ struct ManageGroupsSheet: View {
                         .textCase(nil)
                 } footer: {
                     if sortMode == .manual {
-                        Text("Tap Edit, then drag the handles to arrange groups.")
+                        Text("Tap Edit and/or long press, then drag to arrange groups.")
                             .font(.labelSmall)
                             .foregroundColor(.textTertiary)
                             .textCase(nil)
