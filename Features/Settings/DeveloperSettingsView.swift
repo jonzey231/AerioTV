@@ -159,8 +159,8 @@ struct DeveloperSettingsView: View {
                                 .font(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(unifiedPlayback
-                                 ? "On — default. Every channel runs in the multiview container."
-                                 : "Off — legacy PlayerView fallback")
+                                 ? "On: live playback uses the multiview engine. Required for the AVPlayer options below."
+                                 : "Off: legacy single-stream player (mpv only, no AVPlayer or multiview)")
                                 .font(.labelSmall)
                                 .foregroundColor(unifiedPlayback ? .accentPrimary : .textTertiary)
                         }
@@ -177,7 +177,7 @@ struct DeveloperSettingsView: View {
                     Text("Playback Engine")
                         .sectionHeaderStyle()
                 } footer: {
-                    Text("Unified Playback is the default shipping path — a single tile mounts MultiviewContainerView from the first frame, so adding a second stream is seamless (no view-swap, no re-setup). Disable only if you hit a unified-path regression; the legacy PlayerView remains available as a fallback for the single-stream case but does not support tvOS multiview or the new mini-player UX. Only affects live playback; VOD always uses the legacy path. Restart playback for the change to take effect.")
+                    Text("mpv is the default engine and plays every live channel, including HEVC. The two AVPlayer options route specific stream types to Apple's native player; anything AVPlayer cannot render (such as HEVC inside MPEG-TS) automatically falls back to mpv, so turning them on never loses a channel. Unified Playback hosts all of this: a single tile mounts MultiviewContainerView from the first frame, so adding a second stream is seamless. Disable it only if you hit a unified-path regression; the legacy PlayerView covers single-stream playback but has no multiview, mini-player, or AVPlayer support. Live only (VOD always uses the legacy path). Restart playback for changes to take effect.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
                         .padding(.top, 4)
@@ -205,8 +205,8 @@ struct DeveloperSettingsView: View {
                                 .font(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(avPlayerHLS
-                                 ? "On: .m3u8 channels use the native Apple player"
-                                 : "Off: all channels use the mpv engine")
+                                 ? "On: HLS channels play on Apple's AVPlayer (HEVC auto-falls back to mpv)"
+                                 : "Off: every channel uses the mpv engine (the default)")
                                 .font(.labelSmall)
                                 .foregroundColor(avPlayerHLS ? .accentPrimary : .textTertiary)
                         }
@@ -237,8 +237,8 @@ struct DeveloperSettingsView: View {
                                 .font(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(avPlayerRemuxTS
-                                 ? "On: raw TS channels remux to HLS on-device"
-                                 : "Off: raw TS channels use the mpv engine")
+                                 ? "On: raw MPEG-TS remuxed to HLS for AVPlayer (HEVC/MPEG-2 fall back to mpv)"
+                                 : "Off: raw TS channels use the mpv engine (the default)")
                                 .font(.labelSmall)
                                 .foregroundColor(avPlayerRemuxTS ? .accentPrimary : .textTertiary)
                         }
@@ -630,8 +630,8 @@ struct DeveloperSettingsView: View {
                         iconColor: unifiedPlayback ? .accentPrimary : .textSecondary,
                         title: "Unified Playback",
                         subtitle: unifiedPlayback
-                            ? "On — every channel runs in the multiview container"
-                            : "Off — legacy single-stream PlayerView",
+                            ? "On: required for the AVPlayer engines below; also enables multiview"
+                            : "Off: legacy single-stream player (mpv only)",
                         isOn: $unifiedPlayback
                     ) { _ in }
 
@@ -640,8 +640,8 @@ struct DeveloperSettingsView: View {
                         iconColor: avPlayerHLS ? .accentPrimary : .textSecondary,
                         title: "AVPlayer for HLS Streams",
                         subtitle: avPlayerHLS
-                            ? "On: .m3u8 channels use the native Apple player"
-                            : "Off: all channels use the mpv engine",
+                            ? "On: HLS channels play on Apple's AVPlayer (HEVC auto-falls back to mpv)"
+                            : "Off: every channel uses the mpv engine (the default)",
                         isOn: $avPlayerHLS
                     ) { _ in }
 
@@ -650,8 +650,8 @@ struct DeveloperSettingsView: View {
                         iconColor: avPlayerRemuxTS ? .accentPrimary : .textSecondary,
                         title: "AVPlayer Remux for TS Streams",
                         subtitle: avPlayerRemuxTS
-                            ? "On: raw TS channels remux to HLS on-device"
-                            : "Off: raw TS channels use the mpv engine",
+                            ? "On: raw MPEG-TS remuxed to HLS for AVPlayer (HEVC/MPEG-2 fall back to mpv)"
+                            : "Off: raw TS channels use the mpv engine (the default)",
                         isOn: $avPlayerRemuxTS
                     ) { _ in }
                 }
