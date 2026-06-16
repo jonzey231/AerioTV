@@ -67,16 +67,43 @@ struct MyRecordingsView: View {
         return allRecordings.filter { $0.serverID == sid }
     }
 
+    /// Terminal states always belong in Completed regardless of the clock.
+    private static let terminalStatuses: [RecordingStatus] =
+        [.completed, .stopped, .interrupted, .failed, .cancelled]
+
+    /// True when the recording's effective window is airing right now.
+    ///
+    /// Section assignment can't trust `status` alone for a recording of a
+    /// currently-airing program: when we POST it to Dispatcharr the server
+    /// returns `custom_properties.status == "scheduled"` for the first
+    /// several seconds (its task scheduler hasn't transitioned the job to
+    /// "recording" yet), so the row would sit in Scheduled until the next
+    /// reconcile poll lands. Treating "now is inside [effectiveStart,
+    /// effectiveEnd]" as actively-recording puts it under Recording
+    /// immediately, independent of the server-side status lag, and matches
+    /// what the user just did ("record this program that is on now").
+    private func isAiringNow(_ r: Recording) -> Bool {
+        let now = Date()
+        return r.effectiveStart <= now && now < r.effectiveEnd
+    }
+
     private var scheduled: [Recording] {
-        visibleRecordings.filter { $0.status == .scheduled }
+        visibleRecordings.filter {
+            !Self.terminalStatuses.contains($0.status)
+                && $0.status != .recording
+                && !isAiringNow($0)
+        }
     }
 
     private var recording: [Recording] {
-        visibleRecordings.filter { $0.status == .recording }
+        visibleRecordings.filter {
+            !Self.terminalStatuses.contains($0.status)
+                && ($0.status == .recording || isAiringNow($0))
+        }
     }
 
     private var completed: [Recording] {
-        visibleRecordings.filter { [.completed, .stopped, .interrupted, .failed, .cancelled].contains($0.status) }
+        visibleRecordings.filter { Self.terminalStatuses.contains($0.status) }
     }
 
     private var activeList: [Recording] {
@@ -682,6 +709,14 @@ struct MyRecordingsView: View {
 
 private struct RecordingRow: View {
     let recording: Recording
+    @Environment(\.modelContext) private var modelContext
+
+    /// Genre tags pulled from the EPG cache for this recording's
+    /// program, matched by server + title + air-window overlap (see
+    /// `resolveEPGCategory`). Empty when no cached EPG row matches
+    /// (e.g. an old completed recording whose programme rolled out of
+    /// the current grid window); the synopsis above still renders.
+    @State private var epgCategory: String = ""
 
     /// True when this row should advertise live in-progress playback.
     /// v1.6.23 (Codex UX P2): the row is already tappable to play
@@ -696,6 +731,44 @@ private struct RecordingRow: View {
         guard recording.status == .recording else { return false }
         guard recording.destination == .dispatcharrServer else { return false }
         return recording.dispatcharrFileURL != nil
+    }
+
+    /// Split the matched EPG `<category>` string on XMLTV's common
+    /// separators into individual genre tokens for the pills.
+    private var categoryTokens: [String] {
+        let separators = CharacterSet(charactersIn: ",/;")
+        return epgCategory
+            .components(separatedBy: separators)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// One targeted fetch (limit 1) against the EPG cache to enrich the
+    /// row with genre tags. Matched by `serverID` + exact `title` +
+    /// air-window overlap rather than `channelID`, because a
+    /// recording's `channelID` is the channel's display id while
+    /// `EPGProgram.channelID` is the feed's tvg-id key (they differ for
+    /// Dispatcharr, which carries a whole epgDataID/uuid bridge). Title
+    /// + window is reliable enough for display and degrades gracefully:
+    /// no match leaves `epgCategory` empty and no pills render.
+    private func resolveEPGCategory() {
+        guard epgCategory.isEmpty else { return }
+        let title = recording.programTitle
+        guard !title.isEmpty else { return }
+        let sid = recording.serverID
+        let start = recording.scheduledStart
+        let end = recording.scheduledEnd
+        var descriptor = FetchDescriptor<EPGProgram>(
+            predicate: #Predicate<EPGProgram> { p in
+                p.serverID == sid && p.title == title
+                    && p.startTime < end && p.endTime > start
+            }
+        )
+        descriptor.fetchLimit = 1
+        if let match = try? modelContext.fetch(descriptor).first,
+           !match.category.isEmpty {
+            epgCategory = match.category
+        }
     }
 
     var body: some View {
@@ -723,6 +796,32 @@ private struct RecordingRow: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
+            }
+
+            // Full program synopsis. Frozen onto the recording at
+            // schedule time (`Recording.programDescription`), so it
+            // survives EPG cache rollover and shows on scheduled,
+            // recording, AND completed rows alike. Hidden when the
+            // source feed gave no description rather than showing an
+            // empty gap.
+            if !recording.programDescription.isEmpty {
+                Text(recording.programDescription)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 1)
+            }
+
+            // Genre pills from the EPG, using the same palette as the
+            // guide so the recording carries matching category context.
+            if !categoryTokens.isEmpty {
+                CategoryPillsLayout(spacing: 6) {
+                    ForEach(categoryTokens, id: \.self) { token in
+                        CategoryPill(rawToken: token)
+                    }
+                }
+                .padding(.top, 2)
             }
 
             HStack(spacing: 8) {
@@ -756,6 +855,7 @@ private struct RecordingRow: View {
             }
         }
         .padding(.vertical, 4)
+        .task(id: recording.id) { resolveEPGCategory() }
     }
 
     private var statusBadge: some View {
