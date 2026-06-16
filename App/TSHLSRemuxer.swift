@@ -565,6 +565,10 @@ struct AVPlayerMultiviewTile: View {
     /// KVO on the item's presentationSize; registers the tile's real
     /// video aspect with the store so the focus border hugs the video.
     @State private var sizeObservation: AnyCancellable?
+    /// Fires a few seconds after start: if the item became ready but never
+    /// reported a video size, the stream is audio-only to AVFoundation
+    /// (e.g. HEVC carried in MPEG-TS HLS) and we fall the tile back to mpv.
+    @State private var noVideoCheck: DispatchWorkItem?
 
     var body: some View {
         ZStack {
@@ -676,6 +680,29 @@ struct AVPlayerMultiviewTile: View {
                 guard size.width > 0, size.height > 0 else { return }
                 MultiviewStore.shared.registerVideoAspect(size.width / size.height, for: tileID)
             }
+
+        // No-renderable-video fallback. Some server HLS is "playable" to
+        // AVFoundation (audio decodes, the item reaches readyToPlay) but
+        // carries NO renderable video track, so it plays audio over a black
+        // screen forever, e.g. HEVC carried in MPEG-TS, which AVFoundation
+        // will not decode (HEVC over HLS needs fMP4/CMAF). mpv CAN decode it,
+        // so when a ready item never reports a video size, hand the tile back
+        // to the mpv engine instead of stranding the viewer on a black tile.
+        // The work self-guards on the live item state at fire time; stop()
+        // cancels it on teardown / channel swap.
+        let checkedItem = playerItem
+        let fallback = onEngineFallback
+        let name = channelName
+        let work = DispatchWorkItem {
+            guard checkedItem.status == .readyToPlay,
+                  checkedItem.presentationSize.width == 0,
+                  checkedItem.presentationSize.height == 0 else { return }
+            debugLog("[AVP-MV] audio-only, no renderable video channel=\(name); falling back to mpv tile")
+            fallback("no renderable video")
+        }
+        noVideoCheck?.cancel()
+        noVideoCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
     }
 
     private func stop() {
@@ -688,6 +715,8 @@ struct AVPlayerMultiviewTile: View {
         statusText = nil
         readyLocalURL = nil
         sizeObservation = nil
+        noVideoCheck?.cancel()
+        noVideoCheck = nil
         MultiviewStore.shared.unregisterVideoAspect(for: tileID)
     }
 }
