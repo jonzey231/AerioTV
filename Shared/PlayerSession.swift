@@ -340,10 +340,10 @@ final class PlayerSession: ObservableObject {
     /// exactly once, returning a single locked verdict. Both off (the
     /// default) -> always `.mpv`, so toggle-off users never touch any
     /// AVPlayer path. Non-live -> always `.mpv` (VOD/DVR stay mpv).
-    /// Synchronous on the main actor: it primes the async capability
-    /// probe but reads the cache as-is, so the first-ever play on a server
-    /// resolves conservatively and upgrades next session (same as the old
-    /// router).
+    /// Synchronous on the main actor: it resolves HLS capability inline (a
+    /// short, time-boxed probe on the first play of a not-yet-cached
+    /// server, instant on a cache hit), so even the FIRST play of an
+    /// HLS-capable server routes direct-HLS instead of remux-then-mpv.
     static func resolveEngine(item: ChannelDisplayItem,
                               server: ServerConnection?,
                               isLive: Bool) -> ResolvedEngine {
@@ -366,8 +366,11 @@ final class PlayerSession: ObservableObject {
         var routeURL = url
         var effectiveFormat = format
         if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS {
-            HLSCapabilityStore.shared.probeIfNeeded(streamURL: url, headers: headers)
-            if HLSCapabilityStore.shared.isCapable(url) {
+            // Resolve capability BEFORE the engine locks so the first play
+            // of an HLS-capable server already upgrades to ?output_format=hls
+            // and routes direct-HLS (which decodes HEVC and outputs HDR)
+            // instead of the remux path that dead-ends on HEVC.
+            if HLSCapabilityStore.shared.probeBlocking(streamURL: url, headers: headers) {
                 routeURL = appendingHLSOutputFormat(url)
                 effectiveFormat = .hls
             }
