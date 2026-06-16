@@ -4607,6 +4607,16 @@ struct MainTabView: View {
             debugLog("🟢 [Orchestrator] BAILED: no servers, total elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
             return
         }
+        // Phase 2.5: reconcile DVR recordings before the VOD phases. It is a
+        // cheap single GET per server and usually already finished by the
+        // parallel dvrReconcileKey task, so awaiting it here is idempotent;
+        // its job is to guarantee VOD (the heaviest cold-start load, and the
+        // main churn behind the tvOS 26.5 AttributeGraph crash) stays strictly
+        // last, after channels, EPG, AND recordings have settled, so it never
+        // competes with the Live TV guide or the DVR tab.
+        debugLog("🟢 [Orchestrator] phase 2.5 BEGIN: recordings, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+        await reconcileAllDispatcharrRecordings()
+        debugLog("🟢 [Orchestrator] phase 2.5 done (recordings), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
         // v1.7.x: settle delay before the VOD phases. The tvOS 26.5 SwiftUI
         // AttributeGraph "different namespace" crash fires when SELECT events
         // flood the guide's display list WHILE VOD is publishing its @Published
