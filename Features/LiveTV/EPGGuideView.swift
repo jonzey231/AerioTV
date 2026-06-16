@@ -2372,16 +2372,29 @@ struct EPGGuideView: View {
             // `ScrollViewReader` so the Menu-button handler on tvOS
             // (see HomeView → posts `.guideScrollToTop`) can jump the
             // guide back to the first channel. The `Color.clear`
-            // anchor with `.id("guide.top")` lives inside the Section
-            // content (above the ForEach) so it scrolls normally —
-            // it's not the pinned header, which wouldn't be a valid
-            // scroll target anyway. `.scrollTo(..., anchor: .top)`
-            // positions the anchor just below the pinned time header,
-            // which is exactly where the first channel row belongs.
+            // anchor with `.id("guide.top")` is the first child of the
+            // LazyVStack (above the ForEach), so `.scrollTo(..., anchor:
+            // .top)` pins it to the top of the scroll viewport — i.e.
+            // just below the fixed time-header bar (now a sibling above
+            // the ScrollView, no longer a pinned section header), which
+            // is exactly where the first channel row belongs.
             ScrollViewReader { proxy in
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(spacing: rowGap, pinnedViews: [.sectionHeaders]) {
-                    Section {
+            VStack(spacing: 0) {
+                // ── Fixed time header ──
+                // Lifted OUT of the LazyVStack's pinned `Section` header.
+                // tvOS 27's AttributeGraph aborts (precondition_failure,
+                // input_value_ref_slow, 0 app frames) when the pinned-
+                // section-header path reduces its DisplayList.Key /
+                // LazyPreference during scroll-recycle layout — confirmed
+                // on-device 2026-06-16 (3 identical .ips, guide-scroll under
+                // cold-start load). A plain fixed bar above the ScrollView is
+                // visually identical (it reads `horizontalOffset` so the time
+                // strip stays synced with the program cells) and keeps that
+                // machinery out of the scroll-recycle path entirely.
+                guideTimeHeader(geoWidth: geo.size.width)
+
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVStack(spacing: rowGap) {
                         Color.clear
                             .frame(height: 0)
                             .id("guide.top")
@@ -2396,44 +2409,14 @@ struct EPGGuideView: View {
                         ForEach(channels) { channel in
                             guideRow(for: channel, screenWidth: geo.size.width, focusTargetID: focusTargetID)
                         }
-                    } header: {
-                        // ── Time header (pinned at top) ──
-                        HStack(spacing: 0) {
-                            Color.cardBackground
-                                .frame(width: channelColumnWidth, height: timeHeaderHeight)
-                                // Coolwolf (Discord): show the current time in the
-                                // guide. Top-left corner cell (the mini-player sits
-                                // top-right), refreshes each minute, and uses the
-                                // locale-aware format so it honors the device's
-                                // 12 or 24-hour setting.
-                                .overlay {
-                                    GuideCornerClock(fontSize: timeHeaderHeight * 0.4)
-                                }
-                                .overlay(alignment: .trailing) {
-                                    Rectangle().fill(Color.accentPrimary.opacity(0.2)).frame(width: 1)
-                                }
-                                .zIndex(1)
-
-                            timeHeaderRow
-                                .frame(width: totalGridWidth, height: timeHeaderHeight)
-                                .offset(x: horizontalOffset)
-                                .frame(width: geo.size.width - channelColumnWidth, height: timeHeaderHeight, alignment: .leading)
-                                .clipped()
-                        }
-                        .frame(width: geo.size.width, height: timeHeaderHeight, alignment: .leading)
-                        .background(Color.appBackground)
-                        .overlay(alignment: .bottom) {
-                            Rectangle().fill(Color.accentPrimary.opacity(0.15)).frame(height: 1)
+                    }
+                    .overlay(alignment: .topLeading) {
+                        TimelineView(.periodic(from: .now, by: 60)) { context in
+                            timeIndicatorLine(screenWidth: geo.size.width, now: context.date)
+                                .allowsHitTesting(false)
                         }
                     }
                 }
-                .overlay(alignment: .topLeading) {
-                    TimelineView(.periodic(from: .now, by: 60)) { context in
-                        timeIndicatorLine(screenWidth: geo.size.width, now: context.date)
-                            .allowsHitTesting(false)
-                    }
-                }
-            }
             .clipped()
             .onAppear { visibleProgramWidth = geo.size.width - channelColumnWidth }
             .onChange(of: geo.size.width) { _, w in visibleProgramWidth = w - channelColumnWidth }
@@ -2616,6 +2599,7 @@ struct EPGGuideView: View {
                 }
             }
             #endif
+            } // VStack (fixed time header + scrolling body)
             } // ScrollViewReader
         }
     }
@@ -2761,6 +2745,46 @@ struct EPGGuideView: View {
         return nil
     }
     #endif
+
+    // MARK: - Fixed Time Header (above the scroll body)
+    /// The guide's time strip, rendered as a fixed bar ABOVE the
+    /// ScrollView. It used to be the `header:` of a pinned `Section`
+    /// inside `LazyVStack(pinnedViews: [.sectionHeaders])`, but that
+    /// pinned-section-header path drove the DisplayList.Key /
+    /// LazyPreference reduce that aborts tvOS 27's AttributeGraph during
+    /// scroll-recycle layout. As a plain sibling above the scroll it is
+    /// visually identical: it reads `horizontalOffset` directly so the
+    /// time labels stay horizontally synced with the program cells.
+    @ViewBuilder
+    private func guideTimeHeader(geoWidth: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            Color.cardBackground
+                .frame(width: channelColumnWidth, height: timeHeaderHeight)
+                // Coolwolf (Discord): show the current time in the
+                // guide. Top-left corner cell (the mini-player sits
+                // top-right), refreshes each minute, and uses the
+                // locale-aware format so it honors the device's
+                // 12 or 24-hour setting.
+                .overlay {
+                    GuideCornerClock(fontSize: timeHeaderHeight * 0.4)
+                }
+                .overlay(alignment: .trailing) {
+                    Rectangle().fill(Color.accentPrimary.opacity(0.2)).frame(width: 1)
+                }
+                .zIndex(1)
+
+            timeHeaderRow
+                .frame(width: totalGridWidth, height: timeHeaderHeight)
+                .offset(x: horizontalOffset)
+                .frame(width: geoWidth - channelColumnWidth, height: timeHeaderHeight, alignment: .leading)
+                .clipped()
+        }
+        .frame(width: geoWidth, height: timeHeaderHeight, alignment: .leading)
+        .background(Color.appBackground)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Color.accentPrimary.opacity(0.15)).frame(height: 1)
+        }
+    }
 
     // MARK: - Time Header
     private var timeHeaderRow: some View {
