@@ -439,7 +439,7 @@ struct ManageGroupsButton: View {
                     #if os(tvOS)
                     // Color is owned by TVManageGroupsButtonStyle so focus
                     // tints it the same way the filter pills tint on focus.
-                    .font(.system(size: 28, weight: .medium))
+                    .font(.system(size: 30, weight: .medium))
                     #else
                     .font(.system(size: 16, weight: .medium))
                     .foregroundColor(.accentPrimary)
@@ -498,11 +498,11 @@ private struct TVManageGroupsButtonStyle: ButtonStyle {
         let focused = isFocused
         return configuration.label
             .foregroundColor(focused ? .white : .accentPrimary)
-            // Tighter padding so the circle matches the filter pills' height
-            // rather than overshooting it. strokeBorder keeps the focus ring
-            // inside the button footprint (plain .stroke straddles the edge
-            // and reads as oversized on a circle this small).
-            .padding(12)
+            // Compact circular icon button: padding hugs the glyph so the
+            // focus ring sits right around the icon instead of a wide ring
+            // with a big empty gap. strokeBorder keeps the ring inside the
+            // footprint (plain .stroke straddles the edge and overshoots).
+            .padding(7)
             .background(Circle().fill(Color.elevatedBackground))
             .overlay(
                 Circle().strokeBorder(focused ? Color.accentPrimary : Color.clear, lineWidth: 2)
