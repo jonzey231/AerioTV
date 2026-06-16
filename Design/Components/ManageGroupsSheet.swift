@@ -17,15 +17,33 @@ enum HiddenGroupsStore {
     }
 }
 
+// MARK: - Group Sort Mode
+
+/// How the Live TV group list is ordered. Stored as the raw string so it
+/// rides SyncManager's plain-string iCloud path.
+enum GroupSortMode: String, CaseIterable {
+    case `default`
+    case alphabetical
+    case manual
+
+    var label: String {
+        switch self {
+        case .default:      return "Default"
+        case .alphabetical: return "A-Z"
+        case .manual:       return "Manual"
+        }
+    }
+}
+
 // MARK: - Group Order Persistence
 
-/// Reads/writes a user-defined group display order to UserDefaults.
+/// Reads/writes the user-defined group order + sort mode.
 ///
-/// Unlike `HiddenGroupsStore` (a Set, stored sorted-as-JSON), order MUST
-/// be preserved, so this stores a native `[String]` array. That also lets
-/// it ride `SyncManager.syncStringArrayKeys` (the order-preserving iCloud
-/// path used by `favoriteOrder`) rather than the hidden-group path, which
-/// `.sorted()`s on apply and would destroy the order.
+/// The manual order MUST preserve sequence, so it is stored as a native
+/// `[String]` array (rides SyncManager.syncStringArrayKeys, the
+/// order-preserving iCloud path used by `favoriteOrder` - NOT the
+/// hidden-group path, which `.sorted()`s on apply). The mode is a plain
+/// string (syncStringKeys).
 enum GroupOrderStore {
     static func load(forKey key: String) -> [String] {
         UserDefaults.standard.stringArray(forKey: key) ?? []
@@ -35,15 +53,18 @@ enum GroupOrderStore {
         UserDefaults.standard.set(order, forKey: key)
     }
 
-    static func clear(forKey key: String) {
-        UserDefaults.standard.removeObject(forKey: key)
+    static func loadMode(forKey key: String) -> String {
+        UserDefaults.standard.string(forKey: key) ?? GroupSortMode.default.rawValue
     }
 
-    /// Apply a saved custom order to a fresh server-ordered group list.
-    /// Groups present in `order` come first (in saved order); any groups
-    /// not in `order` (new since the order was saved) are appended in
-    /// their original server order; entries in `order` no longer present
-    /// are dropped. An empty `order` means "use the server default".
+    static func saveMode(_ mode: String, forKey key: String) {
+        UserDefaults.standard.set(mode, forKey: key)
+    }
+
+    /// Apply a saved manual order to a fresh server-ordered group list:
+    /// groups present in `order` come first (in saved order), then any
+    /// groups not in `order` (new since the order was saved) appended in
+    /// server order; entries in `order` no longer present are dropped.
     static func apply(_ groups: [String], order: [String]) -> [String] {
         guard !order.isEmpty else { return groups }
         let present = Set(groups)
@@ -52,43 +73,50 @@ enum GroupOrderStore {
         result.append(contentsOf: groups.filter { !placed.contains($0) })
         return result
     }
+
+    /// Resolve the effective display order for a sort mode.
+    static func displayOrder(_ groups: [String], mode: String, order: [String]) -> [String] {
+        switch GroupSortMode(rawValue: mode) ?? .default {
+        case .alphabetical:
+            return groups.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        case .manual:
+            return apply(groups, order: order)
+        case .default:
+            return groups
+        }
+    }
 }
 
 // MARK: - Manage Groups Sheet
 
-/// A sheet that lets users toggle visibility of individual groups, and
-/// (when `orderStorageKey` is supplied) reorder them alphabetically or
-/// manually. Hidden groups persist via `storageKey`; the custom order
-/// persists via `orderStorageKey`.
+/// A sheet that toggles group visibility and (when `orderStorageKey` is
+/// supplied) orders the groups via a Default / A-Z / Manual selector.
 struct ManageGroupsSheet: View {
     let title: String
     let allGroups: [String]
     let storageKey: String
     let onDismiss: (Set<String>) -> Void
 
-    /// When non-nil, enables alphabetical + manual reordering and persists
-    /// the order under this key. Nil keeps the sheet visibility-only (the
-    /// VOD movie/series group sheets pass nil today).
+    /// When non-nil, enables the Default/A-Z/Manual order selector and
+    /// persists the manual order under this key (mode under
+    /// `<key>.sortMode`). Nil keeps the sheet visibility-only (VOD).
     var orderStorageKey: String? = nil
-    /// Reports the effective custom order whenever it changes (empty array
-    /// after a reset-to-default) so the host can re-render its group pills.
-    /// Only meaningful when `orderStorageKey` is set.
-    var onOrderChanged: (([String]) -> Void)? = nil
+    /// Reports (modeRawValue, manualOrder) whenever the order config
+    /// changes so the host can re-render its group pills.
+    var onConfigChanged: ((String, [String]) -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var hiddenGroups: Set<String> = []
-    /// Working display order. Initialised from the saved order (or
-    /// `allGroups` when reorder is disabled) in `.onAppear`.
-    @State private var orderedLocal: [String] = []
+    @State private var sortMode: GroupSortMode = .default
+    /// The reconciled full manual order (every current group, in saved
+    /// sequence). Mutated by drag (iOS) / d-pad move (tvOS).
+    @State private var manualOrder: [String] = []
     #if os(tvOS)
-    /// The group currently "grabbed" for d-pad reordering, or nil.
+    /// The group currently picked up for d-pad reordering, or nil.
     @State private var grabbedGroup: String? = nil
     #endif
 
     #if os(iOS)
-    /// Mirrors the Developer-Settings flag. When ON on an iPhone, the sheet
-    /// exposes a Layout section with two companion toggles below so the
-    /// user can hide the filter pills + search bar on Live TV.
     @AppStorage("ui.iphone.compactChrome") private var compactChromeiPhone = false
     @AppStorage("ui.iphone.hideFilterBar") private var hideFilterBarCompact = false
     @AppStorage("ui.iphone.hideSearchBar") private var hideSearchBarCompact = false
@@ -98,6 +126,19 @@ struct ManageGroupsSheet: View {
     #endif
 
     private var reorderEnabled: Bool { orderStorageKey != nil }
+    private var modeKey: String? { orderStorageKey.map { $0 + ".sortMode" } }
+
+    /// Groups in the order they should be displayed for the current mode.
+    private var displayList: [String] {
+        switch sortMode {
+        case .alphabetical:
+            return allGroups.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        case .manual:
+            return manualOrder.isEmpty ? allGroups : manualOrder
+        case .default:
+            return allGroups
+        }
+    }
 
     var body: some View {
         NavigationStack {
@@ -118,22 +159,19 @@ struct ManageGroupsSheet: View {
             }
             .navigationTitle(title)
             #if os(tvOS)
-            // On tvOS the Menu/Back button is the natural dismiss gesture.
-            // Hide the toolbar to avoid the white system pill button. When a
-            // group is grabbed the move controller owns Menu (cancel grab);
-            // otherwise Menu dismisses the sheet.
             .toolbar(.hidden)
             .onExitCommand {
+                // While a group is grabbed the row consumes Menu (drop);
+                // this only fires when nothing is grabbed -> dismiss.
                 onDismiss(hiddenGroups)
                 dismiss()
             }
             #else
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if reorderEnabled {
+                if reorderEnabled && sortMode == .manual {
                     ToolbarItem(placement: .navigationBarLeading) {
-                        EditButton()
-                            .foregroundColor(.accentPrimary)
+                        EditButton().foregroundColor(.accentPrimary)
                     }
                 }
                 ToolbarItem(placement: .confirmationAction) {
@@ -148,11 +186,21 @@ struct ManageGroupsSheet: View {
         }
         .onAppear {
             hiddenGroups = HiddenGroupsStore.load(forKey: storageKey)
-            if let key = orderStorageKey {
-                orderedLocal = GroupOrderStore.apply(allGroups, order: GroupOrderStore.load(forKey: key))
+            if let key = orderStorageKey, let mKey = modeKey {
+                sortMode = GroupSortMode(rawValue: GroupOrderStore.loadMode(forKey: mKey)) ?? .default
+                manualOrder = GroupOrderStore.apply(allGroups, order: GroupOrderStore.load(forKey: key))
             } else {
-                orderedLocal = allGroups
+                sortMode = .default
+                manualOrder = allGroups
             }
+        }
+        .onChange(of: sortMode) { _, newMode in
+            // Switching into Manual seeds the manual order from whatever is
+            // currently visible so dragging starts from the same arrangement.
+            if newMode == .manual {
+                manualOrder = GroupOrderStore.apply(allGroups, order: manualOrder)
+            }
+            persistConfig()
         }
     }
 
@@ -164,55 +212,36 @@ struct ManageGroupsSheet: View {
         HiddenGroupsStore.save(hiddenGroups, forKey: storageKey)
     }
 
-    private func persistOrder() {
-        guard let key = orderStorageKey else { return }
-        GroupOrderStore.save(orderedLocal, forKey: key)
-        onOrderChanged?(orderedLocal)
-    }
-
-    private func sortAlphabetically() {
-        orderedLocal.sort { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
-        persistOrder()
-    }
-
-    private func resetOrder() {
-        guard let key = orderStorageKey else { return }
-        GroupOrderStore.clear(forKey: key)
-        orderedLocal = allGroups
-        onOrderChanged?([])
+    private func persistConfig() {
+        guard let key = orderStorageKey, let mKey = modeKey else { return }
+        GroupOrderStore.saveMode(sortMode.rawValue, forKey: mKey)
+        GroupOrderStore.save(manualOrder, forKey: key)
+        onConfigChanged?(sortMode.rawValue, manualOrder)
     }
 
     private func moveGroups(from source: IndexSet, to destination: Int) {
-        guard reorderEnabled else { return }
-        orderedLocal.move(fromOffsets: source, toOffset: destination)
-        persistOrder()
+        guard sortMode == .manual else { return }
+        manualOrder.move(fromOffsets: source, toOffset: destination)
+        persistConfig()
     }
 
     #if os(tvOS)
-    private func moveGrabbed(_ direction: MoveCommandDirection) {
+    enum MoveDirection { case up, down }
+
+    private func moveGrabbed(_ direction: MoveDirection) {
         guard let grabbed = grabbedGroup,
-              let idx = orderedLocal.firstIndex(of: grabbed) else { return }
-        let target: Int
-        switch direction {
-        case .up:   target = idx - 1
-        case .down: target = idx + 1
-        default:    return
-        }
-        guard orderedLocal.indices.contains(target) else { return }
-        orderedLocal.swapAt(idx, target)
-        persistOrder()
+              let idx = manualOrder.firstIndex(of: grabbed) else { return }
+        let target = direction == .up ? idx - 1 : idx + 1
+        guard manualOrder.indices.contains(target) else { return }
+        manualOrder.swapAt(idx, target)
+        persistConfig()
     }
     #endif
 
-    // MARK: non-tvOS layout — checkmark list
+    // MARK: non-tvOS layout - checkmark list
     #if !os(tvOS)
     private var iOSGroupList: some View {
         List {
-            // Compact-chrome layout controls. Only appears when the Developer
-            // flag is ON and we're on an iPhone — gives users one place to
-            // hide the filter pills + search bar in Live TV. Mirrors Veldmuus's
-            // Discord proposal; kept opt-in so the main user base isn't
-            // affected until we promote the flag.
             if showsCompactLayoutSection {
                 Section {
                     Toggle(isOn: $hideFilterBarCompact) {
@@ -248,27 +277,15 @@ struct ManageGroupsSheet: View {
                 }
             }
 
-            // Order controls (Live TV only). Alphabetical sort + reset; the
-            // manual drag-to-reorder happens in the groups list below once
-            // the user taps Edit.
+            // Order selector (Live TV only).
             if reorderEnabled {
                 Section {
-                    Button {
-                        sortAlphabetically()
-                    } label: {
-                        Label("Sort Alphabetically (A-Z)", systemImage: "textformat")
-                            .font(.bodyMedium)
-                            .foregroundColor(.accentPrimary)
+                    Picker("Order", selection: $sortMode) {
+                        ForEach(GroupSortMode.allCases, id: \.self) { mode in
+                            Text(mode.label).tag(mode)
+                        }
                     }
-                    .listRowBackground(Color.cardBackground)
-
-                    Button {
-                        resetOrder()
-                    } label: {
-                        Label("Reset to Default Order", systemImage: "arrow.uturn.backward")
-                            .font(.bodyMedium)
-                            .foregroundColor(.accentPrimary)
-                    }
+                    .pickerStyle(.segmented)
                     .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Order")
@@ -276,15 +293,17 @@ struct ManageGroupsSheet: View {
                         .foregroundColor(.textSecondary)
                         .textCase(nil)
                 } footer: {
-                    Text("Tap Edit, then drag the handles to arrange groups. This order drives the group filter in Live TV.")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                        .textCase(nil)
+                    if sortMode == .manual {
+                        Text("Tap Edit, then drag the handles to arrange groups.")
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                            .textCase(nil)
+                    }
                 }
             }
 
             Section {
-                ForEach(orderedLocal, id: \.self) { group in
+                ForEach(displayList, id: \.self) { group in
                     Button {
                         toggleHidden(group)
                     } label: {
@@ -338,67 +357,69 @@ struct ManageGroupsSheet: View {
     #endif
 
     #if os(tvOS)
-    // MARK: tvOS layout — custom focus-styled rows (no system white highlight)
+    // MARK: tvOS layout - custom focus-styled rows (no system white highlight)
     private var tvGroupList: some View {
-        ZStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(reorderEnabled
-                         ? "Toggle groups on or off. Hold Select on a group to pick it up, then swipe up or down to move it."
-                         : "Toggle groups on or off to show or hide them.")
-                        .font(.labelSmall)
-                        .foregroundColor(.textSecondary)
-                        .padding(.horizontal, 48)
-                        .padding(.top, 8)
-                        .padding(.bottom, reorderEnabled ? 16 : 20)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(instructionText)
+                    .font(.labelSmall)
+                    .foregroundColor(.textSecondary)
+                    .padding(.horizontal, 48)
+                    .padding(.top, 8)
+                    .padding(.bottom, reorderEnabled ? 16 : 20)
 
-                    if reorderEnabled {
-                        HStack(spacing: 16) {
-                            TVActionChip(title: "Sort A-Z", systemImage: "textformat") {
-                                sortAlphabetically()
-                            }
-                            TVActionChip(title: "Reset Order", systemImage: "arrow.uturn.backward") {
-                                resetOrder()
+                if reorderEnabled {
+                    HStack(spacing: 12) {
+                        ForEach(GroupSortMode.allCases, id: \.self) { mode in
+                            TVModeChip(title: mode.label, selected: sortMode == mode) {
+                                sortMode = mode
                             }
                         }
-                        .padding(.horizontal, 48)
-                        .padding(.bottom, 16)
                     }
+                    .padding(.horizontal, 48)
+                    .padding(.bottom, 16)
+                    // Lock the mode selector out while a group is grabbed.
+                    .disabled(grabbedGroup != nil)
+                }
 
-                    ForEach(orderedLocal, id: \.self) { group in
-                        if reorderEnabled {
-                            TVReorderableGroupRow(
-                                group: group,
-                                isOn: !hiddenGroups.contains(group),
-                                isGrabbed: grabbedGroup == group,
-                                reorderActive: grabbedGroup != nil,
-                                onToggle: { toggleHidden(group) },
-                                onGrab: { grabbedGroup = group }
-                            )
-                        } else {
-                            TVGroupToggleRow(
-                                group: group,
-                                isOn: !hiddenGroups.contains(group),
-                                onToggle: { toggleHidden(group) }
-                            )
-                        }
+                ForEach(displayList, id: \.self) { group in
+                    if reorderEnabled && sortMode == .manual {
+                        TVReorderableGroupRow(
+                            group: group,
+                            isOn: !hiddenGroups.contains(group),
+                            isGrabbed: grabbedGroup == group,
+                            anyGrabbed: grabbedGroup != nil,
+                            onToggle: {
+                                if grabbedGroup == group { grabbedGroup = nil }
+                                else if grabbedGroup == nil { toggleHidden(group) }
+                            },
+                            onGrab: { if grabbedGroup == nil { grabbedGroup = group } },
+                            onMoveUp: { moveGrabbed(.up) },
+                            onMoveDown: { moveGrabbed(.down) },
+                            onFinish: { grabbedGroup = nil }
+                        )
+                    } else {
+                        TVGroupToggleRow(
+                            group: group,
+                            isOn: !hiddenGroups.contains(group),
+                            onToggle: { toggleHidden(group) }
+                        )
                     }
                 }
-                .padding(.vertical, 16)
             }
+            .padding(.vertical, 16)
+        }
+    }
 
-            // Move controller: shown while a group is grabbed. It is the
-            // ONLY focusable element during a grab (the rows drop their
-            // press overlays via `reorderActive`), so d-pad up/down has no
-            // focus target to move to and reliably fires `.onMoveCommand`.
-            if let grabbed = grabbedGroup {
-                TVMoveController(
-                    groupName: grabbed,
-                    onMove: { moveGrabbed($0) },
-                    onDrop: { grabbedGroup = nil },
-                    onCancel: { grabbedGroup = nil }
-                )
-            }
+    private var instructionText: String {
+        guard reorderEnabled else {
+            return "Toggle groups on or off to show or hide them."
+        }
+        switch sortMode {
+        case .manual:
+            return "Hold Select on a group to pick it up, then press or swipe up and down to move it. Select or Menu to drop."
+        default:
+            return "Choose an order, or pick Manual to arrange groups yourself."
         }
     }
     #endif
@@ -457,7 +478,36 @@ struct ManageGroupsButton: View {
 }
 
 #if os(tvOS)
-// MARK: - tvOS Group Toggle Row
+// MARK: - tvOS Mode Chip (Default / A-Z / Manual)
+
+private struct TVModeChip: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 22, weight: .semibold))
+                .padding(.horizontal, 22)
+                .padding(.vertical, 10)
+                .background(
+                    Capsule().fill(
+                        selected ? Color.accentPrimary.opacity(0.9)
+                            : (isFocused ? Color.accentPrimary.opacity(0.30) : Color.elevatedBackground))
+                )
+                .foregroundColor(selected || isFocused ? .white : .textSecondary)
+        }
+        .buttonStyle(TVNoRingButtonStyle())
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.05 : 1.0)
+        .animation(.easeInOut(duration: 0.12), value: isFocused)
+    }
+}
+
+// MARK: - tvOS Group Toggle Row (no reorder)
 
 /// A single row in the tvOS ManageGroups list. Uses the app's own
 /// focus-ring style (teal tinted card) instead of the system white highlight.
@@ -478,7 +528,6 @@ struct TVGroupToggleRow: View {
 
                 Spacer()
 
-                // State indicator — matches the filter-bar pill style
                 HStack(spacing: 6) {
                     Circle()
                         .fill(isOn ? Color.accentPrimary : Color.textTertiary)
@@ -506,42 +555,47 @@ struct TVGroupToggleRow: View {
     }
 }
 
-// MARK: - tvOS Reorderable Group Row
+// MARK: - tvOS Reorderable Group Row (Manual mode)
 
-/// Group row used when reordering is enabled. Mirrors `TVGroupToggleRow`'s
-/// look but uses the UIKit-backed `TVPressOverlay` for a reliable tvOS
-/// long-press (Select = toggle visibility, hold Select = grab for move).
-/// While any group is grabbed (`reorderActive`) it drops the overlay so it
-/// is no longer focusable, handing focus to the `TVMoveController`.
+/// Group row for Manual mode. Uses the UIKit-backed `TVPressOverlay` for a
+/// reliable long-press grab; once grabbed it captures d-pad up/down in
+/// place (via `interceptsDirectional`) and is the only focusable row
+/// (`anyGrabbed` drops focus from the others), so focus stays pinned and
+/// the list stays fully visible behind it. The grabbed row shows "Moving"
+/// with a bright border instead of a centered modal.
 private struct TVReorderableGroupRow: View {
     let group: String
     let isOn: Bool
     let isGrabbed: Bool
-    let reorderActive: Bool
+    let anyGrabbed: Bool
     let onToggle: () -> Void
     let onGrab: () -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
+    let onFinish: () -> Void
 
     @State private var isFocused = false
 
-    var body: some View {
-        if reorderActive {
-            rowBody
-        } else {
-            rowBody.overlay(
-                TVPressOverlay(
-                    minimumPressDuration: 0.5,
-                    isFocused: $isFocused,
-                    onTap: onToggle,
-                    onLongPress: onGrab
-                )
-            )
-        }
-    }
-
     private var highlighted: Bool { isFocused || isGrabbed }
 
+    var body: some View {
+        rowBody.overlay(
+            TVPressOverlay(
+                minimumPressDuration: 0.45,
+                isFocused: $isFocused,
+                canFocus: !anyGrabbed || isGrabbed,
+                interceptsDirectional: isGrabbed,
+                onTap: onToggle,
+                onLongPress: onGrab,
+                onMoveUp: onMoveUp,
+                onMoveDown: onMoveDown,
+                onMenu: onFinish
+            )
+        )
+    }
+
     private var rowBody: some View {
-        HStack {
+        HStack(spacing: 14) {
             if isGrabbed {
                 Image(systemName: "arrow.up.arrow.down")
                     .font(.system(size: 24, weight: .bold))
@@ -555,15 +609,21 @@ private struct TVReorderableGroupRow: View {
 
             Spacer()
 
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(isOn ? Color.accentPrimary : Color.textTertiary)
-                    .frame(width: 8, height: 8)
-                Text(isOn ? "On" : "Off")
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundColor(isOn
-                        ? (highlighted ? .white : .accentPrimary)
-                        : (highlighted ? .white : .textTertiary))
+            if isGrabbed {
+                Text("Moving")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(.white)
+            } else {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(isOn ? Color.accentPrimary : Color.textTertiary)
+                        .frame(width: 8, height: 8)
+                    Text(isOn ? "On" : "Off")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundColor(isOn
+                            ? (isFocused ? .white : .accentPrimary)
+                            : (isFocused ? .white : .textTertiary))
+                }
             }
         }
         .padding(.horizontal, 48)
@@ -571,87 +631,17 @@ private struct TVReorderableGroupRow: View {
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(isGrabbed
-                    ? Color.accentPrimary.opacity(0.55)
+                    ? Color.accentPrimary.opacity(0.30)
                     : (isFocused ? Color.accentPrimary.opacity(0.18) : Color.clear))
+                .padding(.horizontal, 32)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isGrabbed ? Color.accentPrimary : Color.clear, lineWidth: 4)
                 .padding(.horizontal, 32)
         )
         .animation(.easeInOut(duration: 0.12), value: isFocused)
         .animation(.easeInOut(duration: 0.12), value: isGrabbed)
-    }
-}
-
-// MARK: - tvOS Action Chip (Sort / Reset)
-
-private struct TVActionChip: View {
-    let title: String
-    let systemImage: String
-    let action: () -> Void
-
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(.system(size: 22, weight: .semibold))
-                .padding(.horizontal, 24)
-                .padding(.vertical, 14)
-                .background(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(isFocused ? Color.accentPrimary.opacity(0.30) : Color.elevatedBackground)
-                )
-                .foregroundColor(isFocused ? .white : .accentPrimary)
-        }
-        .buttonStyle(TVNoRingButtonStyle())
-        .focused($isFocused)
-        .scaleEffect(isFocused ? 1.05 : 1.0)
-        .animation(.easeInOut(duration: 0.12), value: isFocused)
-    }
-}
-
-// MARK: - tvOS Move Controller
-
-/// Modal-ish overlay shown while a group is grabbed. The single focusable
-/// Button captures Select (drop) and Menu (cancel); `.onMoveCommand`
-/// captures d-pad up/down to reposition the grabbed group live in the list
-/// behind it.
-private struct TVMoveController: View {
-    let groupName: String
-    let onMove: (MoveCommandDirection) -> Void
-    let onDrop: () -> Void
-    let onCancel: () -> Void
-
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.55).ignoresSafeArea()
-
-            Button(action: onDrop) {
-                VStack(spacing: 14) {
-                    Image(systemName: "arrow.up.arrow.down.circle.fill")
-                        .font(.system(size: 56))
-                    Text("Moving \(groupName)")
-                        .font(.system(size: 30, weight: .bold))
-                    Text("Swipe up or down to reposition. Press to drop. Menu to cancel.")
-                        .font(.system(size: 22))
-                        .foregroundColor(.textSecondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 640)
-                }
-                .foregroundColor(.white)
-                .padding(48)
-                .background(
-                    RoundedRectangle(cornerRadius: 24, style: .continuous)
-                        .fill(Color.elevatedBackground)
-                )
-                .scaleEffect(isFocused ? 1.03 : 1.0)
-            }
-            .buttonStyle(TVNoRingButtonStyle())
-            .focused($isFocused)
-            .onMoveCommand { direction in onMove(direction) }
-            .onExitCommand { onCancel() }
-        }
-        .onAppear { isFocused = true }
     }
 }
 #endif

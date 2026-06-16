@@ -4,19 +4,20 @@ import UIKit
 
 // MARK: - tvOS tap + long-press detector (UIKit-backed overlay)
 
-/// UIKit-backed tap + long-press gesture for tvOS.
+/// UIKit-backed tap + long-press gesture for tvOS, with optional
+/// directional capture for in-place reordering.
 ///
 /// Why UIKit: every SwiftUI long-press API on tvOS either fires on press
 /// RELEASE (not at `minimumDuration`) or is marked explicitly unavailable.
 /// We verified the following signatures all fail or fire-on-release on
 /// tvOS 18:
-/// - `.onLongPressGesture(minimumDuration:perform:)` — fires on release
-/// - `LongPressGesture.onEnded` (same underlying gesture) — fires on release
+/// - `.onLongPressGesture(minimumDuration:perform:)` - fires on release
+/// - `LongPressGesture.onEnded` (same underlying gesture) - fires on release
 /// - `.onLongPressGesture(minimumDuration:maximumDistance:pressing:perform:)`
-///   — unavailable
+///   - unavailable
 /// - `.onLongPressGesture(minimumDuration:maximumDistance:perform:onPressingChanged:)`
-///   — unavailable
-/// - `.highPriorityGesture(LongPressGesture(...))` — does not change the
+///   - unavailable
+/// - `.highPriorityGesture(LongPressGesture(...))` - does not change the
 ///   release-fires behavior
 ///
 /// Overlay design: the SwiftUI content renders normally and owns its own
@@ -26,6 +27,16 @@ import UIKit
 /// fires `onLongPress` at exactly `minimumPressDuration` while the press
 /// is still held; `pressesEnded` fires `onTap` if the timer hadn't fired
 /// yet. Focus state is reported back into SwiftUI via `onFocusChange`.
+///
+/// Reorder support (additive, opt-in via `interceptsDirectional`): when a
+/// row is "grabbed" for moving, set `interceptsDirectional = true` on its
+/// overlay and `canFocus = false` on every OTHER row's overlay. The
+/// grabbed overlay then (a) stays the only focusable element, so focus
+/// physically cannot leave it, and (b) consumes d-pad up/down (both
+/// directional clicks via `pressesBegan` and trackpad swipes via gesture
+/// recognizers), forwarding them to `onMoveUp` / `onMoveDown` instead of
+/// letting the focus engine navigate. Menu while grabbed calls `onMenu`
+/// (drop) and is consumed so it does not also dismiss the host sheet.
 ///
 /// Usage:
 /// ```swift
@@ -40,30 +51,49 @@ import UIKit
 ///         )
 ///     )
 /// ```
-/// Do NOT also add `.focusable()` / `.focused()` to `cellContent` — the
+/// Do NOT also add `.focusable()` / `.focused()` to `cellContent` - the
 /// overlay UIView is the focusable element. Having both would create two
 /// competing focus targets.
 struct TVPressOverlay: UIViewRepresentable {
     let minimumPressDuration: TimeInterval
     let isFocused: Binding<Bool>?
+    /// Whether this overlay may take focus. Set false on non-grabbed rows
+    /// during a reorder so focus locks onto the grabbed row.
+    let canFocus: Bool
+    /// When true, d-pad up/down/left/right are captured by this overlay
+    /// (up/down -> move callbacks, left/right consumed) and Menu drops.
+    let interceptsDirectional: Bool
     let onTap: () -> Void
     let onLongPress: () -> Void
+    let onMoveUp: () -> Void
+    let onMoveDown: () -> Void
+    let onMenu: () -> Void
 
     init(minimumPressDuration: TimeInterval = 0.35,
          isFocused: Binding<Bool>? = nil,
+         canFocus: Bool = true,
+         interceptsDirectional: Bool = false,
          onTap: @escaping () -> Void = {},
-         onLongPress: @escaping () -> Void) {
+         onLongPress: @escaping () -> Void,
+         onMoveUp: @escaping () -> Void = {},
+         onMoveDown: @escaping () -> Void = {},
+         onMenu: @escaping () -> Void = {}) {
         self.minimumPressDuration = minimumPressDuration
         self.isFocused = isFocused
+        self.canFocus = canFocus
+        self.interceptsDirectional = interceptsDirectional
         self.onTap = onTap
         self.onLongPress = onLongPress
+        self.onMoveUp = onMoveUp
+        self.onMoveDown = onMoveDown
+        self.onMenu = onMenu
     }
 
     func makeUIView(context: Context) -> UIView {
         // Outer container is a plain UIView (not focusable). The
         // focusable PressCatcherView lives inside it. Without this
         // wrapping, UIKit's focus engine inserts its `_UIReplicantView`
-        // focus-animation sibling as a subview of our direct parent —
+        // focus-animation sibling as a subview of our direct parent -
         // which is SwiftUI's `UIHostingController.view`, triggering the
         // console warning "Adding '_UIReplicantView' as a subview of
         // UIHostingController.view is not supported". Owning our own
@@ -72,16 +102,9 @@ struct TVPressOverlay: UIViewRepresentable {
         let container = UIView()
         container.backgroundColor = .clear
 
-        let catcher = PressCatcherView()
+        let catcher = PressCatcherView(frame: .zero)
         catcher.backgroundColor = .clear
-        catcher.onTap = onTap
-        catcher.onLongPress = onLongPress
-        catcher.minimumPressDuration = minimumPressDuration
-        catcher.onFocusChange = { focused in
-            DispatchQueue.main.async {
-                isFocused?.wrappedValue = focused
-            }
-        }
+        apply(to: catcher)
         catcher.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(catcher)
         NSLayoutConstraint.activate([
@@ -95,9 +118,18 @@ struct TVPressOverlay: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         guard let catcher = uiView.subviews.compactMap({ $0 as? PressCatcherView }).first else { return }
+        apply(to: catcher)
+    }
+
+    private func apply(to catcher: PressCatcherView) {
         catcher.onTap = onTap
         catcher.onLongPress = onLongPress
+        catcher.onMoveUp = onMoveUp
+        catcher.onMoveDown = onMoveDown
+        catcher.onMenu = onMenu
         catcher.minimumPressDuration = minimumPressDuration
+        catcher.canFocus = canFocus
+        catcher.interceptsDirectional = interceptsDirectional
         catcher.onFocusChange = { focused in
             DispatchQueue.main.async {
                 isFocused?.wrappedValue = focused
@@ -107,17 +139,54 @@ struct TVPressOverlay: UIViewRepresentable {
 }
 
 /// Focusable UIView that detects Siri-Remote select presses and dispatches
-/// tap vs long-press callbacks based on how long the press was held.
+/// tap vs long-press callbacks based on how long the press was held, plus
+/// optional directional capture for reordering.
 final class PressCatcherView: UIView {
     var onTap: () -> Void = {}
     var onLongPress: () -> Void = {}
+    var onMoveUp: () -> Void = {}
+    var onMoveDown: () -> Void = {}
+    var onMenu: () -> Void = {}
     var onFocusChange: ((Bool) -> Void)?
     var minimumPressDuration: TimeInterval = 0.35
 
+    /// Whether this view may take focus. Toggled to false on non-grabbed
+    /// rows during a reorder so focus locks onto the grabbed row.
+    var canFocus: Bool = true
+
+    /// When true, capture d-pad directions for in-place reordering.
+    var interceptsDirectional: Bool = false {
+        didSet {
+            guard interceptsDirectional != oldValue else { return }
+            upSwipe?.isEnabled = interceptsDirectional
+            downSwipe?.isEnabled = interceptsDirectional
+        }
+    }
+
     private var longPressTimer: Timer?
     private var longPressFired = false
+    private weak var upSwipe: UISwipeGestureRecognizer?
+    private weak var downSwipe: UISwipeGestureRecognizer?
 
-    override var canBecomeFocused: Bool { true }
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        let up = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeUp))
+        up.direction = .up
+        up.isEnabled = false
+        addGestureRecognizer(up)
+        upSwipe = up
+
+        let down = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeDown))
+        down.direction = .down
+        down.isEnabled = false
+        addGestureRecognizer(down)
+        downSwipe = down
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var canBecomeFocused: Bool { canFocus }
 
     override func didUpdateFocus(in context: UIFocusUpdateContext,
                                   with coordinator: UIFocusAnimationCoordinator) {
@@ -125,7 +194,25 @@ final class PressCatcherView: UIView {
         onFocusChange?(context.nextFocusedView == self)
     }
 
+    @objc private func handleSwipeUp() { if interceptsDirectional { onMoveUp() } }
+    @objc private func handleSwipeDown() { if interceptsDirectional { onMoveDown() } }
+
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        // Reorder mode: capture directional clicks + Menu, consume them so
+        // focus stays pinned to this (the grabbed) row and Menu does not
+        // bubble up to dismiss the host sheet.
+        if interceptsDirectional {
+            for press in presses {
+                switch press.type {
+                case .upArrow:    onMoveUp();   return
+                case .downArrow:  onMoveDown(); return
+                case .leftArrow, .rightArrow: return   // lock to this column
+                case .menu:       onMenu();     return
+                default: break
+                }
+            }
+        }
+
         guard presses.contains(where: { $0.type == .select }) else {
             super.pressesBegan(presses, with: event)
             return
@@ -150,6 +237,12 @@ final class PressCatcherView: UIView {
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        // When grabbed, a directional/Menu press was already consumed in
+        // pressesBegan; only Select reaches the tap path here.
+        if interceptsDirectional,
+           presses.contains(where: { $0.type == .upArrow || $0.type == .downArrow || $0.type == .leftArrow || $0.type == .rightArrow || $0.type == .menu }) {
+            return
+        }
         guard presses.contains(where: { $0.type == .select }) else {
             super.pressesEnded(presses, with: event)
             return

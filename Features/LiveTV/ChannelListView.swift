@@ -193,11 +193,14 @@ struct ChannelListView: View {
     #endif
 
     private let hiddenGroupsKey = "hiddenChannelGroups"
-    /// User-defined Live TV group display order (Manage Groups → reorder).
-    /// Stored as a native [String] array so it preserves order and syncs
-    /// via the order-preserving iCloud path. Empty == server default.
+    /// User-defined Live TV group display order + sort mode (Manage Groups).
+    /// Order is a native [String] array (order-preserving iCloud path);
+    /// mode is "default" / "alphabetical" / "manual". Empty order + default
+    /// mode == server order.
     private let channelGroupOrderKey = "channelGroupOrder"
+    private var channelGroupSortModeKey: String { channelGroupOrderKey + ".sortMode" }
     @State private var groupOrder: [String] = []
+    @State private var groupSortMode: String = GroupSortMode.default.rawValue
 
     var body: some View {
         NavigationStack {
@@ -386,6 +389,7 @@ struct ChannelListView: View {
                     }
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
+                    groupSortMode = GroupOrderStore.loadMode(forKey: channelGroupSortModeKey)
                     filterChannels()
                     favoritesStore.register(items: channelStore.channels)
                     #if os(tvOS)
@@ -416,7 +420,8 @@ struct ChannelListView: View {
                             filterChannels()
                         },
                         orderStorageKey: channelGroupOrderKey,
-                        onOrderChanged: { newOrder in
+                        onConfigChanged: { mode, newOrder in
+                            groupSortMode = mode
                             groupOrder = newOrder
                             filterChannels()
                         }
@@ -442,6 +447,7 @@ struct ChannelListView: View {
                 .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidApplyPreferences)) { _ in
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
+                    groupSortMode = GroupOrderStore.loadMode(forKey: channelGroupSortModeKey)
                     if selectedGroup != "All" && hiddenGroups.contains(selectedGroup) {
                         selectedGroup = "All"
                     }
@@ -1021,7 +1027,7 @@ struct ChannelListView: View {
     // MARK: - Filtering
 
     private var visibleGroups: [String] {
-        GroupOrderStore.apply(channelStore.orderedGroups, order: groupOrder)
+        GroupOrderStore.displayOrder(channelStore.orderedGroups, mode: groupSortMode, order: groupOrder)
             .filter { !hiddenGroups.contains($0) }
     }
 

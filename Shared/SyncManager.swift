@@ -82,7 +82,10 @@ final class SyncManager: ObservableObject {
         "categoryColor.documentary", "categoryColor.drama",
         "categoryColor.comedy",      "categoryColor.reality",
         "categoryColor.educational", "categoryColor.scifi",
-        "categoryColor.music"
+        "categoryColor.music",
+        // Live TV group sort mode (default/alphabetical/manual). The
+        // manual order itself rides syncStringArrayKeys (order-preserving).
+        "channelGroupOrder.sortMode"
     ]
     /// Data-typed keys (Codable JSON blobs). `customCategoryColors.v1`
     /// holds the user-defined `[CustomCategory]` list from
