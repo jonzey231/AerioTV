@@ -619,7 +619,7 @@ struct ProgramInfoView: View {
 // resolved bucket's display name. Users asked for "how did my feed
 // tag this program" — showing the bucket name would hide the raw
 // data behind Aerio's canonicalisation.
-private struct CategoryPill: View {
+struct CategoryPill: View {
     let rawToken: String
     /// When true, skip palette resolution entirely and render as a
     /// neutral grey pill. Used for the "Metadata" section in
@@ -680,7 +680,7 @@ private struct CategoryPill: View {
 //
 // Uses the Swift 5.7+ `Layout` protocol. iOS 16+ / tvOS 16+ / macOS
 // 13+ — well under Aerio's deployment floor.
-private struct CategoryPillsLayout: Layout {
+struct CategoryPillsLayout: Layout {
     var spacing: CGFloat = 6
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
