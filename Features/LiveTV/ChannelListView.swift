@@ -193,6 +193,11 @@ struct ChannelListView: View {
     #endif
 
     private let hiddenGroupsKey = "hiddenChannelGroups"
+    /// User-defined Live TV group display order (Manage Groups → reorder).
+    /// Stored as a native [String] array so it preserves order and syncs
+    /// via the order-preserving iCloud path. Empty == server default.
+    private let channelGroupOrderKey = "channelGroupOrder"
+    @State private var groupOrder: [String] = []
 
     var body: some View {
         NavigationStack {
@@ -380,6 +385,7 @@ struct ChannelListView: View {
                         if selectedGroup != "All" { selectedGroup = "All" }
                     }
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
+                    groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
                     filterChannels()
                     favoritesStore.register(items: channelStore.channels)
                     #if os(tvOS)
@@ -408,6 +414,11 @@ struct ChannelListView: View {
                                 selectedGroup = "All"
                             }
                             filterChannels()
+                        },
+                        orderStorageKey: channelGroupOrderKey,
+                        onOrderChanged: { newOrder in
+                            groupOrder = newOrder
+                            filterChannels()
                         }
                     )
                 }
@@ -430,6 +441,7 @@ struct ChannelListView: View {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidApplyPreferences)) { _ in
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
+                    groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
                     if selectedGroup != "All" && hiddenGroups.contains(selectedGroup) {
                         selectedGroup = "All"
                     }
@@ -1009,7 +1021,8 @@ struct ChannelListView: View {
     // MARK: - Filtering
 
     private var visibleGroups: [String] {
-        channelStore.orderedGroups.filter { !hiddenGroups.contains($0) }
+        GroupOrderStore.apply(channelStore.orderedGroups, order: groupOrder)
+            .filter { !hiddenGroups.contains($0) }
     }
 
     private func filterChannels() {

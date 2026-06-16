@@ -114,7 +114,7 @@ final class SyncManager: ObservableObject {
     // Favorites tab. Both are plain `[String]` so they share the same
     // sync path. Kept distinct so older clients that only know about
     // the membership key keep working.
-    private let syncStringArrayKeys  = ["favoriteChannelIDs", "favoriteOrder"]
+    private let syncStringArrayKeys  = ["favoriteChannelIDs", "favoriteOrder", "channelGroupOrder"]
     private let syncHiddenGroupKeys = [
         "hiddenChannelGroups", "hiddenMovieGroups", "hiddenSeriesGroups"
     ]
