@@ -56,7 +56,7 @@ final class PlayerSession: ObservableObject {
     ///   channel so CarPlay / lockscreen keep working — the bridge
     ///   gating in Phase 1d routes remote commands to whichever tile
     ///   holds audio.
-    func enterMultiview(seeding current: ChannelDisplayItem?, server: ServerConnection?) {
+    func enterMultiview(seeding current: ChannelDisplayItem?, server: ServerConnection?, isLive: Bool = true) {
         // Refcount float. SwiftUI's swap from the old single
         // `PlayerView` to `MultiviewContainerView` happens across one
         // (or more) render passes; the ordering of unmount-old vs
@@ -77,6 +77,15 @@ final class PlayerSession: ObservableObject {
         }
 
         if let current {
+            // Lock the session engine ONCE, from the seed channel, before
+            // any tile renders. Every tile inherits MultiviewStore.
+            // sessionEngine for the session's life (no per-tile decision).
+            let resolved = PlayerSession.resolveEngine(item: current, server: server, isLive: isLive)
+            MultiviewStore.shared.lockEngine(resolved)
+            DebugLogger.shared.log(
+                "[Engine] session locked to \(resolved.engine) (seed=\(current.name))",
+                category: "Playback", level: .info
+            )
             MultiviewStore.shared.seedInitialTile(current, server: server)
         }
         mode = .multiview
@@ -326,99 +335,70 @@ final class PlayerSession: ObservableObject {
         return true
     }
 
+    /// The ONE place the engine is decided. Classifies the URL, consults
+    /// the per-host HLS-capability cache, and reads the Developer toggles
+    /// exactly once, returning a single locked verdict. Both off (the
+    /// default) -> always `.mpv`, so toggle-off users never touch any
+    /// AVPlayer path. Non-live -> always `.mpv` (VOD/DVR stay mpv).
+    /// Synchronous on the main actor: it resolves HLS capability inline (a
+    /// short, time-boxed probe on the first play of a not-yet-cached
+    /// server, instant on a cache hit), so even the FIRST play of an
+    /// HLS-capable server routes direct-HLS instead of remux-then-mpv.
+    static func resolveEngine(item: ChannelDisplayItem,
+                              server: ServerConnection?,
+                              isLive: Bool) -> ResolvedEngine {
+        guard isLive, let url = item.streamURL ?? item.streamURLs.first else {
+            let fallback = item.streamURL ?? item.streamURLs.first ?? URL(string: "about:blank")!
+            return ResolvedEngine(engine: .mpv, routeURL: fallback, headers: [:])
+        }
+        var headers: [String: String] = [:]
+        if let ua = server?.effectiveUserAgent, !ua.isEmpty {
+            headers["User-Agent"] = ua
+        }
+        if let server, server.type == .dispatcharrAPI {
+            let key = server.effectiveApiKey
+            if !key.isEmpty {
+                headers["X-API-Key"] = key
+                headers["Authorization"] = "ApiKey \(key)"
+            }
+        }
+        let format = classifyStreamURL(url)
+        var routeURL = url
+        var effectiveFormat = format
+        if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS {
+            // Resolve capability BEFORE the engine locks so the first play
+            // of an HLS-capable server already upgrades to ?output_format=hls
+            // and routes direct-HLS (which decodes HEVC and outputs HDR)
+            // instead of the remux path that dead-ends on HEVC.
+            if HLSCapabilityStore.shared.probeBlocking(streamURL: url, headers: headers) {
+                routeURL = appendingHLSOutputFormat(url)
+                effectiveFormat = .hls
+            }
+        }
+        if PlaybackFeatureFlags.avPlayerForHLS, effectiveFormat == .hls {
+            return ResolvedEngine(engine: .avPlayerDirectHLS, routeURL: routeURL, headers: headers)
+        }
+        if PlaybackFeatureFlags.avPlayerRemuxTS, format == .mpegTS {
+            return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
+        }
+        return ResolvedEngine(engine: .mpv, routeURL: url, headers: headers)
+    }
+
     @discardableResult
     func begin(item: ChannelDisplayItem,
                server: ServerConnection?,
                isLive: Bool = true,
                bypassNativeRouter: Bool = false) -> Bool {
-        // TEST engine router (the UHF pattern: route, do not swap engines).
-        // Genuine HLS URLs (.m3u8, e.g. Xtream /live/.../id.m3u8) go to the
-        // native AVPlayer engine when the Developer toggle is on, which
-        // buys true HDR/Dolby Vision output, Atmos passthrough, and native
-        // AirPlay on those channels. With the second toggle, raw MPEG-TS
-        // streams route through the on-device TS-to-HLS remuxer first
-        // (H.264 + AC-3/AAC only; the remuxer's codec gate falls back to
-        // mpv otherwise). Everything else stays on the mpv pipeline.
-        // `bypassNativeRouter` is the remux-failure fallback path.
-        if !bypassNativeRouter, isLive,
-           let url = item.streamURL ?? item.streamURLs.first {
-            let format = classifyStreamURL(url)
-            var headers: [String: String] = [:]
-            if let ua = server?.effectiveUserAgent, !ua.isEmpty {
-                headers["User-Agent"] = ua
-            }
-            if let server, server.type == .dispatcharrAPI {
-                let key = server.effectiveApiKey
-                if !key.isEmpty {
-                    headers["X-API-Key"] = key
-                    headers["Authorization"] = "ApiKey \(key)"
-                }
-            }
-
-            // Server-side HLS upgrade: Dispatcharr servers running the
-            // native HLS output answer ?output_format=hls with a 302 to
-            // a real playlist. The probe result is cached per host; on a
-            // capable server the raw-TS URL upgrades to an HLS request
-            // and rides the DIRECT AVPlayer path, no on-device remuxer.
-            // The probe primes lazily off whatever channel plays first,
-            // so the first-ever play on a server takes the fallback
-            // path below and later plays route directly.
-            var routeURL = url
-            var effectiveFormat = format
-            if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS {
-                HLSCapabilityStore.shared.probeIfNeeded(streamURL: url, headers: headers)
-                if HLSCapabilityStore.shared.isCapable(url) {
-                    routeURL = appendingHLSOutputFormat(url)
-                    effectiveFormat = .hls
-                    DebugLogger.shared.log(
-                        "[AVP-HLS] router: server-side HLS upgrade for channel id=\(item.id)",
-                        category: "Playback", level: .info
-                    )
-                }
-            }
-
-            let routesNative = (PlaybackFeatureFlags.avPlayerForHLS && effectiveFormat == .hls)
-                || (PlaybackFeatureFlags.avPlayerRemuxTS && format == .mpegTS)
-            // Device-log bug: selecting a channel from the guide while
-            // the MINI was up presented the native cover OVER the
-            // still-playing mini, two concurrent streams (and two audio
-            // paths, the mini is the unmuted audio tile). The container
-            // swap logic lives below this router, so tear the session
-            // down here before presenting the cover.
-            if routesNative, mode != .idle {
-                DebugLogger.shared.log(
-                    "[AVP-HLS] router: stopping active session (mode=\(mode)) before native present",
-                    category: "Playback", level: .info
-                )
-                stop()
-            }
-            if PlaybackFeatureFlags.avPlayerForHLS, effectiveFormat == .hls {
-                nativeHLSUseRemux = false
-                nativeHLSHeaders = headers
-                nativeHLSOverrideURL = routeURL != url ? routeURL : nil
-                nativeHLSUserAgent = server?.effectiveUserAgent
-                nativeHLSServer = server
-                nativeHLSItem = item
-                DebugLogger.shared.log(
-                    "[AVP-HLS] engine router -> AVPlayer (direct HLS\(routeURL != url ? ", server-side" : "")) for channel id=\(item.id)",
-                    category: "Playback", level: .info
-                )
-                return true
-            }
-            if PlaybackFeatureFlags.avPlayerRemuxTS, format == .mpegTS {
-                nativeHLSUseRemux = true
-                nativeHLSHeaders = headers
-                nativeHLSOverrideURL = nil
-                nativeHLSUserAgent = server?.effectiveUserAgent
-                nativeHLSServer = server
-                nativeHLSItem = item
-                DebugLogger.shared.log(
-                    "[AVP-HLS] engine router -> AVPlayer (TS remux) for channel id=\(item.id)",
-                    category: "Playback", level: .info
-                )
-                return true
-            }
-        }
+        // Engine routing now happens INSIDE the container: every session
+        // (single or multiview, AVPlayer or mpv) enters MultiviewStore,
+        // and `enterMultiview` calls `resolveEngine` to lock the engine
+        // once. A single AVPlayer-eligible channel is a one-tile AVPlayer
+        // session in the same container as mpv, so single<->multiview is
+        // one smooth path (no separate cover, no engine-switch restart).
+        // `bypassNativeRouter` is retained for source compatibility with
+        // the legacy fallback callers but no longer routes anywhere; the
+        // session engine is the single source of truth.
+        _ = bypassNativeRouter
 
         let store = MultiviewStore.shared
 
@@ -465,7 +445,7 @@ final class PlayerSession: ObservableObject {
             // so CarPlay / MPRemoteCommandCenter / lockscreen get
             // populated, and flips `mode = .multiview`. Phase C will
             // change this to `mode = .playing` + a direct seed call.
-            enterMultiview(seeding: item, server: server)
+            enterMultiview(seeding: item, server: server, isLive: isLive)
             // `NowPlayingManager.startPlaying` isn't called by
             // `enterMultiview` — the original single-mode path did it
             // on the PlayerView mount. Callers under the feature flag
@@ -541,6 +521,23 @@ final class PlayerSession: ObservableObject {
 /// "playback.unified")` from LLDB or the Developer Settings screen.
 ///
 /// Naming matches the plan: key `"playback.unified"`.
+/// The playback engine for a whole session. Decided ONCE when a session
+/// begins and held for its life (single stream and every multiview tile),
+/// so a session is all-AVPlayer or all-mpv, never mixed.
+enum PlaybackEngine: Equatable {
+    case mpv
+    case avPlayerDirectHLS   // genuine HLS, or a server-side-upgraded TS URL, played direct
+    case avPlayerRemuxTS     // raw TS through the on-device remuxer
+    var isAVPlayer: Bool { self != .mpv }
+}
+
+/// The resolver's verdict: the locked engine plus the URL/headers to use.
+struct ResolvedEngine {
+    let engine: PlaybackEngine
+    let routeURL: URL    // upgraded URL for direct-HLS, else the original
+    let headers: [String: String]
+}
+
 enum PlaybackFeatureFlags {
     /// TEST (branch test/avplayer-hls-engine): when true, live streams
     /// whose URL is genuine HLS (.m3u8) play through the native AVPlayer

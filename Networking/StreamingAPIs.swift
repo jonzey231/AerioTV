@@ -111,6 +111,69 @@ final class HLSCapabilityStore: NSObject {
         session.finishTasksAndInvalidate()
     }
 
+    /// Thread-safe one-shot holder for the blocking probe's status. The
+    /// semaphore orders the background write before the main-thread read;
+    /// the lock guards against a late/duplicate delegate callback.
+    private final class ProbeStatusBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func store(_ v: Int) { lock.lock(); value = v; lock.unlock() }
+        func load() -> Int { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    /// Synchronous, time-boxed capability probe for the engine-lock path.
+    /// `resolveEngine` locks the session engine synchronously (it runs
+    /// inside `enterMultiview`), so it must know HLS capability BEFORE it
+    /// returns. The async `probeIfNeeded` cannot do that: it fires the
+    /// probe and reads the cache the same instant, so the first play of an
+    /// HLS-capable server is decided from an empty cache and routes to the
+    /// remux path (which dead-ends on HEVC) instead of direct AVPlayer.
+    /// This variant returns instantly when the host is already cached or
+    /// was probed this session (no network, no block); otherwise it runs
+    /// the SAME probe and waits up to `timeout` for the answer. The
+    /// semaphore is signalled from the URLSession's OWN background delegate
+    /// queue, never `@MainActor`, so a blocked main thread cannot starve
+    /// the signal: no deadlock. A timeout leaves the host un-probed so a
+    /// later play retries, and never blocks beyond the cap. On a LAN server
+    /// the 302 returns in milliseconds.
+    func probeBlocking(streamURL: URL, headers: [String: String], timeout: TimeInterval = 1.5) -> Bool {
+        guard let key = hostKey(streamURL) else { return false }
+        if probedThisSession.contains(key) || capable.contains(key) {
+            return capable.contains(key)
+        }
+        guard !inFlight.contains(key) else { return capable.contains(key) }
+        inFlight.insert(key)
+
+        let probeURL = appendingHLSOutputFormat(streamURL)
+        var request = URLRequest(url: probeURL)
+        request.timeoutInterval = timeout
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+
+        let sem = DispatchSemaphore(value: 0)
+        let box = ProbeStatusBox()
+        let delegate = ProbeDelegate { status in
+            box.store(status)
+            sem.signal()
+        }
+        let session = URLSession(configuration: .ephemeral,
+                                 delegate: delegate,
+                                 delegateQueue: nil)
+        session.dataTask(with: request).resume()
+        session.finishTasksAndInvalidate()
+
+        let waited = sem.wait(timeout: .now() + timeout)
+        let status = box.load()
+        if waited == .success, status != 0 {
+            record(status: status, for: key)   // real answer: cache + persist
+        } else {
+            // Timed out / no answer: do not poison the session; allow a
+            // later play to retry. A late delegate callback only touches
+            // the local box/semaphore, never the store's state.
+            inFlight.remove(key)
+        }
+        return capable.contains(key)
+    }
+
     private func record(status: Int, for key: String) {
         inFlight.remove(key)
         probedThisSession.insert(key)

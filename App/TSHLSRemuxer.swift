@@ -540,10 +540,16 @@ struct AVPlayerMultiviewTile: View {
     let headers: [String: String]
     let shouldPause: Bool
     let channelName: String
+    /// The per-tile store the container chrome binds to (scrubber,
+    /// play-pause, track pickers, stream info). AVPlayerProgressDriver
+    /// feeds it from this tile's AVPlayer, so the unified chrome works
+    /// identically over an AVPlayer tile as over an mpv tile.
+    let progressStore: PlayerProgressStore
     /// Parent flips this tile back to the mpv engine.
     let onEngineFallback: (String) -> Void
 
     @State private var player: AVPlayer?
+    @State private var driver: AVPlayerProgressDriver?
     @State private var remuxer: TSHLSRemuxer?
     @State private var statusText: String?
     /// AUDIO CORRECTNESS: the remuxer's onReady closure captures this
@@ -559,6 +565,10 @@ struct AVPlayerMultiviewTile: View {
     /// KVO on the item's presentationSize; registers the tile's real
     /// video aspect with the store so the focus border hugs the video.
     @State private var sizeObservation: AnyCancellable?
+    /// Fires a few seconds after start: if the item became ready but never
+    /// reported a video size, the stream is audio-only to AVFoundation
+    /// (e.g. HEVC carried in MPEG-TS HLS) and we fall the tile back to mpv.
+    @State private var noVideoCheck: DispatchWorkItem?
 
     var body: some View {
         ZStack {
@@ -654,6 +664,14 @@ struct AVPlayerMultiviewTile: View {
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
         if !shouldPause { avPlayer.play() }
         player = avPlayer
+        // Bridge this tile's AVPlayer into the chrome's store. When this
+        // tile is the audio tile, the container chrome's scrubber /
+        // play-pause / track pickers / stream info now drive it (they
+        // were inert over an AVPlayer tile before). Tear any prior one
+        // down first (channel swap reuses the tile).
+        driver?.teardown()
+        driver = AVPlayerProgressDriver(
+            player: avPlayer, store: progressStore, isLive: true, applyGravity: { _ in })
         // Report the real video aspect once decode knows it, so the
         // focus border can trace the picture instead of the tile frame.
         sizeObservation = playerItem.publisher(for: \.presentationSize)
@@ -662,9 +680,34 @@ struct AVPlayerMultiviewTile: View {
                 guard size.width > 0, size.height > 0 else { return }
                 MultiviewStore.shared.registerVideoAspect(size.width / size.height, for: tileID)
             }
+
+        // No-renderable-video fallback. Some server HLS is "playable" to
+        // AVFoundation (audio decodes, the item reaches readyToPlay) but
+        // carries NO renderable video track, so it plays audio over a black
+        // screen forever, e.g. HEVC carried in MPEG-TS, which AVFoundation
+        // will not decode (HEVC over HLS needs fMP4/CMAF). mpv CAN decode it,
+        // so when a ready item never reports a video size, hand the tile back
+        // to the mpv engine instead of stranding the viewer on a black tile.
+        // The work self-guards on the live item state at fire time; stop()
+        // cancels it on teardown / channel swap.
+        let checkedItem = playerItem
+        let fallback = onEngineFallback
+        let name = channelName
+        let work = DispatchWorkItem {
+            guard checkedItem.status == .readyToPlay,
+                  checkedItem.presentationSize.width == 0,
+                  checkedItem.presentationSize.height == 0 else { return }
+            debugLog("[AVP-MV] audio-only, no renderable video channel=\(name); falling back to mpv tile")
+            fallback("no renderable video")
+        }
+        noVideoCheck?.cancel()
+        noVideoCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
     }
 
     private func stop() {
+        driver?.teardown()
+        driver = nil
         player?.pause()
         player = nil
         remuxer?.stop()
@@ -672,6 +715,8 @@ struct AVPlayerMultiviewTile: View {
         statusText = nil
         readyLocalURL = nil
         sizeObservation = nil
+        noVideoCheck?.cancel()
+        noVideoCheck = nil
         MultiviewStore.shared.unregisterVideoAspect(for: tileID)
     }
 }
@@ -680,6 +725,11 @@ struct AVPlayerMultiviewTile: View {
 /// SwiftUI like any other tile content.
 struct AVPlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
+    /// Sizing mode for the video inside the layer. Defaults to the
+    /// previous hardcoded letterbox so existing call sites (multiview
+    /// tiles) are unaffected; the unified player chrome drives it from
+    /// the shared aspect setting.
+    var videoGravity: AVLayerVideoGravity = .resizeAspect
 
     final class HostView: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
@@ -689,13 +739,16 @@ struct AVPlayerLayerView: UIViewRepresentable {
     func makeUIView(context: Context) -> HostView {
         let view = HostView()
         view.playerLayer.player = player
-        view.playerLayer.videoGravity = .resizeAspect
+        view.playerLayer.videoGravity = videoGravity
         return view
     }
 
     func updateUIView(_ view: HostView, context: Context) {
         if view.playerLayer.player !== player {
             view.playerLayer.player = player
+        }
+        if view.playerLayer.videoGravity != videoGravity {
+            view.playerLayer.videoGravity = videoGravity
         }
     }
 }

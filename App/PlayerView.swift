@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import AVKit
+import Combine
 import MediaPlayer
 #if os(iOS)
 import UIKit
@@ -3261,6 +3262,690 @@ struct TVRemoteInputView: UIViewRepresentable {
 
 // MARK: - Native AVPlayer engine (TEST, branch test/avplayer-hls-engine)
 
+/// Bridges an `AVPlayer`'s playback state into the shared
+/// `PlayerProgressStore`, the SAME store the mpv path populates, so ONE
+/// custom control overlay can drive both engines. This is the AVPlayer
+/// analog of `MPVPlayerView.Coordinator`'s store wiring: KVO + a
+/// periodic time observer push state IN (currentMs / durationMs /
+/// isPaused / tracks / streamInfo), and the store's command closures
+/// route user intents OUT (play-pause / seek / speed / track select /
+/// aspect). With this in place the overlay's scrubber, play-pause, and
+/// track pickers work identically regardless of which engine is live.
+@MainActor
+final class AVPlayerProgressDriver {
+    /// Held strongly: the driver's lifetime is strictly inside the
+    /// player's (the screen owns both and tears the driver down first),
+    /// and every capture back to the driver is weak, so there is no
+    /// cycle. Strong ownership lets teardown/deinit always reach a live
+    /// player to remove the time observer (AVFoundation requires removal
+    /// before the player deallocates).
+    private let player: AVPlayer
+    private let store: PlayerProgressStore
+    private let isLive: Bool
+    /// Host-provided sink for aspect changes (the overlay has no handle
+    /// to the AVPlayerLayer; the host owns it and applies the gravity).
+    private let applyGravity: (AVLayerVideoGravity) -> Void
+
+    private var timeObserver: Any?
+    private var observations: [NSKeyValueObservation] = []
+    /// Item-scoped KVO, replaced wholesale on every currentItem swap so
+    /// a discarded item's late callbacks can't clobber the store and the
+    /// observation set can't grow per swap.
+    private var itemObservations: [NSKeyValueObservation] = []
+    private var aspectCancellable: AnyCancellable?
+    // AVPlayer selects tracks by AVMediaSelectionOption, not integer id.
+    // We hand the overlay synthetic 1-based ids (0 = auto/off, matching
+    // mpv's aid/sid convention) and map them back here.
+    private var audibleGroup: AVMediaSelectionGroup?
+    private var legibleGroup: AVMediaSelectionGroup?
+    private var audioOptionByID: [Int: AVMediaSelectionOption] = [:]
+    private var subtitleOptionByID: [Int: AVMediaSelectionOption] = [:]
+
+    // MARK: instrumentation ([AVP-STREAM]/[AVP-PERF], mpv-path parity)
+    /// Wall clock at construction; time-to-first-frame is measured from
+    /// here so it includes asset load, not just decode.
+    private let launchStart = CACurrentMediaTime()
+    private var firstPlayLogged = false
+    private var streamSummaryLogged = false
+    /// NotificationCenter tokens scoped to the current item, torn down
+    /// on swap alongside itemObservations.
+    private var itemNotificationTokens: [NSObjectProtocol] = []
+    private var perfTimer: Timer?
+    /// Access-log deltas: last-seen counters so each [AVP-PERF] line
+    /// reports stalls/dropped-frames since the previous line, like the
+    /// mpv vo_drops/dec_drops deltas.
+    private var lastStallCount = 0
+    private var lastDroppedFrames = 0
+
+    init(player: AVPlayer,
+         store: PlayerProgressStore,
+         isLive: Bool,
+         applyGravity: @escaping (AVLayerVideoGravity) -> Void) {
+        self.player = player
+        self.store = store
+        self.isLive = isLive
+        self.applyGravity = applyGravity
+        wireCommands(player)
+        observe(player)
+        // Apply the persisted aspect immediately and on every change.
+        applyGravity(store.aspectMode.videoGravity)
+        aspectCancellable = store.$aspectMode
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] mode in self?.applyGravity(mode.videoGravity) }
+    }
+
+    /// State IN: observers that mirror AVPlayer -> store.
+    private func observe(_ player: AVPlayer) {
+        // Position. 0.5s cadence matches the overlay's needs without
+        // churning the main thread; live streams keep durationMs == 0,
+        // which the overlay already reads as "live" (no scrubber).
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: interval, queue: .main) { [weak self] time in
+            guard let self, !self.isLive else { return }
+            let secs = time.seconds
+            if secs.isFinite { self.store.currentMs = Int32(secs * 1000) }
+        }
+
+        // Play/pause. timeControlStatus is authoritative (covers the
+        // buffering-vs-paused distinction); treat waiting-to-play as not
+        // paused so the spinner logic matches the mpv path.
+        observations.append(player.observe(\.timeControlStatus, options: [.initial, .new]) {
+            [weak self] p, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.store.isPaused = (p.timeControlStatus == .paused)
+                switch p.timeControlStatus {
+                case .playing:
+                    if !self.firstPlayLogged {
+                        self.firstPlayLogged = true
+                        let ms = Int((CACurrentMediaTime() - self.launchStart) * 1000)
+                        debugLog("[AVP-STREAM] first frame playing in \(ms)ms from screen open")
+                    }
+                case .waitingToPlayAtSpecifiedRate:
+                    // The cause of any mid-stream "skip"/rebuffer. Reason
+                    // codes: evaluatingBufferingRate, toMinimizeStalls,
+                    // noItemToPlay.
+                    let reason = p.reasonForWaitingToPlay?.rawValue ?? "unknown"
+                    debugLog("[AVP-STREAM] waiting to play (reason=\(reason))")
+                case .paused:
+                    break
+                @unknown default:
+                    break
+                }
+            }
+        })
+
+        observeCurrentItem(player.currentItem)
+        // Re-observe if the item is swapped (remux ready, fallback, etc.).
+        observations.append(player.observe(\.currentItem, options: [.new]) {
+            [weak self] _, change in
+            Task { @MainActor in
+                if let item = change.newValue ?? nil { self?.observeCurrentItem(item) }
+            }
+        })
+    }
+
+    private func observeCurrentItem(_ item: AVPlayerItem?) {
+        // Drop the previous item's observers first, so a swapped-out
+        // item's late .status/.duration/.presentationSize callbacks can
+        // never re-run populateTracks/populateStreamInfo with stale data.
+        itemObservations.forEach { $0.invalidate() }
+        itemObservations.removeAll()
+        guard let item else { return }
+        // Duration (VOD / seekable). Live HLS reports indefinite, which
+        // we leave as durationMs == 0.
+        itemObservations.append(item.observe(\.duration, options: [.initial, .new]) {
+            [weak self] i, _ in
+            let d = i.duration
+            guard let self, !self.isLive, d.isNumeric, d.seconds.isFinite, d.seconds > 0 else { return }
+            Task { @MainActor in self.store.durationMs = Int32(d.seconds * 1000) }
+        })
+        // Ready -> populate tracks + stream info once metadata exists.
+        itemObservations.append(item.observe(\.status, options: [.initial, .new]) {
+            [weak self] i, _ in
+            guard let self, i.status == .readyToPlay else { return }
+            Task { @MainActor in
+                self.populateTracks(item: i)
+                self.populateStreamInfo(item: i)
+            }
+        })
+        // Presentation size -> stream info resolution.
+        itemObservations.append(item.observe(\.presentationSize, options: [.initial, .new]) {
+            [weak self] i, _ in
+            let size = i.presentationSize
+            guard let self, size.width > 0 else { return }
+            Task { @MainActor in
+                self.store.streamInfo.width = Int(size.width)
+                self.store.streamInfo.height = Int(size.height)
+            }
+        })
+        instrument(item: item)
+    }
+
+    // MARK: - Stream instrumentation ([AVP-STREAM]/[AVP-PERF])
+
+    /// AVPlayer telemetry parity with the mpv `[MPV-STREAM]/[MPV-PERF]`
+    /// block: startup time, stalls, dropped frames, and observed
+    /// bitrate, sourced from the item's access/error logs and the stall
+    /// notification. Scoped to `item`; replaced on every swap.
+    private func instrument(item: AVPlayerItem) {
+        itemNotificationTokens.forEach { NotificationCenter.default.removeObserver($0) }
+        itemNotificationTokens.removeAll()
+        let nc = NotificationCenter.default
+
+        // Access log: AVFoundation's own measurement of startup time and
+        // stalls. The first event's startupTime is the authoritative
+        // "time to first frame" answer for the slow-load report.
+        itemNotificationTokens.append(nc.addObserver(
+            forName: AVPlayerItem.newAccessLogEntryNotification,
+            object: item, queue: .main) { [weak self] _ in
+            guard let self, let event = item.accessLog()?.events.last else { return }
+            if !self.streamSummaryLogged, event.startupTime > 0 {
+                self.streamSummaryLogged = true
+                let bitrate = event.indicatedBitrate > 0 ? event.indicatedBitrate : event.observedBitrate
+                debugLog(String(format:
+                    "[AVP-STREAM] startup=%.0fms indicatedBitrate=%.0fkbps observed=%.0fkbps uri-changes=%d",
+                    event.startupTime * 1000,
+                    event.indicatedBitrate / 1000,
+                    event.observedBitrate / 1000,
+                    event.numberOfStalls))
+            }
+        })
+
+        // Error log: surfaces transient HLS fetch errors (segment 404,
+        // bitrate switch failures) that show as skips but never throw.
+        itemNotificationTokens.append(nc.addObserver(
+            forName: AVPlayerItem.newErrorLogEntryNotification,
+            object: item, queue: .main) { _ in
+            guard let event = item.errorLog()?.events.last else { return }
+            debugLog("[AVP-STREAM] error log: status=\(event.errorStatusCode) domain=\(event.errorDomain) \(event.errorComment ?? "")")
+        })
+
+        // Hard stall: the player ran dry. This is the "skipping in the
+        // feed" smoking gun if it fires after first frame.
+        itemNotificationTokens.append(nc.addObserver(
+            forName: AVPlayerItem.playbackStalledNotification,
+            object: item, queue: .main) { [weak self] _ in
+            let ms = Int((CACurrentMediaTime() - (self?.launchStart ?? 0)) * 1000)
+            debugLog("[AVP-STREAM] STALL at +\(ms)ms (buffer ran empty)")
+        })
+
+        // Periodic summary (15s), mpv [STREAM-SUMMARY] cadence: report
+        // stall + dropped-frame deltas and the current observed bitrate.
+        perfTimer?.invalidate()
+        perfTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.logPerfSummary() }
+        }
+    }
+
+    private func logPerfSummary() {
+        guard let event = player.currentItem?.accessLog()?.events.last else { return }
+        let stalls = event.numberOfStalls
+        let dropped = event.numberOfDroppedVideoFrames
+        let dStalls = max(0, stalls - lastStallCount)
+        let dDropped = max(0, dropped - lastDroppedFrames)
+        lastStallCount = stalls
+        lastDroppedFrames = dropped
+        debugLog(String(format:
+            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d",
+            dStalls, stalls, dDropped, dropped,
+            event.observedBitrate / 1000,
+            event.numberOfMediaRequests))
+    }
+
+    /// Map AVMediaSelectionGroups to the overlay's integer-id track lists.
+    /// Uses the synchronous accessor (deprecated since iOS 16 but still
+    /// functional) deliberately: the async `loadMediaSelectionGroup`
+    /// sends the non-Sendable `AVAsset` off the main actor, which Swift 6
+    /// strict concurrency rejects. At `status == .readyToPlay` the groups
+    /// are loaded, so the sync read returns them without blocking.
+    private func populateTracks(item: AVPlayerItem) {
+        let asset = item.asset
+        let audioGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .audible)
+        let subGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .legible)
+
+        audibleGroup = audioGroup
+        legibleGroup = subGroup
+        audioOptionByID.removeAll()
+        subtitleOptionByID.removeAll()
+
+        var audioTracks: [MediaTrack] = []
+        if let audioGroup {
+            for (index, option) in audioGroup.options.enumerated() {
+                let id = index + 1
+                audioOptionByID[id] = option
+                audioTracks.append(MediaTrack(
+                    id: id, type: "audio",
+                    title: option.displayName,
+                    lang: option.extendedLanguageTag ?? "",
+                    codec: "", isDefault: index == 0))
+            }
+        }
+        var subtitleTracks: [MediaTrack] = []
+        if let subGroup {
+            for (index, option) in subGroup.options.enumerated() {
+                let id = index + 1
+                subtitleOptionByID[id] = option
+                subtitleTracks.append(MediaTrack(
+                    id: id, type: "sub",
+                    title: option.displayName,
+                    lang: option.extendedLanguageTag ?? "",
+                    codec: "", isDefault: false))
+            }
+        }
+
+        store.audioTracks = audioTracks
+        store.subtitleTracks = subtitleTracks
+        // Reflect the current selection back as the highlighted id.
+        let selection = item.currentMediaSelection
+        if let audioGroup, let selected = selection.selectedMediaOption(in: audioGroup),
+           let id = audioOptionByID.first(where: { $0.value == selected })?.key {
+            store.currentAudioTrackID = id
+        }
+        if let subGroup, let selected = selection.selectedMediaOption(in: subGroup),
+           let id = subtitleOptionByID.first(where: { $0.value == selected })?.key {
+            store.currentSubtitleTrackID = id
+        } else {
+            store.currentSubtitleTrackID = 0
+        }
+    }
+
+    private func populateStreamInfo(item: AVPlayerItem) {
+        let size = item.presentationSize
+        if size.width > 0 {
+            store.streamInfo.width = Int(size.width)
+            store.streamInfo.height = Int(size.height)
+        }
+        // Observed bitrate from the access log, when available.
+        if let event = item.accessLog()?.events.last {
+            if event.observedBitrate > 0 {
+                store.streamInfo.bitrate = event.observedBitrate / 8
+            }
+            if event.indicatedBitrate > 0, store.streamInfo.videoCodec.isEmpty {
+                store.streamInfo.videoCodec = "HLS"
+            }
+        }
+    }
+
+    /// Intents OUT: store command closures -> AVPlayer.
+    private func wireCommands(_ player: AVPlayer) {
+        store.togglePauseAction = { [weak player] in
+            guard let player else { return }
+            if player.timeControlStatus == .paused { player.play() } else { player.pause() }
+        }
+        store.seekAction = { [weak player] ms in
+            guard let player else { return }
+            let target = CMTime(value: CMTimeValue(ms), timescale: 1000)
+            player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        store.replayFromStartAction = { [weak player] in
+            guard let player else { return }
+            player.seek(to: .zero)
+            player.play()
+        }
+        store.setSpeedAction = { [weak self, weak player] rate in
+            guard let player else { return }
+            player.rate = Float(rate)
+            self?.store.speed = rate
+        }
+        store.setAudioTrackAction = { [weak self] id in
+            guard let self, let group = self.audibleGroup else { return }
+            self.player.currentItem?.select(self.audioOptionByID[id], in: group)
+            self.store.currentAudioTrackID = id
+        }
+        store.setSubtitleTrackAction = { [weak self] id in
+            guard let self, let group = self.legibleGroup else { return }
+            // id 0 = off (mpv sid 0 parity).
+            self.player.currentItem?.select(id == 0 ? nil : self.subtitleOptionByID[id], in: group)
+            self.store.currentSubtitleTrackID = id
+        }
+    }
+
+    func teardown() {
+        if let timeObserver { player.removeTimeObserver(timeObserver) }
+        timeObserver = nil
+        observations.forEach { $0.invalidate() }
+        observations.removeAll()
+        itemObservations.forEach { $0.invalidate() }
+        itemObservations.removeAll()
+        itemNotificationTokens.forEach { NotificationCenter.default.removeObserver($0) }
+        itemNotificationTokens.removeAll()
+        perfTimer?.invalidate()
+        perfTimer = nil
+        aspectCancellable?.cancel()
+        aspectCancellable = nil
+        // Drop the closures so a torn-down driver can't drive a dead player.
+        store.togglePauseAction = nil
+        store.seekAction = nil
+        store.replayFromStartAction = nil
+        store.setSpeedAction = nil
+        store.setAudioTrackAction = nil
+        store.setSubtitleTrackAction = nil
+    }
+    // No deinit safety net: a @MainActor class's nonisolated deinit
+    // cannot legally touch the non-Sendable timeObserver. It is
+    // unnecessary anyway, the driver holds `player` strongly (so the
+    // player outlives the observer), the screen always calls teardown()
+    // in onDisappear before releasing the driver, and the late-remux
+    // path that could once create an orphan driver is now closed by
+    // niling the remuxer callbacks in onDisappear.
+}
+
+#if os(iOS)
+/// The unified liquid-glass player chrome: ONE SwiftUI container, ONE
+/// visibility Bool, so every control fades in and out together as a
+/// single unit (the UHF-style smoothness the old mounted-capsule
+/// approach could only approximate). Engine-agnostic by construction:
+/// everything it renders reads `PlayerProgressStore` and everything it
+/// does goes through the store's command closures or host-provided
+/// intents, so the SAME view can sit over an AVPlayerLayer today and
+/// the mpv render surface when that host migrates.
+struct UnifiedPlayerChrome: View {
+    @ObservedObject var progress: PlayerProgressStore
+    let title: String
+    let programName: String?
+    let programStart: Date?
+    let programEnd: Date?
+    let canRecord: Bool
+    /// Shows the engine escape hatch row when non-nil (AVPlayer host).
+    let onSwitchToMPV: (() -> Void)?
+    let onClose: () -> Void
+    let onRecord: () -> Void
+    let onAddStream: () -> Void
+    let onStreamInfo: () -> Void
+    let onSleepTimer: (TimeInterval?) -> Void
+    /// Bump the host's auto-hide timer (called on every interaction).
+    let onInteract: () -> Void
+    /// Cancel/restart the auto-hide while the overflow menu is open, so
+    /// the chrome can't fade out (and unmount the menu's anchor) under
+    /// the user's finger. Same hooks the mpv overflow menu uses.
+    var onMenuOpen: (() -> Void)? = nil
+    var onMenuClose: (() -> Void)? = nil
+
+    /// Ticks the live progress band once a minute.
+    @State private var bandNow = Date()
+    private let bandTimer = Timer.publish(every: 60, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        ZStack {
+            // Top scrim + bar
+            VStack(spacing: 0) {
+                HStack(alignment: .center, spacing: 12) {
+                    glassCircle("xmark") {
+                        onInteract()
+                        onClose()
+                    }
+                    .accessibilityLabel("Close player")
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(title)
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .shadow(color: .black.opacity(0.6), radius: 4)
+                        if let programName, !programName.isEmpty {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(programName)
+                                    .lineLimit(1)
+                                if let programStart, let programEnd {
+                                    HStack(spacing: 3) {
+                                        Text(programStart, style: .time)
+                                        Text("-")
+                                        Text(programEnd, style: .time)
+                                    }
+                                } else if let programEnd {
+                                    HStack(spacing: 3) {
+                                        Text("ends")
+                                        Text(programEnd, style: .time)
+                                    }
+                                }
+                            }
+                            .font(.system(size: 12, weight: .regular))
+                            .foregroundColor(.white.opacity(0.72))
+                            .shadow(color: .black.opacity(0.5), radius: 3)
+                        }
+                    }
+
+                    Spacer()
+
+                    HStack(spacing: 10) {
+                        if canRecord {
+                            glassCircle("record.circle", tint: .red) {
+                                onInteract()
+                                onRecord()
+                            }
+                            .accessibilityLabel("Record current program")
+                        }
+                        glassCircle("plus") {
+                            onInteract()
+                            onAddStream()
+                        }
+                        .accessibilityLabel("Add stream")
+                        overflowMenu
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+                .padding(.bottom, 18)
+                .background(
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.65), Color.clear],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .ignoresSafeArea(edges: .top)
+                )
+
+                Spacer()
+
+                liveProgressBand
+            }
+
+            centerPlayPause
+        }
+        .environment(\.colorScheme, .dark)
+        .onReceive(bandTimer) { bandNow = $0 }
+    }
+
+    // MARK: pieces
+
+    /// 52pt frosted circle, the app's liquid-glass button vocabulary
+    /// (material blur over a dark underlay so it reads on bright video).
+    private func glassCircle(_ icon: String, tint: Color = .white,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundColor(tint)
+                .frame(width: 52, height: 52)
+                .background(.ultraThinMaterial, in: Circle())
+                .background(Color.black.opacity(0.35), in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var overflowMenu: some View {
+        Menu {
+            Button {
+                onInteract()
+                onStreamInfo()
+            } label: {
+                Label("Stream Info", systemImage: "info.circle")
+            }
+            if progress.audioTracks.count > 1 {
+                Menu {
+                    ForEach(progress.audioTracks) { track in
+                        Button {
+                            onInteract()
+                            progress.setAudioTrackAction?(track.id)
+                        } label: {
+                            if progress.currentAudioTrackID == track.id {
+                                Label(track.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(track.displayName)
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Audio", systemImage: "waveform")
+                }
+            }
+            if !progress.subtitleTracks.isEmpty {
+                Menu {
+                    Button {
+                        onInteract()
+                        progress.setSubtitleTrackAction?(0)
+                    } label: {
+                        if progress.currentSubtitleTrackID == 0 {
+                            Label("Off", systemImage: "checkmark")
+                        } else {
+                            Text("Off")
+                        }
+                    }
+                    ForEach(progress.subtitleTracks) { track in
+                        Button {
+                            onInteract()
+                            progress.setSubtitleTrackAction?(track.id)
+                        } label: {
+                            if progress.currentSubtitleTrackID == track.id {
+                                Label(track.displayName, systemImage: "checkmark")
+                            } else {
+                                Text(track.displayName)
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Subtitles", systemImage: "captions.bubble")
+                }
+            }
+            Menu {
+                ForEach(VideoAspectMode.allCases) { mode in
+                    Button {
+                        onInteract()
+                        progress.aspectMode = mode
+                        UserDefaults.standard.set(mode.rawValue, forKey: "player.aspectMode")
+                    } label: {
+                        if progress.aspectMode == mode {
+                            Label(mode.label, systemImage: "checkmark")
+                        } else {
+                            Label(mode.label, systemImage: mode.icon)
+                        }
+                    }
+                }
+            } label: {
+                Label("Aspect Ratio", systemImage: "aspectratio")
+            }
+            Menu {
+                ForEach([30, 60, 90, 120], id: \.self) { minutes in
+                    Button("\(minutes) minutes") {
+                        onInteract()
+                        onSleepTimer(TimeInterval(minutes * 60))
+                    }
+                }
+                Button("Off", role: .destructive) {
+                    onInteract()
+                    onSleepTimer(nil)
+                }
+            } label: {
+                Label("Sleep Timer", systemImage: "moon.zzz")
+            }
+            Button {
+                onInteract()
+                AirPlayMenuTrigger.present()
+            } label: {
+                Label("AirPlay", systemImage: "airplay.video")
+            }
+            // Auto-hide hooks ride an always-present menu item: it
+            // appears when the popover opens and disappears when it
+            // closes, so onMenuOpen/onMenuClose bracket the menu's
+            // lifetime (same trick the mpv overflow menu uses).
+            .onAppear { onMenuOpen?() }
+            .onDisappear { onMenuClose?() }
+            if let onSwitchToMPV {
+                Button {
+                    onSwitchToMPV()
+                } label: {
+                    Label("Switch to MPV Player", systemImage: "arrow.triangle.2.circlepath")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 52, height: 52)
+                .background(.ultraThinMaterial, in: Circle())
+                .background(Color.black.opacity(0.35), in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+        }
+    }
+
+    private var centerPlayPause: some View {
+        Button {
+            onInteract()
+            progress.togglePauseAction?()
+        } label: {
+            Image(systemName: progress.isPaused ? "play.fill" : "pause.fill")
+                .font(.system(size: 30, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 76, height: 76)
+                .background(.ultraThinMaterial, in: Circle())
+                .background(Color.black.opacity(0.35), in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.5), radius: 10, y: 2)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(progress.isPaused ? "Play" : "Pause")
+    }
+
+    /// Live program band, mpv parity: program name + progress between
+    /// start/end + minutes remaining, over the bottom scrim.
+    @ViewBuilder
+    private var liveProgressBand: some View {
+        if let programStart, let programEnd, programEnd > programStart {
+            let total = programEnd.timeIntervalSince(programStart)
+            let done = min(max(bandNow.timeIntervalSince(programStart), 0), total)
+            let remaining = max(programEnd.timeIntervalSince(bandNow), 0)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    if let programName, !programName.isEmpty {
+                        Text(programName)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Text("\(Int(remaining / 60)) min remaining")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white.opacity(0.75))
+                }
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.25))
+                        Capsule()
+                            .fill(ThemeManager.shared.accent)
+                            .frame(width: geo.size.width * (total > 0 ? done / total : 0))
+                    }
+                }
+                .frame(height: 4)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 24)
+            .background(
+                LinearGradient(
+                    colors: [Color.clear, Color.black.opacity(0.6)],
+                    startPoint: .top, endPoint: .bottom
+                )
+                .ignoresSafeArea(edges: .bottom)
+            )
+        }
+    }
+}
+#endif
+
 /// Full-screen native AVPlayer playback for genuine HLS streams, presented
 /// when the Developer "AVPlayer for HLS Streams" toggle routes a .m3u8 URL
 /// here instead of the mpv pipeline (see PlayerSession.begin). Uses
@@ -3290,12 +3975,45 @@ struct NativeHLSPlayerScreen: View {
     @State private var showRecordSheet = false
     @State private var showStreamInfo = false
     @State private var sleepWork: DispatchWorkItem?
+    #if os(iOS)
+    /// Unified chrome state: one store, one driver, one visibility Bool.
+    /// The store is the same observable type the mpv overlay reads, fed
+    /// by AVPlayerProgressDriver, so the chrome is engine-agnostic.
+    @StateObject private var progressStore = PlayerProgressStore()
+    @State private var driver: AVPlayerProgressDriver?
+    @State private var showControls = true
+    @State private var controlsHideTask: Task<Void, Never>?
+    @State private var selfTestTask: Task<Void, Never>?
+    #endif
 
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             if let player {
+                #if os(iOS)
+                // Bare video layer + the app's own liquid-glass chrome.
+                // Replaces AVPlayerViewController so BOTH engines can
+                // share one overlay that fades as a single unit (the
+                // mounted-capsule + display-link approach this replaces
+                // could only chase Apple's fade from outside).
+                AVPlayerLayerView(
+                    player: player,
+                    videoGravity: progressStore.aspectMode.videoGravity
+                )
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                // Toggle lives on the VIDEO layer, not the container: a
+                // tap on a chrome button hit-tests to the button (z-above
+                // the video) and never reaches here, so pressing Record /
+                // Add / overflow does not also flip the chrome. During
+                // remux warm-up the layer is absent (player == nil), so a
+                // stray tap can't pre-hide the chrome either.
+                // simultaneousGesture (not onTapGesture): the
+                // AVPlayerLayer's UIView claims raw touches at the UIKit
+                // layer and a plain tap loses that recognizer race.
+                .simultaneousGesture(TapGesture().onEnded { toggleControls() })
+                #else
                 NativeAVPlayerController(
                     player: player,
                     canRecord: item.streamURL != nil,
@@ -3307,7 +4025,31 @@ struct NativeHLSPlayerScreen: View {
                     trailingAccessory: trailingAccessoryView
                 )
                 .ignoresSafeArea()
+                #endif
             }
+
+            #if os(iOS)
+            if showControls, player != nil {
+                UnifiedPlayerChrome(
+                    progress: progressStore,
+                    title: item.name,
+                    programName: item.currentProgram,
+                    programStart: item.currentProgramStart,
+                    programEnd: item.currentProgramEnd,
+                    canRecord: item.streamURL != nil,
+                    onSwitchToMPV: { switchToMPV(openAddStream: false) },
+                    onClose: { dismiss() },
+                    onRecord: { showRecordSheet = true },
+                    onAddStream: { switchToMPV(openAddStream: true) },
+                    onStreamInfo: { showStreamInfo.toggle() },
+                    onSleepTimer: { setSleepTimer($0) },
+                    onInteract: { scheduleControlsHide() },
+                    onMenuOpen: { controlsHideTask?.cancel() },
+                    onMenuClose: { if !progressStore.isPaused { scheduleControlsHide() } }
+                )
+                .transition(.opacity)
+            }
+            #endif
             if let statusText {
                 VStack(spacing: 12) {
                     ProgressView()
@@ -3357,19 +4099,18 @@ struct NativeHLSPlayerScreen: View {
         // the mpv chrome cycle.
         .onExitCommand { minimizeToMini() }
         #else
-        // iOS: unlike tvOS, AVPlayerViewController draws its OWN top
-        // chrome here (close, PiP, AirPlay, volume), so the overlay
-        // carries ONLY the actions the native player lacks, styled in
-        // the native chrome's exact vocabulary: 50pt dark-material
-        // circles for lone actions, related actions grouped in ONE
-        // material capsule (mirroring the native PiP+AirPlay pill),
-        // aligned to the same screen margins one row below the native
-        // controls. Leading: minimize to the corner mini (the native X
-        // fully stops, the chevron keeps watching). Trailing capsule:
-        // Record, Add Stream, Options (Stream Info, Sleep Timer,
-        // Switch to MPV, Stop). Aspect is omitted: the native player
-        // already has pinch zoom.
+        // iOS: the bare-layer + UnifiedPlayerChrome path above. Pause
+        // pins the chrome visible; resume restarts the hide clock
+        // (mpv chrome parity).
         .statusBarHidden()
+        .onChange(of: progressStore.isPaused) { _, paused in
+            if paused {
+                controlsHideTask?.cancel()
+                withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+            } else {
+                scheduleControlsHide()
+            }
+        }
         #endif
         .onAppear {
             AudioSessionRefCount.increment(caller: "native-hls")
@@ -3413,8 +4154,22 @@ struct NativeHLSPlayerScreen: View {
             }
         }
         .onDisappear {
+            #if os(iOS)
+            driver?.teardown()
+            driver = nil
+            controlsHideTask?.cancel()
+            controlsHideTask = nil
+            selfTestTask?.cancel()
+            selfTestTask = nil
+            #endif
             player?.pause()
             player = nil
+            // Detach remuxer callbacks BEFORE stop(): stop() only enqueues
+            // teardown, so a main-queued late onReady/onError could still
+            // land after this view is gone and start an orphan player or
+            // trigger a fallback into a dismissed screen.
+            remuxer?.onReady = nil
+            remuxer?.onError = nil
             remuxer?.stop()
             remuxer = nil
             sleepWork?.cancel()
@@ -3427,6 +4182,35 @@ struct NativeHLSPlayerScreen: View {
             )
         }
     }
+
+    #if os(iOS)
+    private func toggleControls() {
+        withAnimation(.easeInOut(duration: 0.25)) { showControls.toggle() }
+        if showControls {
+            scheduleControlsHide()
+        } else {
+            // Cancel the pending auto-hide so it cannot fire a stale,
+            // duplicate hide after a manual one.
+            controlsHideTask?.cancel()
+        }
+        debugLog("[AVP-CHROME] controls \(showControls ? "VISIBLE (tap)" : "HIDDEN (tap)")")
+    }
+
+    /// One auto-hide clock for the whole chrome. Paused playback pins
+    /// the chrome visible (the onChange above cancels and re-shows).
+    private func scheduleControlsHide() {
+        controlsHideTask?.cancel()
+        guard !progressStore.isPaused else { return }
+        controlsHideTask = Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                withAnimation(.easeInOut(duration: 0.3)) { showControls = false }
+                debugLog("[AVP-CHROME] controls HIDDEN (auto)")
+            }
+        }
+    }
+    #endif
 
     private func startPlayer(with url: URL, headers: [String: String]) {
         var options: [String: Any] = [:]
@@ -3441,9 +4225,53 @@ struct NativeHLSPlayerScreen: View {
             title: item.name,
             subtitle: item.currentProgram
         )
+        // No startup tuning yet, deliberately. "Slow load" and "skipping
+        // in the first few seconds" pull in opposite directions
+        // (buffer headroom vs latency), so the next device run's
+        // [AVP-STREAM] startup= and stall numbers decide the lever
+        // (configuredTimeOffsetFromLive, preferredForwardBufferDuration,
+        // or automaticallyWaitsToMinimizeStalling) rather than a guess.
         let avPlayer = AVPlayer(playerItem: playerItem)
         avPlayer.play()
         player = avPlayer
+        #if os(iOS)
+        // Bridge AVPlayer state into the shared store the chrome reads.
+        // Gravity is applied declaratively (the layer view reads
+        // aspectMode each render), so the driver's gravity sink is a
+        // no-op here.
+        driver = AVPlayerProgressDriver(
+            player: avPlayer,
+            store: progressStore,
+            isLive: true,
+            applyGravity: { _ in }
+        )
+        scheduleControlsHide()
+        #if DEBUG
+        // -AerioChromeSelfTest: scripted chrome exercise for simulator
+        // verification when synthetic clicks are unavailable. Drives the
+        // exact same paths a finger would: the visibility toggle and the
+        // store's pause command (which must pin the chrome visible).
+        if ProcessInfo.processInfo.arguments.contains("-AerioChromeSelfTest") {
+            // Stored + throwing sleeps so onDisappear's cancel actually
+            // aborts the script; otherwise a mid-run dismissal would
+            // resurrect controlsHideTask after teardown nil'd it.
+            selfTestTask = Task { @MainActor in
+                do {
+                    try await Task.sleep(nanoseconds: 6_000_000_000)
+                    toggleControls()
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                    toggleControls()
+                    try await Task.sleep(nanoseconds: 3_000_000_000)
+                    debugLog("[AVP-CHROME] selftest: pausing")
+                    progressStore.togglePauseAction?()
+                    try await Task.sleep(nanoseconds: 4_000_000_000)
+                    debugLog("[AVP-CHROME] selftest: resuming")
+                    progressStore.togglePauseAction?()
+                } catch { /* cancelled on dismissal */ }
+            }
+        }
+        #endif
+        #endif
     }
 
     private static func nativeMetadata(title: String, subtitle: String?) -> [AVMetadataItem] {

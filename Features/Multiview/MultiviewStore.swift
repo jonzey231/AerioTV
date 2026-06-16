@@ -156,6 +156,50 @@ final class MultiviewStore: ObservableObject {
         tileEngines.removeValue(forKey: tileID)
     }
 
+    // MARK: - Session-locked engine
+    /// The engine for THIS session, resolved once at multiview entry and
+    /// inherited by every tile for the session's life. A single value
+    /// makes a mixed-engine grid unrepresentable: every tile reads this,
+    /// so an "AVPlayer session" can never silently go half-mpv. Defaults
+    /// to `.mpv` (the toggle-off behavior); cleared on exit so the next
+    /// session re-resolves and honors a freshly-toggled flag.
+    @Published private(set) var sessionEngine: PlaybackEngine = .mpv
+    /// The upgraded route URL for the seed tile when the lock is
+    /// direct-HLS (server-side TS->HLS upgrade); nil otherwise.
+    @Published private(set) var sessionRouteURL: URL?
+    /// The auth headers resolveEngine built for AVPlayer tiles. These use
+    /// the X-API-Key + `Authorization: ApiKey` shape the Dispatcharr HLS
+    /// endpoint requires, which differs from a server's configured
+    /// authHeaders mode (e.g. X-API-Key only). The mpv/TS endpoint
+    /// accepts the leaner headers, but the HLS playlist/segment endpoint
+    /// 404s without the Authorization header, so AVPlayer tiles must use
+    /// these, not tile.headers. Server-scoped, so they apply to every
+    /// tile in the session.
+    @Published private(set) var sessionHeaders: [String: String] = [:]
+
+    func lockEngine(_ resolved: ResolvedEngine) {
+        sessionEngine = resolved.engine
+        sessionRouteURL = resolved.engine == .avPlayerDirectHLS ? resolved.routeURL : nil
+        sessionHeaders = resolved.engine.isAVPlayer ? resolved.headers : [:]
+    }
+
+    func clearEngineLock() {
+        sessionEngine = .mpv
+        sessionRouteURL = nil
+        sessionHeaders = [:]
+    }
+
+    /// One-way downgrade: a runtime AVPlayer failure (codec gate, fatal
+    /// item error) pins the WHOLE session to mpv for the rest of its
+    /// life, so no tile or re-begin can flip back. Idempotent.
+    func downgradeToMPV() {
+        guard sessionEngine.isAVPlayer else { return }
+        sessionEngine = .mpv
+        sessionRouteURL = nil
+        DebugLogger.shared.log("[Engine] session downgraded to mpv (AVPlayer failure)",
+                               category: "Playback", level: .warning)
+    }
+
     /// TEST (branch test/avplayer-hls-engine): each tile's actual video
     /// aspect ratio (width/height), registered by the tile's video view
     /// when known. The focus border uses it to hug the VIDEO rect
@@ -456,12 +500,24 @@ final class MultiviewStore: ObservableObject {
             )
             return .needsWarning
         }
+        // Under a direct-HLS session lock, a raw-TS channel added to the
+        // grid must request the server-side HLS upgrade so it plays
+        // DIRECT on AVPlayer (the locked engine) instead of feeding raw
+        // TS to AVPlayer and tripping the one-way downgrade. Mirrors the
+        // seed tile's upgrade. Only fires for a capable host; otherwise
+        // the raw URL stands (and would downgrade, the honest edge case).
+        var tileURL = resolved.url
+        if sessionEngine == .avPlayerDirectHLS,
+           classifyStreamURL(resolved.url) == .mpegTS,
+           HLSCapabilityStore.shared.isCapable(resolved.url) {
+            tileURL = appendingHLSOutputFormat(resolved.url)
+        }
         // Commit. `resolved.url` + `resolved.headers` are
         // DELIBERATELY NOT LOGGED — they contain auth credentials.
         let tile = MultiviewTile(
             id: UUID().uuidString,
             item: item,
-            streamURL: resolved.url,
+            streamURL: tileURL,
             headers: resolved.headers,
             addedAt: Date()
         )
@@ -733,6 +789,10 @@ final class MultiviewStore: ObservableObject {
         // tile asynchronously, but this wipe runs now and covers
         // the window between mode flip and disappear.
         progressStoresByTileID = [:]
+        tileEngines = [:]
+        // Engine lock is per-session: clear it so the next session
+        // re-resolves (and honors a freshly-toggled Developer flag).
+        clearEngineLock()
         // Intentionally NOT resetting `warningLastShownAt` — it's
         // a 2h throttle across multiview sessions, not per-session.
     }
