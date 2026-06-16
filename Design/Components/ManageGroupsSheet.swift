@@ -498,10 +498,14 @@ private struct TVManageGroupsButtonStyle: ButtonStyle {
         let focused = isFocused
         return configuration.label
             .foregroundColor(focused ? .white : .accentPrimary)
-            .padding(16)
+            // Tighter padding so the circle matches the filter pills' height
+            // rather than overshooting it. strokeBorder keeps the focus ring
+            // inside the button footprint (plain .stroke straddles the edge
+            // and reads as oversized on a circle this small).
+            .padding(12)
             .background(Circle().fill(Color.elevatedBackground))
             .overlay(
-                Circle().stroke(focused ? Color.accentPrimary : Color.clear, lineWidth: 2)
+                Circle().strokeBorder(focused ? Color.accentPrimary : Color.clear, lineWidth: 2)
             )
             .scaleEffect(focused ? 1.05 : 1.0)
             .opacity(focused ? 1.0 : 0.85)
