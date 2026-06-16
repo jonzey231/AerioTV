@@ -1062,6 +1062,23 @@ struct ChannelListView: View {
         default: // "number"
             break // Channels arrive in number order from ChannelStore
         }
+        // Group ordering: when a non-default group order is chosen in
+        // Manage Groups (A-Z or Manual), reorder channels so they are
+        // grouped by that order. This is a STABLE re-sort, so the channel
+        // sort applied above (number / name / favorites) is preserved as
+        // the within-group order. Default group order leaves the global
+        // channel sort untouched (pre-existing behavior). Drives both the
+        // list and the guide, which both render `filteredChannels`.
+        if (GroupSortMode(rawValue: groupSortMode) ?? .default) != .default {
+            let ordered = GroupOrderStore.displayOrder(channelStore.orderedGroups, mode: groupSortMode, order: groupOrder)
+            let rank = Dictionary(ordered.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
+            result = result.enumerated().sorted { lhs, rhs in
+                let rl = rank[lhs.element.group] ?? Int.max
+                let rr = rank[rhs.element.group] ?? Int.max
+                if rl != rr { return rl < rr }
+                return lhs.offset < rhs.offset
+            }.map { $0.element }
+        }
         filteredChannels = result
         prefetchEPGForVisibleChannels(result)
     }
