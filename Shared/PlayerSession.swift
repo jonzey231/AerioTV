@@ -509,14 +509,33 @@ final class PlayerSession: ObservableObject {
     /// current one and we fail fast back to the caller's error overlay.
     @discardableResult
     func failoverRetryCurrent() async -> Bool {
+        // Re-probe in case the LAN/WAN verdict is stale, then re-tune. Used
+        // from the player's terminal-error path (a channel that could not
+        // start). The verdict-flip-while-playing case is handled separately
+        // and synchronously by `retuneCurrentToActiveURL` (driven by the
+        // probe), so this path mainly catches "tapped a channel, it failed".
+        _ = await TVLANProbe.shared.reprobeAndWait()
+        return retuneCurrentToActiveURL()
+    }
+
+    /// Re-point the currently-playing live channel to the active server's
+    /// current `effectiveBaseURL` (LAN or WAN), WITHOUT re-probing. Called
+    /// when the probe flips the LAN/WAN verdict while a stream is playing (the
+    /// leaving-home-WiFi case) so the stream continues on the reachable URL
+    /// instead of freezing on a now-dead one. Bails when nothing is playing,
+    /// the source is not Dispatcharr (XC/M3U stream URLs are absolute and
+    /// cannot be re-pointed), or the rebuilt URL is unchanged (which also
+    /// stops any re-tune loop, since a no-flip probe leaves the URL as-is).
+    @discardableResult
+    func retuneCurrentToActiveURL() -> Bool {
         guard let item = NowPlayingManager.shared.playingItem,
               let server = ChannelStore.shared.activeServer,
               server.type == .dispatcharrAPI,
               let uuid = item.uuid else { return false }
-        _ = await TVLANProbe.shared.reprobeAndWait()
         let newURLs = ChannelStore.dispatcharrStreamURLs(base: server.effectiveBaseURL, uuid: uuid)
         let current = item.streamURL ?? item.streamURLs.first
-        guard let primary = newURLs.first, primary != current else { return false }  // URL unchanged: nothing to fix
+        guard let primary = newURLs.first, primary != current else { return false }  // URL unchanged
+        debugLog("🔁 [Failover] re-tuning live stream to \(primary.scheme ?? "?")://\(primary.host ?? "?") after LAN/WAN flip")
         var rebuilt = item
         rebuilt.streamURL = primary
         rebuilt.streamURLs = newURLs

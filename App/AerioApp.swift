@@ -718,20 +718,39 @@ final class TVLANProbe: ObservableObject {
         isProbing = true
         defer { isProbing = false }
 
-        let maxAttempts = 3
-        let retryDelayNs: UInt64 = 500_000_000 // 500ms
+        // Fast path: if the device is not on WiFi or wired Ethernet, every LAN
+        // URL (a private-subnet address) is unreachable by definition. Skip the
+        // HEAD probes (which would otherwise eat their full timeout against a
+        // dead host) and record the external URL immediately, so a playing
+        // stream re-tunes to WAN the instant WiFi drops instead of after a
+        // multi-second probe. tvOS is always WiFi/wired, so this only ever
+        // trips on iPhone/iPad cellular.
+        let currentPath = pathMonitor.currentPath
+        if currentPath.status == .satisfied,
+           !currentPath.usesInterfaceType(.wifi),
+           !currentPath.usesInterfaceType(.wiredEthernet) {
+            record(detected: false, host: nil, latencyMs: nil)
+            print("📡 LAN probe: off-LAN interface (cellular) — external URL, no probe")
+            return
+        }
+
+        let maxAttempts = 2
+        let retryDelayNs: UInt64 = 300_000_000 // 300ms
         var allLogs: [String] = []
 
         for attempt in 1...maxAttempts {
             for baseURL in candidates {
                 guard !Task.isCancelled else { return }
-                // Per-candidate HEAD request with a 3s timeout.
-                // Bumped from 2s historically because some home
-                // routers respond slowly to the first connection to
-                // a host the ARP table doesn't know yet (observed
-                // on Ubiquiti setups when the TV just came off
-                // standby).
-                var request = URLRequest(url: baseURL, timeoutInterval: 3.0)
+                // Per-candidate HEAD request with a 2s timeout. Some
+                // home routers (notably Ubiquiti) respond slowly to the
+                // first connection to a host the ARP table doesn't know
+                // yet, so attempt 1 may eat the full timeout warming the
+                // path while the 2nd attempt 300ms later then connects
+                // fast. 2s x 2 attempts keeps a reachable-but-cold LAN
+                // within ~4s worst case while making the leaving-home
+                // LAN to WAN failover far snappier than the old 3s x 3
+                // (which took ~10s before falling back).
+                var request = URLRequest(url: baseURL, timeoutInterval: 2.0)
                 request.httpMethod = "HEAD"
                 let start = Date()
                 do {
@@ -784,6 +803,16 @@ final class TVLANProbe: ObservableObject {
         self.lastHost = host
         self.lastLatencyMs = latencyMs
         self.lastTimestamp = timestamp
+
+        // The verdict may have just flipped LAN<->WAN (e.g. the user left
+        // home WiFi for cellular). If a live stream is playing, re-point it to
+        // the now-correct URL right away rather than waiting for it to freeze
+        // and error out on a dead host. `retuneCurrentToActiveURL` is a no-op
+        // when nothing is playing or the URL is unchanged, so a no-flip probe
+        // costs nothing here.
+        if NowPlayingManager.shared.playingItem != nil {
+            PlayerSession.shared.retuneCurrentToActiveURL()
+        }
     }
 
     // MARK: NWPathMonitor
@@ -791,10 +820,11 @@ final class TVLANProbe: ObservableObject {
     private func startPathMonitor() {
         pathMonitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
-            // We only care about the "just came online" transition
-            // — `.satisfied` means the OS has a usable default
-            // route. Partial-connectivity and offline states would
-            // only waste a probe round-trip.
+            // Re-probe on every usable-route update (`.satisfied`),
+            // which fires on WiFi/cellular switches and other network
+            // changes, not just a cold "just came online" — that is how
+            // leaving home WiFi triggers the LAN to WAN re-tune. Skip
+            // offline / partial-connectivity states (nothing to reach).
             guard path.status == .satisfied else { return }
             Task { @MainActor in
                 self.pathDebounce?.cancel()
