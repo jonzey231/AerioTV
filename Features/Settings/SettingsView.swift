@@ -285,7 +285,7 @@ struct SettingsView: View {
                         #endif
                         NavigationLink(destination: NetworkSettingsView()) {
                             SettingsRow(icon: "network", iconColor: .accentSecondary,
-                                        title: "Network", subtitle: "Timeout, buffer, home WiFi & refresh")
+                                        title: "Network", subtitle: "Timeout, buffer & refresh")
                         }
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
@@ -952,7 +952,7 @@ struct SettingsView: View {
                         navPath.append("multiview")
                     }
                     TVSettingsNavButton(label: "Network", icon: "network",
-                                        iconColor: .accentSecondary, subtitle: "Timeout, buffer, home WiFi & refresh") {
+                                        iconColor: .accentSecondary, subtitle: "Timeout, buffer & refresh") {
                         navPath.append("network")
                     }
                 }
@@ -1433,12 +1433,9 @@ func tvSettingsCardBG(_ focused: Bool) -> some View {
 struct ServerListRow: View {
     let server: ServerConnection
     var onSetActive: (() -> Void)? = nil
-    #if os(iOS)
-    @ObservedObject private var networkMonitor = NetworkMonitor.shared
-    #endif
 
     private var hasLANConfigured: Bool {
-        server.type != .m3uPlaylist && !server.localURL.isEmpty && !server.homeSSIDs.isEmpty
+        server.type != .m3uPlaylist && !server.localURL.isEmpty
     }
 
     private var isOnLAN: Bool {
@@ -1635,27 +1632,20 @@ struct ServerDetailView: View {
     /// Data", clearing cache, and force-quitting repeatedly.
     @State private var showRefreshAllConfirmation = false
     @State private var isRefreshingAll = false
-    #if os(iOS)
-    @ObservedObject private var networkMonitor = NetworkMonitor.shared
-    @State private var ssidRefreshed = false
-    #endif
     /// Cross-platform LAN-probe observer. `TVLANProbe` is the
     /// (legacy-named) cross-platform reachability checker — see
-    /// `AerioApp.swift` for the v1.6.8 rationale. Observing the
-    /// singleton lets ServerDetailView surface the last probe
-    /// result on every platform so users on Ethernet / Mac Catalyst
-    /// (where SSID detection is broken) can still see WHY the app
-    /// thinks it's on LAN, plus drive the "Refresh LAN Detection"
-    /// button.
+    /// `AerioApp.swift` for the rationale. Observing the singleton
+    /// lets ServerDetailView surface the last probe result on every
+    /// platform so users can see WHY the app thinks it's on LAN, plus
+    /// drive the "Refresh LAN Detection" button. The probe is the sole
+    /// LAN signal — there is no SSID / location dependence.
     @ObservedObject private var tvLANProbe = TVLANProbe.shared
     @State private var lanRefreshAcked = false
 
     private var hasLANConfigured: Bool {
-        // v1.6.8: dropped the iOS-only `!homeSSIDs.isEmpty` guard.
-        // LAN now means "we have a localURL we can probe" on every
-        // platform — Ethernet users on iPad / Mac Catalyst have no
-        // SSID to configure but still want LAN routing when the
-        // probe succeeds.
+        // LAN means "we have a localURL we can probe" on every
+        // platform. The TVLANProbe reachability check is the only
+        // signal that decides LAN vs WAN.
         return server.type != .m3uPlaylist && !server.localURL.isEmpty
     }
 
@@ -1698,95 +1688,16 @@ struct ServerDetailView: View {
 
                         infoRow("Active URL", value: server.effectiveBaseURL, isMonospaced: true)
 
-                        // Detected SSID diagnostic row
-                        #if os(iOS)
-                        HStack {
-                            Text("Detected SSID")
-                                .font(.bodyMedium)
-                                .foregroundColor(.textSecondary)
-                            Spacer()
-                            if let ssid = networkMonitor.currentSSID {
-                                Text(ssid)
-                                    .font(.monoSmall)
-                                    .foregroundColor(.textPrimary)
-                            } else {
-                                Text("Not detected")
-                                    .font(.labelSmall)
-                                    .foregroundColor(.statusWarning)
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                        #endif
-
-                        // Show all configured SSIDs, highlighting the matched one
-                        ForEach(server.homeSSIDs, id: \.self) { ssid in
-                            HStack {
-                                Text(ssid)
-                                    .font(.monoSmall)
-                                    .foregroundColor(.textPrimary)
-                                Spacer()
-                                if server.activeHomeSSID == ssid {
-                                    Label("Connected", systemImage: "checkmark.circle.fill")
-                                        .font(.labelSmall)
-                                        .foregroundColor(.statusOnline)
-                                } else {
-                                    Text("Not connected")
-                                        .font(.labelSmall)
-                                        .foregroundColor(.textTertiary)
-                                }
-                            }
-                            .listRowBackground(Color.cardBackground)
-                        }
-
-                        // Manual SSID refresh
-                        #if os(iOS)
-                        Button {
-                            ssidRefreshed = false
-                            NetworkMonitor.shared.refresh(force: true)
-                        } label: {
-                            HStack(spacing: 8) {
-                                if networkMonitor.isRefreshing {
-                                    ProgressView().tint(.accentPrimary).scaleEffect(0.8)
-                                } else {
-                                    Image(systemName: ssidRefreshed ? "checkmark.circle.fill" : "wifi.circle")
-                                        .foregroundColor(ssidRefreshed ? .statusOnline : .accentPrimary)
-                                }
-                                Text(networkMonitor.isRefreshing ? "Detecting…"
-                                     : ssidRefreshed ? "Up to date"
-                                     : "Refresh SSID Detection")
-                                    .foregroundColor(networkMonitor.isRefreshing ? .textSecondary
-                                                     : ssidRefreshed ? .statusOnline : .accentPrimary)
-                            }
-                        }
-                        .disabled(networkMonitor.isRefreshing)
-                        .listRowBackground(Color.cardBackground)
-                        .onChange(of: networkMonitor.isRefreshing) { _, nowRefreshing in
-                            if !nowRefreshing {
-                                ssidRefreshed = true
-                                Task {
-                                    try? await Task.sleep(for: .seconds(2))
-                                    ssidRefreshed = false
-                                }
-                            }
-                        }
-                        #endif
-
-                        // Cross-platform LAN probe rows. v1.6.8 promoted
-                        // `TVLANProbe` from tvOS-only to all platforms,
-                        // so these surface on iOS / iPad / Mac Catalyst
-                        // too. Two reasons it matters on iOS:
-                        //   • Ethernet has no SSID — the SSID rows
-                        //     above are useless on a wired iPad / Mac.
-                        //   • Mac Catalyst's NEHotspotNetwork is broken
-                        //     (returns nil even with wifi-info +
-                        //     Location); the probe is the actual
-                        //     source of truth there.
+                        // Cross-platform LAN probe rows. `TVLANProbe`
+                        // is the SOLE LAN signal on every platform —
+                        // it HEAD-probes each server's localURL and
+                        // decides LAN vs WAN. No SSID, location, or
+                        // Wi-Fi-info is involved.
                         // The "Refresh LAN Detection" button kicks a
-                        // fresh probe of every server's localURL —
-                        // matches the tvOS pattern, and the global
-                        // `tvosLANDetected` UserDefaults flag means a
-                        // refresh on one server's detail page picks
-                        // up the result for all of them.
+                        // fresh probe of every server's localURL; the
+                        // global `tvosLANDetected` UserDefaults flag
+                        // means a refresh on one server's detail page
+                        // picks up the result for all of them.
                         if let host = tvLANProbe.lastHost, tvLANProbe.lastDetected {
                             infoRow("Last Probe Host", value: host, isMonospaced: true)
                         }
@@ -1830,36 +1741,9 @@ struct ServerDetailView: View {
                     } header: {
                         Text("Active Connection").sectionHeaderStyle()
                     } footer: {
-                        #if os(iOS)
-                        if networkMonitor.currentSSID == nil && networkMonitor.isOnWifi {
-                            // On WiFi but SSID is nil — almost always because
-                            // the user hasn't granted Location access. The
-                            // entitlement + Info.plist string ship with the
-                            // app; iOS additionally requires the user to
-                            // grant Location (Precise) before
-                            // NEHotspotNetwork.fetchCurrent will return the
-                            // SSID. Direct the user to the iOS Settings
-                            // path rather than surfacing Xcode jargon.
-                            Text("⚠️ Wi-Fi detected but SSID is unknown. To detect your network, grant Aerio Location access: open the iOS Settings app → Privacy & Security → Location Services → Aerio → choose \"While Using the App\" and enable Precise Location.")
-                                .font(.labelSmall)
-                                .foregroundColor(.statusWarning)
-                        } else if let matched = server.activeHomeSSID {
-                            Text("Connected to \"\(matched)\" — using local URL.")
-                                .font(.labelSmall)
-                                .foregroundColor(.textTertiary)
-                        } else {
-                            Text("Not on a configured home WiFi network — using remote URL.")
-                                .font(.labelSmall)
-                                .foregroundColor(.textTertiary)
-                        }
-                        #endif
-                        #if os(tvOS)
-                        // tvOS equivalent of the iOS footer's plain-
-                        // English explanation. We cannot show "which
-                        // SSID" because tvOS has no SSID API; instead
-                        // we point the user at the probe as the
-                        // source of truth, with a nudge toward the
-                        // Refresh button when it's stale.
+                        // The LAN probe is the source of truth on every
+                        // platform. When it reaches the local server we
+                        // use the local URL; otherwise the remote URL.
                         if tvLANProbe.lastDetected {
                             Text("Local server reachable — streams will use local URL.")
                                 .font(.labelSmall)
@@ -1869,7 +1753,6 @@ struct ServerDetailView: View {
                                 .font(.labelSmall)
                                 .foregroundColor(.textTertiary)
                         }
-                        #endif
                     }
                     .listRowBackground(Color.cardBackground)
                 }
@@ -2716,7 +2599,7 @@ struct EditServerSheet: View {
                 } header: {
                     Text("Local Network").sectionHeaderStyle()
                 } footer: {
-                    Text("Used when connected to a home WiFi network. Add your home network SSIDs in Settings → Network → Home WiFi. Leave blank to always use the main URL.")
+                    Text("Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
@@ -3507,11 +3390,6 @@ private let bufferOptions: [BufferOption] = [
 
 struct NetworkSettingsView: View {
     @ObservedObject private var theme = ThemeManager.shared
-    #if os(iOS)
-    @ObservedObject private var networkMonitor = NetworkMonitor.shared
-    @State private var ssidEntries: [String] = []
-    @State private var ssidRefreshed = false
-    #endif
     @AppStorage("networkTimeout")          private var networkTimeout      = 15.0
     @AppStorage("maxRetries")              private var maxRetries          = 3
     @AppStorage("streamBufferSize")        private var streamBufferSize    = "default"
@@ -3572,22 +3450,6 @@ struct NetworkSettingsView: View {
         .toolbar(.hidden, for: .navigationBar)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
-        #if os(iOS)
-        .task {
-            // Intentionally NOT auto-calling `NetworkMonitor.refresh(force: true)`
-            // here — a user opening Network Settings shouldn't trigger
-            // an iOS Location prompt on their way to toggling a setting
-            // that may have nothing to do with WiFi. The "Refresh SSID
-            // Detection" button below is the explicit, context-aware
-            // way to ask for Location. Cached SSID (if any) still
-            // renders via `networkMonitor.currentSSID`.
-            let stored = UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? ""
-            let parsed = stored.split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            ssidEntries = parsed.isEmpty ? [""] : parsed
-        }
-        #endif
     }
 
     // MARK: - tvOS Body
@@ -3772,151 +3634,6 @@ struct NetworkSettingsView: View {
                 // Appearance removes the duplication and matches the
                 // user's mental model (visual customisation in one
                 // place).
-
-                // MARK: Home WiFi (LAN Switching)
-                #if os(iOS)
-                Section {
-                    // Detected network status
-                    HStack {
-                        Text("Detected Network")
-                            .font(.bodyMedium)
-                            .foregroundColor(.textSecondary)
-                        Spacer()
-                        if networkMonitor.isRefreshing {
-                            ProgressView().tint(.accentPrimary).scaleEffect(0.8)
-                        } else if let ssid = networkMonitor.currentSSID {
-                            Label(ssid, systemImage: "wifi")
-                                .font(.monoSmall)
-                                .foregroundColor(.statusOnline)
-                        } else if networkMonitor.isOnWifi {
-                            Label("Unknown", systemImage: "wifi.exclamationmark")
-                                .font(.labelSmall)
-                                .foregroundColor(.statusWarning)
-                        } else {
-                            Text("Not on WiFi")
-                                .font(.labelSmall)
-                                .foregroundColor(.textTertiary)
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-
-                    // Refresh button
-                    Button {
-                        ssidRefreshed = false
-                        NetworkMonitor.shared.refresh(force: true)
-                    } label: {
-                        HStack(spacing: 8) {
-                            if networkMonitor.isRefreshing {
-                                ProgressView().tint(.accentPrimary).scaleEffect(0.8)
-                            } else {
-                                Image(systemName: ssidRefreshed ? "checkmark.circle.fill" : "wifi.circle")
-                                    .foregroundColor(ssidRefreshed ? .statusOnline : .accentPrimary)
-                            }
-                            Text(networkMonitor.isRefreshing ? "Detecting…"
-                                 : ssidRefreshed ? "Up to date"
-                                 : "Refresh Detection")
-                                .foregroundColor(networkMonitor.isRefreshing ? .textSecondary
-                                                 : ssidRefreshed ? .statusOnline : .accentPrimary)
-                        }
-                    }
-                    .disabled(networkMonitor.isRefreshing)
-                    .listRowBackground(Color.cardBackground)
-                    .onChange(of: networkMonitor.isRefreshing) { _, nowRefreshing in
-                        if !nowRefreshing {
-                            ssidRefreshed = true
-                            Task {
-                                try? await Task.sleep(for: .seconds(2))
-                                ssidRefreshed = false
-                            }
-                        }
-                    }
-
-                    // When the device is on WiFi but SSID came back nil, the
-                    // user almost certainly hasn't granted Location (Precise).
-                    // Surface a one-tap deep-link to iOS Settings so they don't
-                    // have to hand-walk Privacy → Location Services → Aerio.
-                    if networkMonitor.isOnWifi && networkMonitor.currentSSID == nil && !networkMonitor.isRefreshing {
-                        Button {
-                            if let url = URL(string: UIApplication.openSettingsURLString) {
-                                UIApplication.shared.open(url)
-                            }
-                        } label: {
-                            Label("Grant Location Access in Settings", systemImage: "location.circle")
-                                .foregroundColor(.accentPrimary)
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-
-                    // SSID list
-                    ForEach(ssidEntries.indices, id: \.self) { index in
-                        HStack(spacing: 10) {
-                            Image(systemName: !ssidEntries[index].isEmpty && networkMonitor.currentSSID == ssidEntries[index]
-                                  ? "checkmark.circle.fill" : "wifi")
-                                .foregroundColor(!ssidEntries[index].isEmpty && networkMonitor.currentSSID == ssidEntries[index]
-                                                 ? .statusOnline : .textTertiary)
-                                .font(.system(size: 16))
-                            TextField("Home WiFi SSID \(index + 1)", text: $ssidEntries[index])
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                            if ssidEntries.count > 1 {
-                                Button {
-                                    ssidEntries.remove(at: index)
-                                } label: {
-                                    Image(systemName: "minus.circle.fill")
-                                        .foregroundColor(.red)
-                                        .font(.system(size: 20))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-
-                    if ssidEntries.count < 5 {
-                        if let currentSSID = networkMonitor.currentSSID,
-                           !ssidEntries.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == currentSSID }) {
-                            Button {
-                                if let emptyIndex = ssidEntries.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-                                    ssidEntries[emptyIndex] = currentSSID
-                                } else {
-                                    ssidEntries.append(currentSSID)
-                                }
-                            } label: {
-                                Label("Add \"\(currentSSID)\"", systemImage: "wifi.circle.fill")
-                                    .foregroundColor(.statusOnline)
-                            }
-                            .listRowBackground(Color.cardBackground)
-                        }
-
-                        Button {
-                            ssidEntries.append("")
-                        } label: {
-                            Label("Add Network Manually", systemImage: "plus.circle.fill")
-                                .foregroundColor(.accentPrimary)
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-                } header: {
-                    Text("Home WiFi (LAN Switching)").sectionHeaderStyle()
-                } footer: {
-                    if networkMonitor.isOnWifi && networkMonitor.currentSSID == nil {
-                        Text("⚠️ Wi-Fi detected but network name unavailable. To detect your Home WiFi, grant Aerio Location access: open the iOS Settings app → Privacy & Security → Location Services → Aerio → choose \"While Using the App\" and enable Precise Location.")
-                            .font(.labelSmall).foregroundColor(.statusWarning)
-                    } else {
-                        Text("When connected to any of these networks, AerioTV uses each server's local URL instead of its remote URL. Set each server's local URL in Settings → Playlists → [server] → Edit.")
-                            .font(.labelSmall)
-                            .foregroundColor(.textTertiary)
-                    }
-                }
-                .onChange(of: ssidEntries) { _, new in
-                    UserDefaults.standard.set(
-                        new.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                           .filter { !$0.isEmpty }
-                           .joined(separator: ","),
-                        forKey: "globalHomeSSIDs"
-                    )
-                }
-                #endif
 
                 // MARK: Background Refresh
                 Section {

@@ -491,6 +491,16 @@ private struct PlayerRootView: View {
 
     @State private var state: PlayState = .loading
     @State private var lastError: String = ""
+    /// Per-player guard for the one-shot LAN/WAN failover. The MPV
+    /// coordinator only calls `onFatalError` after ALL its built-in
+    /// retries (URL-list failover, loadFailureRetry backoff, premature-end
+    /// retry, warm-up retry) have exhausted. We then attempt exactly ONE
+    /// re-probe + re-point. This flag (plus the URL-unchanged bail inside
+    /// `failoverRetryCurrent`) prevents a genuinely-dead WAN URL from
+    /// looping: the second fatal error skips failover straight to the
+    /// error overlay. The player is `.id(item.id)`, so a successful
+    /// re-begin mounts a fresh PlayerRootView with the flag reset.
+    @State private var didAttemptPlayFailover = false
     @State private var showControls = true
     @State private var controlsHideTask: Task<Void, Never>?
     @State private var dragOffset: CGFloat = 0
@@ -620,7 +630,21 @@ private struct PlayerRootView: View {
             nowPlayingArtworkURL: artworkURL,
             progressStore: progressStore,
             logStore: logStore,
-            onFatalError: { err in lastError = err; state = .error }
+            onFatalError: { err in
+                if !didAttemptPlayFailover, isLive {
+                    didAttemptPlayFailover = true
+                    Task { @MainActor in
+                        let ok = await PlayerSession.shared.failoverRetryCurrent()
+                        if !ok { lastError = err; state = .error }
+                        // if ok: begin() reseeds NowPlaying and a fresh
+                        // player mounts (player is .id(item.id)), so this
+                        // PlayerRootView is replaced and its error state
+                        // never needs to be set.
+                    }
+                } else {
+                    lastError = err; state = .error
+                }
+            }
         )
         .background(Color.black)
         #else

@@ -4,21 +4,9 @@ import SwiftData
 import UIKit
 #endif
 #if os(iOS)
-import NetworkExtension
 import Network
-import CoreLocation
-// CoreWLAN is the native macOS Wi-Fi API and is reachable from Mac
-// Catalyst. We use it as a fallback when `NEHotspotNetwork.fetchCurrent()`
-// returns nil on Catalyst (a documented-but-misbehaving path: Apple
-// claims Catalyst support, but in practice the iOS NetworkExtension
-// SSID resolver only reliably reports a value on iPhone/iPad even
-// when the wifi-info entitlement + Location are both granted).
-#if targetEnvironment(macCatalyst)
-import CoreWLAN
-#endif
 #elseif os(tvOS)
-// tvOS doesn't expose NetworkExtension or the SSID APIs, but Network
-// (NWPathMonitor) is available — used by `TVLANProbe` below to
+// Network (NWPathMonitor) is available — used by `TVLANProbe` below to
 // re-probe the home-server on network-change transitions.
 import Network
 #endif
@@ -387,11 +375,6 @@ struct AerioApp: App {
             switch phase {
             case .active:
                 DebugLogger.shared.logLifecycle("Scene → active (foreground)")
-                // Always refresh the cached SSID when foregrounding so LAN/WAN
-                // switching reacts immediately after the user toggles Wi-Fi.
-                #if os(iOS)
-                NetworkMonitor.shared.refresh()
-                #endif
                 // Start iCloud sync if enabled (pull happens during EPG loading)
                 SyncManager.shared.startObserving()
                 // Re-probe LAN on every foreground transition — covers
@@ -532,368 +515,26 @@ struct AerioApp: App {
     }
 }
 
-// MARK: - Network Monitor (iOS only)
-// Detects the current WiFi SSID via NEHotspotNetwork and caches it in UserDefaults
-// so ServerConnection.effectiveBaseURL can read it synchronously.
-//
-// Requires:
-//  1. "Access WiFi Information" capability (com.apple.developer.networking.wifi-info)
-//  2. Location authorization (NEHotspotNetwork.fetchCurrent returns nil without it)
-//  3. NSLocationWhenInUseUsageDescription in Info.plist
-
-#if os(iOS)
-@MainActor
-final class NetworkMonitor: ObservableObject {
-    static let shared = NetworkMonitor()
-
-    /// The SSID of the currently connected WiFi network, or nil if unknown / off WiFi.
-    @Published private(set) var currentSSID: String? = {
-        UserDefaults.standard.string(forKey: "cachedCurrentSSID")
-    }()
-
-    /// True while an SSID fetch is in progress.
-    @Published private(set) var isRefreshing = false
-
-    /// True when the device has an active WiFi interface.
-    @Published private(set) var isOnWifi = false
-
-    /// Current Location authorization status, republished from the
-    /// underlying CLLocationManager delegate so any SwiftUI view can
-    /// drive its UI from this single source of truth. Used by the
-    /// onboarding "Enable Home WiFi Detection" card so it can show
-    /// "✓ Enabled", "Allow", or "Denied" without each view needing
-    /// its own CLLocationManager.
-    @Published private(set) var locationAuthStatus: CLAuthorizationStatus
-
-    /// True when on a matched home SSID AND the configured localURL
-    /// failed a reachability probe. Most commonly caused by an active
-    /// VPN that blocks LAN traffic. Surfaced by the Live TV banner.
-    @Published private(set) var localServerUnreachable: Bool = false
-
-    private let pathMonitor = NWPathMonitor()
-    private var lastWifiState = false
-    private let locationDelegate = LocationDelegate()
-
-    private init() {
-        // Seed the published auth status from the delegate's manager
-        // before any view observes us.
-        self.locationAuthStatus = locationDelegate.manager.authorizationStatus
-        // Subscribe to EVERY authorization change (including the
-        // `.notDetermined → .authorizedWhenInUse` transition that
-        // happens when the user accepts the prompt) so the
-        // onboarding UI and Settings footers can react live. The
-        // one-shot `onPendingResolution` callback remains separate
-        // so `ensureLocationAuthorization` can still resume a
-        // pending SSID fetch once.
-        locationDelegate.onStatusChange = { [weak self] newStatus in
-            Task { @MainActor in
-                guard let self else { return }
-                let wasAuthorized = self.locationAuthStatus == .authorizedWhenInUse
-                    || self.locationAuthStatus == .authorizedAlways
-                let isAuthorizedNow = newStatus == .authorizedWhenInUse
-                    || newStatus == .authorizedAlways
-                self.locationAuthStatus = newStatus
-                // User just granted Location (typically by returning
-                // from iOS Settings after the onboarding "Unknown
-                // network" warning). Kick off the SSID fetch directly
-                // without going through `refresh()`'s hasHomeSSIDs
-                // guard — the whole point of the warning was that the
-                // user doesn't have any home SSIDs yet and needs to
-                // see their current one to configure one.
-                if !wasAuthorized, isAuthorizedNow {
-                    DebugLogger.shared.log(
-                        "NetworkMonitor: location just granted — kicking off SSID fetch",
-                        category: "Network", level: .info)
-                    self.fetchSSID()
-                }
-            }
-        }
-        startPathMonitor()
-    }
-
-    // MARK: - Public (onboarding / Settings)
-
-    /// Prompt the user for Location (When In Use) authorization. Safe
-    /// to call in any state — if already authorized, the completion
-    /// fires immediately with `true`; if already denied, fires with
-    /// `false` (the user must grant it via iOS Settings); if not yet
-    /// determined, presents the system prompt and fires when the
-    /// user responds.
-    ///
-    /// Used by the onboarding Home WiFi card so the user can grant
-    /// the permission up-front with context, rather than stumbling
-    /// into the "network name unavailable" warning deep in Settings.
-    func requestLocationAuthorization(completion: (@MainActor (Bool) -> Void)? = nil) {
-        ensureLocationAuthorization { granted in
-            completion?(granted)
-        }
-    }
-
-    // MARK: - Public
-
-    /// Fetch the current SSID and update the cache.
-    /// Called automatically when the WiFi interface connects or changes.
-    ///
-    /// Skips the `NEHotspotNetwork.fetchCurrent()` call when no home SSIDs
-    /// are configured, avoiding the iOS location-services indicator that
-    /// appears whenever WiFi-info APIs are used.
-    /// Fetch the current SSID.
-    /// - Parameter force: When `true`, always queries NEHotspotNetwork even if no
-    ///   home SSIDs are configured (used by Settings UI so the user can see
-    ///   their network before configuring). Auto-triggered refreshes pass `false`
-    ///   to avoid the location-services indicator when it's not needed.
-    func refresh(force: Bool = false) {
-        guard !isRefreshing else { return }
-
-        if !force {
-            // Only query WiFi SSID when home-network switching is configured.
-            let homeCSV = UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? ""
-            let hasHomeSSIDs = !homeCSV
-                .split(separator: ",")
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-                .isEmpty
-
-            guard hasHomeSSIDs else {
-                // No home SSIDs → clear stale cache so effectiveBaseURL always
-                // returns the primary URL without triggering location services.
-                if currentSSID != nil {
-                    currentSSID = nil
-                    UserDefaults.standard.removeObject(forKey: "cachedCurrentSSID")
-                    DebugLogger.shared.log(
-                        "NetworkMonitor: skipped SSID fetch (no home SSIDs configured)",
-                        category: "Network", level: .info)
-                }
-                return
-            }
-        }
-
-        // NEHotspotNetwork.fetchCurrent() requires location authorization.
-        ensureLocationAuthorization { [weak self] authorized in
-            guard authorized else {
-                DebugLogger.shared.log(
-                    "NetworkMonitor: location not authorized — cannot fetch SSID",
-                    category: "Network", level: .warning)
-                return
-            }
-            self?.fetchSSID()
-        }
-    }
-
-    // MARK: - Private
-
-    private func fetchSSID() {
-        isRefreshing = true
-        Task { @MainActor in
-            // Primary path: NEHotspotNetwork.fetchCurrent() — the
-            // documented iOS / iPadOS / Mac Catalyst API. On
-            // iPhone + iPad with the wifi-info entitlement and
-            // Location granted, this reliably returns the current
-            // SSID. On Mac Catalyst it's documented as supported
-            // but ships with a long-standing behavioural gap: the
-            // call resolves to nil even when the underlying Wi-Fi
-            // interface is connected to a known network and the
-            // app has Location authorised. v1.6.8 user report
-            // (Mac Catalyst, MacBook on "4OH4") surfaced this:
-            // app showed "Detected SSID: Not detected" even though
-            // the Mac was actively on the configured home
-            // network.
-            var ssid = await NEHotspotNetwork.fetchCurrent()?.ssid
-
-            #if targetEnvironment(macCatalyst)
-            // Fallback path: CoreWLAN. `CWWiFiClient.shared().interface()?.ssid()`
-            // is the native macOS resolver and is reachable from
-            // Mac Catalyst (linker pulls in CoreWLAN.framework
-            // when imported under the `targetEnvironment(macCatalyst)`
-            // gate). It's synchronous, gated by the same
-            // wifi-info entitlement, and on macOS 14+ also
-            // requires Location — both of which are already in
-            // place. We only consult it when the NetworkExtension
-            // path returned nil, so on the (theoretical) Catalyst
-            // build where Apple eventually fixes NEHotspotNetwork,
-            // CoreWLAN stays out of the way.
-            if ssid == nil {
-                if let coreWLANSSID = CWWiFiClient.shared().interface()?.ssid(),
-                   !coreWLANSSID.isEmpty {
-                    DebugLogger.shared.log(
-                        "NetworkMonitor: NEHotspotNetwork returned nil, CoreWLAN fallback resolved SSID = \(coreWLANSSID)",
-                        category: "Network", level: .info)
-                    ssid = coreWLANSSID
-                }
-            }
-            #endif
-
-            self.currentSSID = ssid
-            UserDefaults.standard.set(ssid, forKey: "cachedCurrentSSID")
-            self.isRefreshing = false
-            DebugLogger.shared.log(
-                "NetworkMonitor: SSID = \(ssid ?? "<nil>")",
-                category: "Network", level: .info)
-
-            // If the resolved SSID matches a configured home SSID,
-            // probe the active server's local URL. A VPN that blocks
-            // LAN traffic will fail the probe and surface a banner
-            // in Live TV so the user can disable the VPN.
-            if let ssid, Self.isHomeSSID(ssid) {
-                let localURL = ChannelStore.shared.activeServer?.localURL ?? ""
-                Task { await self.probeLocalServer(localURL: localURL) }
-            } else {
-                self.localServerUnreachable = false
-            }
-        }
-    }
-
-    /// Returns true if the given SSID is listed in `globalHomeSSIDs`
-    /// (comma-separated, whitespace-trimmed).
-    private static func isHomeSSID(_ ssid: String) -> Bool {
-        let homeCSV = UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? ""
-        let homeSSIDs = homeCSV
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        return homeSSIDs.contains(ssid)
-    }
-
-    /// HEAD-probes the configured local URL with a 3-second timeout.
-    /// Any 2xx–4xx response means "server is reachable on the LAN"
-    /// (even a 401/403 from an auth-required endpoint proves the TCP
-    /// path is alive). 5xx, network errors, or timeouts flip the
-    /// `localServerUnreachable` flag true so the Live TV banner can
-    /// warn the user — usually about an active LAN-blocking VPN.
-    func probeLocalServer(localURL: String) async {
-        guard !localURL.isEmpty, let url = URL(string: localURL) else {
-            await MainActor.run { self.localServerUnreachable = false }
-            return
-        }
-        var request = URLRequest(url: url, timeoutInterval: 3)
-        request.httpMethod = "HEAD"
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse, (200..<500).contains(http.statusCode) {
-                await MainActor.run { self.localServerUnreachable = false }
-                return
-            }
-            await MainActor.run { self.localServerUnreachable = true }
-        } catch {
-            await MainActor.run { self.localServerUnreachable = true }
-        }
-    }
-
-    private func ensureLocationAuthorization(completion: @escaping @MainActor (Bool) -> Void) {
-        let status = locationDelegate.manager.authorizationStatus
-        switch status {
-        case .authorizedWhenInUse, .authorizedAlways:
-            completion(true)
-        case .notDetermined:
-            locationDelegate.onPendingResolution = { newStatus in
-                Task { @MainActor in
-                    completion(newStatus == .authorizedWhenInUse || newStatus == .authorizedAlways)
-                }
-            }
-            locationDelegate.manager.requestWhenInUseAuthorization()
-        default:
-            completion(false)
-        }
-    }
-
-    private func startPathMonitor() {
-        pathMonitor.pathUpdateHandler = { [weak self] path in
-            let onWifi = path.usesInterfaceType(.wifi)
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.isOnWifi = onWifi
-                // Refresh SSID only when we connect to (or switch) Wi-Fi networks.
-                if onWifi && !self.lastWifiState {
-                    self.refresh()
-                    // VPN toggles often surface as a WiFi transition
-                    // without the SSID actually changing. Re-probe the
-                    // local URL so the banner can update even when
-                    // `fetchSSID` returns the same value as before.
-                    if let ssid = self.currentSSID, Self.isHomeSSID(ssid) {
-                        let localURL = ChannelStore.shared.activeServer?.localURL ?? ""
-                        Task { await self.probeLocalServer(localURL: localURL) }
-                    }
-                } else if !onWifi {
-                    // Left WiFi — clear SSID so we don't use a stale LAN URL.
-                    self.currentSSID = nil
-                    UserDefaults.standard.removeObject(forKey: "cachedCurrentSSID")
-                    self.localServerUnreachable = false
-                }
-                self.lastWifiState = onWifi
-            }
-        }
-        pathMonitor.start(queue: DispatchQueue.global(qos: .utility))
-    }
-}
-
-/// CLLocationManager delegate that exposes two distinct callbacks:
-/// a persistent `onStatusChange` (fires on every authorization
-/// update so `NetworkMonitor.locationAuthStatus` stays in sync with
-/// the live system state), and a one-shot `onPendingResolution`
-/// used internally by `NetworkMonitor.ensureLocationAuthorization`
-/// to resume a pending SSID fetch once the user responds to the
-/// system prompt. Split into two because the previous single
-/// `onAuthChange` was one-shot + self-clearing, which can't serve
-/// a persistent observer at the same time.
-private class LocationDelegate: NSObject, CLLocationManagerDelegate {
-    let manager = CLLocationManager()
-    /// Fires on EVERY authorization change, including the initial
-    /// `.notDetermined` state. The SwiftUI-facing observer
-    /// (`NetworkMonitor.locationAuthStatus`) wires into this.
-    var onStatusChange: ((CLAuthorizationStatus) -> Void)?
-    /// One-shot callback — set by `ensureLocationAuthorization`
-    /// when kicking off `requestWhenInUseAuthorization()`, fires
-    /// once the user responds with a determined status, then
-    /// clears itself. Guarded against firing for `.notDetermined`
-    /// so a passing pre-prompt notification can't wake a pending
-    /// SSID fetch early.
-    var onPendingResolution: ((CLAuthorizationStatus) -> Void)?
-
-    override init() {
-        super.init()
-        manager.delegate = self
-    }
-
-    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
-        let status = manager.authorizationStatus
-        onStatusChange?(status)
-        guard status != .notDetermined else { return }
-        onPendingResolution?(status)
-        onPendingResolution = nil
-    }
-}
-#endif
-
 // MARK: - LAN Probe (cross-platform)
 //
 // History:
-//   • Originally tvOS-only because tvOS doesn't expose
-//     NetworkExtension's `NEHotspotNetwork` family — no SSID API
-//     means we had to fall back to "can we reach the configured
-//     localURL?" as the LAN detection signal.
+//   • Originally tvOS-only because tvOS doesn't expose a Wi-Fi SSID
+//     API — we fell back to "can we reach the configured localURL?"
+//     as the LAN detection signal.
 //   • v1.6.8: promoted to iOS / iPadOS / Mac Catalyst as well.
-//     Two reasons:
-//        1. Mac Catalyst's `NEHotspotNetwork.fetchCurrent()`
-//           returns nil even with the wifi-info entitlement +
-//           Location granted (long-standing Apple bug). SSID
-//           detection on Mac is effectively broken.
-//        2. Ethernet has no SSID at all. A user with a wired
-//           iPad / Mac would never get LAN routing under the
-//           SSID-only path even when the local server is on
-//           the same subnet.
-//     Probe-based detection works in both cases — if HEAD on the
-//     local URL succeeds, we're on the LAN, period.
+//   • Later: SSID / location / Wi-Fi-info detection was removed
+//     entirely. The probe is now the SOLE decider on every platform:
+//     if a HEAD on the local URL succeeds, we're on the LAN, period.
+//     This is network-medium-agnostic (Ethernet, Wi-Fi, VPN-bypass)
+//     and requires no location permission or Wi-Fi-info entitlement.
 //
-// The class name (`TVLANProbe`) is kept for now to avoid touching
-// every call site; the legacy "tvosLANDetected" UserDefaults key is
-// likewise preserved so existing installs don't lose their last-known
-// LAN state across the update.
+// The class name (`TVLANProbe`) is kept to avoid touching every call
+// site; the legacy "tvosLANDetected" UserDefaults key is likewise
+// preserved so existing installs don't lose their last-known LAN
+// state across the update.
 //
-// `ServerConnection.isOnLANNetwork` reads this probe's result and OR's
-// it with the iOS SSID-match path, so iPhone / iPad still get the
-// fast SSID-only signal when NEHotspotNetwork works, but ALSO get the
-// probe-based fallback when it doesn't (Mac Catalyst, Ethernet, or any
-// case where SSID resolution returns nil).
+// `ServerConnection.isOnLANNetwork` reads this probe's result and
+// nothing else — it is the only LAN signal on all platforms.
 //
 // Reliability hardening (v1.6.7):
 //
@@ -1028,6 +669,21 @@ final class TVLANProbe: ObservableObject {
         }
         print("📡 tvOS LAN probe: re-probing (\(candidates.count) candidate(s))")
         startProbeTask(candidates: candidates)
+    }
+
+    /// Awaitable re-probe for the guide/playback failover paths. Runs the
+    /// same candidate set + retry/timeout logic as `reprobe()` but returns
+    /// only after the verdict is written, so the caller can read the fresh
+    /// `effectiveBaseURL` immediately. Returns the new LAN-detected value.
+    @discardableResult
+    func reprobeAndWait() async -> Bool {
+        let candidates = self.candidateURLs
+        guard !candidates.isEmpty else { return UserDefaults.standard.bool(forKey: Self.detectedKey) }
+        currentProbeTask?.cancel()
+        let task = Task { await runProbe(candidates: candidates) }
+        currentProbeTask = task
+        await task.value
+        return UserDefaults.standard.bool(forKey: Self.detectedKey)
     }
 
     // MARK: Probe core

@@ -8,15 +8,8 @@ struct AddServerView: View {
     @State private var viewModel = ServerConnectionViewModel()
     /// false = type picker shown first; true = form fields revealed
     @State private var typeChosen = false
-    /// LAN/SSID section is optional — collapsed by default
+    /// Local Network section is optional — collapsed by default
     @State private var lanExpanded = false
-
-    // Home WiFi SSID configuration (global, stored in UserDefaults).
-    // Shown inline during setup so the user doesn't have to visit Settings.
-    #if os(iOS)
-    @ObservedObject private var networkMonitor = NetworkMonitor.shared
-    @State private var ssidEntries: [String] = [""]
-    #endif
 
     var onSave: ((ServerConnection) -> Void)? = nil
 
@@ -99,26 +92,6 @@ struct AddServerView: View {
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: typeChosen)
         .animation(.spring(response: 0.35, dampingFraction: 0.8), value: viewModel.verificationSuccess)
-        #if os(iOS)
-        .task {
-            // Load existing SSIDs from UserDefaults so user sees what's already saved.
-            let stored = UserDefaults.standard.string(forKey: "globalHomeSSIDs") ?? ""
-            let parsed = stored.split(separator: ",").map { String($0) }
-            ssidEntries = parsed.isEmpty ? [""] : parsed
-            // Intentionally NOT auto-calling `NetworkMonitor.refresh(force: true)`
-            // here — doing so was the cause of the Location-permission
-            // prompt that fired immediately when a first-run user opened
-            // "Add Server" (before they'd added a LAN URL or typed a
-            // single character). Users interpreted the double prompt
-            // (Location + Local Network) as the app over-reaching.
-            //
-            // The "current WiFi" badge below reads `networkMonitor.currentSSID`
-            // from cache, and the adjacent refresh button still lets
-            // the user trigger a live fetch (which prompts for Location
-            // with context). That's the opt-in flow Aerio's Welcome
-            // screen already uses with its "Detect Home WiFi" card.
-        }
-        #endif
         .fullScreenCover(item: $savedServer) { server in
             ServerSyncView(mode: .onboarding(server: server))
                 .onDisappear {
@@ -597,15 +570,11 @@ struct AddServerView: View {
                             )
                         }
 
-                        #if os(iOS)
-                        homeWiFiSection
-                        #endif
-
                         infoBox(
                             icon: "arrow.triangle.2.circlepath",
                             message: isM3U
-                                ? "When connected to a home WiFi network, Aerio uses the local M3U and EPG URLs above for faster LAN speeds. These networks apply to all sources."
-                                : "When connected to a home WiFi network, Aerio automatically uses the local URL above for faster LAN speeds. These networks apply to all servers."
+                                ? "Used automatically whenever the server is reachable on your local network, with the public URLs otherwise. No setup needed."
+                                : "Used automatically whenever the server is reachable on your local network, with the public URL otherwise. No setup needed."
                         )
                     }
                     .padding([.horizontal, .bottom], 16)
@@ -620,172 +589,6 @@ struct AddServerView: View {
                 .stroke(Color.accentSecondary.opacity(0.25), lineWidth: 1)
         )
     }
-
-    #if os(iOS)
-    // MARK: - Home WiFi SSID Sub-section
-
-    private var homeWiFiSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Sub-header
-            HStack(spacing: 6) {
-                Image(systemName: "house.fill")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.textTertiary)
-                Text("Home WiFi Networks")
-                    .font(.labelMedium)
-                    .foregroundColor(.textTertiary)
-            }
-
-            // Detected network row
-            HStack(spacing: 8) {
-                if networkMonitor.isRefreshing {
-                    ProgressView().tint(.accentPrimary).scaleEffect(0.75)
-                } else if let ssid = networkMonitor.currentSSID {
-                    Image(systemName: "wifi")
-                        .font(.system(size: 13))
-                        .foregroundColor(.statusOnline)
-                    Text(ssid)
-                        .font(.monoSmall)
-                        .foregroundColor(.statusOnline)
-                } else if networkMonitor.isOnWifi {
-                    Image(systemName: "wifi.exclamationmark")
-                        .font(.system(size: 13))
-                        .foregroundColor(.statusWarning)
-                    Text("Unknown network")
-                        .font(.labelSmall)
-                        .foregroundColor(.statusWarning)
-                } else {
-                    Image(systemName: "wifi.slash")
-                        .font(.system(size: 13))
-                        .foregroundColor(.textTertiary)
-                    Text("Not on WiFi")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                }
-                Spacer()
-                Button {
-                    // Explicit user tap → always query, same rationale as the
-                    // Refresh button in the Settings Home WiFi section.
-                    NetworkMonitor.shared.refresh(force: true)
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.accentPrimary)
-                }
-                .buttonStyle(.plain)
-                .disabled(networkMonitor.isRefreshing)
-            }
-            .padding(10)
-            .background(Color.elevatedBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-
-            // On WiFi but SSID is nil → user hasn't granted Location (Precise).
-            // Surface a one-tap Settings deep-link instead of only text so users
-            // don't have to hunt through Privacy → Location Services manually.
-            if networkMonitor.isOnWifi && networkMonitor.currentSSID == nil && !networkMonitor.isRefreshing {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "location.slash")
-                            .font(.system(size: 13))
-                            .foregroundColor(.statusWarning)
-                            .padding(.top, 1)
-                        Text("Allow Location (Precise) so AerioTV can read your WiFi name and auto-switch to the local URL at home.")
-                            .font(.labelSmall)
-                            .foregroundColor(.statusWarning)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Button {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url)
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "gear")
-                            Text("Open Settings")
-                        }
-                        .font(.labelMedium.weight(.semibold))
-                        .foregroundColor(.accentPrimary)
-                    }
-                    .buttonStyle(.plain)
-                }
-                .padding(10)
-                .background(Color.statusWarning.opacity(0.08))
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-
-            // SSID entries
-            ForEach(ssidEntries.indices, id: \.self) { index in
-                HStack(spacing: 8) {
-                    Image(systemName: !ssidEntries[index].isEmpty && networkMonitor.currentSSID == ssidEntries[index]
-                          ? "checkmark.circle.fill" : "wifi")
-                        .font(.system(size: 14))
-                        .foregroundColor(!ssidEntries[index].isEmpty && networkMonitor.currentSSID == ssidEntries[index]
-                                         ? .statusOnline : .textTertiary)
-                    TextField("Home WiFi SSID \(index + 1)", text: $ssidEntries[index])
-                        .font(.bodyMedium)
-                        .foregroundColor(.textPrimary)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                    if ssidEntries.count > 1 {
-                        Button {
-                            ssidEntries.remove(at: index)
-                        } label: {
-                            Image(systemName: "minus.circle.fill")
-                                .foregroundColor(.red)
-                                .font(.system(size: 18))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(10)
-                .background(Color.elevatedBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-
-            // Add network buttons
-            if ssidEntries.count < 5 {
-                if let currentSSID = networkMonitor.currentSSID,
-                   !ssidEntries.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == currentSSID }) {
-                    Button {
-                        if let emptyIndex = ssidEntries.firstIndex(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
-                            ssidEntries[emptyIndex] = currentSSID
-                        } else {
-                            ssidEntries.append(currentSSID)
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "wifi.circle.fill")
-                            Text("Add \"\(currentSSID)\"")
-                        }
-                        .font(.labelMedium)
-                        .foregroundColor(.statusOnline)
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                Button {
-                    ssidEntries.append("")
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "plus.circle.fill")
-                        Text("Add Network Manually")
-                    }
-                    .font(.labelMedium)
-                    .foregroundColor(.accentPrimary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .onChange(of: ssidEntries) { _, new in
-            UserDefaults.standard.set(
-                new.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                   .filter { !$0.isEmpty }
-                   .joined(separator: ","),
-                forKey: "globalHomeSSIDs"
-            )
-        }
-    }
-    #endif
 
     // MARK: - Verify Section
 

@@ -4,8 +4,6 @@
 <dict>
 	<key>com.apple.developer.carplay-audio</key>
 	<true/>
-	<key>com.apple.developer.networking.wifi-info</key>
-	<true/>
 	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
 	<string>$(TeamIdentifierPrefix)app.molinete.aerio</string>
 </dict>

@@ -47,10 +47,6 @@ struct ChannelListView: View {
     /// scrolls down in the channel list. Hysteresis (80 / 20) on the
     /// scroll-y trigger prevents jitter near the edges.
     @State private var isChromeCollapsed: Bool = false
-    /// Surfaces NetworkMonitor.localServerUnreachable as a Live TV banner —
-    /// the user is on a configured home SSID but the server's local URL
-    /// failed a probe (most often due to a VPN blocking LAN traffic).
-    @ObservedObject private var networkMonitor = NetworkMonitor.shared
     /// Experimental "compact chrome" layout flag, owned by Developer
     /// Settings. When on (iPhone only), the Manage Groups button moves
     /// to the nav-bar trailing edge and the filter/search bars become
@@ -473,36 +469,6 @@ struct ChannelListView: View {
             Color.appBackground.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                #if os(iOS)
-                // SSID-detected-but-LAN-unreachable banner. NetworkMonitor.shared
-                // sets `localServerUnreachable` true when the user is on a
-                // configured home SSID but a 3-second probe of the server's
-                // localURL fails — usually because a VPN is blocking LAN.
-                if networkMonitor.localServerUnreachable {
-                    HStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.statusWarning)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("SSID recognized but can't connect to LAN address")
-                                .font(.labelSmall.weight(.semibold))
-                                .foregroundColor(.textPrimary)
-                            Text("You're on your home WiFi, but the server's local URL didn't respond. This is usually an active VPN blocking LAN traffic, a mistyped Local URL, or the server being off. Check Settings → Playlists → [server] → Edit.")
-                                .font(.labelSmall)
-                                .foregroundColor(.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(Color.statusWarning.opacity(0.15))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .padding(.horizontal, 14)
-                    .padding(.top, 6)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                }
-                #endif
-
                 bodyContent
             }
         }
@@ -1310,8 +1276,8 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     let logoURL: URL?
     let group: String
     let categoryOrder: Int
-    let streamURL: URL?
-    let streamURLs: [URL]
+    var streamURL: URL?
+    var streamURLs: [URL]
     var tvgID: String? = nil
     /// Dispatcharr-only: the channel's server-side UUID string.
     /// Needed as an EPG-matching key because Dispatcharr's Dummy

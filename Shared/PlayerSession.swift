@@ -496,6 +496,34 @@ final class PlayerSession: ObservableObject {
         }
     }
 
+    /// One-shot LAN/WAN failover for a live Dispatcharr channel that could
+    /// not play: re-probe, re-derive the stream URL from the active server's
+    /// (possibly flipped) effectiveBaseURL, and re-begin. XC/M3U URLs are
+    /// absolute and can't be re-pointed, so bail for them.
+    ///
+    /// Returns true only when a genuinely different URL was selected and
+    /// playback was re-begun; false otherwise (not Dispatcharr, no active
+    /// server, no UUID, or the re-probe produced the SAME URL). The
+    /// URL-unchanged bail is what stops a dead WAN host from looping: if the
+    /// probe didn't flip the LAN/WAN verdict, the rebuilt URL equals the
+    /// current one and we fail fast back to the caller's error overlay.
+    @discardableResult
+    func failoverRetryCurrent() async -> Bool {
+        guard let item = NowPlayingManager.shared.playingItem,
+              let server = ChannelStore.shared.activeServer,
+              server.type == .dispatcharrAPI,
+              let uuid = item.uuid else { return false }
+        _ = await TVLANProbe.shared.reprobeAndWait()
+        let newURLs = ChannelStore.dispatcharrStreamURLs(base: server.effectiveBaseURL, uuid: uuid)
+        let current = item.streamURL ?? item.streamURLs.first
+        guard let primary = newURLs.first, primary != current else { return false }  // URL unchanged: nothing to fix
+        var rebuilt = item
+        rebuilt.streamURL = primary
+        rebuilt.streamURLs = newURLs
+        stop()
+        return begin(item: rebuilt, server: server, isLive: true)
+    }
+
     /// Full-teardown stop that eventually replaces `exit()`. Phase A
     /// just forwards to `exit()` so everything stays identical
     /// behaviourally; Phase E will collapse this path entirely.

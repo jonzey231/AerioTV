@@ -781,6 +781,37 @@ final class VODStore: ObservableObject {
 final class ChannelStore: ObservableObject {
     static let shared = ChannelStore()
 
+    /// Builds the Dispatcharr live-stream URL(s) for a channel UUID.
+    /// Single source of truth for the proxy/ts/stream format so the
+    /// LAN/WAN failover path (`PlayerSession.failoverRetryCurrent`) can
+    /// re-derive the exact same URL against a freshly-flipped
+    /// `effectiveBaseURL`. The nested `streamURLs` closure in
+    /// `fetchDispatcharr` delegates here so behaviour stays byte-identical.
+    ///
+    /// `base` is normalised to drop a trailing slash before composing,
+    /// matching `fetchDispatcharr`'s pre-stripped `base` local. `nil` /
+    /// empty `uuid` yields an empty array (non-Dispatcharr or unconfigured
+    /// channels have no server-side UUID).
+    static func dispatcharrStreamURLs(base: String, uuid: String?) -> [URL] {
+        guard let uuid, !uuid.isEmpty else { return [] }
+        let trimmedBase = base.hasSuffix("/") ? String(base.dropLast()) : base
+        // TS stream — the only working Dispatcharr proxy endpoint.
+        // /proxy/ts/channel/ doesn't exist. HLS returns 404 on this instance.
+        //
+        // v1.7.x: pin `?output_format=mpegts`. Dispatcharr v0.25.0
+        // added fragmented-MP4 live output, selectable per-request
+        // and overridable by a per-user / server-wide default. Our
+        // live path is libmpv expecting MPEG-TS, so we request the
+        // TS container explicitly rather than inherit a server
+        // default that an admin may have flipped to fmp4. Unknown
+        // query params are ignored by older servers, so this is a
+        // safe, version-agnostic pin (it matches what Dispatcharr's
+        // own preview player sends).
+        return [
+            "\(trimmedBase)/proxy/ts/stream/\(uuid)?output_format=mpegts"
+        ].compactMap { URL(string: $0) }
+    }
+
     // MARK: - Published State
     @Published private(set) var channels: [ChannelDisplayItem] = []
     @Published private(set) var orderedGroups: [String] = []
@@ -2259,22 +2290,13 @@ final class ChannelStore: ObservableObject {
             return URL(string: "\(base)/api/channels/logos/\(id)/cache/")
         }
         func streamURLs(_ uuid: String?) -> [URL] {
-            guard let uuid, !uuid.isEmpty else { return [] }
-            // TS stream — the only working Dispatcharr proxy endpoint.
-            // /proxy/ts/channel/ doesn't exist. HLS returns 404 on this instance.
-            //
-            // v1.7.x: pin `?output_format=mpegts`. Dispatcharr v0.25.0
-            // added fragmented-MP4 live output, selectable per-request
-            // and overridable by a per-user / server-wide default. Our
-            // live path is libmpv expecting MPEG-TS, so we request the
-            // TS container explicitly rather than inherit a server
-            // default that an admin may have flipped to fmp4. Unknown
-            // query params are ignored by older servers, so this is a
-            // safe, version-agnostic pin (it matches what Dispatcharr's
-            // own preview player sends).
-            return [
-                "\(base)/proxy/ts/stream/\(uuid)?output_format=mpegts"
-            ].compactMap { URL(string: $0) }
+            // Delegate to the shared builder so the live-stream URL
+            // format has a single source of truth (the LAN/WAN failover
+            // path re-derives the same URL from a flipped effectiveBaseURL).
+            // `base` is already trailing-slash-stripped here, so the
+            // helper's own stripping is a no-op and the result is
+            // byte-identical to the previous inline format.
+            return ChannelStore.dispatcharrStreamURLs(base: base, uuid: uuid)
         }
 
         var items: [ChannelDisplayItem] = dChannels.enumerated().map { (i, ch) in
@@ -3065,6 +3087,14 @@ struct MainTabView: View {
     /// "Skip did nothing"). Resets on cold launch — the next session
     /// re-evaluates whether the cover should appear.
     @State private var userDismissedInitialLoading = false
+    /// One-shot LAN/WAN failover guard for the channel/EPG orchestrator.
+    /// When a channel load comes back empty (server down, or LAN host
+    /// unreachable after travelling off the home network), we re-run the
+    /// LAN probe once and retry the refresh against the freshly-selected
+    /// LAN-or-WAN URL. Reset to false at the very top of
+    /// `runChannelServerTaskBody` so each fresh server-key change gets
+    /// exactly one attempt.
+    @State private var didAttemptGuideFailover = false
     /// CFAbsoluteTime captured when the initial-sync cover is first
     /// shown. Consumed (and cleared) when the cover dismisses so the
     /// dismissal log line can report total duration. Kept as an
@@ -4383,6 +4413,10 @@ struct MainTabView: View {
     @MainActor
     private func runChannelServerTaskBody() async {
         let orchestratorStart = Date()
+        // Reset the one-shot guide failover guard so each fresh server-key
+        // change (server switch, credentials change, network transition)
+        // gets exactly one LAN/WAN re-probe-and-retry attempt.
+        didAttemptGuideFailover = false
         debugLog("🟢 [Orchestrator] BEGIN, servers=\(allServers.count)")
         debugLog("🔶 MainTabView.task(channelServerKey): firing, servers=\(allServers.count)")
         channelStore.refresh(servers: allServers)
@@ -4582,8 +4616,23 @@ struct MainTabView: View {
                 await channelStore.loadAllEPG()
             }
         } else {
-            // Channel load failed (auth, server down). Reset
-            // the flag we pre-set above so the cover can
+            // Channel load failed (auth, server down, or LAN host
+            // unreachable after travelling off the home network). Before
+            // surfacing the error, try ONE LAN/WAN failover: re-run the
+            // probe (which re-points effectiveBaseURL to whichever of
+            // LAN/WAN is reachable now) and refresh against it. Guarded so
+            // each fresh server-key change attempts this at most once; the
+            // probe is cheap and fast (sub-second at home, 3s timeout off
+            // the LAN) so it never blocks the error path for long.
+            if !didAttemptGuideFailover, !allServers.isEmpty {
+                didAttemptGuideFailover = true
+                let after = await TVLANProbe.shared.reprobeAndWait()
+                debugLog("🟠 [Orchestrator] guide failover reprobe -> LAN=\(after)")
+                channelStore.refresh(servers: allServers)
+                while channelStore.isLoading { try? await Task.sleep(for: .milliseconds(200)) }
+                if !channelStore.channels.isEmpty { await channelStore.loadAllEPG() }
+            }
+            // Reset the flag we pre-set above so the cover can
             // dismiss via the error path — otherwise the user
             // would be stuck staring at "Setting Up …" with
             // no way out.

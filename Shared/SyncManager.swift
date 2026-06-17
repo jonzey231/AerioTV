@@ -69,7 +69,7 @@ final class SyncManager: ObservableObject {
     private let syncStringKeys = [
         "selectedTheme", "liquidGlassStyle", "customAccentHex",
         "defaultTab", "defaultLiveTVView", "streamBufferSize",
-        "bgRefreshType", "globalHomeSSIDs",
+        "bgRefreshType",
         // Guide Display palette overrides — one hex string per
         // category bucket. Missing keys fall through to the defaults
         // in `ProgramCategory.defaultHex`, so clients running older
