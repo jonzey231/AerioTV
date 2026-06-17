@@ -1,6 +1,9 @@
 import SwiftUI
 import SwiftData
 #if os(iOS)
+import UIKit
+#endif
+#if os(iOS)
 import NetworkExtension
 import Network
 import CoreLocation
@@ -96,8 +99,96 @@ private final class MainThreadWatchdog: @unchecked Sendable {
 }
 #endif
 
+#if os(iOS)
+/// Process-wide holder for the interface-orientation mask the app reports
+/// to UIKit, plus the helper that drives an actual rotation (issue #38).
+///
+/// The app stays portrait on iPhone so browse / guide / settings never
+/// rotate; ONLY the video player widens the mask to landscape while the
+/// user holds fullscreen, and exiting restores the natural orientation.
+/// iPad keeps its free rotation. `requestGeometryUpdate` alone cannot
+/// override an engaged rotation lock: iOS clamps the requested geometry to
+/// what the scene reports from `supportedInterfaceOrientationsFor`, so the
+/// AppDelegate reports `mask` and `apply` updates it before rotating.
+@MainActor
+enum AppOrientationLock {
+    /// Mask when nothing is forcing landscape: portrait on iPhone, all
+    /// orientations on iPad (so iPad follows the device naturally).
+    static var base: UIInterfaceOrientationMask {
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait
+    }
+
+    /// The mask UIKit honors. Seeded to `.portrait` and corrected for the
+    /// running idiom by `syncBase()` at launch; thereafter written only by
+    /// `apply`. Read by the AppDelegate on the main thread.
+    static var mask: UIInterfaceOrientationMask = .portrait
+
+    /// True while the player is forcing landscape (chrome reads this to pick
+    /// its icon, so there is a single source of truth).
+    static var isForcingLandscape: Bool { mask == .landscape }
+
+    /// Set the at-rest mask for the current idiom. Called once at launch so
+    /// iPad starts free-rotating while iPhone starts portrait.
+    static func syncBase() {
+        if !isForcingLandscape { mask = base }
+    }
+
+    /// Force the player into landscape, or release back to `base`. Updates
+    /// the reported mask, then asks the active scene to rotate.
+    static func apply(landscape: Bool) {
+        let target: UIInterfaceOrientationMask = landscape ? .landscape : base
+        mask = target
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: target)) { error in
+            debugLog("🔄 [Orientation] requestGeometryUpdate(landscape=\(landscape)) error=\(error.localizedDescription)")
+        }
+        // Re-query supportedInterfaceOrientations so the new mask is honored
+        // immediately, notably when releasing back to portrait (no pending
+        // geometry change would otherwise trigger the re-query).
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+    }
+
+    /// Teardown convenience: always return to the natural orientation.
+    static func release() {
+        guard isForcingLandscape else { return }
+        apply(landscape: false)
+    }
+}
+
+/// Minimal application delegate that exists only to report the dynamic
+/// orientation mask above (issue #38). The phone UI's CarPlay support uses
+/// a separate *scene* delegate; this is the *application* delegate and the
+/// two coexist.
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        // UIKit invokes delegate methods on the main thread, so it is safe to
+        // assume the isolation and seed the at-rest mask for this idiom.
+        MainActor.assumeIsolated { AppOrientationLock.syncBase() }
+        return true
+    }
+
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        MainActor.assumeIsolated { AppOrientationLock.mask }
+    }
+}
+#endif
+
 @main
 struct AerioApp: App {
+    #if os(iOS)
+    // Issue #38: report AppOrientationLock.mask so the player's fullscreen
+    // button can force landscape even under an engaged rotation lock.
+    // Coexists with the CarPlay scene delegate (a scene delegate, not this
+    // application delegate).
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    #endif
     @Environment(\.scenePhase) private var scenePhase
 
     /// Owned explicitly (vs. letting `.modelContainer(for:)` auto-

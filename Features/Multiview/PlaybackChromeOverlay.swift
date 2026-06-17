@@ -64,6 +64,12 @@ struct PlaybackChromeOverlay: View {
     /// timer.
     @EnvironmentObject private var chromeState: MultiviewChromeState
 
+    /// Issue #38: reflects whether the player is currently forcing
+    /// landscape, so the fullscreen button shows the correct icon. Synced
+    /// from `AppOrientationLock` on appear so it stays right when the
+    /// chrome is re-created for a new player session.
+    @State private var forcedLandscape = false
+
     // v1.6.15: removed `verticalSizeClass` + `isiPhonePortrait` —
     // they only existed to switch between the inline title layout
     // (iPad / iPhone landscape) and the three-line title row
@@ -217,6 +223,13 @@ struct PlaybackChromeOverlay: View {
                 // iPhone-portrait three-line title stack was
                 // duplicating that information.
                 Spacer(minLength: 0)
+                #if os(iOS)
+                // Issue #38: rotate-to-fullscreen, iPhone only (iPad already
+                // rotates with the device).
+                if UIDevice.current.userInterfaceIdiom == .phone {
+                    landscapeButton_iOS
+                }
+                #endif
                 if let audio = store.audioProgressStore {
                     iPadOverflowAdapter(
                         progressStore: audio,
@@ -299,11 +312,25 @@ struct PlaybackChromeOverlay: View {
             .allowsHitTesting(false),
             alignment: .bottom
         )
+        #if os(iOS)
+        // Keep the fullscreen-toggle icon correct when the chrome is
+        // (re)created for a new player session.
+        .onAppear { forcedLandscape = AppOrientationLock.isForcingLandscape }
+        #endif
     }
 
     private var closeButton_iOS: some View {
         Button {
             chromeState.reportInteraction()
+            #if os(iOS)
+            // Issue #38: closing the player must return to the natural
+            // orientation. The container's `.onDisappear` is unreliable
+            // here (HomeView keeps the container mounted for the mini-
+            // player, so it never fires on Close), and `exit()` also runs
+            // on channel changes where landscape should persist, so release
+            // explicitly at the close action.
+            AppOrientationLock.release()
+            #endif
             PlayerSession.shared.stop()
         } label: {
             ZStack {
@@ -348,6 +375,35 @@ struct PlaybackChromeOverlay: View {
         .accessibilityLabel("Add stream")
         .accessibilityHint("Pick another channel to watch alongside this one")
     }
+
+    #if os(iOS)
+    /// Issue #38: rotate the player into landscape fullscreen on demand,
+    /// even when the device is rotation-locked to portrait. iPhone-only
+    /// (iPad already rotates freely). Same 52x52 round pill as Close / +.
+    private var landscapeButton_iOS: some View {
+        Button {
+            chromeState.reportInteraction()
+            forcedLandscape.toggle()
+            AppOrientationLock.apply(landscape: forcedLandscape)
+        } label: {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.45), radius: 8, y: 2)
+                Image(systemName: forcedLandscape
+                      ? "arrow.down.right.and.arrow.up.left"
+                      : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 19, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
+            .frame(width: 52, height: 52)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(forcedLandscape ? "Exit fullscreen" : "Rotate to fullscreen")
+        .accessibilityHint(forcedLandscape ? "Return to portrait" : "Rotate the video into landscape fullscreen")
+    }
+    #endif
 
     /// Record button in the iOS top chrome — same 52×52 round pill
     /// as Close / `+` / AirPlay, with a red record-dot icon to

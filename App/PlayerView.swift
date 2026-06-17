@@ -2250,12 +2250,10 @@ private struct PlayerRootView: View {
     /// On iPad-on-Mac this is a no-op (Mac windows do not rotate; use the
     /// window's full-screen control there).
     private func requestOrientation(landscape: Bool) {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
-        let mask: UIInterfaceOrientationMask = landscape ? .landscape : .allButUpsideDown
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
-            debugLog("🔄 requestGeometryUpdate(landscape=\(landscape)) error=\(error.localizedDescription)")
-        }
+        // Route through the shared AppOrientationLock so the AppDelegate's
+        // reported mask is updated too (issue #38). requestGeometryUpdate
+        // alone cannot override an engaged rotation lock without that mask.
+        AppOrientationLock.apply(landscape: landscape)
     }
     #endif
 
