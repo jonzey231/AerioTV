@@ -3267,29 +3267,31 @@ private struct GuideChannelButton: View {
             }
         #else
         channelLabel
-            .overlay(alignment: .topTrailing) {
-                if favoritesStore.isFavorite(channel.id) {
-                    Image(systemName: "star.fill")
-                        .font(.system(size: 9))
-                        .foregroundColor(.statusWarning)
-                        .padding(4)
-                }
-            }
             .contentShape(Rectangle())
             .onTapGesture { onSelect(channel) }
-            // Long-press to manage favorite without leaving the guide.
-            // Fills the UX gap raised in Veldmuus's feedback pass — adding
-            // favorites was previously only possible from Live TV List view.
-            .contextMenu {
+            .overlay(alignment: .topTrailing) {
+                // Tappable favorite star (issue #35). This used to be a
+                // display-only star (drawn only when already favorited)
+                // plus a hidden long-press contextMenu, so iPad users had
+                // no visible way to ADD a favorite from the guide, which is
+                // where iPad lands by default. The recurring "can't add
+                // favorites for Xtream" reports (#18, #35) were really this
+                // discoverability gap, not an XC bug. The star is now always
+                // visible and toggles on tap: a subtle outline when not
+                // favorited, filled gold when favorited. The contextMenu is
+                // dropped on purpose: a parent .contextMenu steals a child
+                // Button's tap (see feedback_context_menu_limitation).
                 Button {
                     favoritesStore.toggle(channel)
                 } label: {
-                    if favoritesStore.isFavorite(channel.id) {
-                        Label("Remove from Favorites", systemImage: "star.slash")
-                    } else {
-                        Label("Add to Favorites", systemImage: "star")
-                    }
+                    Image(systemName: favoritesStore.isFavorite(channel.id) ? "star.fill" : "star")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(favoritesStore.isFavorite(channel.id) ? .statusWarning : .textTertiary.opacity(0.55))
+                        .padding(6)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel(favoritesStore.isFavorite(channel.id) ? "Remove \(channel.name) from Favorites" : "Add \(channel.name) to Favorites")
             }
         #endif
     }

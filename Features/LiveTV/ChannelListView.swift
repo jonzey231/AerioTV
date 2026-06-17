@@ -1911,35 +1911,30 @@ struct ChannelRow: View {
 
             Spacer()
 
-            // v1.6.23 (Codex UX P1): visible secondary-actions
-            // affordance. iPhone users were missing favorites and
-            // program info because the only path to those actions
-            // was a long-press, which most users never discover. A
-            // small ellipsis button on iPhone opens the same
-            // confirmation dialog the long-press currently
-            // triggers. The long-press shortcut is preserved for
-            // power users; tap-to-play remains the row's primary
-            // action.
-            //
-            // iPad keeps the long-press-only path: rows are wider,
-            // multitouch-aware, and the ellipsis would crowd the
-            // existing visible "Schedule" capsule.
-            if !isWide {
-                Button {
-                    let generator = UIImpactFeedbackGenerator(style: .light)
-                    generator.impactOccurred()
-                    showCardMenu = true
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 18, weight: .regular))
-                        .foregroundColor(.textTertiary)
-                        .frame(width: 36, height: 36)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("More actions for \(item.name)")
-                .accessibilityHint("Open favorites, program info, and other actions")
+            // v1.6.23 (Codex UX P1) + issue #35: visible secondary-
+            // actions affordance. The only path to favorites / program
+            // info used to be a long-press, which most users never
+            // discover, so a small ellipsis button opens the same
+            // confirmation dialog. This was iPhone-only originally (iPad
+            // was meant to rely on long-press), but issues #18 and #35
+            // proved iPad users genuinely could not find how to add a
+            // favorite: the iPad row had no visible affordance at all.
+            // So the ellipsis shows on every idiom now. The long-press
+            // shortcut is preserved; tap-to-play stays the primary action.
+            Button {
+                let generator = UIImpactFeedbackGenerator(style: .light)
+                generator.impactOccurred()
+                showCardMenu = true
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 18, weight: .regular))
+                    .foregroundColor(.textTertiary)
+                    .frame(width: 36, height: 36)
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("More actions for \(item.name)")
+            .accessibilityHint("Open favorites, program info, and other actions")
 
             // -- Expand chevron --
             if item.currentProgram != nil || fetchUpcoming != nil {
@@ -2740,7 +2735,7 @@ struct FavoritesView: View {
                     EmptyStateView(
                         icon: "star",
                         title: "No Favorites",
-                        message: "Tap the star on any channel in Live TV to add it here."
+                        message: "Tap the star on a channel in the guide, or a channel's actions button in the list, to add it here."
                     )
                 } else {
                     List {
