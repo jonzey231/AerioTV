@@ -57,6 +57,19 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.6",
+            title: "What's new in 1.7.6",
+            bullets: [
+                "Automatic local/remote switching: AerioTV uses your server's local URL whenever it is reachable and your remote URL otherwise, with no Home WiFi setup and no location permission. Leave home mid-stream and playback re-tunes to the remote URL on its own",
+                "iPhone: a new player button rotates video into fullscreen landscape even when rotation lock is on, and returns to portrait when you exit",
+                "Add favorites right from the guide by tapping the star on a channel, now available on iPad as well",
+                "Live TV groups can be sorted Default, A-Z, or in your own manual order, and the channels inside follow the order you choose",
+                "Recordings now show full program details so episodes are easier to tell apart",
+                "Apple TV: fixed a crash when scrolling the Live TV guide, and fixed no audio when Dolby Atmos is enabled in tvOS Settings"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.6")
+        ),
+        WhatsNewRelease(
             version: "1.7.5",
             title: "What's new in 1.7.5",
             bullets: [

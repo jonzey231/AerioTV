@@ -1,5 +1,55 @@
 # Changelog
 
+## v1.7.6 - 2026-06-17
+
+### Added
+
+- **Automatic local/remote switching.** AerioTV now connects to a server's
+  local (LAN) URL whenever it is reachable and falls back to the remote URL
+  otherwise, deciding purely by a fast reachability check. If you move between
+  networks while watching (for example leaving home WiFi for cellular),
+  playback re-tunes to the reachable URL on its own. This replaces the old
+  Home WiFi / SSID setup, and the location permission has been removed entirely.
+- **iPhone: rotate-to-fullscreen-landscape button.** A new control in the
+  player rotates video into landscape fullscreen even when the device's
+  rotation lock is on, and returns to the natural orientation when you exit.
+- **Favorites from the guide.** Tap the star on any channel in the guide to
+  favorite it, and the channel actions button now appears on iPad as well, so
+  adding favorites no longer requires a hidden long-press.
+- **Live TV group sorting.** Sort your channel groups Default, A-Z, or in a
+  manual order you arrange yourself (drag on iPhone, long-press then d-pad on
+  Apple TV). The channels inside each group follow the chosen order.
+- **AVPlayer playback engine for HLS (experimental, off by default).** Behind
+  Settings > Developer, HLS-capable servers can play through Apple's AVPlayer
+  for HEVC and HDR, with automatic fallback to the mpv engine.
+- **Richer On Demand metadata (TMDB).** Cast and crew with photos, person bios
+  and Known For, posters extended to On Demand, and View on TMDB QR codes on
+  Apple TV.
+- **On Demand category filter** now fetches per category so every enabled
+  category is represented, not just the first page of results.
+- **EPG search** results jump straight to the matching program in the Live TV
+  guide.
+- **Developer: Delete All Logs.**
+
+### Changed
+
+- Removed the location permission and the Home WiFi / SSID configuration
+  entirely (see automatic switching above). Local network access is still
+  requested, since reaching a server on your own network requires it.
+- Apple TV: removing a favorite via the star button now asks for confirmation.
+- Clearer Developer playback-engine labels.
+
+### Fixed
+
+- **Apple TV: fixed a crash when scrolling the Live TV guide** under load on
+  recent tvOS, traced to the pinned guide time-header.
+- **Apple TV: fixed no audio when Dolby Atmos is enabled** in tvOS Settings.
+- **Recording a currently-airing program** now lands in the Recording section
+  instead of Scheduled, and recordings show full program details.
+- HEVC channels that AVPlayer cannot render now fall back to the mpv engine
+  automatically.
+- Various Apple TV focus and text-field polish.
+
 ## v1.7.5 - 2026-06-05
 
 ### Fixed
