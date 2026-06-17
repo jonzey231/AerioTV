@@ -1508,6 +1508,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // OpenGL ES render — GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy)
         private let renderQueue = DispatchQueue(label: "com.aerio.mpv.render", qos: .userInteractive)
         private weak var sampleBufferLayer: AVSampleBufferDisplayLayer?  // vsync-synchronized display
+        // Cached renderer for the off-main render/diagnostics paths.
+        // Captured exactly once on the main actor in setupRenderer(layer:)
+        // (right after sampleBufferLayer is assigned), then read from the
+        // render queue (renderAndPresent) and mpvQueue (printDiagnostics).
+        // AVSampleBufferVideoRenderer is not Sendable; the enqueue path is
+        // externally serialized on renderQueue, matching the contract the
+        // top-of-file `@preconcurrency import AVFoundation` documents.
+        private nonisolated(unsafe) var cachedRenderer: AVSampleBufferVideoRenderer?
         private var eaglContext: EAGLContext?
         private var textureCache: CVOpenGLESTextureCache?
         // v1.7.x Step 5 — triple-buffered FBO ring.
@@ -2669,6 +2677,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         @MainActor
         func setupRenderer(layer: CALayer) {
             self.sampleBufferLayer = layer.sublayers?.compactMap { $0 as? AVSampleBufferDisplayLayer }.first
+            // Capture the renderer once here on the main actor so the
+            // off-main render/diagnostics paths can reach it without a
+            // main-actor hop. See the cachedRenderer declaration.
+            self.cachedRenderer = self.sampleBufferLayer?.sampleBufferRenderer
             kickstartIfNeeded()
             // v1.7.x Issue A round 4: arm the IOSurface re-attach
             // watchdog now that the layer reference is in place.
@@ -3326,7 +3338,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // A config-commit render (and therefore the very first frame) must
             // NOT be skipped on backpressure, or the VO never configures.
             if hasFrame && !shouldCommitTarget,
-               let renderer = sampleBufferLayer?.sampleBufferRenderer,
+               let renderer = cachedRenderer,
                !renderer.isReadyForMoreMediaData {
                 backpressureSkipCount &+= 1
                 return
@@ -3403,8 +3415,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if renderMs > 33.0 { lateFrameCount += 1 }
 
             // Check display layer readiness before enqueue
-            let layerReady = sampleBufferLayer?.sampleBufferRenderer.isReadyForMoreMediaData ?? false
-            let layerStatus = sampleBufferLayer?.sampleBufferRenderer.status
+            let layerReady = cachedRenderer?.isReadyForMoreMediaData ?? false
+            let layerStatus = cachedRenderer?.status
 
             // v1.7.x Issue A round 3: log AVSBDL state transitions so
             // the next test log shows whether the layer is internally
@@ -3414,8 +3426,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // to layer-side auto-clear behavior, not anything mpv-
             // side). Logged on transition only, so smooth playback
             // produces zero noise.
-            if let layer = sampleBufferLayer {
-                let currentStatus = layer.sampleBufferRenderer.status
+            if let renderer = cachedRenderer {
+                let currentStatus = renderer.status
                 if currentStatus != lastObservedLayerStatus {
                     let from = Self.statusName(lastObservedLayerStatus)
                     let to = Self.statusName(currentStatus)
@@ -3431,7 +3443,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // Renderer (iOS 17+). We already use the renderer-
                 // side enqueue API throughout, so this matches our
                 // existing path.
-                let currentFlush = layer.sampleBufferRenderer.requiresFlushToResumeDecoding
+                let currentFlush = renderer.requiresFlushToResumeDecoding
                 if currentFlush != lastObservedRequiresFlush {
                     #if DEBUG
                     debugLog("[AVSBDL-FLUSH] \(streamTag) requiresFlushToResumeDecoding: \(lastObservedRequiresFlush) → \(currentFlush)")
@@ -3537,7 +3549,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     // .error on the renderer).
                     layerFailedFrameCount &+= 1
                     if layerFailedFrameCount == 1 || layerFailedFrameCount % 30 == 0 {
-                        let err = sampleBufferLayer?.sampleBufferRenderer.error?.localizedDescription ?? "nil"
+                        let err = cachedRenderer?.error?.localizedDescription ?? "nil"
                         #if DEBUG
                         debugLog("[MPV-LAYER] \(streamTag) FOREGROUND layer .failed (frame #\(layerFailedFrameCount), enqueue skipped) — error=\(err)")
                         #endif
@@ -3601,7 +3613,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // the comparison baseline.
             } else if let sampleBuffer = Self.makeSampleBuffer(from: renderPixelBuffer, presentationTime: presentationTime) {
                 nonisolated(unsafe) let sb = sampleBuffer
-                sampleBufferLayer?.sampleBufferRenderer.enqueue(sb)
+                cachedRenderer?.enqueue(sb)
                 enqueued = true
                 // v1.7.x: a real (non-black) frame landed, so the
                 // black-frame storm reload watchdog's consecutive
@@ -3715,7 +3727,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
             #endif
 
-            if layerStatus == .failed, let err = sampleBufferLayer?.sampleBufferRenderer.error {
+            if layerStatus == .failed, let err = cachedRenderer?.error {
                 debugLog("🔴 \(streamTag) [LAYER FAILED] \(err.localizedDescription)")
             }
 
@@ -5907,10 +5919,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
             // Display layer health
             var layerStatus = "ok"
-            if let layer = sampleBufferLayer {
-                if layer.sampleBufferRenderer.status == .failed {
-                    layerStatus = "FAILED: \(layer.sampleBufferRenderer.error?.localizedDescription ?? "?")"
-                } else if layer.sampleBufferRenderer.isReadyForMoreMediaData == false {
+            if let renderer = cachedRenderer {
+                if renderer.status == .failed {
+                    layerStatus = "FAILED: \(renderer.error?.localizedDescription ?? "?")"
+                } else if renderer.isReadyForMoreMediaData == false {
                     layerStatus = "BACKPRESSURE"
                 }
             }

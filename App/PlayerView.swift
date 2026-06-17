@@ -3428,7 +3428,7 @@ final class AVPlayerProgressDriver {
             [weak self] i, _ in
             guard let self, i.status == .readyToPlay else { return }
             Task { @MainActor in
-                self.populateTracks(item: i)
+                await self.populateTracks(item: i)
                 self.populateStreamInfo(item: i)
             }
         })
@@ -3462,16 +3462,21 @@ final class AVPlayerProgressDriver {
         itemNotificationTokens.append(nc.addObserver(
             forName: AVPlayerItem.newAccessLogEntryNotification,
             object: item, queue: .main) { [weak self] _ in
-            guard let self, let event = item.accessLog()?.events.last else { return }
-            if !self.streamSummaryLogged, event.startupTime > 0 {
-                self.streamSummaryLogged = true
-                let bitrate = event.indicatedBitrate > 0 ? event.indicatedBitrate : event.observedBitrate
-                debugLog(String(format:
-                    "[AVP-STREAM] startup=%.0fms indicatedBitrate=%.0fkbps observed=%.0fkbps uri-changes=%d",
-                    event.startupTime * 1000,
-                    event.indicatedBitrate / 1000,
-                    event.observedBitrate / 1000,
-                    event.numberOfStalls))
+            // queue: .main means this closure already runs on the main
+            // actor; assumeIsolated lets us touch the @MainActor stored
+            // property `streamSummaryLogged` without an async hop.
+            MainActor.assumeIsolated {
+                guard let self, let event = item.accessLog()?.events.last else { return }
+                // Log the stream summary once.
+                if !self.streamSummaryLogged, event.startupTime > 0 {
+                    self.streamSummaryLogged = true
+                    debugLog(String(format:
+                        "[AVP-STREAM] startup=%.0fms indicatedBitrate=%.0fkbps observed=%.0fkbps uri-changes=%d",
+                        event.startupTime * 1000,
+                        event.indicatedBitrate / 1000,
+                        event.observedBitrate / 1000,
+                        event.numberOfStalls))
+                }
             }
         })
 
@@ -3517,15 +3522,14 @@ final class AVPlayerProgressDriver {
     }
 
     /// Map AVMediaSelectionGroups to the overlay's integer-id track lists.
-    /// Uses the synchronous accessor (deprecated since iOS 16 but still
-    /// functional) deliberately: the async `loadMediaSelectionGroup`
-    /// sends the non-Sendable `AVAsset` off the main actor, which Swift 6
-    /// strict concurrency rejects. At `status == .readyToPlay` the groups
-    /// are loaded, so the sync read returns them without blocking.
-    private func populateTracks(item: AVPlayerItem) {
+    /// Uses the async `loadMediaSelectionGroup(for:)` accessor (the
+    /// synchronous `mediaSelectionGroup(forMediaCharacteristic:)` is
+    /// deprecated since iOS 16). Called at `status == .readyToPlay`, so
+    /// the groups are already loaded and the awaits return immediately.
+    private func populateTracks(item: AVPlayerItem) async {
         let asset = item.asset
-        let audioGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .audible)
-        let subGroup = asset.mediaSelectionGroup(forMediaCharacteristic: .legible)
+        let audioGroup = try? await asset.loadMediaSelectionGroup(for: .audible)
+        let subGroup = try? await asset.loadMediaSelectionGroup(for: .legible)
 
         audibleGroup = audioGroup
         legibleGroup = subGroup
