@@ -2256,9 +2256,18 @@ struct EPGGuideView: View {
                 // the first channel with any future program, inner on the
                 // first future program in that channel. On a healthy EPG
                 // cache this is effectively O(1).
-                let futureCutoff = Date().addingTimeInterval(1800)
+                // A program that has NOT STARTED yet means genuine upcoming
+                // schedule is cached. The previous `end > now+30min` test was
+                // satisfied by the single still-airing program that
+                // seedFromChannels seeds per channel, so a cache holding only
+                // current programs (e.g. after a silent grid-fetch failure)
+                // looked complete and the network refetch was skipped, leaving
+                // the guide stuck on the now-playing show with everything in
+                // the future blank. `start > now` excludes the airing program
+                // and is true only when real future programming is present.
+                let gateNow = Date()
                 let hasFuturePrograms = guideStore.programs.contains { _, progs in
-                    progs.contains { $0.end > futureCutoff }
+                    progs.contains { $0.start > gateNow }
                 }
                 guard !cacheIsFresh || !hasFuturePrograms else {
                     debugLog("📺 EPG cache is fresh with future programs; skipping network fetch")

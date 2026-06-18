@@ -253,11 +253,16 @@ struct VODDetailView: View {
     /// push, so Back returns to THIS title with the bio sheet closed.
     @State private var knownForPush: VODDisplayItem?
     #if os(tvOS)
-    /// Drives the top tab bar's visibility from this detail's scroll
-    /// position so it reappears when the user scrolls back to the top
-    /// (a pushed tvOS detail otherwise hides it, leaving the Menu
-    /// button as the only way back up to it).
-    @State private var detailScrolledToTop = true
+    /// Anchors initial focus to the movie Play button. When the async TMDB
+    /// cast strip realises a beat after open, its `.card` buttons (the
+    /// system's preferred focus style) steal focus from Play. prefersDefault
+    /// Focus + resetFocus is NOT enough on tvOS (a single focus write is
+    /// dropped while the new row lays out, per ChannelListView), so Play is
+    /// bound to this @FocusState and driven in a short retry loop when
+    /// credits arrive.
+    @Namespace private var detailFocusNS
+    @Environment(\.resetFocus) private var resetFocus
+    @FocusState private var playFocused: Bool
     #endif
     @State private var selectedSeason: Int = 0
     @State private var playingURL: IdentifiableURL?
@@ -296,32 +301,36 @@ struct VODDetailView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                #if os(tvOS)
+                // Scope focus so the movie Play button can be the default
+                // target (see detailFocusNS). The top tab bar is owned by
+                // OnDemandView now (hidden while a detail is pushed), so the
+                // old scroll observer that drove its visibility is gone.
+                .focusScope(detailFocusNS)
+                #endif
             }
-            #if os(tvOS)
-            // Reveal the top tab bar while the header (hero + plot +
-            // cast + season selector) is in view; hide it once the user
-            // scrolls down into the episode list. Lets the user reach
-            // the tab bar again by scrolling back up, without the Menu
-            // button (a pushed detail otherwise hides it). tvOS scrolls
-            // by focus, not free inertia, so "scroll to the top" of a
-            // series lands on the first focusable header element with
-            // the non-focusable hero still off-screen (~500pt offset).
-            // The threshold sits above that whole header band so the
-            // bar returns as soon as the user climbs back out of the
-            // episode list, then stays hidden deeper in the list.
-            .onScrollGeometryChange(for: Bool.self) { geo in
-                geo.contentOffset.y < 600
-            } action: { _, headerVisible in
-                if detailScrolledToTop != headerVisible { detailScrolledToTop = headerVisible }
-            }
-            #endif
         }
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         #if os(tvOS)
-        .toolbar(detailScrolledToTop ? .visible : .hidden, for: .tabBar)
+        // When the async TMDB cast strip realises, its `.card` buttons steal
+        // focus from Play. resetFocus + prefersDefaultFocus is NOT enough here
+        // (tvOS drops a single focus write while the new row lays out), so
+        // drive the Play @FocusState in a short retry loop until the engine
+        // accepts it. Movie only; fires on the credits nil -> non-nil edge.
+        .onChange(of: tmdbCredits == nil) { _, isNil in
+            guard item.type == .movie, !isNil else { return }
+            Task { @MainActor in
+                resetFocus(in: detailFocusNS)
+                for _ in 0..<8 {
+                    playFocused = true
+                    try? await Task.sleep(nanoseconds: 70_000_000)
+                    if playFocused { break }
+                }
+            }
+        }
         #endif
         .task {
             await loadDetail()
@@ -912,6 +921,12 @@ struct VODDetailView: View {
             guard let url, !isResolvingURL else { return }
             Task { await resolveAndLaunch(url: url, title: title) }
         }
+        #if os(tvOS)
+        // Movie detail: bind Play to the focus driver + hint it as the scope
+        // default, so the async cast strip can't capture it on open.
+        .focused($playFocused)
+        .prefersDefaultFocus(item.type == .movie, in: detailFocusNS)
+        #endif
     }
 
     private func playEpisode(_ ep: VODEpisode) {

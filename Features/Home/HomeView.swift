@@ -3052,6 +3052,18 @@ struct MainTabView: View {
     /// (classic stack first, then navPath). Reset by SettingsView
     /// after consuming.
     @State private var settingsPopRequested = false
+    /// Latched, navigation-safe mirrors of hasFavorites / hasRecordings /
+    /// hasVOD for the TabView's conditional tabs. Inserting or removing a
+    /// sibling tab while the Settings tab has a sub-page pushed tears down
+    /// that NavigationStack (blank sub-page, then dead navigation: the
+    /// "can't open Settings submenus while the playlist is syncing" bug, since
+    /// these gates flip false->true as VOD / favorites / recordings load).
+    /// syncTabVisibility() copies the live values in only when it is safe to
+    /// mutate the tab set, so the set never changes underneath an active
+    /// Settings navigation; deferred changes apply when the user leaves it.
+    @State private var tabShowFavorites = false
+    @State private var tabShowRecordings = false
+    @State private var tabShowVOD = false
     #endif
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
     @ObservedObject private var favoritesStore = FavoritesStore.shared
@@ -4082,6 +4094,45 @@ struct MainTabView: View {
             || vodStore.isLoadingSeries
     }
 
+    /// Tab-presence flags the TabView actually reads. On tvOS these come from
+    /// the latched, navigation-safe @State (tabShow*); on iOS they read the
+    /// live values directly (iOS NavigationStacks are not torn down by a
+    /// sibling-tab insertion the way tvOS's are).
+    #if os(tvOS)
+    private var showFavoritesTab: Bool { tabShowFavorites }
+    private var showRecordingsTab: Bool { tabShowRecordings }
+    private var showVODTab: Bool { tabShowVOD }
+    #else
+    private var showFavoritesTab: Bool { hasFavorites }
+    private var showRecordingsTab: Bool { hasRecordings }
+    private var showVODTab: Bool { hasVOD }
+    #endif
+
+    #if os(tvOS)
+    /// One Equatable key combining the nav-state gates, so a SINGLE .onChange
+    /// re-applies deferred tab-visibility changes. Folding the three triggers
+    /// into one keeps the tabContentView modifier chain short enough for the
+    /// Swift type-checker (three chained .onChange modifiers tipped it over).
+    private var tabNavStateKey: String {
+        "\(isSettingsSubviewPushed)|\(isVODDetailPushed)|\(selectedTab.rawValue)"
+    }
+    #endif
+
+    /// Copy the live tab-gate values into the latched @State, but ONLY when it
+    /// is safe to mutate the TabView's child set: not while a Settings subview
+    /// or VOD detail is pushed, and not while the Settings tab is selected (the
+    /// entry point into those fragile NavigationStacks). Keeps the sync-time
+    /// tab insertions from tearing down a Settings sub-page mid-navigation.
+    /// No-op on iOS.
+    private func syncTabVisibility() {
+        #if os(tvOS)
+        guard !isSettingsSubviewPushed, !isVODDetailPushed, selectedTab != .settings else { return }
+        if tabShowFavorites != hasFavorites { tabShowFavorites = hasFavorites }
+        if tabShowRecordings != hasRecordings { tabShowRecordings = hasRecordings }
+        if tabShowVOD != hasVOD { tabShowVOD = hasVOD }
+        #endif
+    }
+
     // MARK: - Tab Content
     private var tabContentView: some View {
         TabView(selection: $selectedTab) {
@@ -4091,7 +4142,7 @@ struct MainTabView: View {
 
             // Favorites tab only exists while the user has at least one favorite.
             // The tab bar animates it in/out automatically when the count crosses zero.
-            if hasFavorites {
+            if showFavoritesTab {
                 FavoritesView()
                     .tabItem { Label(AppTab.favorites.title, systemImage: AppTab.favorites.icon) }
                     .tag(AppTab.favorites)
@@ -4099,7 +4150,7 @@ struct MainTabView: View {
 
             // DVR tab only exists while the user has at least one recording
             // (local or server-side). Animates in/out as recordings are added/removed.
-            if hasRecordings {
+            if showRecordingsTab {
                 NavigationStack {
                     MyRecordingsView()
                 }
@@ -4113,7 +4164,7 @@ struct MainTabView: View {
             // live-TV M3U or a Dispatcharr instance without any VOD
             // ingested) hides the tab entirely, matching the dynamic
             // behaviour of Favorites and DVR.
-            if hasVOD {
+            if showVODTab {
                 OnDemandView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
                     .tabItem { Label(AppTab.onDemand.title, systemImage: AppTab.onDemand.icon) }
                     .tag(AppTab.onDemand)
@@ -4134,6 +4185,7 @@ struct MainTabView: View {
         .tint(theme.accent)
         // If the user removes their last favorite while on the Favorites tab, redirect home.
         .onChange(of: hasFavorites) { _, nowHasFavorites in
+            syncTabVisibility()
             if !nowHasFavorites && selectedTab == .favorites {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     selectedTab = .liveTV
@@ -4142,6 +4194,7 @@ struct MainTabView: View {
         }
         // If the user deletes their last recording while on the DVR tab, redirect home.
         .onChange(of: hasRecordings) { _, nowHasRecordings in
+            syncTabVisibility()
             if !nowHasRecordings && selectedTab == .dvr {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     selectedTab = .liveTV
@@ -4153,13 +4206,23 @@ struct MainTabView: View {
         // tab, redirect home rather than leaving them staring at a
         // tab whose backing content is gone.
         .onChange(of: hasVOD) { _, nowHasVOD in
+            syncTabVisibility()
             if !nowHasVOD && selectedTab == .onDemand {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     selectedTab = .liveTV
                 }
             }
         }
+        // Re-apply any tab-visibility change that was deferred while a Settings
+        // subview / VOD detail was open, or while the Settings tab was selected,
+        // the instant the user returns to a safe spot. This is what lets the
+        // deferred sync-time tab insertions land without tearing down an active
+        // Settings navigation (the submenu-stuck-while-syncing fix).
+        #if os(tvOS)
+        .onChange(of: tabNavStateKey) { _, _ in syncTabVisibility() }
+        #endif
         .onAppear {
+            syncTabVisibility()
             debugLog("🔶 MainTabView.onAppear: allServers=\(allServers.count), selectedTab=\(selectedTab), thread=\(Thread.current)")
             if UserDefaults.standard.bool(forKey: "launchOnLiveTV") {
                 selectedTab = .liveTV
@@ -4519,9 +4582,14 @@ struct MainTabView: View {
             // main thread (97k+ entries on the torture playlist),
             // costing a 2-3s hang. Double short-circuit eliminates
             // both the allocation and the scan on a fresh cache.
-            let futureCutoff = Date().addingTimeInterval(1800)
+            // `start > now` (not `end > now+30min`): a seeded still-airing
+            // program has start <= now, so the old test treated a current-only
+            // seed cache as "complete" and skipped the grid refetch, leaving
+            // the guide showing only the now-playing program with the future
+            // blank. See the matching comment in EPGGuideView.swift.
+            let gateNow = Date()
             let hasFuturePrograms = guideStore.programs.contains { _, progs in
-                progs.contains { $0.end > futureCutoff }
+                progs.contains { $0.start > gateNow }
             }
             // v1.6.22: detect a "fresh but pathologically sparse"
             // cache and force a refetch.

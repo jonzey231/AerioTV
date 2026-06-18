@@ -888,9 +888,10 @@ final class VODService {
 /// disabled or unkeyed, the whole TMDB path is inert and only
 /// server-provided posters show.
 enum TMDBPosters {
-    /// `@AppStorage` / UserDefaults key for the enable toggle (the
-    /// toggle itself is per-device, like the other App Behaviors
-    /// toggles; only the API key syncs).
+    /// `@AppStorage` / UserDefaults key for the enable toggle. Synced
+    /// across devices via `SyncManager.syncBoolKeys` so it follows the API
+    /// key (which syncs through the iCloud Keychain); a reinstall no longer
+    /// drops the toggle back to off.
     static let enabledDefaultsKey = "programPostersTMDBEnabled"
     /// Keychain item key for the user's TMDB API key.
     static let keychainKey = "tmdbAPIKey"

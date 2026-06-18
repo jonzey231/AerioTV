@@ -97,6 +97,11 @@ final class SyncManager: ObservableObject {
     ]
     private let syncBoolKeys = [
         "useCustomAccent", "preferAVPlayer", "bgRefreshEnabled",
+        // TMDB program-posters enable toggle. The API key already syncs via
+        // the iCloud Keychain (TMDBPosters.saveAPIKey synchronizable), so the
+        // enable state follows it across reinstalls/devices instead of needing
+        // a manual re-toggle after every install.
+        TMDBPosters.enabledDefaultsKey,
         // Guide Display master toggle + channel-card stripe companion.
         "enableCategoryColors", "tintChannelCards",
         // Per-bucket enable flags for the additional (non-default)

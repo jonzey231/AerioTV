@@ -56,28 +56,37 @@ struct OnDemandView: View {
             Color.appBackground.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                #if os(tvOS)
-                // tvOS: centre the pills above the media grid. Minimal
-                // top padding — the tab bar's own safe area provides
-                // most of the gap; we just add a small breathing room.
-                HStack {
-                    Spacer()
-                    pillRow
-                    Spacer()
+                // Hide the Movies / Series selector while a detail is pushed.
+                // The pills live HERE (above the inner NavigationStack) rather
+                // than inside it, so a pushed VODDetailView does NOT cover
+                // them. On tvOS they stayed focusable and trapped focus: down
+                // from the pills never crossed into the pushed detail, so the
+                // Play button on a movie's info screen was unreachable (the
+                // user could only play Continue Watching items, which skip the
+                // detail). Dropping the pills from the tree while pushed hands
+                // focus to the detail content; they return on pop.
+                if !isDetailPushed {
+                    #if os(tvOS)
+                    // tvOS: centre the pills above the media grid. Minimal top
+                    // padding; the tab bar's own safe area provides most of the
+                    // gap, we just add a small breathing room.
+                    HStack {
+                        Spacer()
+                        pillRow
+                        Spacer()
+                    }
+                    .padding(.horizontal, 40)
+                    .padding(.top, 24)
+                    .padding(.bottom, 20)
+                    .focusSection()
+                    #else
+                    // iOS / iPadOS: pill row renders above the inner
+                    // NavigationStack (matching tvOS's layout). The row itself
+                    // dodges iPadOS 18+'s floating TabView capsule; see
+                    // `iOSPillHeader`'s `extraTopPadding`.
+                    iOSPillHeader
+                    #endif
                 }
-                .padding(.horizontal, 40)
-                .padding(.top, 24)
-                .padding(.bottom, 20)
-                .focusSection()
-                #else
-                // iOS / iPadOS: pill row renders above the inner
-                // NavigationStack (matching tvOS's layout). The row
-                // itself does the work of dodging iPadOS 18+'s
-                // floating TabView capsule — see `iOSPillHeader`'s
-                // `extraTopPadding` for the 72pt kick that pushes
-                // the pills below the floating bar when present.
-                iOSPillHeader
-                #endif
 
                 if segment == 0 {
                     MoviesView(
@@ -96,6 +105,15 @@ struct OnDemandView: View {
                 }
             }
         }
+        #if os(tvOS)
+        // Own the top tab bar's visibility from here, the persistent TabView
+        // child that survives a VOD-detail push/pop. Hidden while a detail is
+        // pushed (fullscreen detail); restored to visible the instant the
+        // detail pops (isDetailPushed -> false). Previously VODDetailView hid
+        // the tab bar on scroll and nothing re-asserted it on pop, so it
+        // stayed hidden across every tab until relaunch.
+        .toolbar(isDetailPushed ? .hidden : .visible, for: .tabBar)
+        #endif
     }
 
     #if os(iOS)
