@@ -315,6 +315,11 @@ struct VODDetailView: View {
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         #if os(tvOS)
+        // Hide the top tab bar while this detail is pushed. The Movies/Series
+        // grid roots assert it back to .visible, so popping restores it. (The
+        // earlier OnDemandView-level toggle hid it but did not re-assert on pop
+        // on tvOS 27, leaving the bar gone after backing out.)
+        .toolbar(.hidden, for: .tabBar)
         // When the async TMDB cast strip realises, its `.card` buttons steal
         // focus from Play. resetFocus + prefersDefaultFocus is NOT enough here
         // (tvOS drops a single focus write while the new row lays out), so
@@ -1181,6 +1186,21 @@ struct VODDetailView: View {
                 }
             }
             .padding(.bottom, 8)
+            #if os(tvOS)
+            // Play sits far above the non-focusable info band and is
+            // horizontally offset, so a geometric D-pad Up from a cast card
+            // can never reach it. Make the strip a focus section and intercept
+            // Up to drive focus to Play directly. Other directions fall
+            // through to normal navigation (onMoveCommand on a focusSection is
+            // additive; it does not block default focus movement). Movie only;
+            // series Play lives on the episode rows.
+            .focusSection()
+            .onMoveCommand { direction in
+                if direction == .up, item.type == .movie {
+                    playFocused = true
+                }
+            }
+            #endif
         }
     }
 

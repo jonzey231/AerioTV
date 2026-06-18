@@ -105,15 +105,10 @@ struct OnDemandView: View {
                 }
             }
         }
-        #if os(tvOS)
-        // Own the top tab bar's visibility from here, the persistent TabView
-        // child that survives a VOD-detail push/pop. Hidden while a detail is
-        // pushed (fullscreen detail); restored to visible the instant the
-        // detail pops (isDetailPushed -> false). Previously VODDetailView hid
-        // the tab bar on scroll and nothing re-asserted it on pop, so it
-        // stayed hidden across every tab until relaunch.
-        .toolbar(isDetailPushed ? .hidden : .visible, for: .tabBar)
-        #endif
+        // Tab-bar visibility is owned inside the NavigationStack now (the
+        // pushed VODDetailView hides it, the grid roots assert it visible), so
+        // popping restores it reliably on tvOS 27. The OnDemandView-level
+        // toggle that used to live here did not re-assert on pop.
     }
 
     #if os(iOS)

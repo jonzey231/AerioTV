@@ -101,6 +101,11 @@ struct TVShowsView: View {
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
+            #if os(tvOS)
+            // Assert the tab bar visible at the grid root so popping a pushed
+            // VODDetailView (which hides it) restores it on tvOS 27.
+            .toolbar(.visible, for: .tabBar)
+            #endif
             #if os(iOS)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
