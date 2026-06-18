@@ -56,6 +56,15 @@ struct AppBehaviorsSettingsView: View {
     @AppStorage("appBehaviorsAppleTVChannelFlip")
     private var appleTVChannelFlip = true
 
+    /// Extra behind-live buffer cushion (seconds) folded into the live
+    /// mpv cache at tune-in to smooth jitter from any live source. Read
+    /// live in `MPVPlayerView.setupMPV` from this same key. Default 0
+    /// keeps the current low-latency tap-to-first-frame path
+    /// byte-identical. Range 0...5s, step 0.5. Left UNSYNCED to match the
+    /// sibling `appBehaviors*` keys.
+    @AppStorage("appBehaviorsStreamBufferSeconds")
+    private var streamBufferSeconds: Double = 0
+
     // MARK: - TMDB program posters (opt-in, off by default)
 
     /// Master toggle for the TMDB-by-title poster fallback.
@@ -203,6 +212,18 @@ struct AppBehaviorsSettingsView: View {
             }
             .listSectionSeparator(.hidden)
 
+            // MARK: Stream Buffer
+            Section {
+                StreamBufferSlider(value: $streamBufferSeconds)
+                    .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("Stream Buffer").sectionHeaderStyle()
+            } footer: {
+                Text("Extra buffer to smooth jitter and stutter on live streams from any source. Higher is smoother but adds delay behind live. 0 keeps the lowest latency. Applies to the next channel you tune.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+            .listSectionSeparator(.hidden)
+
             // MARK: Program Posters (TMDB)
             Section {
                 Toggle(isOn: $tmdbPostersEnabled) {
@@ -322,6 +343,16 @@ struct AppBehaviorsSettingsView: View {
                         .padding(.top, 4)
                 }
 
+                tvSection("Stream Buffer") {
+                    StreamBufferSlider(value: $streamBufferSeconds)
+
+                    Text("Extra buffer to smooth jitter and stutter on live streams from any source. Higher is smoother but adds delay behind live. 0 keeps the lowest latency. Applies to the next channel you tune. Press left or right on the Siri Remote to adjust.")
+                        .font(.system(size: 22))
+                        .foregroundColor(.textTertiary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
+                }
+
                 tvSection("Program Posters") {
                     TVSettingsToggleRow(
                         icon: "photo.on.rectangle.angled",
@@ -401,6 +432,128 @@ struct AppBehaviorsSettingsView: View {
                     .fill(Color.cardBackground)
             )
         }
+    }
+    #endif
+}
+
+// MARK: - Stream Buffer Slider (reusable, platform-split)
+
+/// Reusable "Stream Buffer" control for Settings → App Behaviors.
+///
+/// Encapsulates the per-platform slider so both `iOSBody` and
+/// `tvOSBody` can drop in `StreamBufferSlider(value:)`:
+///   - iOS / iPadOS: a native `Slider` (0...5, step 0.5) with a
+///     right-aligned "Off" / "X.Xs" value label, modeled on the
+///     networkTimeout row in `SettingsView`.
+///   - tvOS: a custom focusable track adjusted with the Siri Remote.
+///     Left/right decrement/increment by 0.5 (clamped 0...5);
+///     up/down are passed through so the focus engine still navigates
+///     to adjacent rows.
+struct StreamBufferSlider: View {
+    @Binding var value: Double
+    @ObservedObject private var theme = ThemeManager.shared
+
+    private static let range: ClosedRange<Double> = 0...5
+    private static let step: Double = 0.5
+
+    /// "Off" at 0, otherwise "X.Xs".
+    private var valueLabel: String {
+        value <= 0 ? "Off" : String(format: "%.1fs", value)
+    }
+
+    #if os(iOS)
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Stream Buffer")
+                    .font(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Spacer()
+                Text(valueLabel)
+                    .font(.monoSmall)
+                    .foregroundColor(theme.accent)
+            }
+            Slider(value: $value, in: Self.range, step: Self.step)
+                .tint(theme.accent)
+        }
+    }
+    #else
+    // tvOS: custom focusable track driven by the Siri Remote.
+    @State private var isFocused = false
+
+    private func clamp(_ v: Double) -> Double {
+        min(max(v, Self.range.lowerBound), Self.range.upperBound)
+    }
+
+    private func adjust(by delta: Double) {
+        withAnimation(.easeOut(duration: 0.12)) {
+            value = clamp(value + delta)
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 24) {
+            Text("Stream Buffer")
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundColor(.textPrimary)
+                .frame(width: 260, alignment: .leading)
+
+            GeometryReader { geo in
+                let trackWidth = geo.size.width
+                let fraction = Self.range.upperBound > 0
+                    ? value / Self.range.upperBound
+                    : 0
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.textTertiary.opacity(0.25))
+                        .frame(height: 10)
+                    Capsule()
+                        .fill(theme.accent)
+                        .frame(width: max(0, trackWidth * fraction), height: 10)
+                }
+                .frame(maxHeight: .infinity, alignment: .center)
+            }
+            .frame(height: 44)
+
+            Text(valueLabel)
+                .font(.system(size: 24, weight: .semibold).monospacedDigit())
+                .foregroundColor(isFocused ? theme.accent : .textSecondary)
+                .frame(width: 90, alignment: .trailing)
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(isFocused ? Color.accentPrimary.opacity(0.12) : Color.elevatedBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.accentPrimary, lineWidth: isFocused ? 3 : 0)
+        )
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+        .overlay(
+            TVPressOverlay(
+                isFocused: $isFocused,
+                canFocus: true,
+                interceptsDirectional: true,
+                // Slider adjust mode: left/right change the value; up/down and
+                // Menu fall through so the focus engine can navigate away.
+                horizontalAdjustOnly: true,
+                // Tap does nothing (a value slider, not a button).
+                onTap: {},
+                onLongPress: {},
+                onMoveUp: {},
+                onMoveDown: {},
+                onMenu: {},
+                // Left/right adjust the value, clamped 0...5.
+                onMoveLeft: { adjust(by: -Self.step) },
+                onMoveRight: { adjust(by: Self.step) }
+            )
+        )
+        .accessibilityElement()
+        .accessibilityLabel("Stream Buffer")
+        .accessibilityValue(valueLabel)
     }
     #endif
 }

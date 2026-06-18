@@ -63,30 +63,48 @@ struct TVPressOverlay: UIViewRepresentable {
     /// When true, d-pad up/down/left/right are captured by this overlay
     /// (up/down -> move callbacks, left/right consumed) and Menu drops.
     let interceptsDirectional: Bool
+    /// Horizontal-only adjust mode for value sliders: with
+    /// `interceptsDirectional` true, left/right are captured (to adjust the
+    /// value) while up/down and Menu are forwarded to the focus engine so the
+    /// user can still navigate away. Reorder rows leave this false (they
+    /// capture up/down to move the grabbed row).
+    let horizontalAdjustOnly: Bool
     let onTap: () -> Void
     let onLongPress: () -> Void
     let onMoveUp: () -> Void
     let onMoveDown: () -> Void
     let onMenu: () -> Void
+    /// d-pad left/right callbacks. When `interceptsDirectional` is true,
+    /// left/right clicks/swipes route here instead of being consumed
+    /// silently. Used by horizontal value sliders (StreamBufferSlider) to
+    /// decrement/increment while keeping up/down for focus navigation.
+    let onMoveLeft: () -> Void
+    let onMoveRight: () -> Void
 
     init(minimumPressDuration: TimeInterval = 0.35,
          isFocused: Binding<Bool>? = nil,
          canFocus: Bool = true,
          interceptsDirectional: Bool = false,
+         horizontalAdjustOnly: Bool = false,
          onTap: @escaping () -> Void = {},
          onLongPress: @escaping () -> Void,
          onMoveUp: @escaping () -> Void = {},
          onMoveDown: @escaping () -> Void = {},
-         onMenu: @escaping () -> Void = {}) {
+         onMenu: @escaping () -> Void = {},
+         onMoveLeft: @escaping () -> Void = {},
+         onMoveRight: @escaping () -> Void = {}) {
         self.minimumPressDuration = minimumPressDuration
         self.isFocused = isFocused
         self.canFocus = canFocus
         self.interceptsDirectional = interceptsDirectional
+        self.horizontalAdjustOnly = horizontalAdjustOnly
         self.onTap = onTap
         self.onLongPress = onLongPress
         self.onMoveUp = onMoveUp
         self.onMoveDown = onMoveDown
         self.onMenu = onMenu
+        self.onMoveLeft = onMoveLeft
+        self.onMoveRight = onMoveRight
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -127,8 +145,13 @@ struct TVPressOverlay: UIViewRepresentable {
         catcher.onMoveUp = onMoveUp
         catcher.onMoveDown = onMoveDown
         catcher.onMenu = onMenu
+        catcher.onMoveLeft = onMoveLeft
+        catcher.onMoveRight = onMoveRight
         catcher.minimumPressDuration = minimumPressDuration
         catcher.canFocus = canFocus
+        // Set horizontalAdjustOnly BEFORE interceptsDirectional so the
+        // latter's didSet enables the correct swipe recognizers.
+        catcher.horizontalAdjustOnly = horizontalAdjustOnly
         catcher.interceptsDirectional = interceptsDirectional
         catcher.onFocusChange = { focused in
             DispatchQueue.main.async {
@@ -147,6 +170,12 @@ final class PressCatcherView: UIView {
     var onMoveUp: () -> Void = {}
     var onMoveDown: () -> Void = {}
     var onMenu: () -> Void = {}
+    var onMoveLeft: () -> Void = {}
+    var onMoveRight: () -> Void = {}
+    /// See TVPressOverlay.horizontalAdjustOnly. Set before
+    /// interceptsDirectional (in apply) so its didSet enables the right
+    /// swipe recognizers.
+    var horizontalAdjustOnly: Bool = false
     var onFocusChange: ((Bool) -> Void)?
     var minimumPressDuration: TimeInterval = 0.35
 
@@ -158,8 +187,13 @@ final class PressCatcherView: UIView {
     var interceptsDirectional: Bool = false {
         didSet {
             guard interceptsDirectional != oldValue else { return }
-            upSwipe?.isEnabled = interceptsDirectional
-            downSwipe?.isEnabled = interceptsDirectional
+            // Horizontal-adjust mode (sliders) captures only left/right;
+            // up/down stay with the focus engine for navigation.
+            let vertical = interceptsDirectional && !horizontalAdjustOnly
+            upSwipe?.isEnabled = vertical
+            downSwipe?.isEnabled = vertical
+            leftSwipe?.isEnabled = interceptsDirectional
+            rightSwipe?.isEnabled = interceptsDirectional
         }
     }
 
@@ -167,6 +201,8 @@ final class PressCatcherView: UIView {
     private var longPressFired = false
     private weak var upSwipe: UISwipeGestureRecognizer?
     private weak var downSwipe: UISwipeGestureRecognizer?
+    private weak var leftSwipe: UISwipeGestureRecognizer?
+    private weak var rightSwipe: UISwipeGestureRecognizer?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -181,6 +217,18 @@ final class PressCatcherView: UIView {
         down.isEnabled = false
         addGestureRecognizer(down)
         downSwipe = down
+
+        let left = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeLeft))
+        left.direction = .left
+        left.isEnabled = false
+        addGestureRecognizer(left)
+        leftSwipe = left
+
+        let right = UISwipeGestureRecognizer(target: self, action: #selector(handleSwipeRight))
+        right.direction = .right
+        right.isEnabled = false
+        addGestureRecognizer(right)
+        rightSwipe = right
     }
 
     @available(*, unavailable)
@@ -196,6 +244,8 @@ final class PressCatcherView: UIView {
 
     @objc private func handleSwipeUp() { if interceptsDirectional { onMoveUp() } }
     @objc private func handleSwipeDown() { if interceptsDirectional { onMoveDown() } }
+    @objc private func handleSwipeLeft() { if interceptsDirectional { onMoveLeft() } }
+    @objc private func handleSwipeRight() { if interceptsDirectional { onMoveRight() } }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         // Reorder mode: capture directional clicks + Menu, consume them so
@@ -204,10 +254,23 @@ final class PressCatcherView: UIView {
         if interceptsDirectional {
             for press in presses {
                 switch press.type {
-                case .upArrow:    onMoveUp();   return
-                case .downArrow:  onMoveDown(); return
-                case .leftArrow, .rightArrow: return   // lock to this column
-                case .menu:       onMenu();     return
+                // Left/right always route to the callbacks: reorder rows get
+                // a no-op (lock to column); sliders adjust their value.
+                case .leftArrow:  onMoveLeft();  return
+                case .rightArrow: onMoveRight(); return
+                // Up/down/Menu: reorder rows capture them (move the grabbed
+                // row, drop the sheet). In horizontalAdjustOnly (slider) mode
+                // they break out and fall through to super so the focus
+                // engine can navigate away to adjacent rows.
+                case .upArrow:
+                    if horizontalAdjustOnly { break }
+                    onMoveUp(); return
+                case .downArrow:
+                    if horizontalAdjustOnly { break }
+                    onMoveDown(); return
+                case .menu:
+                    if horizontalAdjustOnly { break }
+                    onMenu(); return
                 default: break
                 }
             }
@@ -237,8 +300,11 @@ final class PressCatcherView: UIView {
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        // When grabbed, a directional/Menu press was already consumed in
-        // pressesBegan; only Select reaches the tap path here.
+        // Reorder grabs consume directional/Menu in pressesBegan; slider
+        // (horizontalAdjustOnly) mode instead forwards up/down/Menu to super
+        // there for focus navigation. Either way the focus move, if any,
+        // already happened at pressesBegan, so swallow their pressesEnded and
+        // let only a Select press reach the tap path below.
         if interceptsDirectional,
            presses.contains(where: { $0.type == .upArrow || $0.type == .downArrow || $0.type == .leftArrow || $0.type == .rightArrow || $0.type == .menu }) {
             return

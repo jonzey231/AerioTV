@@ -3986,7 +3986,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //        scrubbing buffers back faster (user feedback: "seeking
             //        is slow to buffer"). Still enough prefill to ride out
             //        the typical post-seek segment fetch on VOD/DVR.
-            checkError(mpv_set_option_string(mpv, "cache-pause-wait", isLive ? "0" : "1"))
+            // Stream buffer cushion (App Behaviors → Stream Buffer): when the
+            // user sets a non-zero cushion, live prefills that many SECONDS
+            // before the first frame instead of starting on first byte
+            // (0). VOD/DVR keep their 1s prefill. 0 = byte-identical to the
+            // prior low-latency live path.
+            let streamBufMs = Int(UserDefaults.standard.double(forKey: "appBehaviorsStreamBufferSeconds") * 1000)
+            let cachePauseWait: String = {
+                if isLive {
+                    return streamBufMs > 0 ? String(Double(streamBufMs) / 1000.0) : "0"
+                }
+                return "1"
+            }()
+            setOption(mpv, "cache-pause-wait", cachePauseWait)
 
             // ────────────────────────────────────────────────────────
             // Startup-speed options. These collectively shave ~1-2s
@@ -4146,7 +4158,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if isLive {
                 setOption(mpv, "demuxer-lavf-analyzeduration", "1.5")
                 setOption(mpv, "demuxer-lavf-probesize", "1048576")
-                setOption(mpv, "cache-pause-initial", "no")
+                // Stream buffer cushion: when set, wait to fill the cushion at
+                // open ("yes") rather than starting immediately ("no").
+                setOption(mpv, "cache-pause-initial", streamBufMs > 0 ? "yes" : "no")
                 setOption(mpv, "hls-bitrate", "max")
                 setOption(mpv, "video-latency-hacks", "yes")
             }
@@ -4573,9 +4587,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let liveMinMs = 5_000
                 let vodMinMs = 3_000
                 #endif
-                let ms = isLive
+                var ms = isLive
                     ? max(userPrefMs, liveMinMs)
                     : max(userPrefMs, vodMinMs)
+                // Stream buffer cushion (live only): fold the user's chosen
+                // cushion into the floor so cache-secs / demuxer-readahead-
+                // secs cover it. streamBufMs is already in milliseconds, the
+                // same unit as `ms`. 0 leaves the floor untouched.
+                if isLive, streamBufMs > 0 {
+                    ms = max(ms, streamBufMs)
+                }
                 return Double(ms) / 1000.0
             }()
 
