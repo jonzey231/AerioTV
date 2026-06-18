@@ -908,6 +908,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             hasReachedPlaybackRestartForStream = false
             consecutiveBlackFramesSuppressed = 0
             lastForcedBlackReloadAt = 0
+            forcedReloadWindowStart = 0
+            forcedReloadWindowCount = 0
+            // #37: re-read the kill-switch on every re-arm. Channel-flip and
+            // multiview tile swaps reuse this coordinator and skip setupMPV,
+            // so re-reading here makes "Auto-Recover Frozen Streams" apply to
+            // the next channel even within a live multiview session.
+            watchdogReloadEnabled = (UserDefaults.standard.object(forKey: "appBehaviorsAutoRecoverFrozenStreams") as? Bool) ?? true
             // Re-apply NowPlayingInfo metadata so the lockscreen +
             // Control Center reflect the new channel. The bridge
             // ownership rule from `shouldDriveNowPlayingBridge()`
@@ -1938,11 +1945,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // issuing a redundant loadfile mid-probe and making the flip
         // SLOWER. The actual wedge (Football HD post-underrun) climbed
         // monotonically past that to stale=12301ms with no recovery.
-        // 6.0s sits at 2x the worst observed normal-probe stale, well
-        // clear of healthy flips, yet recovers the user at ~6s instead
-        // of the ~18s they waited before giving up. Gated by !paused so
-        // a user pause is never force-reloaded.
-        private let staleFrameStormThresholdSec: CFTimeInterval = 6.0
+        // 6.0s originally sat at 2x the worst observed normal-probe stale.
+        // RAISED to 12.0s for #37 (Glitzbr 2026-06-17 multiview OTA log): an
+        // OTA commercial boundary stalls decoded-frame OUTPUT for ~6s (decoder
+        // reconfig) while the demuxer cache stays healthy (3-7s, underruns=0),
+        // so 6s fired on a stall that self-recovers and the loadfile-replace
+        // then made it WORSE - each reload fails fast and forces a ~4-5s
+        // re-open, and in multiview the reload work starved sibling tiles into
+        // a cascading reload loop for the whole break. 12s sits above the ~8s
+        // reconfig self-recovery yet still catches the genuine ~18s mpv wedge
+        // that motivated this watchdog. Gated by !paused (a user pause is
+        // never force-reloaded), by the #37 resolution-change grace, by the
+        // per-stream reload backoff, and by the user Auto-Recover toggle.
+        private let staleFrameStormThresholdSec: CFTimeInterval = 12.0
 
         // v1.7.x black-frame-storm reload watchdog.
         //
@@ -1965,15 +1980,38 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         //
         // Thresholds:
         // - 30 consecutive suppressed frames = ~0.6s at 50fps, ~1.0s at
-        //   30fps. That is short enough to feel like a "blip" instead
-        //   of a freeze, long enough that an isolated 1-2 black frame
-        //   from a real channel cut to commercial does NOT trip it.
+        //   30fps. NOTE (#37, Glitzbr 2026-06-17): this DOES trip on OTA
+        //   commercial fade-to-black / ad blanking, so the reload is now
+        //   gated by the #37 resolution-change grace + the per-stream reload
+        //   backoff + the user Auto-Recover toggle (see below).
         // - 5 second reload cooldown = avoids hammering the proxy if
         //   the storm is sourced upstream.
         private var consecutiveBlackFramesSuppressed: Int = 0
         private var lastForcedBlackReloadAt: CFAbsoluteTime = 0
         private let blackFrameStormThreshold: Int = 30
         private let blackFrameReloadCooldownSec: CFAbsoluteTime = 5.0
+
+        // #37 (Glitzbr 2026-06-17 multiview OTA log): a commercial break can
+        // trip BOTH reload watchdogs repeatedly. Each loadfile-replace fails
+        // fast and forces a ~4-5s re-open, and in multiview the reload work
+        // starves sibling tiles past their own threshold, cascading into a
+        // reload loop for the whole break. Circuit-breaker: cap forced reloads
+        // (both paths combined) to maxForcedReloadsPerWindow per
+        // reloadBackoffWindowSec per stream; once capped, back off and let the
+        // stream recover on its own (it does once the break ends). Fixed-window
+        // counter; touched from the CADisplayLink watchdog (stale path) and the
+        // render queue (black path) - the same benign cross-thread pattern as
+        // lastForcedBlackReloadAt above (an occasional off-by-one is harmless).
+        private var forcedReloadWindowStart: CFAbsoluteTime = 0
+        private var forcedReloadWindowCount: Int = 0
+        private let reloadBackoffWindowSec: CFAbsoluteTime = 60.0
+        private let maxForcedReloadsPerWindow: Int = 3
+
+        // #37 user kill-switch (Settings > App Behaviors > Auto-Recover Frozen
+        // Streams). Read once per tune in setupMPV; default true. When false,
+        // BOTH forced-reload watchdog paths are disabled and a frozen stream is
+        // left for the user to re-tune manually (no auto loadfile-replace).
+        private var watchdogReloadEnabled: Bool = true
 
         // v1.7.x Issue A round 2: localize mid-stream black flashes.
         // Archie 2026-05-08 native-UHD test showed late=3 frames
@@ -3097,15 +3135,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // path of clean playback.
             if staleAge >= staleFrameStormThresholdSec,
                lastAppliedPause != true,
+               watchdogReloadEnabled,
                hasReachedPlaybackRestartForStream {
                 let wallNow = CFAbsoluteTimeGetCurrent()
-                // #37: suppress the reload briefly after a real resolution
-                // change (OTA commercial boundary) so an expected switch
-                // stall is not mistaken for a wedge and force-restarted.
+                // #37: suppress the reload after a real resolution change (OTA
+                // commercial boundary) so an expected switch stall is not
+                // mistaken for a wedge, and cap reloads via the per-stream
+                // backoff so a sustained break cannot drive a reload loop.
                 if wallNow - lastForcedBlackReloadAt >= blackFrameReloadCooldownSec,
                    wallNow - lastResolutionChangeAt >= resolutionChangeReloadGraceSec,
-                   let reloadURL = urls.first {
+                   let reloadURL = urls.first,
+                   forcedReloadAllowed(now: wallNow) {
                     lastForcedBlackReloadAt = wallNow
+                    noteForcedReload()
                     let safeURL = DebugLogger.sanitize(reloadURL.absoluteString)
                     debugLog("[STALE-RELOAD] \(streamTag) stale=\(String(format: "%.0f", staleAge * 1000))ms >= threshold=\(String(format: "%.0f", staleFrameStormThresholdSec * 1000))ms; issuing loadfile replace to re-prime pipeline (url=\(safeURL.prefix(80)))")
                     DebugLogger.shared.log(
@@ -3118,6 +3160,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     }
                 }
             }
+        }
+
+        /// #37 circuit-breaker shared by both forced-reload watchdog paths.
+        /// Returns true if a forced reload is allowed right now (under the
+        /// per-window cap), advancing the fixed window when it rolls over.
+        /// Call noteForcedReload() only when a reload is actually issued.
+        private func forcedReloadAllowed(now: CFAbsoluteTime) -> Bool {
+            if now - forcedReloadWindowStart > reloadBackoffWindowSec {
+                forcedReloadWindowStart = now
+                forcedReloadWindowCount = 0
+            }
+            return forcedReloadWindowCount < maxForcedReloadsPerWindow
+        }
+
+        private func noteForcedReload() {
+            forcedReloadWindowCount &+= 1
         }
 
         /// Build a CMSampleBuffer that points at the same IOSurface
@@ -3585,11 +3643,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // hits when the source is genuinely dark or the
                 // proxy keeps producing the same broken bytes.
                 if consecutiveBlackFramesSuppressed == blackFrameStormThreshold,
+                   watchdogReloadEnabled,
                    hasReachedPlaybackRestartForStream {
                     let now = CFAbsoluteTimeGetCurrent()
+                    // #37: gate the black-frame reload like the stale path -
+                    // skip during the post-resolution-change grace (commercial
+                    // fade / ad blanking) and obey the per-stream reload
+                    // backoff so blanking cannot drive a reload loop.
                     if now - lastForcedBlackReloadAt >= blackFrameReloadCooldownSec,
-                       let reloadURL = urls.first {
+                       now - lastResolutionChangeAt >= resolutionChangeReloadGraceSec,
+                       let reloadURL = urls.first,
+                       forcedReloadAllowed(now: now) {
                         lastForcedBlackReloadAt = now
+                        noteForcedReload()
                         let safeURL = DebugLogger.sanitize(reloadURL.absoluteString)
                         debugLog("[BLACK-RELOAD] \(streamTag) consecutive=\(consecutiveBlackFramesSuppressed) >= threshold=\(blackFrameStormThreshold); issuing loadfile replace to re-prime pipeline (url=\(safeURL.prefix(80)))")
                         DebugLogger.shared.log(
@@ -3992,6 +4058,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // (0). VOD/DVR keep their 1s prefill. 0 = byte-identical to the
             // prior low-latency live path.
             let streamBufMs = Int(UserDefaults.standard.double(forKey: "appBehaviorsStreamBufferSeconds") * 1000)
+            // #37 kill-switch: read once per tune (applies to the next channel,
+            // like Stream Buffer). Default true = watchdog auto-reload on.
+            watchdogReloadEnabled = (UserDefaults.standard.object(forKey: "appBehaviorsAutoRecoverFrozenStreams") as? Bool) ?? true
             let cachePauseWait: String = {
                 if isLive {
                     return streamBufMs > 0 ? String(Double(streamBufMs) / 1000.0) : "0"
@@ -4813,6 +4882,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // (the user just asked to start playing something new).
             consecutiveBlackFramesSuppressed = 0
             lastForcedBlackReloadAt = 0
+            forcedReloadWindowStart = 0
+            forcedReloadWindowCount = 0
             // Disarm the reload watchdogs until this new stream reaches
             // playback-restart, so its startup probe is never treated as
             // a wedge.

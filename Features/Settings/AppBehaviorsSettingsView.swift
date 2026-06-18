@@ -65,6 +65,15 @@ struct AppBehaviorsSettingsView: View {
     @AppStorage("appBehaviorsStreamBufferSeconds")
     private var streamBufferSeconds: Double = 0
 
+    /// #37 kill-switch: when false, the player's frozen-stream auto-reload
+    /// watchdogs (stale-frame + black-frame loadfile-replace) are disabled,
+    /// so a live channel that restarts/stutters at commercial boundaries is
+    /// left to recover on its own instead of being force-reloaded. Default
+    /// true. Read live in `MPVPlayerView.setupMPV`. UNSYNCED, like the
+    /// sibling `appBehaviors*` keys.
+    @AppStorage("appBehaviorsAutoRecoverFrozenStreams")
+    private var autoRecoverFrozenStreams = true
+
     // MARK: - TMDB program posters (opt-in, off by default)
 
     /// Master toggle for the TMDB-by-title poster fallback.
@@ -224,6 +233,21 @@ struct AppBehaviorsSettingsView: View {
             }
             .listSectionSeparator(.hidden)
 
+            // MARK: Auto-Recover Frozen Streams (#37)
+            Section {
+                Toggle(isOn: $autoRecoverFrozenStreams) {
+                    Text("Auto-Recover Frozen Streams")
+                        .font(.bodyMedium)
+                        .foregroundColor(.textPrimary)
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+            } footer: {
+                Text("If a live stream stops sending video, the player reloads it to recover. Turn this off if live channels restart or stutter during commercial breaks (a brief freeze may show instead). Applies to the next channel you tune.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+            .listSectionSeparator(.hidden)
+
             // MARK: Program Posters (TMDB)
             Section {
                 Toggle(isOn: $tmdbPostersEnabled) {
@@ -351,6 +375,16 @@ struct AppBehaviorsSettingsView: View {
                         .foregroundColor(.textTertiary)
                         .padding(.horizontal, 20)
                         .padding(.top, 4)
+                }
+
+                tvSection("Stream Recovery") {
+                    TVSettingsToggleRow(
+                        icon: "arrow.clockwise.circle",
+                        iconColor: theme.accent,
+                        title: "Auto-Recover Frozen Streams",
+                        subtitle: "If a live stream stops sending video, the player reloads it to recover. Turn this off if live channels restart or stutter during commercial breaks; a brief freeze may show instead.",
+                        isOn: $autoRecoverFrozenStreams
+                    ) { _ in }
                 }
 
                 tvSection("Program Posters") {
