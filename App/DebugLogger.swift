@@ -217,6 +217,19 @@ final class DebugLogger: @unchecked Sendable {
     /// positives on short unrelated fields.
     private static let jwtInJsonRegex = try! NSRegularExpression(
         pattern: #""(access|refresh)"\s*:\s*"[^"]{20,}""#)
+    /// HTTP basic-auth userinfo embedded in a URL: `scheme://user:pass@host`.
+    /// Common in raw M3U playlists, which the Xtream path/query regexes above
+    /// do NOT cover. Redacts the whole userinfo to `***@`, keeping the scheme
+    /// and host so the log still shows which server was contacted.
+    private static let urlUserInfoRegex = try! NSRegularExpression(
+        pattern: #"(://)[^/@\s]+@"#)
+    /// Generic credential-bearing query params beyond the Xtream
+    /// username/password/api_key set: token, auth, sig, signature, secret,
+    /// pass, pwd, hash, key. Raw M3U / CDN stream URLs frequently carry one
+    /// of these. Over-redaction here is harmless; a missed credential is not.
+    private static let sensitiveQueryParamRegex = try! NSRegularExpression(
+        pattern: #"([?&](?:token|auth|authkey|sig|signature|secret|pass|pwd|hash|key)=)[^&\s]+"#,
+        options: .caseInsensitive)
 
     static func sanitize(_ message: String) -> String {
         var result = message
@@ -224,9 +237,11 @@ final class DebugLogger: @unchecked Sendable {
             let range = NSRange(result.startIndex..., in: result)
             result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: template)
         }
+        apply(urlUserInfoRegex,      "$1***@")
         apply(xtreamPathRegex,       "/$1/$2/***/")
         apply(xtreamQueryParamRegex, "$1***")
         apply(apiKeyRegex,           "$1***")
+        apply(sensitiveQueryParamRegex, "$1***")
         apply(authHeaderRegex,       "$1: ***")
         apply(embyTokenRegex,        #"$1"***""#)
         apply(jwtInJsonRegex,        #""$1": "***""#)
