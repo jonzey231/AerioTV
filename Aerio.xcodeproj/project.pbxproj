@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AE10CAFE0000000000000001 /* AerioTVUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE10CAFE0000000000000002 /* AerioTVUITests.swift */; };
 		000A4A7BFF25A66945137BB3 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
 		07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */; };
 		0823BE6E3373A83D3FEBC32F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
@@ -29,7 +28,7 @@
 		23CF3BDA1A62692EC1141F06 /* AerioTopShelf.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 980F01E6377A91F10236C4D5 /* AerioTopShelf.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		2527936283FB11BD5201E1DA /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
 		27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */; };
-		294AE2B45D4A82E38B1D09C4 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Aerio.xcworkspace */; };
+		294AE2B45D4A82E38B1D09C4 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
 		29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */; };
 		2B3C4D5E6F708901ACE70010 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
 		2B3C4D5E6F708901ACE70011 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
@@ -49,7 +48,7 @@
 		3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
 		48336325ACADA131557D4C58 /* AppBehaviorsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */; };
 		483F98D5B841C7C3E8491885 /* Pods_Aerio_tvOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 24C772C96083DF7C60C170B6 /* Pods_Aerio_tvOS.framework */; };
-		5585996EF79BB170CAD2D6F3 /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */; };
+		5585996EF79BB170CAD2D6F3 /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */; };
 		565A7DFCEC12544455827DB3 /* ReminderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 265A7DFCEC12544455827DB3 /* ReminderManager.swift */; };
 		58753215820D219D87D24402 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D65D8707C8FA1760DCE6708 /* WelcomeView.swift */; };
 		5A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */; };
@@ -60,7 +59,7 @@
 		622B003E0D0A155E9FE7D9B7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
 		62AD11B70BF6B745FD727C8B /* AerioSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */; };
 		6308BAE1E16965A379092AE8 /* OnDemandView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CBF1B5E89BE18F8E73482B9 /* OnDemandView.swift */; };
-		65A50DB238B2354D5B81DE09 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Aerio.xcworkspace */; };
+		65A50DB238B2354D5B81DE09 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
 		665A7DFCEC12544455827DB3 /* ReminderManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 265A7DFCEC12544455827DB3 /* ReminderManager.swift */; };
 		6A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A8B2C3D1E5F607892AA4B5C /* KeychainHelper.swift */; };
 		6AFEBD1C481F02C363B48866 /* Manifest.lock in Resources */ = {isa = PBXBuildFile; fileRef = C8918F8C279C6028AA7BC86D /* Manifest.lock */; };
@@ -73,6 +72,7 @@
 		73FE0EA560BD116D4301EB8D /* Colors.swift in Sources */ = {isa = PBXBuildFile; fileRef = C384E19782307C7D03F8F60B /* Colors.swift */; };
 		76842216BD4822B7380FDF05 /* TVShowsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */; };
 		788D987295F9672EFA03E102 /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
+		7A11FAB6D3BD7B764BF99C59 /* SwitchStreamView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65319FCB313930453DF8EFCA /* SwitchStreamView.swift */; };
 		7A7218D999F2EBB150A606A1 /* ReminderBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */; };
 		7CFFD573C287B60F267445BD /* PlaylistImportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */; };
 		7D775CD7B45EE60B92377A6F /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
@@ -104,6 +104,7 @@
 		A8E322C238A7CE0B55BA3D4D /* AerioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* AerioApp.swift */; };
 		ACAEB60B5118B283BF99CF16 /* PlaylistImportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */; };
 		AD422FFDD689840F76B8A238 /* MediaServerAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */; };
+		AE10CAFE0000000000000001 /* AerioTVUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE10CAFE0000000000000002 /* AerioTVUITests.swift */; };
 		AE4174FB696D381DAADB8497 /* ContentProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29555D1D6559100DF82F2F8A /* ContentProvider.swift */; };
 		AE465B6890F7B1F65AB0A6F4 /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A660E9D8B5D23C804B590C79 /* Foundation.framework */; };
 		B0B4EE0F74D4863E74833446 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */; };
@@ -148,6 +149,7 @@
 		B1C2D3E4F5A67890ACE00B02 /* CategoryColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */; };
 		B1C2D3E4F5A67890ACE0A002 /* RemoteInputLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */; };
 		B1C2D3E4F5A67890ACE0A003 /* RemoteInputLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */; };
+		B4874C9D2075467ED09F0552 /* SwitchStreamView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65319FCB313930453DF8EFCA /* SwitchStreamView.swift */; };
 		B5AE22380A5D13659655A5CD /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F4EE98C1564A7E3A5DD86B /* SearchView.swift */; };
 		B743C668A35FABC8A1BECB16 /* VODModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B5CE40DD6A5BBCBB943E551 /* VODModels.swift */; };
 		B747D3E4B7695FAF8CD9C557 /* Pods-Aerio_iOS-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8EEF8CE5358378E2CF3F4012 /* Pods-Aerio_iOS-Info.plist */; };
@@ -162,6 +164,8 @@
 		C9B3A9A8801BC79552C8D496 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */; };
 		C9E28AF097D00D2A282673A5 /* AerioSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */; };
 		C9E919E28B95CE15179BBCBD /* OnDemandView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CBF1B5E89BE18F8E73482B9 /* OnDemandView.swift */; };
+		CARPLAYSCENE000000000002 /* CarPlaySceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */; };
+		CARPLAYSCENE000000000003 /* CarPlaySceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */; };
 		CC1234567890ABCDEF123456 /* DebugLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1234567890ABCDEF123456 /* DebugLogger.swift */; };
 		CD1234567890ABCDEF123456 /* NowPlayingBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */; };
 		CF38B25676730E71C9AD497A /* AerioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* AerioApp.swift */; };
@@ -175,11 +179,9 @@
 		DBFAE2F87043F12BE1728B6D /* Manifest.lock in Resources */ = {isa = PBXBuildFile; fileRef = C8918F8C279C6028AA7BC86D /* Manifest.lock */; };
 		DD1234567890ABCDEF123456 /* DebugLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1234567890ABCDEF123456 /* DebugLogger.swift */; };
 		DE1234567890ABCDEF123456 /* NowPlayingBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */; };
-		CARPLAYSCENE000000000002 /* CarPlaySceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */; };
-		CARPLAYSCENE000000000003 /* CarPlaySceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */; };
 		E7C08D85CEAB0B3D8E268FBA /* ThemeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */; };
 		EE1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */; };
-		EFE8847CEB70D953DD4D2BFB /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = "TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */; };
+		EFE8847CEB70D953DD4D2BFB /* Podfile.lock in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */; };
 		F00D3696D62D7C9EF6E05244 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */; };
 		F11A12EB07CB46158E23B73E /* ProgramInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */; };
 		F1B2C3D4E5F6A70890BC2345 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
@@ -198,19 +200,19 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
-		AE10CAFE0000000000000007 /* PBXContainerItemProxy */ = {
-			isa = PBXContainerItemProxy;
-			containerPortal = FF7071163D6291891DEC5B95 /* Project object */;
-			proxyType = 1;
-			remoteGlobalIDString = 3D7E0C99AD2471A7F6A5FF48;
-			remoteInfo = Aerio_tvOS;
-		};
 		03C850CD4E7C1F922776F9EA /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = FF7071163D6291891DEC5B95 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = A7FF9694565411B4791759AC;
 			remoteInfo = AerioTopShelf;
+		};
+		AE10CAFE0000000000000007 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FF7071163D6291891DEC5B95 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3D7E0C99AD2471A7F6A5FF48;
+			remoteInfo = Aerio_tvOS;
 		};
 /* End PBXContainerItemProxy section */
 
@@ -229,8 +231,6 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
-		AE10CAFE0000000000000002 /* AerioTVUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AerioTVUITests.swift; sourceTree = "<group>"; };
-		AE10CAFE0000000000000003 /* AerioTVUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AerioTVUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		00F4EE98C1564A7E3A5DD86B /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
 		03AB1BA15FC7FAB4754ECE75 /* Pods-Aerio_iOS-frameworks-Debug-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Debug-output-files.xcfilelist"; sourceTree = "<group>"; };
 		050594609247DACBBD411AAE /* Pods-Aerio_tvOS.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_tvOS.release.xcconfig"; path = "Target Support Files/Pods-Aerio_tvOS/Pods-Aerio_tvOS.release.xcconfig"; sourceTree = "<group>"; };
@@ -268,6 +268,7 @@
 		5957CC8A6CC0000B14ED47C5 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		628C021FBBB1C5C00F6640EA /* TVServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = TVServices.framework; path = System/Library/Frameworks/TVServices.framework; sourceTree = SDKROOT; };
 		62C0C151EAA6394D32003217 /* DeviceInfo.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DeviceInfo.swift; sourceTree = "<group>"; };
+		65319FCB313930453DF8EFCA /* SwitchStreamView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SwitchStreamView.swift; sourceTree = "<group>"; };
 		693A71F4A4429F56337992E6 /* StreamingAPIs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamingAPIs.swift; sourceTree = "<group>"; };
 		6C96AEA17257AA77D4EBE291 /* Pods-Aerio_iOS-frameworks-Release-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Release-output-files.xcfilelist"; sourceTree = "<group>"; };
 		6E223D01D7BBD84EAD449D43 /* ThemeManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThemeManager.swift; sourceTree = "<group>"; };
@@ -305,7 +306,8 @@
 		A660E9D8B5D23C804B590C79 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/AppleTVOS.platform/Developer/SDKs/AppleTVOS18.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		AA1234567890ABCDEF123456 /* DebugLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugLogger.swift; sourceTree = "<group>"; };
 		AB1234567890ABCDEF123456 /* NowPlayingBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NowPlayingBridge.swift; sourceTree = "<group>"; };
-		CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarPlaySceneDelegate.swift; sourceTree = "<group>"; };
+		AE10CAFE0000000000000002 /* AerioTVUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AerioTVUITests.swift; sourceTree = "<group>"; };
+		AE10CAFE0000000000000003 /* AerioTVUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AerioTVUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = LocalRecordingSession.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioSessionRefCount.swift; sourceTree = "<group>"; };
 		B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = IdleTimerRefCount.swift; sourceTree = "<group>"; };
@@ -335,6 +337,7 @@
 		C384E19782307C7D03F8F60B /* Colors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Colors.swift; sourceTree = "<group>"; };
 		C41DDA8474CA1A75D88D9E3C /* MobileVLCKit-xcframeworks-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "MobileVLCKit-xcframeworks-output-files.xcfilelist"; sourceTree = "<group>"; };
 		C8918F8C279C6028AA7BC86D /* Manifest.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Manifest.lock; sourceTree = "<group>"; };
+		CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CarPlaySceneDelegate.swift; sourceTree = "<group>"; };
 		CC1061A736638618318B7F00 /* AddServerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddServerView.swift; sourceTree = "<group>"; };
 		CC1061A736638618318B7F01 /* ServerSyncView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerSyncView.swift; sourceTree = "<group>"; };
 		CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
@@ -356,20 +359,13 @@
 		FA5005705700000000000001 /* FavoritesStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesStore.swift; sourceTree = "<group>"; };
 		FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppBehaviorsSettingsView.swift; sourceTree = "<group>"; };
 		MPV0000000000000000000001 /* MPVPlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MPVPlayerView.swift; sourceTree = "<group>"; };
+		TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */ = {isa = PBXFileReference; lastKnownFileType = wrapper.workspace; path = Aerio.xcworkspace; sourceTree = "<group>"; };
+		TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
 		TSR0000000000000000000001 /* TSHLSRemuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSHLSRemuxer.swift; sourceTree = "<group>"; };
-		"TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Aerio.xcworkspace */ = {isa = PBXFileReference; lastKnownFileType = wrapper.workspace; path = Aerio.xcworkspace; sourceTree = "<group>"; };
-		"TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
 		WHATSNEW00000000000ACE000 /* WhatsNew.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		AE10CAFE0000000000000006 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		2519A83EA3E0217DB749D759 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -388,6 +384,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AE10CAFE0000000000000006 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		F6FC8EF44BA77AB5758D95F1 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -400,14 +403,6 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		AE10CAFE0000000000000004 /* AerioTVUITests */ = {
-			isa = PBXGroup;
-			children = (
-				AE10CAFE0000000000000002 /* AerioTVUITests.swift */,
-			);
-			path = AerioTVUITests;
-			sourceTree = "<group>";
-		};
 		11EC69739059FC54CFF03581 /* iOS */ = {
 			isa = PBXGroup;
 			children = (
@@ -423,6 +418,7 @@
 				E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */,
 				E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */,
 				7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */,
+				65319FCB313930453DF8EFCA /* SwitchStreamView.swift */,
 			);
 			path = LiveTV;
 			sourceTree = "<group>";
@@ -618,6 +614,14 @@
 			path = Components;
 			sourceTree = "<group>";
 		};
+		AE10CAFE0000000000000004 /* AerioTVUITests */ = {
+			isa = PBXGroup;
+			children = (
+				AE10CAFE0000000000000002 /* AerioTVUITests.swift */,
+			);
+			path = AerioTVUITests;
+			sourceTree = "<group>";
+		};
 		B1C2D3E4F5A67890ACE00010 /* Multiview */ = {
 			isa = PBXGroup;
 			children = (
@@ -647,8 +651,8 @@
 		BD5262EA2F6792080036371D /* Recovered References */ = {
 			isa = PBXGroup;
 			children = (
-				"TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0" /* Aerio.xcworkspace */,
-				"TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1" /* Podfile.lock */,
+				TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */,
+				TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */,
 			);
 			name = "Recovered References";
 			sourceTree = "<group>";
@@ -795,23 +799,6 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		AE10CAFE00000000000000000C /* AerioTVUITests */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = AE10CAFE00000000000000000B /* Build configuration list for PBXNativeTarget "AerioTVUITests" */;
-			buildPhases = (
-				AE10CAFE0000000000000005 /* Sources */,
-				AE10CAFE0000000000000006 /* Frameworks */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-				AE10CAFE0000000000000008 /* PBXTargetDependency */,
-			);
-			name = AerioTVUITests;
-			productName = AerioTVUITests;
-			productReference = AE10CAFE0000000000000003 /* AerioTVUITests.xctest */;
-			productType = "com.apple.product-type.bundle.ui-testing";
-		};
 		353CF1DD804CE1FDC2F4E294 /* Aerio_iOS */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 53EE43EF2A156AB0859B4923 /* Build configuration list for PBXNativeTarget "Aerio_iOS" */;
@@ -866,6 +853,23 @@
 			productName = AerioTopShelf;
 			productReference = 980F01E6377A91F10236C4D5 /* AerioTopShelf.appex */;
 			productType = "com.apple.product-type.app-extension";
+		};
+		AE10CAFE00000000000000000C /* AerioTVUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AE10CAFE00000000000000000B /* Build configuration list for PBXNativeTarget "AerioTVUITests" */;
+			buildPhases = (
+				AE10CAFE0000000000000005 /* Sources */,
+				AE10CAFE0000000000000006 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				AE10CAFE0000000000000008 /* PBXTargetDependency */,
+			);
+			name = AerioTVUITests;
+			productName = AerioTVUITests;
+			productReference = AE10CAFE0000000000000003 /* AerioTVUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
 
@@ -1004,14 +1008,6 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
-		AE10CAFE0000000000000005 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				AE10CAFE0000000000000001 /* AerioTVUITests.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
 		3A1C44D789D61CA0731351C2 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -1095,6 +1091,7 @@
 				6308BAE1E16965A379092AE8 /* OnDemandView.swift in Sources */,
 				D361421CBA05BF602FCEAE80 /* DispatcharrDirectConnect.swift in Sources */,
 				48336325ACADA131557D4C58 /* AppBehaviorsSettingsView.swift in Sources */,
+				B4874C9D2075467ED09F0552 /* SwitchStreamView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1182,6 +1179,15 @@
 				C9E919E28B95CE15179BBCBD /* OnDemandView.swift in Sources */,
 				1B56BE6F7111A4EF6DD7E11B /* DispatcharrDirectConnect.swift in Sources */,
 				BEEFBC48135CF7E02F81D4D4 /* AppBehaviorsSettingsView.swift in Sources */,
+				7A11FAB6D3BD7B764BF99C59 /* SwitchStreamView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AE10CAFE0000000000000005 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AE10CAFE0000000000000001 /* AerioTVUITests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1196,56 +1202,20 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
-		AE10CAFE0000000000000008 /* PBXTargetDependency */ = {
-			isa = PBXTargetDependency;
-			target = 3D7E0C99AD2471A7F6A5FF48 /* Aerio_tvOS */;
-			targetProxy = AE10CAFE0000000000000007 /* PBXContainerItemProxy */;
-		};
 		873E8E1D3999D625281F5672 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			name = AerioTopShelf;
 			target = A7FF9694565411B4791759AC /* AerioTopShelf */;
 			targetProxy = 03C850CD4E7C1F922776F9EA /* PBXContainerItemProxy */;
 		};
+		AE10CAFE0000000000000008 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3D7E0C99AD2471A7F6A5FF48 /* Aerio_tvOS */;
+			targetProxy = AE10CAFE0000000000000007 /* PBXContainerItemProxy */;
+		};
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
-		AE10CAFE0000000000000009 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 47DTJ3Q67T;
-				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "app.molinete.aerio.AerioTVUITests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = appletvos;
-				SWIFT_VERSION = 6.0;
-				TARGETED_DEVICE_FAMILY = 3;
-				TEST_TARGET_NAME = Aerio_tvOS;
-				TVOS_DEPLOYMENT_TARGET = 18.0;
-			};
-			name = Debug;
-		};
-		AE10CAFE00000000000000000A /* Release */ = {
-			isa = XCBuildConfiguration;
-			buildSettings = {
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 47DTJ3Q67T;
-				GENERATE_INFOPLIST_FILE = YES;
-				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "app.molinete.aerio.AerioTVUITests";
-				PRODUCT_NAME = "$(TARGET_NAME)";
-				SDKROOT = appletvos;
-				SWIFT_VERSION = 6.0;
-				TARGETED_DEVICE_FAMILY = 3;
-				TEST_TARGET_NAME = Aerio_tvOS;
-				TVOS_DEPLOYMENT_TARGET = 18.0;
-			};
-			name = Release;
-		};
 		01DDFCC8CB0708CA2ADEA45F /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1528,6 +1498,42 @@
 			};
 			name = Debug;
 		};
+		AE10CAFE00000000000000000A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 47DTJ3Q67T;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio.AerioTVUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_TARGET_NAME = Aerio_tvOS;
+				TVOS_DEPLOYMENT_TARGET = 18.0;
+			};
+			name = Release;
+		};
+		AE10CAFE0000000000000009 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 47DTJ3Q67T;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.molinete.aerio.AerioTVUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				SWIFT_VERSION = 6.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_TARGET_NAME = Aerio_tvOS;
+				TVOS_DEPLOYMENT_TARGET = 18.0;
+			};
+			name = Debug;
+		};
 		D64CEFE7FC072A7357E6D379 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 0EEF62484815637B5043D834 /* Pods-Aerio_tvOS.debug.xcconfig */;
@@ -1554,15 +1560,6 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		AE10CAFE00000000000000000B /* Build configuration list for PBXNativeTarget "AerioTVUITests" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				AE10CAFE0000000000000009 /* Debug */,
-				AE10CAFE00000000000000000A /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
 		53EE43EF2A156AB0859B4923 /* Build configuration list for PBXNativeTarget "Aerio_iOS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -1580,6 +1577,15 @@
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;
+		};
+		AE10CAFE00000000000000000B /* Build configuration list for PBXNativeTarget "AerioTVUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AE10CAFE0000000000000009 /* Debug */,
+				AE10CAFE00000000000000000A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
 		};
 		E14095500FDB469BC6E1027E /* Build configuration list for PBXProject "Aerio" */ = {
 			isa = XCConfigurationList;

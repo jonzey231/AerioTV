@@ -58,6 +58,12 @@ struct PlaybackChromeOverlay: View {
     /// `.sheet` — matches the pattern used for `showAddSheet`.
     @Binding var showRecordSheet: Bool
 
+    /// Bound from the container. The iOS overflow menu's "Switch Stream"
+    /// row flips this true; the container presents `SwitchStreamView`.
+    /// Only wired on the iOS (overflow-menu) path; on tvOS the Options
+    /// panel drives its own copy in the container.
+    @Binding var showSwitchStream: Bool
+
     /// Drives the 5-second auto-fade of chrome. Container owns it;
     /// we read `isVisible` to gate opacity + hit-testing, and call
     /// `reportInteraction()` on every button action to bump the
@@ -240,6 +246,10 @@ struct PlaybackChromeOverlay: View {
                             chromeState.reportInteraction()
                             showRecordSheet = true
                         },
+                        onSwitchStream: canSwitchStreamForAudioTile ? {
+                            chromeState.reportInteraction()
+                            showSwitchStream = true
+                        } : nil,
                         // Pin the chrome up while the overflow menu (and
                         // its sub-menus) is open; release + restart the
                         // fade clock on dismiss. Without this the 5s
@@ -426,6 +436,19 @@ struct PlaybackChromeOverlay: View {
         return audio.item.streamURL != nil
     }
 
+    /// Whether the audio tile's channel can Switch Stream: a Dispatcharr
+    /// channel (has both the integer pk and the proxy uuid) on a Direct
+    /// Connect admin server. Gates the iOS overflow-menu "Switch Stream"
+    /// row; nil-or-closure is decided from this at the call site.
+    private var canSwitchStreamForAudioTile: Bool {
+        guard let audioID = store.audioTileID,
+              let audio = store.tiles.first(where: { $0.id == audioID }),
+              audio.item.dispatcharrChannelID != nil,
+              let uuid = audio.item.uuid, !uuid.isEmpty
+        else { return false }
+        return ChannelStore.shared.activeServer?.dispatcharrCanSwitchStream ?? false
+    }
+
     #endif
 
     // MARK: - Live program progress band
@@ -544,6 +567,10 @@ private struct iPadOverflowAdapter: View {
     /// Fired from the menu. The overlay flips `showRecordSheet` so the
     /// container presents `RecordProgramSheet`.
     let onRecord: () -> Void
+    /// Switch Stream (Dispatcharr Direct Connect, admin only). Non-nil
+    /// only when the audio tile's channel is eligible; flips
+    /// `showSwitchStream` so the container presents `SwitchStreamView`.
+    var onSwitchStream: (() -> Void)? = nil
     /// Pin / unpin the auto-hiding chrome while the menu popover is open
     /// (fired from `PlayerOverflowMenu`'s `.onAppear`/`.onDisappear`
     /// under `#if os(iOS)`). See the type doc comment.
@@ -588,6 +615,7 @@ private struct iPadOverflowAdapter: View {
                 }
             },
             recordAction: onRecord,
+            switchStreamAction: onSwitchStream,
             onMenuOpen: onMenuOpen,
             onMenuClose: onMenuClose
         )

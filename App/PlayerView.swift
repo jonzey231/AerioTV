@@ -2471,6 +2471,12 @@ struct PlayerOverflowMenu: View, Equatable {
     var toggleStreamInfo: (() -> Void)?
     var toggleAudioOnly: (() -> Void)?
     var recordAction: (() -> Void)?
+    /// Switch Stream (Dispatcharr Direct Connect, admin only). When the
+    /// caller supplies a non-nil closure the menu shows a "Switch Stream"
+    /// row; nil hides it (non-Dispatcharr / non-admin / no channel ids).
+    /// An optional closure, so it is excluded from the `==` below and
+    /// needs no equality change.
+    var switchStreamAction: (() -> Void)?
     var onMenuOpen: (() -> Void)?
     var onMenuClose: (() -> Void)?
 
@@ -2486,7 +2492,11 @@ struct PlayerOverflowMenu: View, Equatable {
         lhs.showStreamInfo == rhs.showStreamInfo &&
         lhs.isAudioOnly == rhs.isAudioOnly &&
         lhs.aspectMode == rhs.aspectMode &&
-        lhs.canRecord == rhs.canRecord
+        lhs.canRecord == rhs.canRecord &&
+        // Closures are excluded from ==, but the PRESENCE of the Switch
+        // Stream action gates whether the row shows, so compare its
+        // nil-ness so eligibility changes still re-render the menu.
+        (lhs.switchStreamAction == nil) == (rhs.switchStreamAction == nil)
     }
 
     private var sleepTimerRemainingText: String? {
@@ -2615,6 +2625,17 @@ struct PlayerOverflowMenu: View, Equatable {
                     }
                 }
 
+                // Switch Stream (Dispatcharr Direct Connect, admin only).
+                // Gated by the caller via a non-nil closure; opens the
+                // member-stream picker.
+                if let switchStreamAction {
+                    Button {
+                        switchStreamAction()
+                    } label: {
+                        Label("Switch Stream", systemImage: "arrow.triangle.swap")
+                    }
+                }
+
                 // Sleep timer (sub-menu)
                 Menu {
                     if sleepTimerEnd != nil {
@@ -2730,6 +2751,10 @@ struct TVPlayerOptionsPanel: View {
     /// dismisses itself. v1 only shows the option during live-TV
     /// playback (the panel is already gated on that upstream).
     var onEnterMultiview: (() -> Void)?
+    /// Switch Stream (Dispatcharr Direct Connect, admin only). When
+    /// non-nil the panel shows a top "Switch Stream" row that opens the
+    /// member-stream picker. nil hides it.
+    var onSwitchStream: (() -> Void)?
 
     /// Focus tracking for every pill in the panel. Each pill binds to
     /// a unique string id via `.focused($focusedID, equals:)`; the
@@ -2743,6 +2768,7 @@ struct TVPlayerOptionsPanel: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if onSwitchStream != nil { switchStreamSection }
                 audioSection
                 subtitleSection
                 if !isLive { speedSection }
@@ -2777,6 +2803,7 @@ struct TVPlayerOptionsPanel: View {
     /// speed (VOD) → sleep timer → multiview → stream-info. Lands
     /// on a real id so the `@FocusState` binding takes.
     private var firstFocusableID: String {
+        if onSwitchStream != nil { return "switch-stream" }
         if audioTracks.count > 1, let first = audioTracks.first {
             return "audio-\(first.id)"
         }
@@ -2878,6 +2905,25 @@ struct TVPlayerOptionsPanel: View {
     /// does the sheet call `PlayerSession.enterMultiview(seeding:server:)`
     /// and transition to the grid. Browsing the picker does NOT
     /// interrupt playback.
+    /// "Switch Stream" row (Dispatcharr Direct Connect, admin only).
+    /// Rendered at the top of the panel and default-focused when present
+    /// so it is the first thing the user lands on. Opens the member-stream
+    /// picker; the panel dismisses itself first via `onDismiss`.
+    @ViewBuilder private var switchStreamSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Stream Source")
+            optionPill(
+                id: "switch-stream",
+                text: "Switch Stream",
+                systemImage: "arrow.triangle.swap",
+                isSelected: false
+            ) {
+                onSwitchStream?()
+                onDismiss?()
+            }
+        }
+    }
+
     @ViewBuilder private var multiviewSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionHeader("Add Stream")

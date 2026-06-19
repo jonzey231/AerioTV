@@ -371,6 +371,19 @@ final class ServerConnection {
         type != .dispatcharrAPI || dispatcharrUserLevel >= 10
     }
 
+    /// Whether the connected account may use Switch Stream (pick a
+    /// channel's active upstream from the player). Dispatcharr Direct
+    /// Connect only, and admin only: `POST /proxy/ts/change_stream/<uuid>`
+    /// is server-side `IsAdmin` (`user_level` >= 10), so a Standard /
+    /// Streamer account gets HTTP 403. Note the INVERTED shape vs
+    /// `dispatcharrCanRecordToServer`: this is `==` + `&&`, so it returns
+    /// `false` for every non-Dispatcharr server (Xtream / M3U never expose
+    /// member streams or a change-stream endpoint), hiding the affordance
+    /// there instead of showing an option that can't work.
+    var dispatcharrCanSwitchStream: Bool {
+        type == .dispatcharrAPI && dispatcharrUserLevel >= 10
+    }
+
     /// Parsed list of the connected Dispatcharr user's assigned Channel
     /// Profile ids. Splits `dispatcharrChannelProfileIDs` on commas,
     /// trims whitespace, and drops blanks / non-integers so a malformed

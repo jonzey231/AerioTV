@@ -65,6 +65,21 @@ struct MultiviewContainerView: View {
     /// is gated on that condition.
     @State private var showRecordSheet: Bool = false
 
+    /// Presents `SwitchStreamView` (Dispatcharr Direct Connect, admin
+    /// only) for the audio tile's channel. Flipped by the tvOS Options
+    /// panel's "Switch Stream" row and the iOS overflow menu (via
+    /// `PlaybackChromeOverlay`). Lets the user pick the channel's active
+    /// upstream from the player.
+    @State private var showSwitchStream: Bool = false
+
+    /// In-session Switch Stream selection, kept here (not in the picker,
+    /// which is recreated each open) so re-opening the picker shows the
+    /// stream the user actually switched to — `/status.stream_id` goes
+    /// stale right after a switch, so it can't be trusted on re-open.
+    /// Keyed by channel uuid; a channel change makes it resolve to nil.
+    @State private var switchedStreamChannelUUID: String?
+    @State private var switchedStreamID: Int?
+
     /// Sleep-timer state for the Options panel. Lives on the
     /// container so it survives panel dismissals and is shared
     /// between the timer-countdown loop and the Options UI. Was
@@ -221,7 +236,7 @@ struct MultiviewContainerView: View {
                     // hard focus trap on every direction (no other
                     // focusable view exists outside the panel).
                     #if os(tvOS)
-                    .disabled(showTVOptions)
+                    .disabled(showTVOptions || showSwitchStream)
                     // tvOS N=1 chrome floats as a BOTTOM OVERLAY over the
                     // full-bleed video instead of an inline sibling that
                     // shrank the tile (Android-style, far less obtrusive).
@@ -247,7 +262,7 @@ struct MultiviewContainerView: View {
                             .opacity(chromeState.isVisible ? 1 : 0)
                             .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
                             .accessibilityHidden(!chromeState.isVisible)
-                            .disabled(showTVOptions || !chromeState.isVisible)
+                            .disabled(showTVOptions || showSwitchStream || !chromeState.isVisible)
                         }
                     }
                     #endif
@@ -323,7 +338,8 @@ struct MultiviewContainerView: View {
                     showTVOptions: $showTVOptions,
                     sleepTimerEnd: $sleepTimerEnd,
                     showStreamInfo: $showStreamInfo,
-                    showRecordSheet: $showRecordSheet
+                    showRecordSheet: $showRecordSheet,
+                    showSwitchStream: $showSwitchStream
                 )
                 // (No `.disabled(showTVOptions)` here — on tvOS this
                 // overlay is empty by design; the actual chrome pills
@@ -393,7 +409,16 @@ struct MultiviewContainerView: View {
                     // inside this panel would be a second path to
                     // the same action, which is the workflow the
                     // user explicitly asked us to remove.
-                    onEnterMultiview: nil
+                    onEnterMultiview: nil,
+                    // Switch Stream — only when the audio tile's channel
+                    // is an admin Dispatcharr channel with a pk + uuid.
+                    // Closes the panel, then presents the picker.
+                    onSwitchStream: canSwitchStreamForAudioTile ? {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showTVOptions = false
+                        }
+                        showSwitchStream = true
+                    } : nil
                 )
                 // v1.6.12 (GH #11 follow-up): trap D-pad navigation
                 // inside the panel. Without `.focusSection()` tvOS
@@ -418,6 +443,20 @@ struct MultiviewContainerView: View {
                         showTVOptions = false
                     }
                 }
+            }
+            #endif
+
+            // tvOS Switch Stream picker — inline overlay, NOT a third
+            // .fullScreenCover (a third stacked cover breaks the tvOS 27
+            // focus engine, leaving the bottom chrome unreachable). The
+            // picker paints its own full-screen background; the tiles and
+            // bottom chrome are .disabled while it's up so focus stays
+            // trapped inside it. SwitchStreamView seeds its own focus.
+            #if os(tvOS)
+            if showSwitchStream {
+                switchStreamSheetContent
+                    .transition(.opacity)
+                    .zIndex(60)
             }
             #endif
 
@@ -599,9 +638,29 @@ struct MultiviewContainerView: View {
         // interaction so the fade clock starts from "now" rather
         // than picking up where it left off.
         .onChange(of: showTVOptions) { _, showing in
-            chromeState.setPinned(showing)
+            // Pin while EITHER modal is up so the combined state is right
+            // regardless of which onChange fires last when the panel hands
+            // off to the Switch Stream overlay (showTVOptions→false +
+            // showSwitchStream→true in one beat).
+            chromeState.setPinned(showing || showSwitchStream)
+            if !showing && !showSwitchStream {
+                chromeState.reportInteraction()
+            }
+        }
+        // Switch Stream overlay shares the chrome-pin discipline: while it
+        // is up the 5s auto-fade must NOT run, or it clears focusedChrome
+        // out from under the bottom pills and leaves them focus-less on
+        // close (the "chrome focus messed up" report). On close, restore
+        // focus to the Options pill the picker was opened from — nothing
+        // else moves focus back since the overlay disabled the chrome.
+        .onChange(of: showSwitchStream) { _, showing in
+            chromeState.setPinned(showing || showTVOptions)
             if !showing {
                 chromeState.reportInteraction()
+                Task { @MainActor in
+                    await Task.yield()
+                    if !showTVOptions { focusedChrome = .options }
+                }
             }
         }
         #endif
@@ -755,7 +814,22 @@ struct MultiviewContainerView: View {
                 // forcing a manual arrow-right traversal to reach "+".
                 // See `ChromeFocusTarget` doc comment for the
                 // Freyguy1975 Discord report that motivated this.
-                focusedChrome = .addStream
+                //
+                // Defer one runloop: the pills flip from .disabled to
+                // enabled in THIS same pass (their gate includes
+                // !chromeState.isVisible), and a synchronous focus write
+                // races that realization on tvOS 27 — it lands on a
+                // not-yet-focusable pill, is dropped, and focus stays on
+                // the tile. That was the "summon chrome, wait for it to
+                // fade, summon again" symptom. Yielding lets the enable +
+                // tvOS's own focus pass settle so our write lands last,
+                // the same pattern the focusedTileID writes above use.
+                Task { @MainActor in
+                    await Task.yield()
+                    if chromeState.isVisible && !showTVOptions && !showSwitchStream {
+                        focusedChrome = .addStream
+                    }
+                }
             } else {
                 // When chrome fades, release any pill focus so the next
                 // render restores the tile as the default focus via
@@ -909,6 +983,17 @@ struct MultiviewContainerView: View {
             recordSheetContent
         }
         #endif
+        // Switch Stream picker. iOS presents it as a sheet. tvOS does NOT
+        // use a third .fullScreenCover (stacking a third cover breaks the
+        // tvOS 27 focus engine — the unpresented cover steals focus from
+        // the bottom chrome). tvOS instead renders it as an inline overlay
+        // in the gridArea ZStack above, the same pattern as the Options
+        // panel.
+        #if os(iOS)
+        .sheet(isPresented: $showSwitchStream) {
+            switchStreamSheetContent
+        }
+        #endif
         // Exit-confirmation dialog. Presented when the user presses
         // Menu/Back with chrome already visible (see the `onExitCommand`
         // comment above for the full Menu stack). Confirming runs
@@ -1025,6 +1110,55 @@ struct MultiviewContainerView: View {
         }
     }
 
+    /// Content for the Switch Stream picker. Resolves the audio tile's
+    /// Dispatcharr channel ids at render time (the int pk for the
+    /// member-streams list, the uuid for change_stream). Renders
+    /// `EmptyView` if the audio tile lacks them — unreachable in practice
+    /// because the affordance is gated on `canSwitchStreamForAudioTile`,
+    /// but it keeps the sheet dismissing cleanly if the tile goes away.
+    @ViewBuilder
+    private var switchStreamSheetContent: some View {
+        if let audioID = store.audioTileID,
+           let audio = store.tiles.first(where: { $0.id == audioID }),
+           let channelID = audio.item.dispatcharrChannelID,
+           let uuid = audio.item.uuid, !uuid.isEmpty {
+            SwitchStreamView(
+                channelID: channelID,
+                channelUUID: uuid,
+                channelName: audio.item.name,
+                // Works for both presentations: iOS sheet + tvOS overlay
+                // are both bound to `showSwitchStream`, so flipping it
+                // false dismisses either one.
+                onClose: { showSwitchStream = false },
+                // Persisted in-session selection for THIS channel, so a
+                // re-open shows the switched stream rather than the stale
+                // /status.stream_id.
+                initialStreamID: switchedStreamChannelUUID == uuid ? switchedStreamID : nil,
+                onSwitched: { id in
+                    switchedStreamChannelUUID = uuid
+                    switchedStreamID = id
+                }
+            )
+        } else {
+            EmptyView()
+        }
+    }
+
+    #if os(tvOS)
+    /// Whether the audio tile's channel can Switch Stream: a Dispatcharr
+    /// channel (int pk + proxy uuid) on a Direct Connect admin server.
+    /// Gates the tvOS Options panel's "Switch Stream" row. The iOS path
+    /// has its own copy in `PlaybackChromeOverlay`.
+    private var canSwitchStreamForAudioTile: Bool {
+        guard let audioID = store.audioTileID,
+              let audio = store.tiles.first(where: { $0.id == audioID }),
+              audio.item.dispatcharrChannelID != nil,
+              let uuid = audio.item.uuid, !uuid.isEmpty
+        else { return false }
+        return ChannelStore.shared.activeServer?.dispatcharrCanSwitchStream ?? false
+    }
+    #endif
+
     /// Body text for the exit-confirmation dialog. Explains what
     /// happens after tapping the primary button so the user isn't
     /// surprised by the destination view.
@@ -1102,6 +1236,20 @@ struct MultiviewContainerView: View {
             "[MV-Cmd] tvOS Menu source=\(source) | showTVOptions=\(showTVOptions) showStreamInfo=\(showStreamInfo) isMinimized=\(nowPlaying.isMinimized) chromeVisible=\(chromeState.isVisible) tiles=\(store.tiles.count) fullscreenTile=\(store.fullscreenTileID ?? "nil") relocating=\(store.relocatingTileID ?? "nil")",
             category: "Playback", level: .info
         )
+        // Switch Stream overlay is the topmost surface — Back closes it
+        // first (mirrors SwitchStreamView's own onExitCommand; harmless if
+        // both fire). Restoring chrome focus is handled by the
+        // showSwitchStream onChange above.
+        if showSwitchStream {
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: Switch Stream overlay open → close it",
+                category: "Playback", level: .info
+            )
+            withAnimation(.easeInOut(duration: 0.15)) {
+                showSwitchStream = false
+            }
+            return
+        }
         // v1.6.15.x: Stream Info overlay catches Back BEFORE the
         // Options-panel branch. Stream Info is opened FROM the
         // Options panel and persists after the panel dismisses, so

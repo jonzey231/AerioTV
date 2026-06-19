@@ -816,6 +816,28 @@ extension KeyedDecodingContainer {
         }
         return nil
     }
+
+    /// Decode a value Dispatcharr/DRF may serialize as EITHER a JSON
+    /// number or a JSON string, returning it as a String. Returns nil for
+    /// missing / null / empty. Used by `DispatcharrStream.StreamStats`
+    /// numeric fields (`source_fps`, `ffmpeg_output_bitrate`), which arrive
+    /// inconsistently typed — the same DRF quirk that forced
+    /// `DispatcharrChannel.channelNumber` to a tolerant decode. Tries
+    /// String first (covers "1080", "59.94"), then Double (drops a
+    /// trailing .0 for whole numbers), then Int.
+    func decodeStringOrNumber(forKey key: Key) -> String? {
+        if let s = try? decode(String.self, forKey: key) {
+            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? nil : t
+        }
+        if let d = try? decode(Double.self, forKey: key) {
+            return d == d.rounded() ? String(Int(d)) : String(d)
+        }
+        if let i = try? decode(Int.self, forKey: key) {
+            return String(i)
+        }
+        return nil
+    }
 }
 
 // MARK: - Xtream Series Item
@@ -2731,6 +2753,80 @@ struct DispatcharrAPI {
         try validate(response: response, data: data)
     }
 
+    // MARK: - Switch Stream
+
+    /// Lists a channel's member streams, highest priority first, keyed by
+    /// the channel's INTEGER pk (`DispatcharrChannel.id`, NOT the uuid).
+    /// Dispatcharr returns a plain JSON array; we also tolerate a paginated
+    /// `{ "results": [...] }` envelope in case the server pages this route.
+    func getChannelStreams(channelID: Int) async throws -> [DispatcharrStream] {
+        let url = try buildURL(path: "/api/channels/channels/\(channelID)/streams/")
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.httpMethod = "GET"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        if let arr = try? Self.jsonDecoder.decode([DispatcharrStream].self, from: data) {
+            return arr
+        }
+        return try decode(DispatcharrResultsWrapper<DispatcharrStream>.self, from: data).results
+    }
+
+    /// Switches the channel's active upstream. Keyed by the channel UUID
+    /// (the same `<uuid>` used in `/proxy/ts/stream/<uuid>`). Server-side
+    /// `@permission_classes([IsAdmin])` — a non-admin account gets 403.
+    /// Dispatcharr swaps the upstream in place behind the unchanged proxy
+    /// connection (a mid-stream TS discontinuity, no EOF); libmpv follows
+    /// it on its own, so the caller does NOT reload the player after this.
+    @discardableResult
+    func changeStream(channelUUID: String, streamID: Int) async throws -> String? {
+        let url = try buildURL(path: "/proxy/ts/change_stream/\(channelUUID)")
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.httpMethod = "POST"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["stream_id": streamID])
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        // The response carries the resolved upstream `url` Dispatcharr
+        // switched to. We confirm the switch by polling /status.url against
+        // this (the event-path bug leaves stream_id stale, so url is the
+        // only trustworthy signal). Best-effort decode; nil just skips the
+        // confirm gate.
+        return (try? Self.jsonDecoder.decode(DispatcharrChangeStreamResponse.self, from: data))?.url
+    }
+
+    /// Reads `/proxy/ts/status/<uuid>` for the channel's live upstream.
+    /// `url` is reliably updated on a stream switch; `streamID` is NOT (the
+    /// owner:false event path never rewrites it, so it stays stale ~20s) —
+    /// use it only to seed the current-stream mark before any in-session
+    /// switch, never to confirm one.
+    func getChannelStatus(channelUUID: String) async throws -> DispatcharrChannelStatus {
+        let url = try buildURL(path: "/proxy/ts/status/\(channelUUID)")
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        request.httpMethod = "GET"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try decode(DispatcharrChannelStatus.self, from: data)
+    }
+
+    /// Lists the server's M3U source accounts so a stream's `m3u_account`
+    /// integer id can be resolved to a display name (the source label the
+    /// Dispatcharr WebUI shows). Admin endpoint; tolerates a `results`
+    /// envelope as well as a plain array.
+    func getM3UAccounts() async throws -> [DispatcharrM3UAccount] {
+        let url = try buildURL(path: "/api/m3u/accounts/")
+        var request = URLRequest(url: url, timeoutInterval: 30)
+        request.httpMethod = "GET"
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        if let arr = try? Self.jsonDecoder.decode([DispatcharrM3UAccount].self, from: data) {
+            return arr
+        }
+        return try decode(DispatcharrResultsWrapper<DispatcharrM3UAccount>.self, from: data).results
+    }
+
     /// Triggers comskip (commercial detection/removal) on a completed
     /// recording. Dispatcharr handles the processing server-side.
     func applyComskip(id: Int) async throws {
@@ -3509,6 +3605,95 @@ struct DispatcharrChannel: Decodable, Identifiable {
             ?? extra.decodeIfPresent(Int.self, forKey: .channelGroup)
     }
 
+}
+
+// MARK: - Switch Stream (Dispatcharr member streams)
+
+/// One member stream of a Dispatcharr channel, from
+/// `GET /api/channels/channels/{id}/streams/` (highest priority first).
+/// `id` is the Stream pk POSTed to `change_stream`; `m3uAccount` is the
+/// source M3U account id resolved to a name via `getM3UAccounts()`.
+/// `streamStats` is `null` until Dispatcharr has probed that source, so
+/// a never-played stream degrades to name + source only.
+struct DispatcharrStream: Decodable, Identifiable {
+    let id: Int
+    let name: String?
+    let m3uAccount: Int?
+    let streamStats: StreamStats?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case m3uAccount = "m3u_account"
+        case streamStats = "stream_stats"
+    }
+
+    /// Quality stats Dispatcharr reports for a probed stream. Numeric
+    /// fields decode through `decodeStringOrNumber` because DRF can emit
+    /// them as JSON strings or numbers; codecs/resolution use the existing
+    /// flexible-string decode. All optional — any field can be absent.
+    struct StreamStats: Decodable {
+        let resolution: String?     // e.g. "1920x1080"
+        let sourceFPS: String?      // number-or-string
+        let videoCodec: String?     // e.g. "h264", "hevc"
+        let outputBitrate: String?  // kbps, number-or-string
+        let audioCodec: String?     // e.g. "aac", "ac3"
+
+        enum CodingKeys: String, CodingKey {
+            case resolution
+            case sourceFPS = "source_fps"
+            case videoCodec = "video_codec"
+            case outputBitrate = "ffmpeg_output_bitrate"
+            case audioCodec = "audio_codec"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            resolution = c.decodeFlexibleString(forKey: .resolution)
+            sourceFPS = c.decodeStringOrNumber(forKey: .sourceFPS)
+            videoCodec = c.decodeFlexibleString(forKey: .videoCodec)
+            outputBitrate = c.decodeStringOrNumber(forKey: .outputBitrate)
+            audioCodec = c.decodeFlexibleString(forKey: .audioCodec)
+        }
+    }
+}
+
+/// A Dispatcharr M3U source account from `GET /api/m3u/accounts/`. Used to
+/// resolve a stream's `m3u_account` integer id to a display name (the
+/// source label the Dispatcharr WebUI shows). Distinct from
+/// `DispatcharrCategoryM3UAccount` (the VOD category->account join row).
+struct DispatcharrM3UAccount: Decodable, Identifiable {
+    let id: Int
+    let name: String?
+}
+
+/// Response of `POST /proxy/ts/change_stream/<uuid>`. We only need `url`
+/// (the resolved upstream the server switched to) for the confirm gate.
+struct DispatcharrChangeStreamResponse: Decodable {
+    let url: String?
+}
+
+/// Subset of `GET /proxy/ts/status/<uuid>`. `url` is the live upstream
+/// (reliable across switches); `streamID` is the active stream pk (goes
+/// stale on the event path — seed-only, never a confirm signal). Both
+/// decode tolerantly (DRF may string-encode the id).
+struct DispatcharrChannelStatus: Decodable {
+    let url: String?
+    let streamID: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case url
+        case streamID = "stream_id"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        url = c.decodeFlexibleString(forKey: .url)
+        if let s = c.decodeStringOrNumber(forKey: .streamID) {
+            streamID = Int(s)
+        } else {
+            streamID = nil
+        }
+    }
 }
 
 // MARK: - Dispatcharr VOD
