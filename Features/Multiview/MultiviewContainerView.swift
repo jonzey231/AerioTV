@@ -65,12 +65,16 @@ struct MultiviewContainerView: View {
     /// is gated on that condition.
     @State private var showRecordSheet: Bool = false
 
-    /// Presents `SwitchStreamView` (Dispatcharr Direct Connect, admin
-    /// only) for the audio tile's channel. Flipped by the tvOS Options
-    /// panel's "Switch Stream" row and the iOS overflow menu (via
-    /// `PlaybackChromeOverlay`). Lets the user pick the channel's active
-    /// upstream from the player.
+    /// iOS ONLY: presents `SwitchStreamView` as a `.sheet` (flipped by the
+    /// iOS overflow menu via `PlaybackChromeOverlay`).
     @State private var showSwitchStream: Bool = false
+
+    /// tvOS ONLY: the Switch Stream picker is a SECOND PAGE inside the
+    /// Options-panel presentation (`showTVOptions`), not a separate overlay
+    /// — so it inherits the panel's proven focus trap and touches none of
+    /// the bottom-chrome focus/pin machinery. True = show the stream list
+    /// in place of the options list while `showTVOptions` stays true.
+    @State private var streamPickerVisible: Bool = false
 
     /// In-session Switch Stream selection, kept here (not in the picker,
     /// which is recreated each open) so re-opening the picker shows the
@@ -236,7 +240,7 @@ struct MultiviewContainerView: View {
                     // hard focus trap on every direction (no other
                     // focusable view exists outside the panel).
                     #if os(tvOS)
-                    .disabled(showTVOptions || showSwitchStream)
+                    .disabled(showTVOptions)
                     // tvOS N=1 chrome floats as a BOTTOM OVERLAY over the
                     // full-bleed video instead of an inline sibling that
                     // shrank the tile (Android-style, far less obtrusive).
@@ -262,7 +266,7 @@ struct MultiviewContainerView: View {
                             .opacity(chromeState.isVisible ? 1 : 0)
                             .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
                             .accessibilityHidden(!chromeState.isVisible)
-                            .disabled(showTVOptions || showSwitchStream || !chromeState.isVisible)
+                            .disabled(showTVOptions || !chromeState.isVisible)
                         }
                     }
                     #endif
@@ -387,76 +391,92 @@ struct MultiviewContainerView: View {
                showTVOptions,
                let audioStore = store.audioProgressStore,
                let audioTile = store.tiles.first {
-                TVPlayerOptionsPanel(
-                    audioTracks: audioStore.audioTracks,
-                    currentAudioTrackID: audioStore.currentAudioTrackID,
-                    subtitleTracks: audioStore.subtitleTracks,
-                    currentSubtitleTrackID: audioStore.currentSubtitleTrackID,
-                    speed: audioStore.speed,
-                    isLive: true,  // multiview is always live-only in v1
-                    sleepTimerEnd: $sleepTimerEnd,
-                    showStreamInfo: $showStreamInfo,
-                    setAudioTrack: { audioStore.setAudioTrackAction?($0) },
-                    setSubtitleTrack: { audioStore.setSubtitleTrackAction?($0) },
-                    setSpeed: { audioStore.setSpeedAction?($0) },
-                    onDismiss: {
+                if streamPickerVisible,
+                   let channelID = audioTile.item.dispatcharrChannelID,
+                   let uuid = audioTile.item.uuid, !uuid.isEmpty {
+                    // Switch Stream picker as the Options panel's SECOND
+                    // PAGE. Rendered in the SAME slot as the options panel
+                    // while `showTVOptions` stays true, so it inherits the
+                    // panel's focus trap (tiles + bottom chrome are already
+                    // `.disabled(showTVOptions)`) and touches NONE of the
+                    // chrome focus/pin code. Closing it (Done, Menu, or a
+                    // confirmed switch) sets showTVOptions=false, which
+                    // restores chrome focus via the exact same proven path
+                    // closing the options panel uses.
+                    SwitchStreamView(
+                        channelID: channelID,
+                        channelUUID: uuid,
+                        channelName: audioTile.item.name,
+                        onClose: {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                streamPickerVisible = false
+                                showTVOptions = false
+                            }
+                        },
+                        initialStreamID: switchedStreamChannelUUID == uuid ? switchedStreamID : nil,
+                        onSwitched: { id in
+                            switchedStreamChannelUUID = uuid
+                            switchedStreamID = id
+                        }
+                    )
+                    .id(audioTile.id)
+                } else {
+                    TVPlayerOptionsPanel(
+                        audioTracks: audioStore.audioTracks,
+                        currentAudioTrackID: audioStore.currentAudioTrackID,
+                        subtitleTracks: audioStore.subtitleTracks,
+                        currentSubtitleTrackID: audioStore.currentSubtitleTrackID,
+                        speed: audioStore.speed,
+                        isLive: true,  // multiview is always live-only in v1
+                        sleepTimerEnd: $sleepTimerEnd,
+                        showStreamInfo: $showStreamInfo,
+                        setAudioTrack: { audioStore.setAudioTrackAction?($0) },
+                        setSubtitleTrack: { audioStore.setSubtitleTrackAction?($0) },
+                        setSpeed: { audioStore.setSpeedAction?($0) },
+                        onDismiss: {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                showTVOptions = false
+                            }
+                        },
+                        // Deliberately nil — `+` pill is a peer action
+                        // in `PlaybackChromeOverlay`. Listing "Add Stream"
+                        // inside this panel would be a second path to
+                        // the same action, which is the workflow the
+                        // user explicitly asked us to remove.
+                        onEnterMultiview: nil,
+                        // Switch Stream — only for an admin Dispatcharr
+                        // channel with a pk + uuid. Flips to the picker
+                        // PAGE in this same panel (no separate overlay).
+                        onSwitchStream: canSwitchStreamForAudioTile ? {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                streamPickerVisible = true
+                            }
+                        } : nil
+                    )
+                    // v1.6.12 (GH #11 follow-up): trap D-pad navigation
+                    // inside the panel. Without `.focusSection()` tvOS
+                    // lets focus escape down past the last row (Stream
+                    // Info) into whatever's behind / below the panel —
+                    // typically the chrome's Options pill — which left
+                    // the panel still visible but unreachable. The
+                    // matching pattern lives on PlayerView's panel
+                    // instance; this brings the multiview path to
+                    // parity. tvOS strongly prefers to keep focus inside
+                    // a `focusSection`, so D-pad-down at the bottom of
+                    // the scroll just stops there instead of leaping
+                    // out.
+                    .focusSection()
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    // Audio tile id in the SwiftUI identity so switching
+                    // audio tile (if that ever happens mid-panel) rebuilds
+                    // the panel with fresh track lists.
+                    .id(audioTile.id)
+                    .onExitCommand {
                         withAnimation(.easeInOut(duration: 0.15)) {
                             showTVOptions = false
                         }
-                    },
-                    // Deliberately nil — `+` pill is a peer action
-                    // in `PlaybackChromeOverlay`. Listing "Add Stream"
-                    // inside this panel would be a second path to
-                    // the same action, which is the workflow the
-                    // user explicitly asked us to remove.
-                    onEnterMultiview: nil,
-                    // Switch Stream — only when the audio tile's channel
-                    // is an admin Dispatcharr channel with a pk + uuid.
-                    // Closes the panel, then presents the picker.
-                    onSwitchStream: canSwitchStreamForAudioTile ? {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            showTVOptions = false
-                        }
-                        showSwitchStream = true
-                    } : nil
-                )
-                // v1.6.12 (GH #11 follow-up): trap D-pad navigation
-                // inside the panel. Without `.focusSection()` tvOS
-                // lets focus escape down past the last row (Stream
-                // Info) into whatever's behind / below the panel —
-                // typically the chrome's Options pill — which left
-                // the panel still visible but unreachable. The
-                // matching pattern lives on PlayerView's panel
-                // instance; this brings the multiview path to
-                // parity. tvOS strongly prefers to keep focus inside
-                // a `focusSection`, so D-pad-down at the bottom of
-                // the scroll just stops there instead of leaping
-                // out.
-                .focusSection()
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                // Audio tile id in the SwiftUI identity so switching
-                // audio tile (if that ever happens mid-panel) rebuilds
-                // the panel with fresh track lists.
-                .id(audioTile.id)
-                .onExitCommand {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        showTVOptions = false
                     }
                 }
-            }
-            #endif
-
-            // tvOS Switch Stream picker — inline overlay, NOT a third
-            // .fullScreenCover (a third stacked cover breaks the tvOS 27
-            // focus engine, leaving the bottom chrome unreachable). The
-            // picker paints its own full-screen background; the tiles and
-            // bottom chrome are .disabled while it's up so focus stays
-            // trapped inside it. SwitchStreamView seeds its own focus.
-            #if os(tvOS)
-            if showSwitchStream {
-                switchStreamSheetContent
-                    .transition(.opacity)
-                    .zIndex(60)
             }
             #endif
 
@@ -638,29 +658,14 @@ struct MultiviewContainerView: View {
         // interaction so the fade clock starts from "now" rather
         // than picking up where it left off.
         .onChange(of: showTVOptions) { _, showing in
-            // Pin while EITHER modal is up so the combined state is right
-            // regardless of which onChange fires last when the panel hands
-            // off to the Switch Stream overlay (showTVOptions→false +
-            // showSwitchStream→true in one beat).
-            chromeState.setPinned(showing || showSwitchStream)
-            if !showing && !showSwitchStream {
-                chromeState.reportInteraction()
-            }
-        }
-        // Switch Stream overlay shares the chrome-pin discipline: while it
-        // is up the 5s auto-fade must NOT run, or it clears focusedChrome
-        // out from under the bottom pills and leaves them focus-less on
-        // close (the "chrome focus messed up" report). On close, restore
-        // focus to the Options pill the picker was opened from — nothing
-        // else moves focus back since the overlay disabled the chrome.
-        .onChange(of: showSwitchStream) { _, showing in
-            chromeState.setPinned(showing || showTVOptions)
+            chromeState.setPinned(showing)
             if !showing {
                 chromeState.reportInteraction()
-                Task { @MainActor in
-                    await Task.yield()
-                    if !showTVOptions { focusedChrome = .options }
-                }
+                // Reset the Switch Stream sub-page so re-opening Options
+                // shows the options list, not a stale picker. (The picker
+                // lives INSIDE this panel presentation on tvOS, so closing
+                // the panel closes it too — no separate chrome wiring.)
+                streamPickerVisible = false
             }
         }
         #endif
@@ -814,22 +819,7 @@ struct MultiviewContainerView: View {
                 // forcing a manual arrow-right traversal to reach "+".
                 // See `ChromeFocusTarget` doc comment for the
                 // Freyguy1975 Discord report that motivated this.
-                //
-                // Defer one runloop: the pills flip from .disabled to
-                // enabled in THIS same pass (their gate includes
-                // !chromeState.isVisible), and a synchronous focus write
-                // races that realization on tvOS 27 — it lands on a
-                // not-yet-focusable pill, is dropped, and focus stays on
-                // the tile. That was the "summon chrome, wait for it to
-                // fade, summon again" symptom. Yielding lets the enable +
-                // tvOS's own focus pass settle so our write lands last,
-                // the same pattern the focusedTileID writes above use.
-                Task { @MainActor in
-                    await Task.yield()
-                    if chromeState.isVisible && !showTVOptions && !showSwitchStream {
-                        focusedChrome = .addStream
-                    }
-                }
+                focusedChrome = .addStream
             } else {
                 // When chrome fades, release any pill focus so the next
                 // render restores the tile as the default focus via
@@ -1110,12 +1100,11 @@ struct MultiviewContainerView: View {
         }
     }
 
-    /// Content for the Switch Stream picker. Resolves the audio tile's
-    /// Dispatcharr channel ids at render time (the int pk for the
-    /// member-streams list, the uuid for change_stream). Renders
-    /// `EmptyView` if the audio tile lacks them — unreachable in practice
-    /// because the affordance is gated on `canSwitchStreamForAudioTile`,
-    /// but it keeps the sheet dismissing cleanly if the tile goes away.
+    #if os(iOS)
+    /// iOS sheet content for the Switch Stream picker. (tvOS presents the
+    /// picker as a page inside the Options panel — see the panel block.)
+    /// Resolves the audio tile's Dispatcharr ids at render time; EmptyView
+    /// if absent so the sheet dismisses cleanly.
     @ViewBuilder
     private var switchStreamSheetContent: some View {
         if let audioID = store.audioTileID,
@@ -1126,9 +1115,6 @@ struct MultiviewContainerView: View {
                 channelID: channelID,
                 channelUUID: uuid,
                 channelName: audio.item.name,
-                // Works for both presentations: iOS sheet + tvOS overlay
-                // are both bound to `showSwitchStream`, so flipping it
-                // false dismisses either one.
                 onClose: { showSwitchStream = false },
                 // Persisted in-session selection for THIS channel, so a
                 // re-open shows the switched stream rather than the stale
@@ -1143,6 +1129,7 @@ struct MultiviewContainerView: View {
             EmptyView()
         }
     }
+    #endif
 
     #if os(tvOS)
     /// Whether the audio tile's channel can Switch Stream: a Dispatcharr
@@ -1236,20 +1223,6 @@ struct MultiviewContainerView: View {
             "[MV-Cmd] tvOS Menu source=\(source) | showTVOptions=\(showTVOptions) showStreamInfo=\(showStreamInfo) isMinimized=\(nowPlaying.isMinimized) chromeVisible=\(chromeState.isVisible) tiles=\(store.tiles.count) fullscreenTile=\(store.fullscreenTileID ?? "nil") relocating=\(store.relocatingTileID ?? "nil")",
             category: "Playback", level: .info
         )
-        // Switch Stream overlay is the topmost surface — Back closes it
-        // first (mirrors SwitchStreamView's own onExitCommand; harmless if
-        // both fire). Restoring chrome focus is handled by the
-        // showSwitchStream onChange above.
-        if showSwitchStream {
-            DebugLogger.shared.log(
-                "[MV-Cmd]   → branch: Switch Stream overlay open → close it",
-                category: "Playback", level: .info
-            )
-            withAnimation(.easeInOut(duration: 0.15)) {
-                showSwitchStream = false
-            }
-            return
-        }
         // v1.6.15.x: Stream Info overlay catches Back BEFORE the
         // Options-panel branch. Stream Info is opened FROM the
         // Options panel and persists after the panel dismisses, so
