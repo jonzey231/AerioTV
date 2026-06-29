@@ -2908,7 +2908,7 @@ struct TVPlayerOptionsPanel: View {
     /// "Switch Stream" row (Dispatcharr Direct Connect, admin only).
     /// Rendered at the top of the panel and default-focused when present
     /// so it is the first thing the user lands on. Opens the member-stream
-    /// picker; the panel dismisses itself first via `onDismiss`.
+    /// picker, which renders as a PAGE inside this same panel presentation.
     @ViewBuilder private var switchStreamSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionHeader("Stream Source")
@@ -2918,8 +2918,13 @@ struct TVPlayerOptionsPanel: View {
                 systemImage: "arrow.triangle.swap",
                 isSelected: false
             ) {
+                // Do NOT call onDismiss() here. The picker is a PAGE inside
+                // this panel presentation: the container flips
+                // `streamPickerVisible` while `showTVOptions` stays true.
+                // Dismissing the panel (showTVOptions = false) would tear
+                // the picker down with it — the "Switch Stream → blank
+                // screen / Options menu disappears" bug.
                 onSwitchStream?()
-                onDismiss?()
             }
         }
     }

@@ -14,6 +14,15 @@ import CoreVideo
 import CoreMedia  // For CMSampleBuffer
 import OpenGLES
 
+/// Tiny thread-safe latch for the Switch Stream re-sync keepalive: the
+/// keepalive task flips it once its connection receives a first byte (i.e. the
+/// server registered it as a client), and the reload waits on it before
+/// re-loading the player's own connection.
+private actor ReprimeKeepaliveGate {
+    private(set) var isConnected = false
+    func markConnected() { isConnected = true }
+}
+
 // MARK: - libmpv global init warm-up
 //
 // Observation from `[MV-TIMING]` logs on Apple TV 4K (3rd gen):
@@ -967,6 +976,75 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if urls.first?.absoluteString == newURL.absoluteString { return }
             swapStream(to: newURL, newTitle: newTitle, newSubtitle: newSubtitle)
         }
+
+        // MARK: - Switch Stream re-sync
+
+        /// Posted by `SwitchStreamView` after a confirmed Dispatcharr Switch
+        /// Stream. Reload ONLY if this coordinator is the one playing that
+        /// channel's proxy URL — libmpv usually follows the in-place swap, but
+        /// a dead upstream + Dispatcharr failover cascade desyncs it, so we
+        /// reload to re-lock onto the fresh buffer.
+        @objc fileprivate func switchStreamReprimeRequested(_ note: Notification) {
+            guard let uuid = note.userInfo?["uuid"] as? String else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      let current = self.urls.first,
+                      current.absoluteString.contains("/proxy/ts/stream/\(uuid)") else { return }
+                self.reprimeWithKeepalive(url: current, headers: self.headers,
+                                          title: self.nowPlayingTitle, subtitle: self.nowPlayingSubtitle)
+            }
+        }
+
+        /// Holds a SECOND bare client connection to the proxy stream open on a
+        /// DEDICATED ephemeral session (never the shared API pool), waits for
+        /// it to register, THEN forces a `loadfile replace` reload. The
+        /// keepalive keeps the channel's client-count >= 1 across our reload so
+        /// Dispatcharr's short shutdown delay doesn't tear the channel down and
+        /// cold-revert it to the default stream. Best-effort: if the keepalive
+        /// can't attach we reload anyway.
+        @MainActor
+        private func reprimeWithKeepalive(url: URL, headers: [String: String],
+                                          title: String, subtitle: String?) {
+            debugLog("[SwitchStream] \(streamTag): reload to re-sync libmpv onto the switched stream's buffer")
+            let gate = ReprimeKeepaliveGate()
+            // Dedicated ephemeral session: its connections never enter the
+            // shared API pool, so this throwaway keepalive can't influence
+            // which uwsgi worker a later change_stream lands on.
+            let session = URLSession(configuration: .ephemeral)
+            let keepalive = Task.detached(priority: .utility) {
+                var req = URLRequest(url: url, timeoutInterval: 8)
+                headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+                // Distinct UA so this throwaway client is identifiable in
+                // Dispatcharr logs and never collides with the playback client.
+                req.setValue("AerioTV-switch-keepalive", forHTTPHeaderField: "User-Agent")
+                do {
+                    let (bytes, _) = try await session.bytes(for: req)
+                    var first = true
+                    for try await _ in bytes {
+                        if first { first = false; await gate.markConnected() }
+                        if Task.isCancelled { break }
+                    }
+                } catch {
+                    // best-effort; the reload proceeds regardless
+                }
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { keepalive.cancel(); session.invalidateAndCancel(); return }
+                // Wait (≤4s) for the keepalive to register before we reload
+                // (which briefly drops the player's own connection).
+                let deadline = Date().addingTimeInterval(4)
+                while Date() < deadline {
+                    if await gate.isConnected { break }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                self.swapStream(to: url, newTitle: title, newSubtitle: subtitle)
+                // Hold the keepalive while our reload re-establishes, then drop it.
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                keepalive.cancel()
+                session.invalidateAndCancel()
+            }
+        }
+
 
         /// Called from `updateUIViewController`. Sends `mute=0` when
         /// the tile becomes audio-active, `mute=1` otherwise. No-op
@@ -2182,6 +2260,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Audio route change — log AirPlay connect/disconnect
             NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChanged),
                                                    name: AVAudioSession.routeChangeNotification, object: nil)
+            // Switch Stream: after a confirmed switch the picker asks the live
+            // player to reload so libmpv re-locks onto the channel's fresh
+            // buffer (recovers the dead-upstream/failover-cascade freeze). Only
+            // the coordinator playing that channel's proxy URL reacts. Removed
+            // via removeObserver(self) in deinit.
+            NotificationCenter.default.addObserver(self, selector: #selector(switchStreamReprimeRequested(_:)),
+                                                   name: .switchStreamReprime, object: nil)
 
             // Issue #26: apply the chosen aspect mode to the display layer
             // whenever it changes (and once on subscribe for the persisted

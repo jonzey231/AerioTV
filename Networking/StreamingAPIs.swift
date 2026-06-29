@@ -2787,12 +2787,17 @@ struct DispatcharrAPI {
         request.httpBody = try JSONSerialization.data(withJSONObject: ["stream_id": streamID])
         let (data, response) = try await loggedData(for: request)
         try validate(response: response, data: data)
-        // The response carries the resolved upstream `url` Dispatcharr
-        // switched to. We confirm the switch by polling /status.url against
-        // this (the event-path bug leaves stream_id stale, so url is the
-        // only trustworthy signal). Best-effort decode; nil just skips the
-        // confirm gate.
-        return (try? Self.jsonDecoder.decode(DispatcharrChangeStreamResponse.self, from: data))?.url
+        // The response carries the resolved upstream `url` Dispatcharr switched
+        // to plus an `owner` flag. We confirm the switch by polling /status.url
+        // against the url (the event-path bug leaves stream_id stale, so url is
+        // the only trustworthy signal). `owner` tells us whether this request
+        // hit the channel's owner worker — only then does Dispatcharr rewrite
+        // the stream_id its Stats card reads, so we log it to explain any
+        // lingering Stats staleness. Best-effort decode; nil just skips the gate.
+        let decoded = try? Self.jsonDecoder.decode(DispatcharrChangeStreamResponse.self, from: data)
+        let ownerStr = decoded?.owner.map(String.init) ?? "unknown"
+        debugLog("[SwitchStream] change_stream stream_id=\(streamID) owner=\(ownerStr) (owner=true → Stats reflects; owner=false → Stats stays stale until re-tune)")
+        return decoded?.url
     }
 
     /// Reads `/proxy/ts/status/<uuid>` for the channel's live upstream.
@@ -3670,6 +3675,12 @@ struct DispatcharrM3UAccount: Decodable, Identifiable {
 /// (the resolved upstream the server switched to) for the confirm gate.
 struct DispatcharrChangeStreamResponse: Decodable {
     let url: String?
+    /// True when the request landed on the channel's OWNER worker. Only the
+    /// owner path rewrites the Redis `stream_id` the Dispatcharr Stats card
+    /// reads (`channel_service.change_stream_url` → `_update_channel_metadata`);
+    /// on a non-owner worker the switch still applies for playback but the
+    /// Stats card stays stale. Sourced from `result['direct_update']` server-side.
+    let owner: Bool?
 }
 
 /// Subset of `GET /proxy/ts/status/<uuid>`. `url` is the live upstream

@@ -144,14 +144,28 @@ struct SwitchStreamView: View {
             do {
                 // change_stream returns the resolved upstream url. We then
                 // confirm by polling /status.url == that url (stream_id is
-                // unreliable on the event path). libmpv follows the
-                // in-place TS swap on its own once the server has switched,
-                // so we do NOT touch the player.
+                // unreliable on the event path). libmpv follows the in-place
+                // TS swap for PLAYBACK on its own, so we do NOT reconnect the
+                // player (reconnecting is an Android/ExoPlayer-only need and
+                // its client churn actively pushes our API calls onto a
+                // non-owner worker). Whether Dispatcharr's Stats page reflects
+                // the switch depends on the url-changing change_stream landing
+                // on the channel's OWNER worker — the only path that rewrites
+                // the Redis stream_id the Stats card reads. We keep the API
+                // connection pool clean so it stays pinned to that worker.
                 let targetURL = try await api.changeStream(channelUUID: channelUUID, streamID: stream.id)
                 let confirmed = await confirmSwitch(api: api, targetURL: targetURL, streamID: stream.id)
                 if confirmed {
                     debugLog("[SwitchStream] \(channelName): confirmed switch to stream id=\(stream.id) \"\(titleLine(for: stream))\"")
                     onSwitched?(stream.id)
+                    // Ask the live player to reload onto the same proxy URL so
+                    // libmpv re-locks onto the channel's fresh buffer. Needed
+                    // when the upstream was dead and Dispatcharr cascaded
+                    // through failover, churning the buffer; harmless otherwise.
+                    NotificationCenter.default.post(
+                        name: .switchStreamReprime, object: nil,
+                        userInfo: ["uuid": channelUUID]
+                    )
                     close()
                 } else {
                     // The POST returned 200 but /status.url never matched

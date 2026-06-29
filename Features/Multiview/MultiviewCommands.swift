@@ -112,4 +112,18 @@ struct MultiviewCommands: Commands {
 /// showAddSheet` to `true`.
 extension Notification.Name {
     static let multiviewRequestOpenAddSheet = Notification.Name("MultiviewRequestOpenAddSheet")
+
+    /// Posted by `SwitchStreamView` after a confirmed Dispatcharr Switch
+    /// Stream. The live player coordinator whose proxy URL matches
+    /// `userInfo["uuid"]` reloads libmpv onto the same proxy URL so it
+    /// re-locks onto the channel's fresh buffer. libmpv usually follows the
+    /// in-place TS swap on its own, but when the picked upstream is dead and
+    /// Dispatcharr cascades through server-side failover, the buffer resets
+    /// repeatedly and libmpv falls far behind the head (frozen until
+    /// re-tune). The reload is the deterministic recovery; a brief keepalive
+    /// connection is held across it so the channel isn't torn down to zero
+    /// clients (Dispatcharr's short shutdown delay would cold-revert it to the
+    /// default stream). Does NOT affect the Stats page (that's owner-worker
+    /// gated server-side); purely a playback-robustness step.
+    static let switchStreamReprime = Notification.Name("SwitchStreamReprime")
 }
