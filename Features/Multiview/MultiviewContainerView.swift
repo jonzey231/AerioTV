@@ -813,21 +813,49 @@ struct MultiviewContainerView: View {
                 // focus to the "+" / Add Stream pill so the user can
                 // build out a multiview tile pile with a single
                 // Menu/Back-then-Select sequence regardless of which
-                // tile was previously focused. Without this, the
-                // spatial focus routing lands the next D-pad-down on
-                // Options (leftmost pill) from a left-positioned tile,
-                // forcing a manual arrow-right traversal to reach "+".
-                // See `ChromeFocusTarget` doc comment for the
-                // Freyguy1975 Discord report that motivated this.
-                focusedChrome = .addStream
+                // tile was previously focused.
+                //
+                // LONG-STANDING BUG FIX (tvOS 26 + 27, many user reports):
+                // "press Menu, chrome appears but the pills won't focus;
+                // summon twice and it works." ROOT CAUSE (10-agent sweep,
+                // unanimous): the video tile is an ACTIVELY-held focus owner
+                // that is never released on summon — it is `.disabled` only
+                // by `showTVOptions` (NOT by chrome visibility), its
+                // `focusedTileID` stays pinned to it (only cleared on
+                // minimize), and it keeps `.prefersDefaultFocus`. A bare
+                // `focusedChrome` write cannot pull focus off an actively
+                // held tile that sits in a sibling focus region — which is
+                // exactly why simply re-asserting `focusedChrome` (even in a
+                // retry loop) never worked. So:
+                //   1. RELEASE the tile's hold (focusedTileID = nil) so the
+                //      engine must re-resolve focus, and
+                //   2. the tile's `.prefersDefaultFocus` is gated off while
+                //      chrome is visible (see the tile modifier) so the
+                //      engine does NOT re-pick the tile, and
+                //   3. claim the pill on the NEXT runloop (Task.yield) so the
+                //      write lands AFTER the pills' `.disabled(false)`
+                //      realizes — the same deferral every other focus write
+                //      in this file uses (onAppear seed, relocate reassert).
+                focusedTileID = nil
+                Task { @MainActor in
+                    await Task.yield()
+                    // Re-check: the user may have dismissed chrome or opened
+                    // the Options panel during the hop.
+                    if chromeState.isVisible && !showTVOptions {
+                        focusedChrome = .addStream
+                    }
+                }
             } else {
-                // When chrome fades, release any pill focus so the next
-                // render restores the tile as the default focus via
-                // `.prefersDefaultFocus`. Otherwise the focus engine
-                // would keep the (now invisible + height-0) pill as
-                // its remembered target and D-pad events would get
-                // dropped.
+                // When chrome fades, release any pill focus AND restore the
+                // tile as the explicit focus holder. `.prefersDefaultFocus`
+                // is hint-only / unreliable (the whole reason this file
+                // drives `focusedTileID` directly), so we must re-pin it or
+                // D-pad + the up/down channel-flip would be dropped until the
+                // user nudges focus.
                 focusedChrome = nil
+                if !nowPlaying.isMinimized, let id = store.tiles.first?.id {
+                    focusedTileID = id
+                }
             }
         }
         #endif
@@ -1346,7 +1374,14 @@ struct MultiviewContainerView: View {
                     // menu-dismiss pass yanked focus off the moving tile and the
                     // first arrow was swallowed re-realizing focus (the async
                     // re-focus below then fixed it, but only by the 2nd press).
-                    .prefersDefaultFocus((store.relocatingTileID ?? store.audioTileID) == tile.id, in: focusNS)
+                    // Gated off `chromeState.isVisible` (the long-standing
+                    // "can't focus chrome on first Menu summon" fix): while
+                    // the bottom chrome is up the tile must STOP being the
+                    // preferred default of focusNS, or the focus engine
+                    // keeps re-picking it and the chrome pills never get
+                    // focus. Relocate implies chrome hidden, so Move-Tile
+                    // behavior is unchanged.
+                    .prefersDefaultFocus((store.relocatingTileID ?? store.audioTileID) == tile.id && !chromeState.isVisible, in: focusNS)
                     // Bind each tile to the container's `focusedTileID`
                     // `@FocusState`. Normal navigation: the binding
                     // tracks the focus engine (SwiftUI updates the
