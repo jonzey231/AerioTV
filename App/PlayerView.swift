@@ -2474,9 +2474,13 @@ struct PlayerOverflowMenu: View, Equatable {
     /// Switch Stream (Dispatcharr Direct Connect, admin only). When the
     /// caller supplies a non-nil closure the menu shows a "Switch Stream"
     /// row; nil hides it (non-Dispatcharr / non-admin / no channel ids).
-    /// An optional closure, so it is excluded from the `==` below and
-    /// needs no equality change.
-    var switchStreamAction: (() -> Void)?
+    /// `nonisolated(unsafe)` so the `nonisolated ==` can read its nil-ness
+    /// (the PRESENCE of the action gates the row, so it must affect equality)
+    /// without Xcode 27's strict-concurrency warning about referencing a
+    /// main-actor non-Sendable closure from the `&&` autoclosure. Safe: `==`
+    /// only reads nil-ness (on the main actor during view diffing), and the
+    /// closure is only ever INVOKED from `body`, also on the main actor.
+    nonisolated(unsafe) var switchStreamAction: (() -> Void)?
     var onMenuOpen: (() -> Void)?
     var onMenuClose: (() -> Void)?
 
