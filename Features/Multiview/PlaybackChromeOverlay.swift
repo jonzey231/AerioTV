@@ -841,7 +841,12 @@ struct PlaybackBottomChrome_tvOS: View {
     @ViewBuilder
 
     private var addButton: some View {
-        Button {
+        // Own the focus ring so it follows the pill's Capsule shape. The
+        // shared TVNoHighlightButtonStyle draws a RoundedRectangle(14) ring
+        // that reads boxy on a capsule, so suppress it (drawsFocusRing:
+        // false) and draw a Capsule accent ring here instead.
+        let isFocused = focusedChrome == .addStream
+        return Button {
             chromeState.reportInteraction()
             showAddSheet = true
         } label: {
@@ -855,16 +860,22 @@ struct PlaybackBottomChrome_tvOS: View {
             .padding(.horizontal, 32)
             .padding(.vertical, 16)
             .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
+            .overlay(
+                Capsule().strokeBorder(
+                    isFocused ? Color.accentPrimary : Color.white.opacity(0.22),
+                    lineWidth: isFocused ? 4 : 1
+                )
+            )
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($focusedChrome, equals: .addStream)
         .accessibilityLabel("Add stream")
         .accessibilityHint("Pick another channel to watch alongside this one")
     }
 
     private var optionsButton: some View {
-        Button {
+        let isFocused = focusedChrome == .options
+        return Button {
             chromeState.reportInteraction()
             debugLog("[MV-Cmd] Options pill pressed → showTVOptions=true | audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) audioStore=\(store.audioProgressStore == nil ? "nil" : "ok")")
             showTVOptions = true
@@ -879,9 +890,14 @@ struct PlaybackBottomChrome_tvOS: View {
             .padding(.horizontal, 32)
             .padding(.vertical, 16)
             .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
+            .overlay(
+                Capsule().strokeBorder(
+                    isFocused ? Color.accentPrimary : Color.white.opacity(0.22),
+                    lineWidth: isFocused ? 4 : 1
+                )
+            )
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($focusedChrome, equals: .options)
         .accessibilityLabel("Options")
         .accessibilityHint("Change audio track, subtitles, sleep timer, or stream info")
@@ -895,7 +911,8 @@ struct PlaybackBottomChrome_tvOS: View {
     /// dot icon reads as the universal recording vocabulary; pill
     /// style matches Options / Add Stream.
     private var recordButton: some View {
-        Button {
+        let isFocused = focusedChrome == .record
+        return Button {
             chromeState.reportInteraction()
             showRecordSheet = true
         } label: {
@@ -910,9 +927,14 @@ struct PlaybackBottomChrome_tvOS: View {
             .padding(.horizontal, 32)
             .padding(.vertical, 16)
             .background(.ultraThinMaterial, in: Capsule())
-            .overlay(Capsule().stroke(Color.white.opacity(0.22), lineWidth: 1))
+            .overlay(
+                Capsule().strokeBorder(
+                    isFocused ? Color.accentPrimary : Color.white.opacity(0.22),
+                    lineWidth: isFocused ? 4 : 1
+                )
+            )
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($focusedChrome, equals: .record)
         .accessibilityLabel("Record current program")
         .accessibilityHint("Schedule a recording of what's currently airing on this channel")
