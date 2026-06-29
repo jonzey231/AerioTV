@@ -1736,20 +1736,33 @@ final class MultiviewChromeState: ObservableObject {
         // `reportInteraction()` keep the focus ring alive without
         // each call site having to double-bump.
         reportFocusActivity()
-        lastRescheduleAt = now
+        scheduleHide()
+    }
+
+    /// Records the reschedule timestamp and (re)arms the auto-hide task.
+    /// Suppressed while pinned. Factored out so both `reportInteraction()`
+    /// AND `setPinned(false)` arm the fade through the same path. The latter
+    /// is the important one: releasing the pin must guarantee a fresh fade
+    /// timer even when a (no-op, pinned) `reportInteraction()` just bumped
+    /// `lastRescheduleAt`. Without this, the follow-up `reportInteraction()`
+    /// in the panel-close path would coalesce-early-return and leave the
+    /// chrome with no hide task at all (it was cancelled when the pin went
+    /// on), stranding it visible forever — the "exit Switch Stream picker via
+    /// Menu, chrome never fades" bug.
+    private func scheduleHide() {
+        lastRescheduleAt = ContinuousClock.now
         hideTask?.cancel()
-        // While pinned (e.g. TVOptions panel open), don't even
-        // schedule the hide task — chrome stays up until the pin
-        // is released by the panel-close path.
+        // While pinned (e.g. TVOptions panel open) don't schedule the hide
+        // task; chrome stays up until the pin is released by the panel-close
+        // path, which calls back through here.
         guard !isPinned else { return }
         hideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: Self.fadeDelayNs)
             guard !Task.isCancelled, let self else { return }
-            // Re-check the pin at fire time too — pin may have been
-            // set during the 5s sleep (the panel could open after
-            // chrome was summoned), in which case we skip the hide
-            // and the panel-close path will reschedule a fresh
-            // interaction.
+            // Re-check the pin at fire time too: it may have been set during
+            // the 5s sleep (the panel could open after chrome was summoned),
+            // in which case skip the hide and let the panel-close path arm a
+            // fresh timer.
             guard !self.isPinned else { return }
             withAnimation(.easeInOut(duration: 0.4)) {
                 self.isVisible = false
@@ -1759,12 +1772,13 @@ final class MultiviewChromeState: ObservableObject {
 
     /// v1.6.12: pin chrome visibility on or off. While `pinned ==
     /// true`, `isVisible` is force-set to `true` and any in-flight
-    /// hide task is cancelled — auto-hide is fully suppressed.
-    /// Releasing the pin (`setPinned(false)`) doesn't immediately
-    /// hide the chrome; it just lets the next `reportInteraction()`
-    /// reschedule a fresh fade timer. Callers typically follow
-    /// `setPinned(false)` with `reportInteraction()` to start the
-    /// fade clock from now.
+    /// hide task is cancelled (auto-hide is fully suppressed).
+    /// Releasing the pin (`setPinned(false)`) arms a fresh fade timer
+    /// itself via `scheduleHide()`, so the chrome reliably fades after
+    /// the panel closes even if a follow-up `reportInteraction()` would
+    /// coalesce away. Callers may still follow with `reportInteraction()`
+    /// to also refresh the focus ring; it is a harmless no-op for the
+    /// fade clock.
     func setPinned(_ pinned: Bool) {
         guard isPinned != pinned else { return }
         isPinned = pinned
@@ -1775,6 +1789,13 @@ final class MultiviewChromeState: ObservableObject {
                     isVisible = true
                 }
             }
+        } else {
+            // Unpinning: auto-hide was suppressed while pinned, so there is no
+            // valid hide task. Arm a fresh fade now (bypassing
+            // reportInteraction's coalesce guard) so the chrome reliably fades
+            // after the Options panel / Switch Stream picker closes, no matter
+            // which Menu/dismiss path got us here.
+            scheduleHide()
         }
     }
 

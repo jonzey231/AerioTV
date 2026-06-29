@@ -296,16 +296,19 @@ struct MultiviewTileView: View {
     @ViewBuilder
     private var tvOSBody: some View {
         Button {
-            // Select presses wake the focus indicator (the center
-            // audio icon) but deliberately DON'T call
-            // `reportInteraction()` — that would also summon the
-            // bottom pills (Options + Add Stream), which is what the
-            // old model did and what we just moved away from. The
-            // bottom pills are no longer auto-summoned by Select or
-            // D-pad; they're reachable via the long-press context
-            // menu (Play/Pause pills are still present at N=1 under
-            // the unified chrome overlay).
-            chromeState.reportFocusActivity()
+            // At N=1 (the single-stream player) Select summons the
+            // bottom chrome, so Select and Menu BOTH reveal the
+            // Options / Record / Add Stream pills (user request).
+            // `reportInteraction()` also wakes the focus ring. At N>1
+            // we keep Select = take-audio and only wake the focus ring
+            // via `reportFocusActivity()`, so a tap in the grid doesn't
+            // drag the transport bar in with it. (D-pad never summons
+            // chrome on either path; only Select / Menu do.)
+            if isSoleTile {
+                chromeState.reportInteraction()
+            } else {
+                chromeState.reportFocusActivity()
+            }
             // Error state takes priority — if the tile is showing
             // the red "Decoder unavailable" card, Select removes
             // the tile. The inner Button in that card can't be
