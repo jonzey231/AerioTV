@@ -57,6 +57,18 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.7",
+            title: "What's new in 1.7.7",
+            bullets: [
+                "Switch Stream: on a Dispatcharr server connected with an admin Direct Connect account, pick which upstream a channel pulls from straight from the player's Options menu, handy when one source is buffering or down",
+                "New Stream Buffer setting adds a configurable live cushion that smooths stutter on bursty streams",
+                "Apple TV: the player controls now appear on the first Menu press, can be summoned with Select as well as Menu, match the rounded pill shape when focused, and hide on their own after you back out",
+                "Apple TV: fixed On Demand focus and navigation, including the cast row jumping to Play and the tab bar not restoring after leaving a title",
+                "Live TV: stopped a reload loop that could interrupt over-the-air channels at commercial breaks"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.7")
+        ),
+        WhatsNewRelease(
             version: "1.7.6",
             title: "What's new in 1.7.6",
             bullets: [

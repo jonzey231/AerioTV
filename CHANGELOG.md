@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.7.7 - 2026-06-29
+
+### Added
+
+- **Switch Stream (Dispatcharr).** On a Dispatcharr server connected with an
+  admin Direct Connect account, pick which upstream a channel pulls from
+  straight from the player's Options menu, so you can move off a source that is
+  buffering or down without leaving the channel. The picker lists each stream
+  with its quality, marks the one that is currently active, and confirms the
+  switch took effect before the player reloads onto it.
+- **Stream Buffer setting.** A configurable live cushion that holds a little
+  more video ahead to smooth out stutter on bursty streams.
+
+### Fixed
+
+- **Apple TV: player controls appear and hide reliably.** The Options / Record
+  / Add Stream bar now focuses on the first Menu press, can be summoned with
+  Select as well as Menu, draws its focus highlight to match the rounded pill
+  shape, and fades on its own after you back out of the Options or Switch
+  Stream panel.
+- **Apple TV: On Demand focus and navigation.** Fixed focus climbing from the
+  cast row to Play, the tab bar not restoring after you leave a title, a
+  Settings submenu that could stall, blank future guide data, and a TMDB
+  toggle that did not sync.
+- **Live TV: no reload loop at commercial breaks.** The stream watchdog no
+  longer repeatedly reloads when an over-the-air channel briefly changes format
+  at an ad break.
+
+### Changed
+
+- **Debug log redaction.** Additional M3U credential formats are stripped from
+  the debug log sanitizer so they never appear in diagnostic logs.
+
 ## v1.7.6 - 2026-06-17
 
 ### Added
