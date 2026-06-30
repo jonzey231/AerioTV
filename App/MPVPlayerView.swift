@@ -3728,6 +3728,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // hits when the source is genuinely dark or the
                 // proxy keeps producing the same broken bytes.
                 if consecutiveBlackFramesSuppressed == blackFrameStormThreshold,
+                   // #44 (GH): LIVE ONLY. Recordings/VOD are seekable files,
+                   // so `loadfile <url> replace` restarts them at 0:00. OTA
+                   // recordings splice a different encode at each commercial,
+                   // and that format change produces a ~30-frame black stretch
+                   // during the decoder reconfig — which the live-tuned storm
+                   // watchdog misread as a wedged pipeline and "re-primed",
+                   // looping the recording back to the beginning. libmpv
+                   // reconfigures format changes on a seekable file on its own
+                   // (audio_reconfigs in the logs confirm it), so the reload is
+                   // never the right move off-live. Live keeps the re-prime.
+                   isLive,
                    watchdogReloadEnabled,
                    hasReachedPlaybackRestartForStream {
                     let now = CFAbsoluteTimeGetCurrent()
