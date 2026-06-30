@@ -107,6 +107,17 @@ final class NowPlayingBridge {
         infoDict = info
         publishInfo()
 
+        // #43: tvOS REQUIRES an explicit `playbackState` for the system to treat
+        // this app as the active Now Playing app — which is what makes the OS
+        // relay the lock-screen / Control Center widget to a paired iPhone (the
+        // same way YouTube/Emby surface their Apple TV playback on your phone).
+        // iOS infers "playing" from the active audio session, but tvOS does not:
+        // setting only `nowPlayingInfo` without `playbackState` leaves the phone
+        // with no widget at all. This is the missing piece behind "AerioTV on
+        // the Apple TV shows no Now Playing widget on my iPhone."
+        setPlaybackState(.playing)
+        debugLog("[NowPlaying] configure: published + playbackState=.playing title=\"\(title)\" isLive=\(isLive)")
+
         #if DEBUG
         let publishedCount = MPNowPlayingInfoCenter.default().nowPlayingInfo?.count ?? -1
         print("[NowPlaying] configure: published nowPlayingInfo (local.count=\(info.count) center.count=\(publishedCount))")
@@ -121,6 +132,9 @@ final class NowPlayingBridge {
         infoDict[MPNowPlayingInfoPropertyElapsedPlaybackTime] = time
         infoDict[MPNowPlayingInfoPropertyPlaybackRate] = Double(rate)
         publishInfo()
+        // #43: keep tvOS's active-app signal in sync with play/pause so the
+        // relayed widget reflects the right state and stays alive.
+        setPlaybackState(rate > 0 ? .playing : .paused)
     }
 
 
@@ -129,6 +143,8 @@ final class NowPlayingBridge {
         artworkTask?.cancel()
         artworkTask = nil
         infoDict = [:]
+        // #43: clear the active-app signal so the relayed widget dismisses.
+        MPNowPlayingInfoCenter.default().playbackState = .stopped
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
         let cc = MPRemoteCommandCenter.shared()
         cc.playCommand.removeTarget(nil)
@@ -161,6 +177,14 @@ final class NowPlayingBridge {
     /// from arbitrary dispatch queues (iOS _dispatch_assert_queue_fail).
     private func publishInfo() {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = infoDict
+    }
+
+    /// #43: set the system playback state. On tvOS this is the signal that makes
+    /// the app the active Now Playing app (which is what the OS relays to the
+    /// Apple TV Remote / a paired iPhone's lock-screen widget); on iOS it keeps
+    /// the widget in sync with play/pause. Available iOS 13+ / tvOS 13+.
+    private func setPlaybackState(_ state: MPNowPlayingPlaybackState) {
+        MPNowPlayingInfoCenter.default().playbackState = state
     }
 
     private func registerCommands(isLive: Bool) {
