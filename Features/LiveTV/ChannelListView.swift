@@ -30,6 +30,12 @@ struct ChannelListView: View {
     @EnvironmentObject private var channelStore: ChannelStore
     @Environment(\.modelContext) private var modelContext
     @Environment(\.horizontalSizeClass) private var sizeClass
+    // #45: collection filter pills live in the group-pill row; observe the
+    // store so the row updates when collections are created / deleted.
+    @ObservedObject private var collectionsStore = ChannelCollectionsStore.shared
+    // #45: collection whose pill is being managed (long-press → move / delete).
+    // Drives the tvOS manage confirmationDialog; nil = none.
+    @State private var managePillCollection: ChannelCollection?
 
     @Query private var servers: [ServerConnection]
 
@@ -304,6 +310,9 @@ struct ChannelListView: View {
                 .onChange(of: searchText)       { _, _ in filterChannels() }
                 .onChange(of: selectedGroup)    { _, _ in filterChannels() }
                 .onChange(of: sortModeRaw)      { _, _ in filterChannels() }
+                // #45: re-filter when a collection's membership changes so a
+                // collection view updates live as channels are added/removed.
+                .onChange(of: collectionsStore.collections) { _, _ in filterChannels() }
                 // Re-sort when favorites change so the Favorites-First mode
                 // drops newly-unfavorited rows back into the number-sorted
                 // section below without waiting for the user to switch
@@ -934,6 +943,11 @@ struct ChannelListView: View {
                 )
                 #endif
 
+                // #45: collections placed at the beginning sit before "All".
+                ForEach(collectionsStore.beginningCollections) { c in
+                    collectionPill(c)
+                }
+
                 ForEach(["All"] + visibleGroups, id: \.self) { group in
                     #if os(tvOS)
                     TVGroupPill(
@@ -959,6 +973,11 @@ struct ChannelListView: View {
                     .buttonStyle(.plain)
                     #endif
                 }
+
+                // #45: collections placed at the end sit after the last group.
+                ForEach(collectionsStore.endCollections) { c in
+                    collectionPill(c)
+                }
             }
             .padding(.horizontal, 16)
             #if os(tvOS)
@@ -969,6 +988,76 @@ struct ChannelListView: View {
             .padding(.vertical, 6)
             #endif
         }
+        // #45: manage a collection's pill (tvOS long-press → move / delete).
+        // iOS uses .contextMenu on the pill instead (see collectionPill).
+        #if os(tvOS)
+        .confirmationDialog(
+            managePillCollection?.name ?? "Collection",
+            isPresented: Binding(
+                get: { managePillCollection != nil },
+                set: { if !$0 { managePillCollection = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: managePillCollection
+        ) { c in
+            collectionManageActions(c)
+            Button("Cancel", role: .cancel) { }
+        }
+        #endif
+    }
+
+    /// #45: one collection filter pill, matching the group-pill look. Selecting
+    /// it sets `selectedGroup` to the `collection:<id>` sentinel that
+    /// `filterChannels()` resolves to the collection's members.
+    @ViewBuilder
+    private func collectionPill(_ c: ChannelCollection) -> some View {
+        let token = "collection:\(c.id)"
+        #if os(tvOS)
+        CollectionPillTV(
+            name: c.name,
+            isSelected: selectedGroup == token,
+            onTap: { withAnimation(.spring(response: 0.25)) { selectedGroup = token } },
+            onLongPress: { managePillCollection = c }
+        )
+        #else
+        Button {
+            withAnimation(.spring(response: 0.25)) { selectedGroup = token }
+        } label: {
+            Text(c.name)
+                .font(.labelMedium)
+                .foregroundColor(selectedGroup == token ? .appBackground : .textSecondary)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(
+                    selectedGroup == token
+                        ? AnyView(Capsule().fill(Color.accentPrimary))
+                        : AnyView(Capsule().fill(Color.elevatedBackground))
+                )
+        }
+        .buttonStyle(.plain)
+        .contextMenu { collectionManageActions(c) }
+        #endif
+    }
+
+    /// #45: pill long-press actions (tvOS confirmationDialog + iOS contextMenu):
+    /// move the collection's pill front/back, or delete the collection.
+    @ViewBuilder
+    private func collectionManageActions(_ c: ChannelCollection) -> some View {
+        if c.placement == .end {
+            Button {
+                ChannelCollectionsStore.shared.setPlacement(id: c.id, to: .beginning)
+            } label: { Label("Move to Front", systemImage: "arrow.left.to.line") }
+        } else {
+            Button {
+                ChannelCollectionsStore.shared.setPlacement(id: c.id, to: .end)
+            } label: { Label("Move to Back", systemImage: "arrow.right.to.line") }
+        }
+        Button(role: .destructive) {
+            // Mirror the hidden-group reset: if we're filtered to this
+            // collection, drop back to All before its pill vanishes.
+            if selectedGroup == "collection:\(c.id)" { selectedGroup = "All" }
+            ChannelCollectionsStore.shared.delete(id: c.id)
+        } label: { Label("Delete Collection", systemImage: "trash") }
     }
 
     // MARK: - Error View
@@ -1006,12 +1095,25 @@ struct ChannelListView: View {
 
     private func filterChannels() {
         var result = channelStore.channels
-        // Exclude channels belonging to hidden groups
-        if !hiddenGroups.isEmpty {
-            result = result.filter { !hiddenGroups.contains($0.group) }
-        }
-        if selectedGroup != "All" {
-            result = result.filter { $0.group == selectedGroup }
+        if selectedGroup.hasPrefix("collection:") {
+            // #45: collection filter — show exactly the curated members. The
+            // user explicitly chose them, so hidden-group exclusion is bypassed.
+            // If the collection was deleted, fall through to showing everything.
+            let cid = String(selectedGroup.dropFirst("collection:".count))
+            ChannelCollectionsStore.shared.activeFilterCollectionID = cid
+            if let c = ChannelCollectionsStore.shared.collection(id: cid) {
+                let memberSet = Set(c.memberIDs)
+                result = result.filter { memberSet.contains($0.id) }
+            }
+        } else {
+            ChannelCollectionsStore.shared.activeFilterCollectionID = nil
+            // Exclude channels belonging to hidden groups
+            if !hiddenGroups.isEmpty {
+                result = result.filter { !hiddenGroups.contains($0.group) }
+            }
+            if selectedGroup != "All" {
+                result = result.filter { $0.group == selectedGroup }
+            }
         }
         if !searchText.isEmpty {
             result = result.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
@@ -1513,6 +1615,10 @@ struct ChannelRow: View {
     /// channel silently dropped it from Favorites (reporter: ochaos).
     /// Adding a favorite stays immediate; only removal asks first.
     @State private var showRemoveFavoriteConfirmation = false
+    // #45: per-channel "Add to Collection" picker + new-collection name alert.
+    @State private var showCollectionPicker = false
+    @State private var showNewCollectionAlert = false
+    @State private var newCollectionName = ""
     #endif
 
     var body: some View {
@@ -1961,6 +2067,28 @@ struct ChannelRow: View {
                 favoritesStore.toggle(item)
             }
 
+            // #45: add/remove this channel from a user collection. Deferred so
+            // this dialog fully dismisses before the picker presents (chained
+            // confirmationDialogs race on tvOS otherwise).
+            Button("Add to Collection…") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
+            }
+
+            // #45: contextual remove. Viewing a collection -> remove from just
+            // that one; otherwise (and only if it's in any) remove from all.
+            if let cid = ChannelCollectionsStore.shared.activeFilterCollectionID,
+               let coll = ChannelCollectionsStore.shared.collection(id: cid),
+               coll.memberIDs.contains(item.id) {
+                Button("Remove from \(coll.name)", role: .destructive) {
+                    ChannelCollectionsStore.shared.removeMember(channelID: item.id, in: cid)
+                }
+            } else if ChannelCollectionsStore.shared.activeFilterCollectionID == nil,
+                      ChannelCollectionsStore.shared.isInAnyCollection(item.id) {
+                Button("Remove from All Collections", role: .destructive) {
+                    ChannelCollectionsStore.shared.removeFromAllCollections(item.id)
+                }
+            }
+
             // Program Info — surface the current program's full
             // description + category metadata in a modal. Only shown
             // when we actually have a current program to describe;
@@ -2019,6 +2147,33 @@ struct ChannelRow: View {
                     )
                 }
             }
+        }
+        // #45: per-channel "Add to Collection" — toggle membership in any
+        // existing collection (a checkmark marks current members) or create a
+        // new one with this channel already in it.
+        .confirmationDialog("Add to Collection", isPresented: $showCollectionPicker, titleVisibility: .visible) {
+            ForEach(ChannelCollectionsStore.shared.collections) { c in
+                Button((ChannelCollectionsStore.shared.contains(channelID: item.id, in: c.id) ? "✓ " : "") + c.name) {
+                    ChannelCollectionsStore.shared.toggleMember(channelID: item.id, in: c.id)
+                }
+            }
+            Button("New Collection…") {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showNewCollectionAlert = true }
+            }
+        }
+        .alert("New Collection", isPresented: $showNewCollectionAlert) {
+            TextField("Name", text: $newCollectionName)
+            Button("Add at Beginning") {
+                ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [item.id], placement: .beginning)
+                newCollectionName = ""
+            }
+            Button("Add at End") {
+                ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [item.id], placement: .end)
+                newCollectionName = ""
+            }
+            Button("Cancel", role: .cancel) { newCollectionName = "" }
+        } message: {
+            Text("Name the collection and choose where its pill appears in the Live TV row.")
         }
     }
     #endif
@@ -2765,6 +2920,10 @@ struct FavoritesView: View {
             }
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
+            // #45: Favorites is not a collection view — clear the active
+            // collection so the channel long-press menu offers "Remove from
+            // All Collections" here rather than a stale "Remove from <name>".
+            .onAppear { ChannelCollectionsStore.shared.activeFilterCollectionID = nil }
         }
     }
 
@@ -2901,6 +3060,44 @@ struct TVGroupPillButtonStyle: ButtonStyle {
             .scaleEffect(focused ? 1.05 : 1.0)
             .opacity(focused ? 1.0 : (isSelected ? 1.0 : 0.85))
             .animation(.easeInOut(duration: 0.15), value: focused)
+    }
+}
+
+/// #45: a collection filter pill that supports BOTH tap (filter) and a
+/// reliable long-press (manage). TVGroupPill is a Button, and a Button's
+/// long-press on tvOS fires on release; so this renders the pill visual as a
+/// plain (non-focusable) view styled to match TVGroupPillButtonStyle and lets
+/// a TVPressOverlay own focus + dispatch tap vs long-press.
+private struct CollectionPillTV: View {
+    let name: String
+    let isSelected: Bool
+    let onTap: () -> Void
+    let onLongPress: () -> Void
+    @State private var isFocused = false
+
+    var body: some View {
+        Text(name)
+            .font(.system(size: 22, weight: .medium))
+            .foregroundColor(isSelected ? .appBackground : (isFocused ? .white : .textSecondary))
+            .padding(.horizontal, 26)
+            .padding(.vertical, 13)
+            .background(
+                Capsule().fill(isSelected ? Color.accentPrimary : Color.elevatedBackground)
+            )
+            .overlay(
+                Capsule().stroke(isFocused && !isSelected ? Color.accentPrimary : Color.clear, lineWidth: 2)
+            )
+            .scaleEffect(isFocused ? 1.05 : 1.0)
+            .opacity(isFocused ? 1.0 : (isSelected ? 1.0 : 0.85))
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+            .overlay(
+                TVPressOverlay(
+                    minimumPressDuration: 0.5,
+                    isFocused: $isFocused,
+                    onTap: onTap,
+                    onLongPress: onLongPress
+                )
+            )
     }
 }
 

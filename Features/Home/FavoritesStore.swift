@@ -152,16 +152,37 @@ final class FavoritesStore: ObservableObject {
 
 /// One named collection: a stable id, a user-editable name, and an ordered
 /// set of member channel IDs (the same `ChannelDisplayItem.id` Favorites uses).
+/// Where a collection's filter pill sits in the Live TV pill row: before the
+/// All / Favorites / server-group pills, or after them. Chosen at creation.
+enum CollectionPlacement: String, Codable {
+    case beginning
+    case end
+}
+
 struct ChannelCollection: Codable, Identifiable, Equatable, Hashable {
     var id: String
     var name: String
     /// Ordered for a stable display order; membership tests use `contains`.
     var memberIDs: [String]
+    /// Pill position in the Live TV filter row (beginning vs end of the groups).
+    var placement: CollectionPlacement
 
-    init(id: String = UUID().uuidString, name: String, memberIDs: [String] = []) {
+    init(id: String = UUID().uuidString, name: String, memberIDs: [String] = [],
+         placement: CollectionPlacement = .end) {
         self.id = id
         self.name = name
         self.memberIDs = memberIDs
+        self.placement = placement
+    }
+
+    // Collections persisted before `placement` existed decode to `.end`.
+    private enum CodingKeys: String, CodingKey { case id, name, memberIDs, placement }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        memberIDs = try c.decode([String].self, forKey: .memberIDs)
+        placement = try c.decodeIfPresent(CollectionPlacement.self, forKey: .placement) ?? .end
     }
 }
 
@@ -170,6 +191,13 @@ final class ChannelCollectionsStore: ObservableObject {
     static let shared = ChannelCollectionsStore()
 
     @Published private(set) var collections: [ChannelCollection] = []
+
+    /// The collection currently shown by the Live TV filter (nil = not viewing
+    /// a collection). Set by ChannelListView's filter; read by the channel
+    /// long-press menus to choose between "Remove from <collection>" and
+    /// "Remove from All Collections". Intentionally not @Published — the menus
+    /// read it on demand when presented, so it needs no view invalidation.
+    var activeFilterCollectionID: String?
 
     private static let storageKey = "channelCollections"
 
@@ -197,14 +225,20 @@ final class ChannelCollectionsStore: ObservableObject {
     // MARK: Mutations (each persists immediately)
 
     @discardableResult
-    func create(name: String, memberIDs: [String] = []) -> ChannelCollection {
+    func create(name: String, memberIDs: [String] = [],
+                placement: CollectionPlacement = .end) -> ChannelCollection {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let collection = ChannelCollection(name: trimmed.isEmpty ? "New Collection" : trimmed,
-                                           memberIDs: memberIDs)
+                                           memberIDs: memberIDs, placement: placement)
         collections.append(collection)
         persist()
         return collection
     }
+
+    /// Collections that want their pill before the standard group pills.
+    var beginningCollections: [ChannelCollection] { collections.filter { $0.placement == .beginning } }
+    /// Collections that want their pill after the standard group pills.
+    var endCollections: [ChannelCollection] { collections.filter { $0.placement == .end } }
 
     func rename(id: String, to newName: String) {
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -218,6 +252,14 @@ final class ChannelCollectionsStore: ObservableObject {
         persist()
     }
 
+    /// Move a collection's pill to the front or back of the group-pill row.
+    func setPlacement(id: String, to placement: CollectionPlacement) {
+        guard let i = collections.firstIndex(where: { $0.id == id }),
+              collections[i].placement != placement else { return }
+        collections[i].placement = placement
+        persist()
+    }
+
     /// Add or remove a channel from a collection (the per-channel toggle the
     /// "Add to Collection" menu drives).
     func toggleMember(channelID: String, in collectionID: String) {
@@ -228,6 +270,29 @@ final class ChannelCollectionsStore: ObservableObject {
             collections[i].memberIDs.append(channelID)
         }
         persist()
+    }
+
+    /// Remove a channel from one specific collection (no-op if absent).
+    func removeMember(channelID: String, in collectionID: String) {
+        guard let i = collections.firstIndex(where: { $0.id == collectionID }) else { return }
+        let before = collections[i].memberIDs.count
+        collections[i].memberIDs.removeAll { $0 == channelID }
+        if collections[i].memberIDs.count != before { persist() }
+    }
+
+    /// Remove a channel from every collection it belongs to.
+    func removeFromAllCollections(_ channelID: String) {
+        var changed = false
+        for i in collections.indices where collections[i].memberIDs.contains(channelID) {
+            collections[i].memberIDs.removeAll { $0 == channelID }
+            changed = true
+        }
+        if changed { persist() }
+    }
+
+    /// Whether this channel belongs to at least one collection.
+    func isInAnyCollection(_ channelID: String) -> Bool {
+        collections.contains { $0.memberIDs.contains(channelID) }
     }
 
     /// Reorder the collections themselves (Manage Collections drag/d-pad move).

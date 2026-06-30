@@ -3600,6 +3600,10 @@ private struct GuideProgramButton: View {
     // route is a self-contained modal that is not re-evaluated from cell
     // updates, so the highlight stays stable.
     @State private var showCtxDialog = false
+    // #45: per-channel "Add to Collection" picker + new-collection name alert.
+    @State private var showCollectionPicker = false
+    @State private var showNewCollectionAlert = false
+    @State private var newCollectionName = ""
     #endif
     #if os(iOS)
     /// iOS long-press menu. Mirrors the mechanism ChannelListView
@@ -3668,6 +3672,24 @@ private struct GuideProgramButton: View {
                        : "Add to Multiview") {
                     onMultiviewIntent(channelItem)
                 }
+                // #45: add/remove this channel from a user collection.
+                Button("Add to Collection…") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
+                }
+                // #45: contextual remove (viewing a collection -> that one;
+                // otherwise remove from all, when it's in any).
+                if let cid = ChannelCollectionsStore.shared.activeFilterCollectionID,
+                   let coll = ChannelCollectionsStore.shared.collection(id: cid),
+                   coll.memberIDs.contains(channelItem.id) {
+                    Button("Remove from \(coll.name)", role: .destructive) {
+                        ChannelCollectionsStore.shared.removeMember(channelID: channelItem.id, in: cid)
+                    }
+                } else if ChannelCollectionsStore.shared.activeFilterCollectionID == nil,
+                          ChannelCollectionsStore.shared.isInAnyCollection(channelItem.id) {
+                    Button("Remove from All Collections", role: .destructive) {
+                        ChannelCollectionsStore.shared.removeFromAllCollections(channelItem.id)
+                    }
+                }
                 Button("Program Info") {
                     activeSheet = .programInfo(
                         ProgramInfoTarget(
@@ -3701,6 +3723,32 @@ private struct GuideProgramButton: View {
                         }
                     }
                 }
+            }
+            // #45: per-channel "Add to Collection" (guide tvOS menu) — toggle
+            // membership in any existing collection (✓ = member) or create one.
+            .confirmationDialog("Add to Collection", isPresented: $showCollectionPicker, titleVisibility: .visible) {
+                ForEach(ChannelCollectionsStore.shared.collections) { c in
+                    Button((ChannelCollectionsStore.shared.contains(channelID: channelItem.id, in: c.id) ? "✓ " : "") + c.name) {
+                        ChannelCollectionsStore.shared.toggleMember(channelID: channelItem.id, in: c.id)
+                    }
+                }
+                Button("New Collection…") {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showNewCollectionAlert = true }
+                }
+            }
+            .alert("New Collection", isPresented: $showNewCollectionAlert) {
+                TextField("Name", text: $newCollectionName)
+                Button("Add at Beginning") {
+                    ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [channelItem.id], placement: .beginning)
+                    newCollectionName = ""
+                }
+                Button("Add at End") {
+                    ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [channelItem.id], placement: .end)
+                    newCollectionName = ""
+                }
+                Button("Cancel", role: .cancel) { newCollectionName = "" }
+            } message: {
+                Text("Name the collection and choose where its pill appears in the Live TV row.")
             }
             // tvOS: .fullScreenCover (single, item-driven) — see
             // `GuideCellSheet` doc for why we consolidated.
