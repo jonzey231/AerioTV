@@ -139,3 +139,121 @@ final class FavoritesStore: ObservableObject {
         #endif
     }
 }
+
+// MARK: - Channel Collections (issue #45)
+//
+// User-created, named groupings of channels — like Favorites, but you can
+// have many of them and rename them. Built on the same lightweight
+// UserDefaults persistence as `FavoritesStore` (no SwiftData): each
+// collection is just a name + an ordered list of channel IDs, and the whole
+// array is JSON-encoded under one key. Device-local for v1 (not yet mirrored
+// to iCloud KVS); collections surface as filter pills in Live TV alongside
+// All / Favorites / server groups.
+
+/// One named collection: a stable id, a user-editable name, and an ordered
+/// set of member channel IDs (the same `ChannelDisplayItem.id` Favorites uses).
+struct ChannelCollection: Codable, Identifiable, Equatable, Hashable {
+    var id: String
+    var name: String
+    /// Ordered for a stable display order; membership tests use `contains`.
+    var memberIDs: [String]
+
+    init(id: String = UUID().uuidString, name: String, memberIDs: [String] = []) {
+        self.id = id
+        self.name = name
+        self.memberIDs = memberIDs
+    }
+}
+
+@MainActor
+final class ChannelCollectionsStore: ObservableObject {
+    static let shared = ChannelCollectionsStore()
+
+    @Published private(set) var collections: [ChannelCollection] = []
+
+    private static let storageKey = "channelCollections"
+
+    init() { load() }
+
+    var isEmpty: Bool { collections.isEmpty }
+
+    func collection(id: String) -> ChannelCollection? {
+        collections.first { $0.id == id }
+    }
+
+    /// Members of a collection resolved against the current channel list,
+    /// in the collection's stored order. Unknown IDs (channels not in the
+    /// active server) are dropped, mirroring how Favorites filters.
+    func items(in collectionID: String, from allItems: [ChannelDisplayItem]) -> [ChannelDisplayItem] {
+        guard let c = collection(id: collectionID) else { return [] }
+        let byID = Dictionary(allItems.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return c.memberIDs.compactMap { byID[$0] }
+    }
+
+    func contains(channelID: String, in collectionID: String) -> Bool {
+        collection(id: collectionID)?.memberIDs.contains(channelID) ?? false
+    }
+
+    // MARK: Mutations (each persists immediately)
+
+    @discardableResult
+    func create(name: String, memberIDs: [String] = []) -> ChannelCollection {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let collection = ChannelCollection(name: trimmed.isEmpty ? "New Collection" : trimmed,
+                                           memberIDs: memberIDs)
+        collections.append(collection)
+        persist()
+        return collection
+    }
+
+    func rename(id: String, to newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let i = collections.firstIndex(where: { $0.id == id }) else { return }
+        collections[i].name = trimmed
+        persist()
+    }
+
+    func delete(id: String) {
+        collections.removeAll { $0.id == id }
+        persist()
+    }
+
+    /// Add or remove a channel from a collection (the per-channel toggle the
+    /// "Add to Collection" menu drives).
+    func toggleMember(channelID: String, in collectionID: String) {
+        guard let i = collections.firstIndex(where: { $0.id == collectionID }) else { return }
+        if let m = collections[i].memberIDs.firstIndex(of: channelID) {
+            collections[i].memberIDs.remove(at: m)
+        } else {
+            collections[i].memberIDs.append(channelID)
+        }
+        persist()
+    }
+
+    /// Reorder the collections themselves (Manage Collections drag/d-pad move).
+    func moveCollections(fromOffsets source: IndexSet, toOffset destination: Int) {
+        collections.move(fromOffsets: source, toOffset: destination)
+        persist()
+    }
+
+    /// Reorder members within a collection.
+    func moveMembers(in collectionID: String, fromOffsets source: IndexSet, toOffset destination: Int) {
+        guard let i = collections.firstIndex(where: { $0.id == collectionID }) else { return }
+        collections[i].memberIDs.move(fromOffsets: source, toOffset: destination)
+        persist()
+    }
+
+    // MARK: Persistence
+
+    private func load() {
+        guard let data = UserDefaults.standard.data(forKey: Self.storageKey),
+              let decoded = try? JSONDecoder().decode([ChannelCollection].self, from: data) else { return }
+        collections = decoded
+    }
+
+    private func persist() {
+        if let data = try? JSONEncoder().encode(collections) {
+            UserDefaults.standard.set(data, forKey: Self.storageKey)
+        }
+    }
+}
