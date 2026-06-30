@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.7.8 - 2026-06-29
+
+### Fixed
+
+- **4K / UHD playback is far more stable.** Fixed a memory buildup that could
+  garble audio or, during a long session on a demanding UHD channel, cause the
+  app to run out of memory. The player now releases the old video pipeline
+  before it reloads a stream, so memory stays flat instead of climbing.
+- **No stalls right after launch on UHD channels.** The first-run catalog and
+  guide sync no longer competes with live video for the same resources, so a 4K
+  stream keeps playing smoothly while On Demand and the guide load in the
+  background.
+
 ## v1.7.7 - 2026-06-29
 
 ### Added
