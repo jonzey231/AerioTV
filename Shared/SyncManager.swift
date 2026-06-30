@@ -421,6 +421,29 @@ final class SyncManager: ObservableObject {
             UserDefaults.standard.removeObject(forKey: "kvsToKeychainMigrationDoneV1")
             UserDefaults.standard.removeObject(forKey: "kvsCredentialPurgeDoneV1")
             debugLog("🔵 SyncManager.clearCloudCategory: cleared \(keychainCleared) iCloud Keychain entries")
+            // SECURITY: serialize(...) also writes cleartext `_password`/`_apiKey`
+            // into the "syncedServers" KVS blob as a transport fallback (~922),
+            // so deleting only the Keychain left those credentials sitting in
+            // iCloud. Re-push the server blob with credentials explicitly
+            // stripped (the Keychain is already gone above, so a re-serialize
+            // omits them anyway — this is belt-and-suspenders). Cancel any
+            // pending server push first so it can't re-write creds afterward.
+            pushDebounce?.cancel(); pushDebounce = nil
+            nonisolated(unsafe) let capturedServers = localServers.map { $0 }
+            let serversKey = kvsKey
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    let stripped = capturedServers.map { srv -> [String: Any] in
+                        var d = self.serialize(srv)
+                        d.removeValue(forKey: "_password")
+                        d.removeValue(forKey: "_apiKey")
+                        return d
+                    }
+                    NSUbiquitousKeyValueStore.default.set(stripped, forKey: serversKey)
+                    NSUbiquitousKeyValueStore.default.synchronize()
+                    debugLog("🔵 SyncManager.clearCloudCategory: re-pushed \(stripped.count) servers to KVS without credentials")
+                }
+            }
         }
     }
 
