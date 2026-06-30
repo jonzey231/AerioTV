@@ -1315,9 +1315,15 @@ struct MultiviewContainerView: View {
                 category: "Playback", level: .info
             )
             store.relocatingTileID = nil
-        } else if !chromeState.isVisible {
+        } else if !chromeState.isVisible
+            && !(PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1) {
+            // #42 Part 4: only the N>=2 multiview grid uses Menu to SUMMON chrome.
+            // At N=1 (single-stream) Select summons chrome (MultiviewTileView) and
+            // chrome auto-fades after 5s, so Menu skips this branch and falls
+            // through to minimize below — a single Back returns to the guide +
+            // mini-player in one press (Android-TV parity).
             DebugLogger.shared.log(
-                "[MV-Cmd]   → branch: chrome hidden → summon chrome",
+                "[MV-Cmd]   → branch: chrome hidden + N>=2 → summon chrome",
                 category: "Playback", level: .info
             )
             chromeState.reportInteraction()

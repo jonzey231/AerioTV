@@ -5427,11 +5427,33 @@ private struct ChannelInfoBanner: View {
         return nil
     }
 
+    #if os(tvOS)
+    @ViewBuilder
+    private func playerHint(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 15, weight: .medium))
+            .foregroundColor(.white.opacity(0.55))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Color.black.opacity(0.4).clipShape(Capsule()))
+    }
+    #endif
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if shouldRender, let item = nowPlaying.playingItem, nowPlaying.isLive {
-                bannerContent(for: item)
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                VStack(alignment: .leading, spacing: 10) {
+                    bannerContent(for: item)
+                    #if os(tvOS)
+                    // #42 Part 4: gesture hints below the channel info card,
+                    // riding the banner's same 5s appear/fade window on tune-in.
+                    VStack(alignment: .leading, spacing: 6) {
+                        playerHint("Press Menu/Back to return to TV Guide")
+                        playerHint("Press Select to show player controls")
+                    }
+                    #endif
+                }
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
             Spacer(minLength: 0)
         }
