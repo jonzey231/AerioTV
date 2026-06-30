@@ -1,5 +1,71 @@
 import CoreGraphics
 
+/// Issue #48: user-selectable multiview grid "shape" for a given tile count.
+/// Picked live from the player Options panel and persisted globally (one
+/// preference for all counts) in `@AppStorage`. `MultiviewGridMath.rects(for:
+/// count:in:spacing:)` maps each mode to the concrete rect table, falling back
+/// to `.auto` whenever a mode does not apply to the current count. `.auto` is
+/// the historical per-count default (layout1...layout9), so an existing user
+/// who never opens the picker sees no change.
+///
+/// Inlined here (rather than its own file) because the project uses explicit
+/// target membership; this keeps the new type compiled without a pbxproj edit.
+enum MultiviewLayoutMode: String, CaseIterable, Identifiable, Sendable {
+    /// The built-in default layout for the current count (layout1...layout9).
+    case auto
+    /// Balanced equal-size grid, landscape-preferred, last partial row
+    /// centered. Only differs from `.auto` for counts whose default is
+    /// asymmetric (3 and 5).
+    case evenGrid
+    /// One large hero tile on the left with the rest stacked on the right.
+    /// Generalizes to any count >= 2. The hero is the per-tile spotlight
+    /// selection if set, otherwise the first tile.
+    case spotlight
+    /// 6 only: the 5-tile "hero + 4 followers" layout with the normally
+    /// empty bottom-right cell filled by the 6th tile (issue #48). Falls back
+    /// to `.auto` at any other count.
+    case heroCorner
+
+    var id: String { rawValue }
+
+    /// Persisted key shared by the store binding and the picker.
+    static let storageKey = "multiviewLayoutMode"
+
+    var displayName: String {
+        switch self {
+        case .auto:       return "Default"
+        case .evenGrid:   return "Even Grid"
+        case .spotlight:  return "Spotlight"
+        case .heroCorner: return "Hero + Corner"
+        }
+    }
+
+    /// SF Symbol for the picker row.
+    var symbolName: String {
+        switch self {
+        case .auto:       return "square.grid.2x2"
+        case .evenGrid:   return "rectangle.grid.2x2"
+        case .spotlight:  return "rectangle.lefthalf.inset.filled"
+        case .heroCorner: return "rectangle.grid.1x2"
+        }
+    }
+
+    /// The modes worth offering at a given tile count, with duplicates of
+    /// `.auto` omitted (for 4/6/7/8/9 the default already IS an even grid).
+    /// Returns `[]` for counts with no real choice (<= 1) so the picker hides.
+    static func available(forTileCount n: Int) -> [MultiviewLayoutMode] {
+        switch n {
+        case ..<2:  return []
+        case 2:     return [.auto, .spotlight]
+        case 3:     return [.auto, .evenGrid]          // .auto (layout3) is already the spotlight shape
+        case 4:     return [.auto, .spotlight]
+        case 5:     return [.auto, .evenGrid, .spotlight]
+        case 6:     return [.auto, .heroCorner, .spotlight]
+        default:    return [.auto, .spotlight]          // 7, 8, 9
+        }
+    }
+}
+
 /// Pure math: tile-count + container-size + spacing → array of per-tile
 /// rects, in the same order as `MultiviewStore.tiles`.
 ///
@@ -188,6 +254,76 @@ enum MultiviewGridMath {
         for i in 0..<smallCount {
             let y = (smallH + spacing) * CGFloat(i)
             rects.append(CGRect(x: bigW + spacing, y: y, width: smallW, height: smallH))
+        }
+        return rects
+    }
+
+    // MARK: - Issue #48: layout-mode resolution
+
+    /// Resolve rects for an explicit layout MODE. Falls back to the per-count
+    /// default for any mode that does not apply to the current count.
+    static func rects(
+        for mode: MultiviewLayoutMode,
+        count: Int,
+        in container: CGSize,
+        spacing: CGFloat = defaultSpacing
+    ) -> [CGRect] {
+        switch mode {
+        case .auto:      return rects(for: count, in: container, spacing: spacing)
+        case .evenGrid:  return evenGridRects(for: count, in: container, spacing: spacing)
+        case .spotlight: return spotlightRects(for: count, in: container, spacing: spacing)
+        case .heroCorner:
+            return count == 6
+                ? heroCornerRects(container, spacing: spacing)
+                : rects(for: count, in: container, spacing: spacing)
+        }
+    }
+
+    /// The 5-tile hero layout (`layout5`) with the normally-empty bottom-right
+    /// (col 2, row 2) cell filled by a 6th small tile. Reading order:
+    /// hero → (2,0) → (2,1) → (0,2) → (1,2) → (2,2).
+    static func heroCornerRects(_ c: CGSize, spacing: CGFloat = defaultSpacing) -> [CGRect] {
+        guard c.width > 0, c.height > 0 else { return [] }
+        var rects = layout5(c, spacing: spacing)
+        let cellW = (c.width  - 2 * spacing) / 3
+        let cellH = (c.height - 2 * spacing) / 3
+        let col2X = 2 * (cellW + spacing)
+        let row2Y = 2 * (cellH + spacing)
+        rects.append(CGRect(x: col2X, y: row2Y, width: cellW, height: cellH))
+        return rects
+    }
+
+    /// A balanced equal-size grid for any count. Landscape-preferred
+    /// (`rows = floor(sqrt(n))`, so wider than tall) with a partial final row
+    /// centered horizontally. For n=3 this is 3-across; for n=5 it is 3 on
+    /// top and 2 centered below.
+    static func evenGridRects(
+        for count: Int,
+        in c: CGSize,
+        spacing: CGFloat = defaultSpacing
+    ) -> [CGRect] {
+        guard count > 0, c.width > 0, c.height > 0 else { return [] }
+        let n = min(count, 9)
+        let rows = max(1, Int(Double(n).squareRoot()))
+        let cols = Int((Double(n) / Double(rows)).rounded(.up))
+        let w = (c.width  - CGFloat(cols - 1) * spacing) / CGFloat(cols)
+        let h = (c.height - CGFloat(rows - 1) * spacing) / CGFloat(rows)
+        var rects: [CGRect] = []
+        rects.reserveCapacity(n)
+        var remaining = n
+        for row in 0..<rows {
+            let inRow = min(cols, remaining)
+            // Center a partial final row.
+            let rowW = CGFloat(inRow) * w + CGFloat(inRow - 1) * spacing
+            let xStart = (c.width - rowW) / 2
+            for i in 0..<inRow {
+                rects.append(CGRect(
+                    x: xStart + CGFloat(i) * (w + spacing),
+                    y: CGFloat(row) * (h + spacing),
+                    width: w, height: h
+                ))
+            }
+            remaining -= inRow
         }
         return rects
     }

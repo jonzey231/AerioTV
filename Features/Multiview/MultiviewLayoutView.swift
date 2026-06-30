@@ -30,17 +30,21 @@ struct MultiviewLayoutView<Content: View>: View {
     /// layout with this tile large and the rest stacked small. nil = the
     /// normal equal grid.
     let spotlightTileID: String?
+    /// Issue #48: the user-selected layout shape for the current tile count.
+    let layoutMode: MultiviewLayoutMode
     @ViewBuilder var content: (MultiviewTile) -> Content
 
     init(
         tiles: [MultiviewTile],
         spacing: CGFloat = MultiviewGridMath.defaultSpacing,
         spotlightTileID: String? = nil,
+        layoutMode: MultiviewLayoutMode = .auto,
         @ViewBuilder content: @escaping (MultiviewTile) -> Content
     ) {
         self.tiles = tiles
         self.spacing = spacing
         self.spotlightTileID = spotlightTileID
+        self.layoutMode = layoutMode
         self.content = content
     }
 
@@ -49,24 +53,28 @@ struct MultiviewLayoutView<Content: View>: View {
     /// present, with more than one tile), the spotlighted tile is moved to
     /// the front so it occupies the big rect and the rest stack small.
     private func tileLayout(in size: CGSize) -> (tiles: [MultiviewTile], rects: [CGRect]) {
-        if let spotID = spotlightTileID,
-           tiles.contains(where: { $0.id == spotID }),
-           tiles.count > 1 {
+        // Spotlight is active when a tile was explicitly spotlighted (#27) OR
+        // the user picked the Spotlight layout mode (#48). The hero is the
+        // explicitly spotlighted tile, otherwise the first tile.
+        let spotlightActive = layoutMode == .spotlight
+            || (spotlightTileID != nil && tiles.contains { $0.id == spotlightTileID })
+        if spotlightActive, tiles.count > 1 {
             // Spotlight rects: [0] is the big tile, [1...] the small stack.
-            // Assign the big rect to the spotlighted tile IN PLACE and the
-            // small rects to the others in order, keeping the ForEach
-            // iteration order identical to the equal grid. That way the only
-            // thing that changes on toggle is each tile's frame, so they
-            // smoothly grow/shrink instead of reshuffling (which mis-diffs
-            // and looks glitchy with heavy video layers).
+            // Assign the big rect to the hero tile IN PLACE and the small
+            // rects to the others in order, keeping the ForEach iteration
+            // order identical to the equal grid. That way the only thing that
+            // changes on toggle is each tile's frame, so they smoothly
+            // grow/shrink instead of reshuffling (which mis-diffs and looks
+            // glitchy with heavy video layers).
             let spot = MultiviewGridMath.spotlightRects(for: tiles.count, in: size, spacing: spacing)
             guard spot.count == tiles.count else {
-                return (tiles, MultiviewGridMath.rects(for: tiles.count, in: size, spacing: spacing))
+                return (tiles, MultiviewGridMath.rects(for: layoutMode, count: tiles.count, in: size, spacing: spacing))
             }
+            let heroID = spotlightTileID ?? tiles.first?.id
             var rects = [CGRect](repeating: .zero, count: tiles.count)
             var nextSmall = 1
             for (i, tile) in tiles.enumerated() {
-                if tile.id == spotID {
+                if tile.id == heroID {
                     rects[i] = spot[0]
                 } else {
                     rects[i] = spot[nextSmall]
@@ -75,7 +83,7 @@ struct MultiviewLayoutView<Content: View>: View {
             }
             return (tiles, rects)
         }
-        return (tiles, MultiviewGridMath.rects(for: tiles.count, in: size, spacing: spacing))
+        return (tiles, MultiviewGridMath.rects(for: layoutMode, count: tiles.count, in: size, spacing: spacing))
     }
 
     var body: some View {

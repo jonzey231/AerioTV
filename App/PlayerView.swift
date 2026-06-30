@@ -2759,6 +2759,12 @@ struct TVPlayerOptionsPanel: View {
     /// non-nil the panel shows a top "Switch Stream" row that opens the
     /// member-stream picker. nil hides it.
     var onSwitchStream: (() -> Void)?
+    /// Issue #48: multiview layout options for the CURRENT tile count
+    /// (`MultiviewLayoutMode.available(forTileCount:)`). Empty hides the
+    /// Layout section entirely (single-stream playback / fewer than 2 tiles).
+    var layoutOptions: [MultiviewLayoutMode] = []
+    var currentLayout: MultiviewLayoutMode = .auto
+    var onSelectLayout: ((MultiviewLayoutMode) -> Void)?
 
     /// Focus tracking for every pill in the panel. Each pill binds to
     /// a unique string id via `.focused($focusedID, equals:)`; the
@@ -2773,6 +2779,7 @@ struct TVPlayerOptionsPanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if onSwitchStream != nil { switchStreamSection }
+                if !layoutOptions.isEmpty { layoutSection }
                 audioSection
                 subtitleSection
                 if !isLive { speedSection }
@@ -2808,6 +2815,7 @@ struct TVPlayerOptionsPanel: View {
     /// on a real id so the `@FocusState` binding takes.
     private var firstFocusableID: String {
         if onSwitchStream != nil { return "switch-stream" }
+        if !layoutOptions.isEmpty { return "layout-\(currentLayout.rawValue)" }
         if audioTracks.count > 1, let first = audioTracks.first {
             return "audio-\(first.id)"
         }
@@ -2824,6 +2832,25 @@ struct TVPlayerOptionsPanel: View {
     }
 
     // MARK: - Sections
+
+    /// Issue #48: live multiview layout picker. One pill per layout option
+    /// available at the current tile count; selecting one persists the choice
+    /// and the grid reflows underneath. The panel stays open so the user can
+    /// preview and try other layouts without re-summoning Options.
+    @ViewBuilder private var layoutSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Layout")
+            ForEach(layoutOptions) { mode in
+                optionPill(
+                    id: "layout-\(mode.rawValue)",
+                    text: mode.displayName,
+                    isSelected: mode == currentLayout
+                ) {
+                    onSelectLayout?(mode)
+                }
+            }
+        }
+    }
 
     @ViewBuilder private var audioSection: some View {
         if audioTracks.count > 1 {

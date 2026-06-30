@@ -174,6 +174,12 @@ struct MultiviewContainerView: View {
     /// "padded" layout (the default as of v1.7.4).
     private var tileSpacing: CGFloat { paddingEnabled ? 8 : 0 }
 
+    /// Issue #48: the user-selected multiview layout shape (Default /
+    /// Even Grid / Spotlight / Hero + Corner). Picked live from the player
+    /// Options panel; `.auto` preserves the historical per-count layout.
+    @AppStorage(MultiviewLayoutMode.storageKey)
+    private var layoutMode: MultiviewLayoutMode = .auto
+
     /// v1.7.x: gates the Apple TV up/down d-pad channel-flip on
     /// single-tile (N=1) playback in the unified-multiview path.
     /// Default ON. Surfaced in Settings → App Behaviors → Apple TV
@@ -451,7 +457,15 @@ struct MultiviewContainerView: View {
                             withAnimation(.easeInOut(duration: 0.15)) {
                                 streamPickerVisible = true
                             }
-                        } : nil
+                        } : nil,
+                        // Issue #48: live layout picker for the current tile
+                        // count. Selecting a mode persists it and the grid
+                        // reflows underneath while the panel stays open.
+                        layoutOptions: MultiviewLayoutMode.available(forTileCount: store.tiles.count),
+                        currentLayout: layoutMode,
+                        onSelectLayout: { mode in
+                            withAnimation(.easeInOut(duration: 0.2)) { layoutMode = mode }
+                        }
                     )
                     // v1.6.12 (GH #11 follow-up): trap D-pad navigation
                     // inside the panel. Without `.focusSection()` tvOS
@@ -1363,7 +1377,7 @@ struct MultiviewContainerView: View {
             // they're already at live edge.
             MultiviewTileView(tile: fullscreenTile, store: store)
         } else {
-            let grid = MultiviewLayoutView(tiles: store.tiles, spacing: tileSpacing, spotlightTileID: store.spotlightTileID) { tile in
+            let grid = MultiviewLayoutView(tiles: store.tiles, spacing: tileSpacing, spotlightTileID: store.spotlightTileID, layoutMode: layoutMode) { tile in
                 #if os(tvOS)
                 MultiviewTileView(tile: tile, store: store, isSoleTile: isSole)
                     // Issue #30: during Move Tile (relocate) mode prefer focus
