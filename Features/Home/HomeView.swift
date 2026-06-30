@@ -3807,7 +3807,7 @@ struct MainTabView: View {
                 VStack {
                     VStack(alignment: .leading, spacing: 6) {
                         if nowPlaying.isActive && nowPlaying.isMinimized {
-                            guideMenuHint("Press Menu/Back to resume playback.")
+                            guideMenuHint("Press Menu/Back or Play/Pause to resume playback.")
                         }
                         guideMenuHint("Double press Menu/Back to return to top channel.")
                         guideMenuHint("Hold left on remote to return to the All group pill.")
