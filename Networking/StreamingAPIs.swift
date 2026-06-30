@@ -1125,6 +1125,23 @@ struct DispatcharrAPI {
     /// handling stays intact. The token store is cleared on
     /// `.refreshExpired` so the next request goes through the
     /// session-warmup path (re-login from Keychain credentials).
+    // Static per-server throttle on the silent api_key re-bootstrap below, so a
+    // server that forces a 401 storm cannot drive repeated password replays to
+    // `/api/accounts/token/`. A legit token expiry (tokens last hours) triggers
+    // only ONE rebootstrap, which mints a fresh key the next request uses, so the
+    // 60s window never interferes with normal refresh; it only bounds the
+    // abusive / persistently-failing case. (The password only ever reaches the
+    // already-trusted configured host regardless; this caps the volume.)
+    private static let rebootstrapThrottleLock = NSLock()
+    nonisolated(unsafe) private static var lastRebootstrapAt: [UUID: Date] = [:]
+    private static func shouldAttemptRebootstrap(serverID: UUID) -> Bool {
+        rebootstrapThrottleLock.lock(); defer { rebootstrapThrottleLock.unlock() }
+        let now = Date()
+        if let last = lastRebootstrapAt[serverID], now.timeIntervalSince(last) < 60 { return false }
+        lastRebootstrapAt[serverID] = now
+        return true
+    }
+
     func dataWithJWTRetry(for request: URLRequest) async throws -> (Data, URLResponse) {
         let (data, response) = try await HTTPRouter.data(for: request, using: session)
 
@@ -1187,6 +1204,9 @@ struct DispatcharrAPI {
             guard let sid = serverID,
                   let username = savedUsername,
                   !username.isEmpty else {
+                return (data, response)
+            }
+            guard Self.shouldAttemptRebootstrap(serverID: sid) else {
                 return (data, response)
             }
             guard let newKey = await Self.silentRebootstrapApiKey(

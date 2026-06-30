@@ -38,7 +38,19 @@ struct AuthPosterImage: View {
                 return
             }
             var req = URLRequest(url: url, timeoutInterval: 20)
-            headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+            // SECURITY: attach the server's credential headers ONLY when the
+            // image is on the configured server's host. A malicious or
+            // compromised backend can return a poster URL pointing at an
+            // attacker host; without this gate the Dispatcharr X-API-Key /
+            // Authorization would be sent there and harvested. Foreign posters
+            // (TMDB / CDN) are public and load fine with no headers. The active
+            // server is the one every VOD/EPG poster context is viewed under
+            // (same source ProgramInfoView already uses for its poster auth).
+            let allowedHost = ChannelStore.shared.activeServer
+                .flatMap { URL(string: $0.effectiveBaseURL)?.host?.lowercased() }
+            if let allowedHost, url.host?.lowercased() == allowedHost {
+                headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+            }
             guard let (data, _) = try? await URLSession.shared.data(for: req),
                   let img = UIImage(data: data) else { return }
             AuthImageCache.shared.store(img, for: key)
