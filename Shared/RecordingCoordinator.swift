@@ -232,7 +232,25 @@ final class RecordingCoordinator: ObservableObject {
         defer { if needsScope { dir.stopAccessingSecurityScopedResource() } }
 
         let destPath = dir.appendingPathComponent("\(recording.id.uuidString).ts")
-        let (tempURL, _) = try await URLSession.shared.download(from: playbackURL)
+
+        // Authenticated, status-checked, atomic download. The /file/ endpoint
+        // sits behind the same auth as every other Dispatcharr call, so the old
+        // unauthenticated URLSession.shared.download(from:) 401/403'd on secured
+        // servers and then silently saved the HTML/JSON error body as a .ts with
+        // a bogus byte count. Attach the stream auth headers, require 200 before
+        // committing, and replace any stale file so re-download isn't blocked.
+        var request = URLRequest(url: playbackURL)
+        api.streamAuthHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (tempURL, response) = try await URLSession.shared.download(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            try? FileManager.default.removeItem(at: tempURL)
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw NSError(domain: "RecordingCoordinator", code: code,
+                          userInfo: [NSLocalizedDescriptionKey: "Recording download failed (HTTP \(code))"])
+        }
+        if FileManager.default.fileExists(atPath: destPath.path) {
+            try? FileManager.default.removeItem(at: destPath)
+        }
         try FileManager.default.moveItem(at: tempURL, to: destPath)
 
         let attrs = try FileManager.default.attributesOfItem(atPath: destPath.path)

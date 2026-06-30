@@ -1548,6 +1548,19 @@ struct DispatcharrAPI {
         ))
     }
 
+    /// SSRF guard for SERVER-SUPPLIED absolute URLs (pagination `next`,
+    /// redirect `Location`) that we then re-issue with the user's auth
+    /// headers attached. Without it a compromised/malicious Dispatcharr could
+    /// paginate / 30x our API key to a loopback, RFC-1918, or cloud-metadata
+    /// host (confused-deputy SSRF + credential delivery). Reuses the in-tree
+    /// artwork validator (#53); the configured server host is always allowed
+    /// (LAN-only Dispatcharr included). Returns nil to reject — which also
+    /// cleanly ends the pagination loops (same as an absent `next`).
+    private func validatedServerSuppliedURL(_ raw: String?) -> URL? {
+        guard let raw, let parsed = URL(string: raw) else { return nil }
+        return VODService.validateAbsoluteURL(parsed, serverHost: URL(string: baseURL)?.host)
+    }
+
     // MARK: - Pagination helper
     private func fetchAllPages<T: Decodable>(_ type: T.Type, firstPath: String) async throws -> [T] {
         var allItems: [T] = []
@@ -1564,7 +1577,7 @@ struct DispatcharrAPI {
             }
             let wrapped = try decode(DispatcharrResultsWrapper<T>.self, from: data)
             allItems += wrapped.results
-            if let nextStr = wrapped.next, let next = URL(string: nextStr) {
+            if let next = validatedServerSuppliedURL(wrapped.next) {
                 nextURL = next
             } else {
                 nextURL = nil
@@ -1847,7 +1860,7 @@ struct DispatcharrAPI {
             allItems = list
         } else if let wrapped = try? decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data) {
             allItems = wrapped.results
-            var nextURL = wrapped.next.flatMap { URL(string: $0) }
+            var nextURL = validatedServerSuppliedURL(wrapped.next)
             var pagesLeft = 2
             while let pageURL = nextURL, pagesLeft > 0 {
                 pagesLeft -= 1
@@ -1859,7 +1872,7 @@ struct DispatcharrAPI {
                       (200..<300).contains(pageHttp.statusCode) else { break }
                 let page = try decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: pageData)
                 allItems += page.results
-                nextURL = page.next.flatMap { URL(string: $0) }
+                nextURL = validatedServerSuppliedURL(page.next)
             }
         }
 
@@ -1904,7 +1917,7 @@ struct DispatcharrAPI {
             } else if let wrapped = try? decode(DispatcharrResultsWrapper<DispatcharrCurrentProgram>.self, from: data) {
                 allItems += wrapped.results
                 debugLog("📺 BulkEPG: page fetched, got \(wrapped.results.count) programs (total: \(allItems.count), hasNext: \(wrapped.next != nil))")
-                if let nextStr = wrapped.next, let next = URL(string: nextStr) {
+                if let next = validatedServerSuppliedURL(wrapped.next) {
                     nextURL = next
                 } else {
                     nextURL = nil
@@ -2242,7 +2255,7 @@ struct DispatcharrAPI {
                             continuation.finish()
                             return
                         }
-                        if let nextStr = wrapped.next, let next = URL(string: nextStr) {
+                        if let next = validatedServerSuppliedURL(wrapped.next) {
                             nextURL = next
                         } else {
                             continuation.finish(); return
@@ -2380,7 +2393,7 @@ struct DispatcharrAPI {
         debugLog("[VOD-Episodes] no count — falling back to sequential next-walk seriesID=\(seriesID)")
         var nextURLString = firstPage.next
         var pageIdx = 2
-        while let nextStr = nextURLString, let nextURL = URL(string: nextStr) {
+        while let nextURL = validatedServerSuppliedURL(nextURLString) {
             do {
                 var request = URLRequest(url: nextURL)
                 headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
@@ -2496,8 +2509,12 @@ struct DispatcharrAPI {
 
             if (300...399).contains(http.statusCode),
                let loc = http.value(forHTTPHeaderField: "Location"),
-               let next = URL(string: loc, relativeTo: current)?.absoluteURL {
-                current = next
+               let next = URL(string: loc, relativeTo: current)?.absoluteURL,
+               let safeNext = VODService.validateAbsoluteURL(next, serverHost: URL(string: baseURL)?.host) {
+                // SSRF guard: never follow a redirect to a loopback/private/
+                // metadata host with the API key attached. A rejected 3xx falls
+                // through to `return response.url ?? current` (last-good URL).
+                current = safeNext
                 redirects += 1
                 continue
             }

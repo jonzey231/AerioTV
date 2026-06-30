@@ -187,6 +187,17 @@ enum NWHTTPClient {
             // Mirrors URLSession's default behavior.
             var nextRequest = originalRequest
             nextRequest.url = nextURL
+            // SSRF / credential-leak guard: a malicious or compromised server
+            // can 30x to an arbitrary host. Do NOT forward credential headers
+            // to a DIFFERENT host (the sibling URLSession path strips them via
+            // RedirectPreservingDelegate.isSameOrigin). Same host keeps them, so
+            // a legitimate Dispatcharr same-host redirect (incl. an http->https
+            // upgrade) still authenticates.
+            if nextURL.host?.lowercased() != currentURL.host?.lowercased() {
+                nextRequest.setValue(nil, forHTTPHeaderField: "Authorization")
+                nextRequest.setValue(nil, forHTTPHeaderField: "X-API-Key")
+                nextRequest.setValue(nil, forHTTPHeaderField: "Cookie")
+            }
             if status == 301 || status == 302 || status == 303 {
                 let method = (nextRequest.httpMethod ?? "GET").uppercased()
                 if method != "GET" && method != "HEAD" {
