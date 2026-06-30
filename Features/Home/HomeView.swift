@@ -2888,6 +2888,11 @@ final class NowPlayingManager: ObservableObject {
     func minimize() {
         debugLog("🎮 NowPlaying.minimize: \(playingItem?.name ?? "nil")")
         isMinimized = true
+        // #42: the chrome can't be visible once we minimize. Clear the shared
+        // mirror here so the re-coupled ChannelInfoBanner can't strand on a
+        // stale `true` (the .onChange mirror won't fire if the container
+        // unmounts before the chrome's own auto-hide does).
+        chromeIsVisible = false
     }
 
     func expand() {
@@ -2903,6 +2908,12 @@ final class NowPlayingManager: ObservableObject {
         debugLog("🎮 NowPlaying.stop: \(playingItem?.name ?? "nil")")
         playingItem = nil
         isMinimized = false
+        // #42: authoritative reset of the chrome mirror on every playback
+        // teardown. The flag is only ever *set* by .onChange observers in
+        // MultiviewContainerView / PlayerView, which don't fire `false` when
+        // those views unmount — so without this it persists `true` into the
+        // next session and the re-coupled banner flashes on the guide.
+        chromeIsVisible = false
     }
 
     /// v1.6.15: debounced channel-flip step. Each call accumulates a
@@ -5352,6 +5363,9 @@ private struct ChannelInfoBanner: View {
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
     @ObservedObject private var guideStore = GuideStore.shared
     @ObservedObject private var multiviewStore = MultiviewStore.shared
+    // #42 Part 4: gate the "Up/Down changes channels" hint on the same Settings
+    // toggle that enables that gesture (default on).
+    @AppStorage("appBehaviorsAppleTVChannelFlip") private var appleTVChannelFlip = true
 
     /// Local 5s window that opens on every `streamStartedToken`
     /// bump. Lets the banner appear on a Siri Remote channel-flip
@@ -5377,16 +5391,22 @@ private struct ChannelInfoBanner: View {
     /// the Stream Info overlay is open (on iPhone the two overlays share
     /// the top-left corner and would overlap).
     ///
-    /// v1.7.3: dropped the old `chromeIsVisible ||` coupling. That flag
+    /// v1.7.3 dropped the `chromeIsVisible ||` coupling because that flag
     /// could stick `true` on an Apple TV cold-launch / auto-resume chrome
     /// desync and strand the banner visible for minutes (only Menu/Back,
-    /// which re-toggled the flag, cleared it). The banner was the sole
-    /// reader of `chromeIsVisible`, so driving it purely off the
-    /// wall-clock window makes it immune: the `.task` clears the window
-    /// at +5s and the `bannerOpenedAt` freshness check is the backstop
-    /// even if that task is cancelled. Chrome summoned via Menu already
-    /// shows the channel + program in the chrome itself, so the banner
-    /// is not needed there.
+    /// which re-toggled the flag, cleared it).
+    ///
+    /// #42 restores the coupling (so Select re-summons the card + hints
+    /// alongside the chrome), but hardens the flag against the original
+    /// stranding so it can't recur:
+    ///   - `NowPlayingManager.stop()` / `minimize()` now reset it to false
+    ///     (the .onChange mirrors only ever *set* it; they don't fire
+    ///     `false` when their views unmount).
+    ///   - the MultiviewContainerView mirror uses `.onChange(initial: true)`
+    ///     so a fresh mount force-clears any value left stranded by the
+    ///     previous mount (the cold-launch / resume desync above).
+    /// The wall-clock `bannerWindowFresh` term still independently caps the
+    /// tune-in appearance, so the banner is never worse off than v1.7.3.
     private var shouldRender: Bool {
         let isSingleStream = multiviewStore.tiles.count <= 1
         let isFullscreenActive = nowPlaying.isActive && !nowPlaying.isMinimized
@@ -5395,7 +5415,10 @@ private struct ChannelInfoBanner: View {
             guard let openedAt = bannerOpenedAt else { return false }
             return Date().timeIntervalSince(openedAt) < Self.bannerWindowSeconds
         }()
-        return bannerWindowFresh
+        // #42 Part 4: also show the card + hints whenever the chrome is summoned
+        // via Select (not just the tune-in window). chromeIsVisible mirrors the
+        // chrome's own 5s auto-fade, so the banner fades out together with it.
+        return (bannerWindowFresh || nowPlaying.chromeIsVisible)
             && isSingleStream
             && isFullscreenActive
             && !nowPlaying.streamInfoIsVisible
@@ -5435,7 +5458,8 @@ private struct ChannelInfoBanner: View {
             .foregroundColor(.white.opacity(0.55))
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
-            .background(Color.black.opacity(0.4).clipShape(Capsule()))
+            // #42 Part 4: match the program info card's dark fill (black @ 0.72).
+            .background(Color.black.opacity(0.72).clipShape(Capsule()))
     }
     #endif
 
@@ -5447,10 +5471,15 @@ private struct ChannelInfoBanner: View {
                     #if os(tvOS)
                     // #42 Part 4: gesture hints below the channel info card,
                     // riding the banner's same 5s appear/fade window on tune-in.
+                    // Left-padded by sidePadding to line up with the card's edge.
                     VStack(alignment: .leading, spacing: 6) {
                         playerHint("Press Menu/Back to return to TV Guide")
                         playerHint("Press Select to show player controls")
+                        if appleTVChannelFlip {
+                            playerHint("Press Up/Down to change channels")
+                        }
                     }
+                    .padding(.leading, sidePadding)
                     #endif
                 }
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -5505,6 +5534,10 @@ private struct ChannelInfoBanner: View {
         }
         .animation(.easeInOut(duration: 0.3), value: bannerWindowActive)
         .animation(.easeInOut(duration: 0.3), value: multiviewStore.tiles.count)
+        // #42: when the chrome is summoned/dismissed via Select, fade the card
+        // + hints in/out with it instead of popping. Same 0.3s curve as the
+        // other two so overlapping triggers don't interleave into a stutter.
+        .animation(.easeInOut(duration: 0.3), value: nowPlaying.chromeIsVisible)
     }
 
     @ViewBuilder

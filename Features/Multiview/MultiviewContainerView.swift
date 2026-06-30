@@ -546,7 +546,13 @@ struct MultiviewContainerView: View {
         // lock its visibility to the same auto-fade timer. Cross-
         // platform — both iPhone/iPad (PlaybackChromeOverlay) and
         // tvOS (inline pills) read the same `chromeState`.
-        .onChange(of: chromeState.isVisible) { _, visible in
+        // `initial: true` (#42): fire on mount too, so a freshly-mounted
+        // container (cold launch / suspend-resume remount, where chromeState
+        // re-inits to false) force-clears any `chromeIsVisible` left stranded
+        // `true` by the previous mount. Without this the mirror only updates
+        // on a *change*, so a stale `true` survives the remount and strands
+        // the re-coupled ChannelInfoBanner — the v1.7.3 regression.
+        .onChange(of: chromeState.isVisible, initial: true) { _, visible in
             nowPlaying.chromeIsVisible = visible
         }
         // v1.6.15: wake chrome only on stream starts that explicitly
