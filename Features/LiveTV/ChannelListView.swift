@@ -158,6 +158,14 @@ struct ChannelListView: View {
         let gap: CGFloat = 12
         return max(0, miniBottomAbs + gap - naturalTopAbsolute)
     }
+
+    // #42 Part 1: true while a guide Left is held past threshold; pins focus on
+    // the "All" pill so the still-held press cannot overshoot the leading
+    // controls. Unconditional (ChannelListView member) because the shared
+    // group-filter-bar reads it to gate collection-pill focus; only the tvOS
+    // Left-hold detector sets it true.
+    @State private var leftHoldPinningAll = false
+
     #if os(tvOS)
     @State private var showSearchField = false
     /// tvOS guide focus target. Normally `nil` so the focus engine
@@ -171,10 +179,9 @@ struct ChannelListView: View {
     // #42 Part 1: focus target for the group-filter pills (the "All" pill is the
     // jump target for a guide long-press Left).
     @FocusState private var groupPillFocused: String?
-    // #42 Part 1: true while a guide Left is held past threshold; pins focus on
-    // the "All" pill so the still-held press cannot overshoot into the leading
-    // controls. Auto-clears via a safety task if the release event is missed.
-    @State private var leftHoldPinningAll = false
+    // #42 Part 1: auto-clears the pin if the Left release event is missed.
+    // (`leftHoldPinningAll` itself is declared unconditionally above — shared
+    // group-filter-bar code reads it to gate collection-pill focus.)
     @State private var leftHoldSafetyTask: Task<Void, Never>?
 
     /// Explicit row that the next `resetFocus(in: guideFocusNS)` should
@@ -1660,6 +1667,15 @@ struct ChannelRow: View {
 
     @State private var showCardMenu = false
 
+    // #45: per-channel "Add to Collection" picker + new-collection name alert.
+    // Used by the iOS row (iOSRow) as well as tvOS, so these stay unconditional.
+    // They were previously mis-scoped inside `#if os(tvOS)`, which left iOSRow
+    // referencing undeclared state on iOS — masked until the iOSRow type-check
+    // timeout was relieved by extracting the dialog builders.
+    @State private var showCollectionPicker = false
+    @State private var showNewCollectionAlert = false
+    @State private var newCollectionName = ""
+
     #if os(tvOS)
     /// v1.7.5 (issue #34): confirm before REMOVING a favorite via the
     /// one-press star button. On Apple TV the star sits one D-pad-left
@@ -1667,10 +1683,6 @@ struct ChannelRow: View {
     /// channel silently dropped it from Favorites (reporter: ochaos).
     /// Adding a favorite stays immediate; only removal asks first.
     @State private var showRemoveFavoriteConfirmation = false
-    // #45: per-channel "Add to Collection" picker + new-collection name alert.
-    @State private var showCollectionPicker = false
-    @State private var showNewCollectionAlert = false
-    @State private var newCollectionName = ""
     #endif
 
     var body: some View {
@@ -2114,119 +2126,140 @@ struct ChannelRow: View {
             isPresented: $showCardMenu,
             titleVisibility: .visible
         ) {
-            let isFav = favoritesStore.isFavorite(item.id)
-            Button(isFav ? "Remove from Favorites" : "Add to Favorites") {
-                favoritesStore.toggle(item)
-            }
-
-            // #45: add/remove this channel from a user collection. Deferred so
-            // this dialog fully dismisses before the picker presents (chained
-            // confirmationDialogs race on tvOS otherwise).
-            Button("Add to Collection…") {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
-            }
-
-            // #45: contextual remove. Viewing a collection -> remove from just
-            // that one; otherwise (and only if it's in any) remove from all.
-            if let cid = ChannelCollectionsStore.shared.activeFilterCollectionID,
-               let coll = ChannelCollectionsStore.shared.collection(id: cid),
-               coll.memberIDs.contains(item.id) {
-                Button("Remove from \(coll.name)", role: .destructive) {
-                    ChannelCollectionsStore.shared.removeMember(channelID: item.id, in: cid)
-                }
-            } else if ChannelCollectionsStore.shared.activeFilterCollectionID == nil,
-                      ChannelCollectionsStore.shared.isInAnyCollection(item.id) {
-                Button("Remove from All Collections", role: .destructive) {
-                    ChannelCollectionsStore.shared.removeFromAllCollections(item.id)
-                }
-            }
-
-            // Program Info — surface the current program's full
-            // description + category metadata in a modal. Only shown
-            // when we actually have a current program to describe;
-            // otherwise this button would be misleading (it would
-            // open an info sheet with a blank title).
-            if let program = item.currentProgram,
-               let start = item.currentProgramStart,
-               let end = item.currentProgramEnd {
-                Button("Program Info") {
-                    // v1.7.x: pull programID from GuideStore if we
-                    // have it cached — lets the modal lazy-load any
-                    // category data the bulk enrichment hadn't reached
-                    // yet (rare for now-airing, common for all others).
-                    let pid = guideStore.programs[item.id]?
-                        .first(where: { $0.start <= Date() && $0.end > Date() })?
-                        .programID
-                    activeSheet = .programInfo(
-                        ProgramInfoTarget(
-                            channelName: item.name,
-                            title: program,
-                            start: start,
-                            end: end,
-                            description: item.currentProgramDescription ?? "",
-                            category: item.currentProgramCategory ?? "",
-                            programID: pid
-                        )
-                    )
-                }
-            }
-
-            // Record the currently-airing program. v1.6.8 (B1 Phase 1):
-            // dropped the `currentProgram != nil && end > now` gate.
-            // For Dispatcharr playlists, `ChannelDisplayItem.currentProgram`
-            // is never populated at load time (the load path leaves
-            // EPG enrichment to the Guide view's per-cell prefetch),
-            // so the gate hid the Record action permanently for users
-            // who hadn't visited the Guide first. Now we always offer
-            // "Record" — when EPG is missing we fall back to a generic
-            // title + a 60-minute default duration that the user can
-            // override in `RecordProgramSheet`.
-            if item.streamURL != nil {
-                let hasEPG = (item.currentProgram?.isEmpty == false)
-                Button(hasEPG ? "Record from Now" : "Record") {
-                    let now = Date()
-                    let title = item.currentProgram ?? "\(item.name) live recording"
-                    let start = item.currentProgramStart ?? now
-                    let end = (item.currentProgramEnd.flatMap { $0 > now ? $0 : nil })
-                        ?? now.addingTimeInterval(3600)
-                    activeSheet = .record(
-                        EPGEntry(
-                            title: title,
-                            description: item.currentProgramDescription ?? "",
-                            startTime: start,
-                            endTime: end
-                        )
-                    )
-                }
-            }
+            cardMenuButtons
         }
         // #45: per-channel "Add to Collection" — toggle membership in any
         // existing collection (a checkmark marks current members) or create a
         // new one with this channel already in it.
         .confirmationDialog("Add to Collection", isPresented: $showCollectionPicker, titleVisibility: .visible) {
-            ForEach(ChannelCollectionsStore.shared.collections) { c in
-                Button((ChannelCollectionsStore.shared.contains(channelID: item.id, in: c.id) ? "✓ " : "") + c.name) {
-                    ChannelCollectionsStore.shared.toggleMember(channelID: item.id, in: c.id)
-                }
-            }
-            Button("New Collection…") {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showNewCollectionAlert = true }
-            }
+            collectionPickerButtons
         }
         .alert("New Collection", isPresented: $showNewCollectionAlert) {
-            TextField("Name", text: $newCollectionName)
-            Button("Add at Beginning") {
-                ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [item.id], placement: .beginning)
-                newCollectionName = ""
-            }
-            Button("Add at End") {
-                ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [item.id], placement: .end)
-                newCollectionName = ""
-            }
-            Button("Cancel", role: .cancel) { newCollectionName = "" }
+            newCollectionAlertButtons
         } message: {
             Text("Name the collection and choose where its pill appears in the Live TV row.")
         }
+    }
+
+    // #49 follow-up: the card-menu / collection-picker / new-collection-alert
+    // button builders are pulled out of `iOSRow` into their own @ViewBuilder
+    // members. Inline (the #45 shape) they pushed the iOSRow body past the
+    // Swift type-checker's expression budget ("unable to type-check in
+    // reasonable time"), which only surfaced on the iOS build (tvOS uses the
+    // separate, lighter `tvRow`). Behaviour is unchanged.
+    @ViewBuilder
+    private var cardMenuButtons: some View {
+        let isFav = favoritesStore.isFavorite(item.id)
+        Button(isFav ? "Remove from Favorites" : "Add to Favorites") {
+            favoritesStore.toggle(item)
+        }
+
+        // #45: add/remove this channel from a user collection. Deferred so
+        // this dialog fully dismisses before the picker presents (chained
+        // confirmationDialogs race on tvOS otherwise).
+        Button("Add to Collection…") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showCollectionPicker = true }
+        }
+
+        // #45: contextual remove. Viewing a collection -> remove from just
+        // that one; otherwise (and only if it's in any) remove from all.
+        if let cid = ChannelCollectionsStore.shared.activeFilterCollectionID,
+           let coll = ChannelCollectionsStore.shared.collection(id: cid),
+           coll.memberIDs.contains(item.id) {
+            Button("Remove from \(coll.name)", role: .destructive) {
+                ChannelCollectionsStore.shared.removeMember(channelID: item.id, in: cid)
+            }
+        } else if ChannelCollectionsStore.shared.activeFilterCollectionID == nil,
+                  ChannelCollectionsStore.shared.isInAnyCollection(item.id) {
+            Button("Remove from All Collections", role: .destructive) {
+                ChannelCollectionsStore.shared.removeFromAllCollections(item.id)
+            }
+        }
+
+        // Program Info — surface the current program's full
+        // description + category metadata in a modal. Only shown
+        // when we actually have a current program to describe;
+        // otherwise this button would be misleading (it would
+        // open an info sheet with a blank title).
+        if let program = item.currentProgram,
+           let start = item.currentProgramStart,
+           let end = item.currentProgramEnd {
+            Button("Program Info") {
+                // v1.7.x: pull programID from GuideStore if we
+                // have it cached — lets the modal lazy-load any
+                // category data the bulk enrichment hadn't reached
+                // yet (rare for now-airing, common for all others).
+                let pid = guideStore.programs[item.id]?
+                    .first(where: { $0.start <= Date() && $0.end > Date() })?
+                    .programID
+                activeSheet = .programInfo(
+                    ProgramInfoTarget(
+                        channelName: item.name,
+                        title: program,
+                        start: start,
+                        end: end,
+                        description: item.currentProgramDescription ?? "",
+                        category: item.currentProgramCategory ?? "",
+                        programID: pid
+                    )
+                )
+            }
+        }
+
+        // Record the currently-airing program. v1.6.8 (B1 Phase 1):
+        // dropped the `currentProgram != nil && end > now` gate.
+        // For Dispatcharr playlists, `ChannelDisplayItem.currentProgram`
+        // is never populated at load time (the load path leaves
+        // EPG enrichment to the Guide view's per-cell prefetch),
+        // so the gate hid the Record action permanently for users
+        // who hadn't visited the Guide first. Now we always offer
+        // "Record" — when EPG is missing we fall back to a generic
+        // title + a 60-minute default duration that the user can
+        // override in `RecordProgramSheet`.
+        if item.streamURL != nil {
+            let hasEPG = (item.currentProgram?.isEmpty == false)
+            Button(hasEPG ? "Record from Now" : "Record") {
+                let now = Date()
+                let title = item.currentProgram ?? "\(item.name) live recording"
+                let start = item.currentProgramStart ?? now
+                let end = (item.currentProgramEnd.flatMap { $0 > now ? $0 : nil })
+                    ?? now.addingTimeInterval(3600)
+                activeSheet = .record(
+                    EPGEntry(
+                        title: title,
+                        description: item.currentProgramDescription ?? "",
+                        startTime: start,
+                        endTime: end
+                    )
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var collectionPickerButtons: some View {
+        ForEach(ChannelCollectionsStore.shared.collections) { c in
+            Button((ChannelCollectionsStore.shared.contains(channelID: item.id, in: c.id) ? "✓ " : "") + c.name) {
+                ChannelCollectionsStore.shared.toggleMember(channelID: item.id, in: c.id)
+            }
+        }
+        Button("New Collection…") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { showNewCollectionAlert = true }
+        }
+    }
+
+    @ViewBuilder
+    private var newCollectionAlertButtons: some View {
+        TextField("Name", text: $newCollectionName)
+        Button("Add at Beginning") {
+            ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [item.id], placement: .beginning)
+            newCollectionName = ""
+        }
+        Button("Add at End") {
+            ChannelCollectionsStore.shared.create(name: newCollectionName, memberIDs: [item.id], placement: .end)
+            newCollectionName = ""
+        }
+        Button("Cancel", role: .cancel) { newCollectionName = "" }
     }
     #endif
 
