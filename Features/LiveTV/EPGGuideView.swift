@@ -561,6 +561,30 @@ final class GuideStore: ObservableObject {
         }
     }
 
+    /// Drops programs that ended more than an hour ago and empties their
+    /// channel keys, so the resident `programs` dict tracks the live window
+    /// instead of accumulating every aired program for the process lifetime
+    /// (audit P1 — the dominant steady-state EPG memory cost on Apple TV; the
+    /// SwiftData cache already purges `endTime < hourAgo`, this mirrors it in
+    /// memory). Only mutates @Published state when something was actually
+    /// removed, so a no-op foreground doesn't churn the guide. Aired programs
+    /// sit below "now" in the grid and are never visible, so the trim is
+    /// invisible to the user. Runs on warm foreground.
+    func trimExpiredPrograms() {
+        let cutoff = Date().addingTimeInterval(-3600)
+        var trimmed: [String: [GuideProgram]] = [:]
+        var removedAny = false
+        for (channelID, list) in programs {
+            let kept = list.filter { $0.end >= cutoff }
+            if kept.count != list.count { removedAny = true }
+            if !kept.isEmpty { trimmed[channelID] = kept }
+        }
+        guard removedAny else { return }
+        let total = trimmed.values.reduce(0) { $0 + $1.count }
+        programs = trimmed
+        debugLog("📺 GuideStore.trimExpiredPrograms: trimmed resident EPG to live window — \(total) programs across \(trimmed.count) channels")
+    }
+
     /// Phase 2 — async: fetch upcoming programs to fill in the timeline beyond "now playing."
     /// Loads an initial batch quickly, then backfills remaining channels at lower priority.
     @discardableResult

@@ -4285,6 +4285,14 @@ struct MainTabView: View {
             onScenePhaseChange: { old, new in
                 handleAutoResumeScenePhase(from: old, to: new)
                 refreshGuideIfStaleOnForeground(from: old, to: new)
+                // Audit P1 memory: trim aired programs out of the resident
+                // GuideStore dict on every warm foreground so it tracks the
+                // live window instead of accumulating every past program for
+                // the process lifetime. Independent of the staleness refresh
+                // above (runs even when the cache is fresh).
+                if new == .active && old != .active {
+                    GuideStore.shared.trimExpiredPrograms()
+                }
             }
         ))
         // Background-work heartbeat logger. When `isAnyBackgroundWork`
