@@ -2748,6 +2748,10 @@ final class NowPlayingManager: ObservableObject {
     @Published var playingItem: ChannelDisplayItem? = nil
     @Published var playingHeaders: [String: String] = [:]
     @Published var isMinimized: Bool = false
+    // #42 Part 3: debounce state distinguishing a SINGLE Back (restore the mini
+    // to fullscreen) from a DOUBLE Back (jump to the top channel).
+    var menuMiniPressCount = 0
+    var menuMiniDebounce: Task<Void, Never>?
 
     /// True while a CarPlay scene is connected (set by CarPlaySceneDelegate
     /// on connect/disconnect). Drives the CarPlay branch in
@@ -3756,7 +3760,7 @@ struct MainTabView: View {
                     .buttonStyle(.plain)
                     #endif
                     .padding(.leading, 16)
-                    .padding(.top, 8)
+                    .padding(.top, -16)
                     #if os(iOS)
                     .popover(isPresented: $showBackgroundWorkDetails,
                              attachmentAnchor: .rect(.bounds)) {
@@ -3783,6 +3787,29 @@ struct MainTabView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .zIndex(1)
             }
+
+            // #42 Part 3: tvOS Menu/Back hints, top-left of the Live TV guide,
+            // below the syncing toast. Always shows the double-press-to-top hint;
+            // adds a resume hint above it when a mini-player is active.
+            #if os(tvOS)
+            if selectedTab == .liveTV && (!nowPlaying.isActive || nowPlaying.isMinimized) {
+                VStack {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if nowPlaying.isActive && nowPlaying.isMinimized {
+                            guideMenuHint("Press Menu/Back to resume playback.")
+                        }
+                        guideMenuHint("Double press Menu/Back to return to top channel.")
+                        guideMenuHint("Hold left on remote to return to the All group pill.")
+                    }
+                    .padding(.leading, 16)
+                    .padding(.top, isAnyBackgroundWork ? 52 : 12)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .zIndex(1)
+                .allowsHitTesting(false)
+            }
+            #endif
 
             // Mode branch:
             //   .multiview → MultiviewContainerView (grid + transport)
@@ -5058,6 +5085,19 @@ struct MainTabView: View {
     /// reasonable time") as the if/else chain grew with the v1.6.x
     /// tab-state additions. A plain method has its own scope so the
     /// budget resets cleanly.
+    #if os(tvOS)
+    /// #42 Part 3: a small muted hint badge for the top-left of the Live TV guide.
+    @ViewBuilder
+    private func guideMenuHint(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 15, weight: .medium))
+            .foregroundColor(.white.opacity(0.55))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Color.black.opacity(0.4).clipShape(Capsule()))
+    }
+    #endif
+
     private func handleMenuPress() {
         debugLog("🎮 [HMP] handleMenuPress | isActive=\(nowPlaying.isActive) isMinimized=\(nowPlaying.isMinimized) isVODDetailPushed=\(isVODDetailPushed) isSettingsSubviewPushed=\(isSettingsSubviewPushed) selectedTab=\(selectedTab.rawValue) playerSession.mode=\(playerSession.mode)")
         // TEST (branch test/avplayer-hls-engine): if this handler runs
@@ -5085,21 +5125,26 @@ struct MainTabView: View {
             debugLog("🎮 [HMP]   → branch: full-screen player → posting .playerBackPress")
             NotificationCenter.default.post(name: .playerBackPress, object: nil)
         } else if nowPlaying.isActive && nowPlaying.isMinimized {
-            // Under unified playback, the mini is N=1 multiview
-            // collapsed to a corner. Fully stopping requires
-            // `PlayerSession.shared.stop()` — it tears down
-            // MultiviewStore + mpv + flips mode to `.idle`.
-            // `nowPlaying.stop()` alone only clears lockscreen
-            // metadata and leaves the container rendering.
-            debugLog("🎮 Menu pressed: mini player → stop playback")
-            PlayerSession.shared.stop()
-            // Back-flow step 3: closing the mini drops to the full guide; keep
-            // focus on the channel that was playing (its NOW cell) instead of
-            // resetting to row 0. stop() preserves lastPlayedChannelID, which
-            // the .forceGuideFocus handler targets. Deferred so the teardown
-            // settles before the guide re-asserts focus.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+            // #42 Part 3: with a mini-player active, a SINGLE Back restores it to
+            // fullscreen; a DOUBLE Back jumps to the top channel (the long-press
+            // route isn't viable — tvOS owns a held Menu). Debounce ~0.3s: the
+            // expand is DEFERRED so the mini stays minimized during the window,
+            // letting a quick second press land here and bump the count to 2.
+            // (Stopping playback now lives only on the explicit close control.)
+            nowPlaying.menuMiniPressCount += 1
+            nowPlaying.menuMiniDebounce?.cancel()
+            nowPlaying.menuMiniDebounce = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled else { return }
+                let isDouble = nowPlaying.menuMiniPressCount >= 2
+                nowPlaying.menuMiniPressCount = 0
+                if isDouble {
+                    debugLog("🎮 [HMP]   → mini DOUBLE-Back → jump to top channel (#42 P3)")
+                    NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
+                } else {
+                    debugLog("🎮 [HMP]   → mini SINGLE-Back → expand to fullscreen (#42 P3)")
+                    withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
+                }
             }
         } else if isVODDetailPushed {
             // Pop the VOD detail view back to the browse list.
