@@ -119,6 +119,11 @@ struct MultiviewTileView: View {
     /// dialog on the next render.
     @State private var showAudioTrackMenu: Bool = false
     @State private var showSubtitleTrackMenu: Bool = false
+    // Issue #48: the global multiview layout mode, shared with the container's
+    // binding through the same @AppStorage key. Surfaced as a "Layout" submenu
+    // in the per-tile long-press menu (the reachable multiview surface — the
+    // single-player Options panel that also hosts it never appears here).
+    @AppStorage(MultiviewLayoutMode.storageKey) private var layoutMode: MultiviewLayoutMode = .auto
 
     // MARK: - User-configurable multiview appearance (Settings → Multiview)
     //
@@ -493,6 +498,31 @@ struct MultiviewTileView: View {
                 isSpotlit ? "Remove Spotlight" : "Spotlight",
                 systemImage: isSpotlit ? "rectangle.split.3x1" : "rectangle.inset.filled"
             )
+        }
+
+        // Issue #48: grid layout picker. The single-player Options panel that
+        // also hosts this never surfaces in multiview, so the layout choices
+        // live here in the per-tile long-press menu as direct items (this
+        // codebase uses sheets rather than nested submenus in its tvOS context
+        // menus, so flat items are the reliable shape). Grid-wide (selecting
+        // from any tile sets the shared layout); hidden when there's no real
+        // choice (<= 1 tile). The active mode shows a checkmark.
+        let layoutOptions = MultiviewLayoutMode.available(forTileCount: store.tiles.count)
+        ForEach(layoutOptions) { mode in
+            Button {
+                debugLog("[MV-LAYOUT] select mode=\(mode.rawValue) was=\(layoutMode.rawValue) tile=\(tile.id) tiles=\(store.tiles.count) spotID=\(store.spotlightTileID ?? "nil")")
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    layoutMode = mode
+                    // An explicit non-spotlight layout choice is authoritative:
+                    // clear any per-tile spotlight (#27), which would otherwise
+                    // keep `spotlightActive` true and make this switch a no-op
+                    // (the likely cause of the "switches stop working" report).
+                    if mode != .spotlight { store.spotlightTileID = nil }
+                }
+            } label: {
+                Label("Layout: \(mode.displayName)",
+                      systemImage: layoutMode == mode ? "checkmark" : mode.symbolName)
+            }
         }
 
         if progressStore.audioTracks.count > 1 {
