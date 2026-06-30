@@ -2499,6 +2499,13 @@ struct EPGGuideView: View {
             #endif
             #if os(tvOS)
             .onMoveCommand { direction in
+                // #42 Part 1: only scroll the EPG timeline when a guide program
+                // cell is actually focused. A held Left whose focus has jumped to
+                // the "All" pill still resolves ONE onMoveCommand(.left) into the
+                // guide on release (focusedProgramID == nil); gating on a focused
+                // cell drops that stray scroll, while normal scrolling (which
+                // always has a focused cell) is untouched.
+                guard focusedProgramID != nil else { return }
                 switch direction {
                 case .left:
                     withAnimation(.easeOut(duration: 0.3)) {

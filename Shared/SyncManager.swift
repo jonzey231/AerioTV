@@ -1410,6 +1410,12 @@ extension Notification.Name {
     /// vocabulary as Apple's TV / Music apps where Menu on a long
     /// list means "take me back to the top".
     static let guideScrollToTop = Notification.Name("guideScrollToTop")
+    /// #42 Part 1: a guide long-press Left. `Began` posts when the hold crosses
+    /// the threshold (jump focus to the leftmost "All" pill); `Ended` posts on
+    /// release. Between them the pill bar pins focus to "All" so the still-held
+    /// press cannot overshoot left into the leading Guide/Search/List controls.
+    static let guideLeftHoldBegan = Notification.Name("guideLeftHoldBegan")
+    static let guideLeftHoldEnded = Notification.Name("guideLeftHoldEnded")
     /// Posted by `ChannelStore.primeXMLTVFromURL` after it has
     /// finished the XMLTV parse AND written category-enriched
     /// entries into EPGCache via `GuideStore.seedEPGCache`. Any

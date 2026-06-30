@@ -326,4 +326,89 @@ final class PressCatcherView: UIView {
         super.pressesCancelled(presses, with: event)
     }
 }
+
+// MARK: - #42 Part 1: guide long-press-Left detector
+
+/// Detects a LONG-press (>= 0.5s) of the Left d-pad while the guide is on
+/// screen and invokes `onLongPressLeft`. A short Left passes straight through
+/// (so the guide's `onMoveCommand` still scrolls the EPG timeline). The Left
+/// long-press recognizer is installed on the host's WINDOW — the only ancestor
+/// reliably in the focused program cell's `UIPress` responder chain (a sibling
+/// `.overlay`/`.background` view is not) — and is removed when the guide leaves
+/// the hierarchy, so it lives only while the guide (which mounts this view) is
+/// shown. Modeled on PlayerView's `.leftArrow` long-press recognizer.
+struct GuideLongPressLeftDetector: UIViewRepresentable {
+    /// Fires once when the Left hold crosses the 0.5s threshold (jump to "All").
+    let onBegan: () -> Void
+    /// Fires when the Left press is released (stop pinning focus to "All").
+    let onEnded: () -> Void
+
+    func makeUIView(context: Context) -> LeftHoldHostView {
+        let v = LeftHoldHostView()
+        v.onLeftHoldBegan = onBegan
+        v.onLeftHoldEnded = onEnded
+        v.isUserInteractionEnabled = false   // passthrough; never steals focus/taps
+        return v
+    }
+    func updateUIView(_ uiView: LeftHoldHostView, context: Context) {
+        uiView.onLeftHoldBegan = onBegan
+        uiView.onLeftHoldEnded = onEnded
+    }
+    static func dismantleUIView(_ uiView: LeftHoldHostView, coordinator: ()) {
+        uiView.detachRecognizer()
+    }
+}
+
+/// Non-focusable host whose only job is to attach a Left-arrow long-press
+/// recognizer to its window. Never takes focus or swallows touches; the
+/// recognizer uses `cancelsTouchesInView = false` so short Left presses still
+/// reach SwiftUI's `onMoveCommand` (timeline scroll) untouched.
+final class LeftHoldHostView: UIView, UIGestureRecognizerDelegate {
+    var onLeftHoldBegan: (() -> Void)?
+    var onLeftHoldEnded: (() -> Void)?
+    private weak var attachedWindow: UIWindow?
+    private var recognizer: UILongPressGestureRecognizer?
+
+    override var canBecomeFocused: Bool { false }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window !== attachedWindow { detachRecognizer() }
+        guard let window, recognizer == nil else { return }
+        let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleLeftHold(_:)))
+        lp.allowedPressTypes = [NSNumber(value: UIPress.PressType.leftArrow.rawValue)]
+        lp.minimumPressDuration = 0.5
+        // #42 Part 1: consume the press once the long-press is recognized so the
+        // still-held Left's "click" does not resolve into the guide on release
+        // (which scrolled the EPG timeline). Short Left (< 0.5s) never recognizes
+        // the long-press, so its timeline scroll via onMoveCommand is unaffected.
+        lp.cancelsTouchesInView = true
+        lp.delaysTouchesBegan = false
+        lp.delegate = self
+        window.addGestureRecognizer(lp)
+        recognizer = lp
+        attachedWindow = window
+    }
+
+    func detachRecognizer() {
+        if let r = recognizer { attachedWindow?.removeGestureRecognizer(r) }
+        recognizer = nil
+        attachedWindow = nil
+    }
+
+    @objc private func handleLeftHold(_ gr: UILongPressGestureRecognizer) {
+        switch gr.state {
+        case .began:
+            onLeftHoldBegan?()
+        case .ended, .cancelled, .failed:
+            onLeftHoldEnded?()
+        default:
+            break
+        }
+    }
+
+    // Coexist with the focus engine + any other recognizers (e.g. the player's).
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+}
 #endif

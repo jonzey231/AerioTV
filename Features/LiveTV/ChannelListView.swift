@@ -168,6 +168,14 @@ struct ChannelListView: View {
     /// the disabled mini player. Cleared back to nil immediately
     /// after the claim so subsequent D-pad navigation isn't pinned.
     @FocusState private var focusedGuideRowID: String?
+    // #42 Part 1: focus target for the group-filter pills (the "All" pill is the
+    // jump target for a guide long-press Left).
+    @FocusState private var groupPillFocused: String?
+    // #42 Part 1: true while a guide Left is held past threshold; pins focus on
+    // the "All" pill so the still-held press cannot overshoot into the leading
+    // controls. Auto-clears via a safety task if the release event is missed.
+    @State private var leftHoldPinningAll = false
+    @State private var leftHoldSafetyTask: Task<Void, Never>?
 
     /// Explicit row that the next `resetFocus(in: guideFocusNS)` should
     /// land on, driving `.prefersDefaultFocus`. Set by the Menu/Back
@@ -551,6 +559,37 @@ struct ChannelListView: View {
                 .animation(.spring(response: 0.35), value: capturedNaturalTop)
                 .animation(.spring(response: 0.35), value: nowPlaying.isMinimized)
                 .animation(.spring(response: 0.35), value: nowPlaying.miniPlayerBottomAbs)
+                // #42 Part 1: long-press Left anywhere in the guide jumps focus
+                // to the "All" pill. The detector installs a window-level Left
+                // long-press recognizer (mounted only while the guide is shown);
+                // a short Left still scrolls the timeline via onMoveCommand.
+                #if os(tvOS)
+                .background(
+                    GuideLongPressLeftDetector(
+                        onBegan: { NotificationCenter.default.post(name: .guideLeftHoldBegan, object: nil) },
+                        onEnded: { NotificationCenter.default.post(name: .guideLeftHoldEnded, object: nil) }
+                    )
+                )
+                .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldBegan)) { _ in
+                    // Jump focus to "All" and pin it there for the duration of the
+                    // hold so the still-held Left can't overshoot into the leading
+                    // Guide/Search/List controls.
+                    leftHoldPinningAll = true
+                    groupPillFocused = "All"
+                    leftHoldSafetyTask?.cancel()
+                    leftHoldSafetyTask = Task { @MainActor in
+                        // Backstop in case the release event is missed, so focus
+                        // is never permanently locked on "All".
+                        try? await Task.sleep(nanoseconds: 2_500_000_000)
+                        if !Task.isCancelled { leftHoldPinningAll = false }
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldEnded)) { _ in
+                    leftHoldPinningAll = false
+                    leftHoldSafetyTask?.cancel()
+                    leftHoldSafetyTask = nil
+                }
+                #endif
             }
         } else {
             channelListContent
@@ -819,6 +858,11 @@ struct ChannelListView: View {
                     action: { withAnimation(.spring(response: 0.25)) { showGuideView.toggle() } },
                     systemImage: showGuideView ? "list.bullet" : "calendar"
                 )
+                // #42 Part 1: leading controls go non-focusable while a guide
+                // Left is held, so the hold stops at "All" instead of
+                // overshooting into them. (TVGroupPill's custom style ignores
+                // isEnabled, so .disabled removes focus without dimming.)
+                .disabled(leftHoldPinningAll)
 
                 // Search toggle
                 TVGroupPill(
@@ -832,6 +876,7 @@ struct ChannelListView: View {
                     },
                     systemImage: "magnifyingglass"
                 )
+                .disabled(leftHoldPinningAll)   // #42 Part 1: see above
 
                 if showSearchField {
                     TextField("Search channels", text: $searchText)
@@ -941,11 +986,14 @@ struct ChannelListView: View {
                     action: { showManageGroups = true },
                     hiddenCount: hiddenGroups.count
                 )
+                .disabled(leftHoldPinningAll)   // #42 Part 1: see Guide toggle above
                 #endif
 
                 // #45: collections placed at the beginning sit before "All".
+                // #42 Part 1: also non-focusable while a guide Left is held, so
+                // the hold cannot land on a beginning collection before "All".
                 ForEach(collectionsStore.beginningCollections) { c in
-                    collectionPill(c)
+                    collectionPill(c, canFocus: !leftHoldPinningAll)
                 }
 
                 ForEach(["All"] + visibleGroups, id: \.self) { group in
@@ -955,6 +1003,9 @@ struct ChannelListView: View {
                         isSelected: selectedGroup == group,
                         action: { withAnimation(.spring(response: 0.25)) { selectedGroup = group } }
                     )
+                    // #42 Part 1: make the pills programmatic focus targets so a
+                    // guide long-press Left can land focus on the "All" pill.
+                    .focused($groupPillFocused, equals: group)
                     #else
                     Button {
                         withAnimation(.spring(response: 0.25)) { selectedGroup = group }
@@ -1010,12 +1061,13 @@ struct ChannelListView: View {
     /// it sets `selectedGroup` to the `collection:<id>` sentinel that
     /// `filterChannels()` resolves to the collection's members.
     @ViewBuilder
-    private func collectionPill(_ c: ChannelCollection) -> some View {
+    private func collectionPill(_ c: ChannelCollection, canFocus: Bool = true) -> some View {
         let token = "collection:\(c.id)"
         #if os(tvOS)
         CollectionPillTV(
             name: c.name,
             isSelected: selectedGroup == token,
+            canFocus: canFocus,
             onTap: { withAnimation(.spring(response: 0.25)) { selectedGroup = token } },
             onLongPress: { managePillCollection = c }
         )
@@ -3071,6 +3123,7 @@ struct TVGroupPillButtonStyle: ButtonStyle {
 private struct CollectionPillTV: View {
     let name: String
     let isSelected: Bool
+    var canFocus: Bool = true
     let onTap: () -> Void
     let onLongPress: () -> Void
     @State private var isFocused = false
@@ -3094,6 +3147,7 @@ private struct CollectionPillTV: View {
                 TVPressOverlay(
                     minimumPressDuration: 0.5,
                     isFocused: $isFocused,
+                    canFocus: canFocus,
                     onTap: onTap,
                     onLongPress: onLongPress
                 )
