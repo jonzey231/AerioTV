@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.7.9 - 2026-06-30
+
+### Fixed
+
+- **DVR downloads are reliable.** Saving a completed recording to the device is
+  now authenticated and checks the server's response first, so a secured or
+  erroring server can no longer leave behind a broken file.
+
+### Changed
+
+- **Lower memory use on Apple TV.** The guide now releases programs that have
+  already aired instead of holding the entire schedule in memory for the whole
+  session, easing memory pressure during long viewing sessions.
+- **Security and privacy hardening.** Account credentials are kept strictly
+  scoped to your own server (never forwarded to redirected or third-party
+  hosts), and EPG parsing is hardened against malformed feeds.
+
+## v1.7.8 - 2026-06-29
+
+### Fixed
+
+- **4K / UHD playback is far more stable.** Fixed a memory buildup that could
+  garble audio or, during a long session on a demanding UHD channel, cause the
+  app to run out of memory. The player now releases the old video pipeline
+  before it reloads a stream, so memory stays flat instead of climbing.
+- **No stalls right after launch on UHD channels.** The first-run catalog and
+  guide sync no longer competes with live video for the same resources, so a 4K
+  stream keeps playing smoothly while On Demand and the guide load in the
+  background.
+
 ## v1.7.7 - 2026-06-29
 
 ### Added

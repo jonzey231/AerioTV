@@ -3239,6 +3239,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         "🟡 [MPV-RELOAD] stale-frame storm reload tile=\(tileID ?? "single") stale_ms=\(Int(staleAge * 1000))",
                         category: "MPV-STREAM", level: .warning
                     )
+                    // MEMORY-LEAK FIX: same as the black-frame reload below.
+                    // Flush the display-layer renderer before re-priming so its
+                    // stale enqueued 4K CMSampleBuffers/CVPixelBuffers are not
+                    // orphaned across the `loadfile replace`. This stale-frame
+                    // path is the one that fires REPEATEDLY on a wedged UHD
+                    // stream (7x in 2 min in the 2026-06-29 capture), so without
+                    // the flush it is the dominant leak contributor.
+                    // `removingDisplayedImage: false` keeps the last frame up.
+                    cachedRenderer?.flush(removingDisplayedImage: false)
                     mpvQueue.async { [weak self] in
                         guard let self, let mpv = self.activeMPVHandle() else { return }
                         self.mpvCommand(mpv, ["loadfile", reloadURL.absoluteString, "replace"])
@@ -3758,6 +3767,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             "🟡 [MPV-RELOAD] black-frame storm reload tile=\(tileID ?? "single") consec=\(consecutiveBlackFramesSuppressed)",
                             category: "MPV-STREAM", level: .warning
                         )
+                        // MEMORY-LEAK FIX: flush the display-layer renderer
+                        // BEFORE re-priming. The renderer retains its enqueued
+                        // CMSampleBuffers (and their 4K CVPixelBuffers); if this
+                        // `loadfile replace` fails (transient LOADING_FAILED) and
+                        // the error path re-plays, those old buffers are never
+                        // cleared, so the failed load + re-play stacked a SECOND
+                        // 4K HDR pipeline (~750MB) on top of the un-freed first
+                        // and the app climbed toward the jetsam ceiling (live
+                        // capture 2026-06-29: rss flat at 307MB then spiked to
+                        // ~1GB within 15s of this reload, thermal nominal).
+                        // `removingDisplayedImage: false` keeps the last good
+                        // frame on screen, so no black flash.
+                        cachedRenderer?.flush(removingDisplayedImage: false)
                         mpvQueue.async { [weak self] in
                             guard let self, let mpv = self.activeMPVHandle() else { return }
                             self.mpvCommand(mpv, ["loadfile", reloadURL.absoluteString, "replace"])
@@ -5744,6 +5766,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     debugLog("[MPV-DIAG] \(streamTag) \(errLabel) — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
                     #endif
                     let retryURL = urls[currentIndex]
+                    // MEMORY-LEAK FIX (pairs with the black-frame reload above):
+                    // clear the display-layer renderer's stale enqueued buffers
+                    // before the retry re-primes, so the failed load's ~4K
+                    // buffer set is not left orphaned while play() stands up a
+                    // fresh pipeline. This is the second half of the reload ->
+                    // LOADING_FAILED -> re-play sequence that leaked ~750MB on
+                    // the bursty UHD stream (live capture 2026-06-29).
+                    cachedRenderer?.flush(removingDisplayedImage: false)
                     DispatchQueue.global(qos: .userInitiated)
                         .asyncAfter(deadline: .now() + delay) { [weak self] in
                             self?.play(url: retryURL)

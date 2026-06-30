@@ -57,6 +57,25 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.9",
+            title: "What's new in 1.7.9",
+            bullets: [
+                "Lower memory use on Apple TV during long sessions, for steadier playback",
+                "Saved DVR recordings download more reliably",
+                "Security and privacy hardening across credential handling and EPG parsing"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.9")
+        ),
+        WhatsNewRelease(
+            version: "1.7.8",
+            title: "What's new in 1.7.8",
+            bullets: [
+                "4K and UHD channels are far more stable: fixed a memory buildup that could garble audio or, during a long session, run the app out of memory on a demanding stream",
+                "No more stalls right after launch on a UHD channel: the first-run catalog and guide sync no longer competes with live video, so a 4K stream keeps playing while On Demand and the guide load in the background"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.8")
+        ),
+        WhatsNewRelease(
             version: "1.7.7",
             title: "What's new in 1.7.7",
             bullets: [

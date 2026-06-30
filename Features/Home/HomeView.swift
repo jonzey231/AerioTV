@@ -556,6 +556,14 @@ final class VODStore: ObservableObject {
                     )
                 }
                 debugLog("🎬 [VOD-CAT] \(cat.name): +\(accumulated.count - before) (total \(accumulated.count))")
+                // Cold-load yields to playback (2026-06-29): when a live stream is
+                // playing, breathe between category sweeps so the main-actor JSON
+                // decode + struct-build bursts don't starve the live decoder on the
+                // same main thread (see the fetchUpcoming note in the orchestrator).
+                // No-op when nothing is playing — full-speed load.
+                if !MultiviewStore.shared.tiles.isEmpty {
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
                 if accumulated.count >= totalCap {
                     debugLog("🎬 VODStore.loadMovies: hit total cap \(totalCap), stopping category sweep")
                     break categoryLoop
@@ -722,6 +730,12 @@ final class VODStore: ObservableObject {
                     )
                 }
                 debugLog("📺 [VOD-CAT] \(cat.name): +\(accumulated.count - before) (total \(accumulated.count))")
+                // Cold-load yields to playback (2026-06-29): pace the series sweep
+                // while a live stream is playing — same rationale as loadMovies and
+                // the orchestrator fetchUpcoming hold. No-op when idle.
+                if !MultiviewStore.shared.tiles.isEmpty {
+                    try? await Task.sleep(for: .milliseconds(200))
+                }
                 if accumulated.count >= totalCap {
                     debugLog("📺 VODStore.loadSeries: hit total cap \(totalCap), stopping category sweep")
                     break categoryLoop
@@ -4271,6 +4285,14 @@ struct MainTabView: View {
             onScenePhaseChange: { old, new in
                 handleAutoResumeScenePhase(from: old, to: new)
                 refreshGuideIfStaleOnForeground(from: old, to: new)
+                // Audit P1 memory: trim aired programs out of the resident
+                // GuideStore dict on every warm foreground so it tracks the
+                // live window instead of accumulating every past program for
+                // the process lifetime. Independent of the staleness refresh
+                // above (runs even when the cache is fresh).
+                if new == .active && old != .active {
+                    GuideStore.shared.trimExpiredPrograms()
+                }
             }
         ))
         // Background-work heartbeat logger. When `isAnyBackgroundWork`
@@ -4663,15 +4685,33 @@ struct MainTabView: View {
                     // and sidesteps the Sendable wrap on the SwiftData
                     // `ServerConnection` array we'd otherwise have to
                     // marshal across an actor boundary.
-                    let bgStart = Date()
                     Task { @MainActor [allServers] in
+                        // Cold-load yields to playback (2026-06-29): the EPG cache is
+                        // already fresh, so this refresh is NON-ESSENTIAL cosmetic
+                        // enrichment (category tints + programID backfill). Its ~30k-row
+                        // grid decode runs HERE on the main actor; when it overlaps the
+                        // cold start while a live stream is playing it starves the
+                        // heaviest live decoder on the SAME main thread — measured on a
+                        // 4K HDR feed as cache->0.1s plus a watchdog-reload storm that
+                        // then leaks memory. Hold this refresh until playback settles
+                        // (tiles drain) or a 60s ceiling, whichever first, so it lands
+                        // after the decoder has filled its cache. No hold when idle.
+                        var heldSec = 0
+                        while !MultiviewStore.shared.tiles.isEmpty, heldSec < 60 {
+                            try? await Task.sleep(for: .seconds(5))
+                            heldSec += 5
+                        }
+                        if heldSec > 0 {
+                            debugLog("🟢 [Orchestrator] phase 2 EPG: held background fetchUpcoming \(heldSec)s for active playback")
+                        }
+                        let fetchStart = Date()
                         let didRefresh = await guideStore.fetchUpcoming(
                             channels: channelStore.channels,
                             servers: allServers,
                             replaceExisting: false
                         )
-                        let elapsed = Int(Date().timeIntervalSince(bgStart))
-                        debugLog("🟢 [Orchestrator] background fetchUpcoming COMPLETE — didRefresh=\(didRefresh), elapsed=\(elapsed)s (cache-fresh refresh)")
+                        let elapsed = Int(Date().timeIntervalSince(fetchStart))
+                        debugLog("🟢 [Orchestrator] background fetchUpcoming COMPLETE — didRefresh=\(didRefresh), elapsed=\(elapsed)s (cache-fresh refresh, held \(heldSec)s)")
                     }
                 }
             } else {

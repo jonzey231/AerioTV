@@ -214,9 +214,16 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
     private var skippingProgramme = false
 
     // MARK: - Public entry points
+    /// Hostile-feed ceiling: a malicious EPG endpoint can't OOM the device
+    /// with an absurd document. Legit XMLTV (even multi-day, all-channel) is
+    /// well under this.
+    private static let maxXMLTVBytes = 512 * 1_024 * 1_024  // 512 MB
+
     static func parse(data: Data) -> [ParsedEPGProgram] {
+        guard data.count <= maxXMLTVBytes else { return [] }
         let instance = XMLTVParser()
         let xmlParser = XMLParser(data: data)
+        xmlParser.shouldResolveExternalEntities = false   // XXE / external-entity hardening
         xmlParser.delegate = instance
         xmlParser.parse()
         return instance.programmes
@@ -232,6 +239,7 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
         let instance = XMLTVParser()
         instance.knownChannelIDs = knownChannelIDs
         let xmlParser = XMLParser(stream: stream)
+        xmlParser.shouldResolveExternalEntities = false   // XXE / external-entity hardening
         xmlParser.delegate = instance
         xmlParser.parse()
         return instance.programmes
