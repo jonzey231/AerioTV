@@ -1097,7 +1097,8 @@ final class ChannelStore: ObservableObject {
     /// dedupes by title + time). On iPhone this is the only
     /// XMLTV pass that happens — which is exactly why we need it
     /// here.
-    func primeXMLTVFromURL(_ url: URL, headers: [String: String] = [:]) async {
+    @discardableResult
+    func primeXMLTVFromURL(_ url: URL, headers: [String: String] = [:]) async -> Bool {
         let now = Date()
         let windowStart = now.addingTimeInterval(-3600)
         let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
@@ -1109,10 +1110,10 @@ final class ChannelStore: ObservableObject {
         // too and will re-dispatch, but snapshotting here keeps
         // the call site sync-clean.
         let snapshot = channels
-        guard let activeServer = activeServer else { return }
+        guard let activeServer = activeServer else { return false }
         let categoryServerID = activeServer.id.uuidString
 
-        await GuideStore.shared.fetchXMLTVFromURL(
+        let xmltvDidLand = await GuideStore.shared.fetchXMLTVFromURL(
             url: url,
             channels: snapshot,
             windowStart: windowStart,
@@ -1147,6 +1148,7 @@ final class ChannelStore: ObservableObject {
         // non-tinted rows until they manually collapsed and
         // re-expanded.
         NotificationCenter.default.post(name: .epgCategoriesDidUpdate, object: nil)
+        return xmltvDidLand
     }
 
     // MARK: - Private Loader
@@ -1802,8 +1804,22 @@ final class ChannelStore: ObservableObject {
             }
 
         case .xtreamCodes:
-            // Xtream: batch per-stream EPG (reuses enrichXtreamEPG)
-            await enrichXtreamEPG(baseURL: baseURL, username: username, password: password)
+            // Standard XC EPG: pull the server's bulk xmltv.php guide (full
+            // programmes, server-native naming + categories) like every other
+            // XC client, through the same XMLTV path Dispatcharr/M3U use.
+            // primeXMLTVFromURL populates GuideStore.programs + EPGCache, so the
+            // now-playing line (which falls back to GuideStore.programs) and the
+            // guide grid both read the bulk feed. Only fall back to per-stream
+            // get_short_epg when the feed yields nothing (provider exposes no
+            // xmltv.php, or no channel carries an epg_channel_id).
+            let xAPIForEPG = XtreamCodesAPI(baseURL: baseURL, username: username, password: password)
+            var xmltvOK = false
+            if let xcEPGURL = xAPIForEPG.xmltvURL() {
+                xmltvOK = await primeXMLTVFromURL(xcEPGURL)
+            }
+            if !xmltvOK {
+                await enrichXtreamEPG(baseURL: baseURL, username: username, password: password)
+            }
             // v1.7.3: optional custom XMLTV drives the channel-card
             // category tints (Sports/News/Movies/Kids). Xtream's API
             // exposes no per-program category, so this is the only way
@@ -2159,13 +2175,18 @@ final class ChannelStore: ObservableObject {
         let items: [ChannelDisplayItem] = streams.enumerated().compactMap { (i, s) in
             let urls = xAPI.streamURLs(for: s); guard let primary = urls.first else { return nil }
             let catName = categories.first(where: { $0.id == s.categoryID })?.name ?? "Uncategorized"
-            return ChannelDisplayItem(
+            var item = ChannelDisplayItem(
                 id: String(s.streamID), name: s.name,
                 number: String(s.num ?? (i + 1)),
                 logoURL: s.streamIcon.flatMap { URL(string: $0) },
                 group: catName,
                 categoryOrder: catOrder[s.categoryID ?? ""] ?? Int.max,
                 streamURL: primary, streamURLs: urls)
+            // Carry the Xtream epg_channel_id as the tvg-id so the bulk
+            // xmltv.php guide can match `<programme channel="...">` back to
+            // this channel through the same path M3U/Dispatcharr use.
+            if let epgID = s.epgChannelID, !epgID.isEmpty { item.tvgID = epgID }
+            return item
         }
         let sorted = sortChannels(items, groupOrder: groupOrder)
         return (sorted, derivedGroupOrder(from: sorted))

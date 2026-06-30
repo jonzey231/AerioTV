@@ -1029,6 +1029,25 @@ final class GuideStore: ObservableObject {
     private func fetchXtream(server: ServerConnection, channels: [ChannelDisplayItem],
                               windowStart: Date, windowEnd: Date,
                               replaceExisting: Bool = false) async -> Bool {
+        let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL,
+                                  username: server.username,
+                                  password: server.effectivePassword)
+
+        // Standard XC EPG: the server's bulk xmltv.php guide (full programmes,
+        // server-native naming + categories), matched by tvg-id through the
+        // same XMLTV path M3U uses. XC channels carry their epg_channel_id as
+        // tvgID (ChannelStore.fetchXtream). Only fall back to the per-stream
+        // get_short_epg loop below when the feed yields no matching programmes
+        // (provider without xmltv.php, or channels with no epg_channel_id).
+        if let xmltvURL = api.xmltvURL() {
+            let ok = await fetchXMLTVFromURL(
+                url: xmltvURL, channels: channels,
+                windowStart: windowStart, windowEnd: windowEnd,
+                categoryServerID: server.id.uuidString,
+                replaceExisting: replaceExisting)
+            if ok { return true }
+        }
+
         let batchBasePrograms = replaceExisting
             ? replacingWindowBase(for: channels, windowStart: windowStart, windowEnd: windowEnd)
             : nil
@@ -1041,9 +1060,6 @@ final class GuideStore: ObservableObject {
                 cancelBatch()
             }
         }
-        let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL,
-                                  username: server.username,
-                                  password: server.effectivePassword)
 
         // Fetch with limited concurrency (max 3 concurrent) and 15s timeout per request
         let didReceiveAnyResponse = await withTaskGroup(of: (String, [GuideProgram], Bool).self) { group in

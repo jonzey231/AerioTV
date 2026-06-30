@@ -424,6 +424,15 @@ struct XtreamCodesAPI {
         return URL(string: "\(base)/get.php?username=\(username)&password=\(password)&type=m3u_plus")
     }
 
+    /// Standard Xtream Codes bulk XMLTV EPG feed — the full guide every
+    /// other XC client consumes. The server renders programme names its
+    /// own way here (dummy-EPG name settings, `<category>` tags, etc.),
+    /// unlike the per-stream `get_short_epg` JSON. Routed through
+    /// `buildURL` so username/password are query-encoded.
+    func xmltvURL() -> URL? {
+        try? buildURL(path: "/xmltv.php", params: [:])
+    }
+
     /// Fetch the M3U and return a dict of [streamName: streamURL] for URL lookup.
     /// Also keyed by tvg-id for EPG matching.
     func fetchM3UStreamURLs() async throws -> [String: URL] {
