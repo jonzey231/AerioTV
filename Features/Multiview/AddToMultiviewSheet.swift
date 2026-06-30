@@ -200,6 +200,19 @@ struct AddToMultiviewSheet: View {
                     bypassWarning: true
                 )
             }
+            // #46 (GH): suppress this warning permanently (device-local) and
+            // proceed, matching the channel-add alert above.
+            Button("Don't Show Again") {
+                UserDefaults.standard.set(true, forKey: "multiviewPerfWarningSuppressed")
+                pendingVODAdd = nil
+                commitAddVOD(
+                    streamURL: pending.streamURL, headers: pending.headers,
+                    title: pending.title, posterURL: pending.posterURL,
+                    kind: pending.kind, vodID: pending.vodID,
+                    serverID: pending.serverID, vodType: pending.vodType,
+                    bypassWarning: true
+                )
+            }
             Button("Cancel", role: .cancel) { pendingVODAdd = nil }
         } message: { _ in
             Text("Adding more than \(multiviewStore.softLimit) streams may cause audio drops, buffering, or overheating on some devices.")
@@ -1749,6 +1762,13 @@ private struct SharedSheetModifiers: ViewModifier {
                 presenting: pendingWarningItem
             ) { item in
                 Button("Continue", role: .destructive) {
+                    onContinueWarning(item)
+                }
+                // #46 (GH): suppress this warning permanently (device-local)
+                // and proceed with the add, so a user who routinely runs more
+                // than the soft limit is not nagged every time.
+                Button("Don't Show Again") {
+                    UserDefaults.standard.set(true, forKey: "multiviewPerfWarningSuppressed")
                     onContinueWarning(item)
                 }
                 Button("Cancel", role: .cancel) {

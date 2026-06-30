@@ -493,7 +493,10 @@ final class MultiviewStore: ObservableObject {
         // Soft cap → caller shows warning, we don't commit yet.
         // Skipping straight to .added when the 2h window is still warm
         // matches the plan's "don't nag" rule.
-        if !bypassWarning && tiles.count >= softLimit && !warningRecentlyShown {
+        // #46 (GH): once the user picks "Don't Show Again" on the warning we
+        // never surface it again (device-local, like the other multiview prefs).
+        if !bypassWarning && tiles.count >= softLimit && !warningRecentlyShown
+            && !UserDefaults.standard.bool(forKey: "multiviewPerfWarningSuppressed") {
             DebugLogger.shared.log(
                 "[MV-Tile] add pending: needsWarning (count=\(tiles.count), softLimit=\(softLimit))",
                 category: "Playback", level: .info
