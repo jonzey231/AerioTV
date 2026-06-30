@@ -57,6 +57,16 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.9",
+            title: "What's new in 1.7.9",
+            bullets: [
+                "Lower memory use on Apple TV during long sessions, for steadier playback",
+                "Saved DVR recordings download more reliably",
+                "Security and privacy hardening across credential handling and EPG parsing"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.9")
+        ),
+        WhatsNewRelease(
             version: "1.7.8",
             title: "What's new in 1.7.8",
             bullets: [

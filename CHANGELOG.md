@@ -1,5 +1,22 @@
 # Changelog
 
+## v1.7.9 - 2026-06-30
+
+### Fixed
+
+- **DVR downloads are reliable.** Saving a completed recording to the device is
+  now authenticated and checks the server's response first, so a secured or
+  erroring server can no longer leave behind a broken file.
+
+### Changed
+
+- **Lower memory use on Apple TV.** The guide now releases programs that have
+  already aired instead of holding the entire schedule in memory for the whole
+  session, easing memory pressure during long viewing sessions.
+- **Security and privacy hardening.** Account credentials are kept strictly
+  scoped to your own server (never forwarded to redirected or third-party
+  hosts), and EPG parsing is hardened against malformed feeds.
+
 ## v1.7.8 - 2026-06-29
 
 ### Fixed
