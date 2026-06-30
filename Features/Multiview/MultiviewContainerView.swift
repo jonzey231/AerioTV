@@ -1247,7 +1247,9 @@ struct MultiviewContainerView: View {
     ///                            stack means Back always closes the
     ///                            panel first regardless of where
     ///                            focus drifted to.
-    ///   1. Already minimized   → full teardown (`PlayerSession.stop`).
+    ///   1. Already minimized   → no-op (#42 Part 5). Menu/Back while
+    ///                            minimized is owned by HomeView (Part 3):
+    ///                            single Back expands, double jumps to top.
     ///   2. Fullscreen tile     → collapse back to grid.
     ///   3. Relocate mode       → cancel relocate.
     ///   4. Chrome hidden       → first Menu press summons the
@@ -1261,7 +1263,8 @@ struct MultiviewContainerView: View {
     ///                            player. The user then sees the
     ///                            guide with the stream still
     ///                            playing; further Menu on the guide
-    ///                            stops playback.
+    ///                            expands it (single Back) or jumps to
+    ///                            the top channel (double Back) — #42 P3/P5.
     ///   5b. Chrome visible at N≥2 → "Exit Multiview?" confirmation.
     ///                            Guard against accidental Menu-
     ///                            spams that would otherwise tear
@@ -1304,11 +1307,19 @@ struct MultiviewContainerView: View {
             return
         }
         if nowPlaying.isMinimized {
+            // #42 Part 5: the close-mini-player gesture is removed. Menu/Back
+            // while minimized is owned entirely by HomeView.handleMenuPress
+            // (Part 3: single Back expands the mini, double Back jumps to the
+            // top channel) — the container no longer tears playback down here.
+            // This branch is normally unreachable anyway (the container is
+            // `.disabled` while minimized, and HomeView only relays
+            // `.playerBackPress` from its non-minimized branch), so it is a
+            // defensive no-op rather than a teardown.
             DebugLogger.shared.log(
-                "[MV-Cmd]   → branch: minimized → stop",
+                "[MV-Cmd]   → branch: minimized → ignored (close-mini gesture removed, #42 P5)",
                 category: "Playback", level: .info
             )
-            PlayerSession.shared.stop()
+            return
         } else if store.fullscreenTileID != nil {
             DebugLogger.shared.log(
                 "[MV-Cmd]   → branch: fullscreen tile → collapse to grid",
