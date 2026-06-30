@@ -4,6 +4,7 @@ Carthage/
 
 # Xcode
 build/
+build-*/
 DerivedData/
 *.xcuserstate
 *.xcuserdatad/
