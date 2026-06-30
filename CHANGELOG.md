@@ -1,5 +1,33 @@
 # Changelog
 
+## v1.7.10 - 2026-06-30
+
+### Added
+
+- **Channel Collections.** Group your channels into your own named collections
+  and filter the Live TV list to them with quick pills.
+- **More multiview layouts.** Pick from additional grid and spotlight
+  arrangements in the multiview layout picker.
+
+### Changed
+
+- **Xtream Codes guide uses the full standard EPG.** Xtream connections now pull
+  the server's complete XMLTV guide the same way other clients do, so you get
+  more program data, accurate dummy-EPG titles, and category colors instead of
+  just the now and next slivers.
+- **Apple TV guide and mini-player gestures.** Smoother Live TV navigation: hold
+  Left in the guide to jump to the All group, a single Back restores the
+  mini-player while a double Back jumps to the top channel, and a single Back
+  minimizes a full-screen channel in one press.
+
+### Fixed
+
+- **Recorded playback no longer restarts at commercial breaks.** Saved DVR
+  recordings play straight through instead of looping back when the broadcast
+  splices a different encode at an ad break.
+- **The multiview performance warning can be dismissed for good** with a "Don't
+  show again" option.
+
 ## v1.7.9 - 2026-06-30
 
 ### Fixed

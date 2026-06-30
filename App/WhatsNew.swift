@@ -57,6 +57,18 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.10",
+            title: "What's new in 1.7.10",
+            bullets: [
+                "Channel Collections: group channels into your own custom collections and filter Live TV to them with quick pills",
+                "More multiview layouts to choose from",
+                "Xtream Codes guide now pulls the full standard EPG: more program data, accurate dummy-EPG titles, and category colors",
+                "Apple TV: smoother Live TV guide navigation and mini-player gestures",
+                "Recorded playback no longer restarts at commercial breaks"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.10")
+        ),
+        WhatsNewRelease(
             version: "1.7.9",
             title: "What's new in 1.7.9",
             bullets: [
