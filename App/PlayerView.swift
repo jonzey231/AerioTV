@@ -4398,19 +4398,17 @@ struct NativeHLSPlayerScreen: View {
         }
         let asset = AVURLAsset(url: url, options: options)
         let playerItem = AVPlayerItem(asset: asset)
-        // Live-edge headroom (parity with the multiview tile): hold the
-        // playhead ~9s behind live so it doesn't starve at the edge. The
-        // cushion is already-available window content, so startup stays fast
-        // (AVPlayer picks a start point ~9s back, not a big pre-buffer).
+        // Live-edge point: trust the server (parity with the multiview tile).
+        // The Dispatcharr HLS output pins the join point itself (#EXT-X-START on
+        // the standard output, PART-HOLD-BACK ~1.5s on the Low-Latency output),
+        // so we do not force configuredTimeOffsetFromLive, which would override
+        // both and pin latency at our guess on the LL path. Forward buffer stays
+        // at automatic (a forced 12s gated first frame to ~11.8s off-LAN while
+        // being invisible on LAN). See TSHLSRemuxer.startPlayer for the full
+        // rationale on both.
         playerItem.automaticallyPreservesTimeOffsetFromLive = true
-        playerItem.configuredTimeOffsetFromLive = CMTime(seconds: 9, preferredTimescale: 1)
-        // Forward buffer: left at automatic (parity with the multiview tile). A
-        // device capture showed a forced 12s gated first frame to ~11.8s on a
-        // bandwidth-limited path while being invisible on LAN, so automatic
-        // (auto-wait=true) is the fast-start choice on every link. See
-        // TSHLSRemuxer.startPlayer for the full rationale.
         DebugLogger.shared.log(
-            "[AVP-HLS] live offset=9s fwdBuf=automatic channel=\(item.name)",
+            "[AVP-HLS] live offset=server fwdBuf=automatic channel=\(item.name)",
             category: "Playback", level: .info
         )
         // Feed the native info panel real channel/program names instead

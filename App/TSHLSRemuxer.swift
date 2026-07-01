@@ -659,16 +659,16 @@ struct AVPlayerMultiviewTile: View {
         }
         let asset = AVURLAsset(url: url, options: options)
         let playerItem = AVPlayerItem(asset: asset)
-        // Live-edge headroom. The stalls were CoreMedia -16832 "stall danger"
-        // (AVPlayer riding ~1 segment from the live edge), NOT a download-ahead
-        // shortfall, so hold the playhead ~9s behind live instead of forcing a
-        // big forward buffer (which only delayed first frame). The cushion is
-        // content already in the playlist window, so the start segment is
-        // available immediately and startup stays fast: AVPlayer picks a start
-        // point ~9s back and maintains that offset. (mpv never needs this: it
-        // reads a continuous MPEG-TS stream with no live edge to ride.)
+        // Live-edge point: trust the server, do not force an offset. The
+        // Dispatcharr HLS output now pins the join point itself, correctly for
+        // each mode: #EXT-X-START ~3 target durations back on the standard
+        // output (safe, no CoreMedia -16832 stall-danger), and PART-HOLD-BACK
+        // ~1.5s on the Low-Latency output. A hard-coded configuredTimeOffsetFromLive
+        // would override both and, on the LL path, pin latency at our guess
+        // instead of riding the live edge. Preserve whatever start point the
+        // server hands us across stalls. (mpv never needs this: it reads a
+        // continuous MPEG-TS stream with no live edge to ride.)
         playerItem.automaticallyPreservesTimeOffsetFromLive = true
-        playerItem.configuredTimeOffsetFromLive = CMTime(seconds: 9, preferredTimescale: 1)
         // Forward buffer: left at AVPlayer's automatic default (0). A device
         // capture DISPROVED the idea that a forced preferredForwardBufferDuration
         // does not gate first frame: forcing 12s gated tune-in to ~11.8s on a
@@ -682,7 +682,7 @@ struct AVPlayerMultiviewTile: View {
         // (huge headroom keeps it stall-free), fastest-safe off-LAN. The 9s
         // offset above stays as the only explicit live-edge lever; the real
         // low-latency-AND-no-stall fix off-LAN is server-side LL-HLS.
-        debugLog("[AVP-MV] live offset=9s fwdBuf=automatic channel=\(channelName)")
+        debugLog("[AVP-MV] live offset=server fwdBuf=automatic channel=\(channelName)")
         let avPlayer = AVPlayer(playerItem: playerItem)
         // Live truth at this instant, never a captured snapshot.
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
