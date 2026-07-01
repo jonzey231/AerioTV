@@ -221,7 +221,6 @@ struct PlaybackChromeOverlay: View {
             // truncate inside a ~160pt gap that can't hold them.
             HStack(alignment: .center, spacing: 12) {
                 closeButton_iOS
-                engineBadge_iOS
                 // v1.6.15: title removed from the chrome bar — the
                 // new top-left `ChannelInfoBanner` (HomeView) shows
                 // channel logo, number, name, program title, and
@@ -293,6 +292,15 @@ struct PlaybackChromeOverlay: View {
             // single top-left HUD on every form factor.
 
             Spacer(minLength: 0)
+            // Dev engine badge sits bottom-left, above the progress band, so
+            // it never collides with the top-left ChannelInfoBanner (program
+            // info HUD). Only renders while an AVPlayer dev toggle is on.
+            HStack {
+                engineBadge_iOS
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 8)
             liveProgressBand
                 .padding(.horizontal, 20)
                 .padding(.bottom, 24)
