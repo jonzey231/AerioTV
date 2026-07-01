@@ -4083,6 +4083,16 @@ struct NativeHLSPlayerScreen: View {
     @State private var showRecordSheet = false
     @State private var showStreamInfo = false
     @State private var sleepWork: DispatchWorkItem?
+    /// Fires ~4s after a native AVPlayer item is built: if the item is
+    /// .failed (e.g. the server returned 415 for a non-H.264 channel) or
+    /// reached .readyToPlay with no renderable video (HEVC-in-TS that
+    /// AVFoundation decodes audio-only over a black screen), hand the
+    /// channel back to mpv. The direct-HLS path otherwise only fell back on
+    /// AVPlayerItemFailedToPlayToEndTime, which neither of those cases fires.
+    @State private var noVideoCheck: DispatchWorkItem?
+    /// One-shot guard so the watchdog, the failure notification, and a remux
+    /// error can't each trigger a fallback into an already-dismissed screen.
+    @State private var didFallback = false
     #if os(iOS)
     /// Unified chrome state: one store, one driver, one visibility Bool.
     /// The store is the same observable type the mpv overlay reads, fed
@@ -4282,6 +4292,8 @@ struct NativeHLSPlayerScreen: View {
             remuxer = nil
             sleepWork?.cancel()
             sleepWork = nil
+            noVideoCheck?.cancel()
+            noVideoCheck = nil
             AudioSessionRefCount.decrement(caller: "native-hls")
             IdleTimerRefCount.decrement(caller: "native-hls")
             DebugLogger.shared.log(
@@ -4342,6 +4354,31 @@ struct NativeHLSPlayerScreen: View {
         let avPlayer = AVPlayer(playerItem: playerItem)
         avPlayer.play()
         player = avPlayer
+
+        // No-renderable-video / rejected-playlist fallback (parity with the
+        // multiview tile guard in TSHLSRemuxer). AVFoundation cannot decode
+        // HEVC-in-MPEG-TS: depending on the server it either rejects the
+        // playlist (the native-HLS output returns 415 for non-H.264, so the
+        // item goes .failed) or reaches .readyToPlay and plays audio over a
+        // permanent black screen (presentationSize stays 0x0). Neither fires
+        // AVPlayerItemFailedToPlayToEndTime, so without this the single-stream
+        // direct-HLS path would strand the viewer. mpv decodes these fine.
+        let checkedItem = playerItem
+        let channelName = item.name
+        let work = DispatchWorkItem {
+            let status = checkedItem.status
+            let noVideo = checkedItem.presentationSize.width == 0
+                && checkedItem.presentationSize.height == 0
+            guard status == .failed || (status == .readyToPlay && noVideo) else { return }
+            DebugLogger.shared.log(
+                "[AVP-HLS] no renderable video (status=\(status.rawValue)) channel=\(channelName); falling back to mpv",
+                category: "Playback", level: .warning
+            )
+            fallbackToMPV()
+        }
+        noVideoCheck?.cancel()
+        noVideoCheck = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
         #if os(iOS)
         // Bridge AVPlayer state into the shared store the chrome reads.
         // Gravity is applied declaratively (the layer view reads
@@ -4476,6 +4513,8 @@ struct NativeHLSPlayerScreen: View {
     /// Remux failure path: dismiss this cover and restart the channel on
     /// the mpv pipeline, bypassing the native router so it cannot loop.
     private func fallbackToMPV() {
+        guard !didFallback else { return }
+        didFallback = true
         switchToMPV(openAddStream: false)
     }
 
