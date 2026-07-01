@@ -1792,7 +1792,11 @@ final class MultiviewChromeState: ObservableObject {
         // While pinned (e.g. TVOptions panel open) don't schedule the hide
         // task; chrome stays up until the pin is released by the panel-close
         // path, which calls back through here.
-        guard !isPinned else { return }
+        guard !isPinned else {
+            debugLog("[MV-Chrome] scheduleHide SKIPPED (pinned) isVisible=\(isVisible)")
+            return
+        }
+        debugLog("[MV-Chrome] scheduleHide armed (5s) isVisible=\(isVisible)")
         hideTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: Self.fadeDelayNs)
             guard !Task.isCancelled, let self else { return }
@@ -1800,7 +1804,11 @@ final class MultiviewChromeState: ObservableObject {
             // the 5s sleep (the panel could open after chrome was summoned),
             // in which case skip the hide and let the panel-close path arm a
             // fresh timer.
-            guard !self.isPinned else { return }
+            guard !self.isPinned else {
+                debugLog("[MV-Chrome] hideTask fire SKIPPED (pinned at fire)")
+                return
+            }
+            debugLog("[MV-Chrome] hideTask FIRED -> isVisible=false")
             withAnimation(.easeInOut(duration: 0.4)) {
                 self.isVisible = false
             }
@@ -1818,6 +1826,7 @@ final class MultiviewChromeState: ObservableObject {
     /// fade clock.
     func setPinned(_ pinned: Bool) {
         guard isPinned != pinned else { return }
+        debugLog("[MV-Chrome] setPinned(\(pinned)) isVisible=\(isVisible)")
         isPinned = pinned
         if pinned {
             hideTask?.cancel()

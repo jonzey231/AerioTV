@@ -103,7 +103,13 @@ enum AppOrientationLock {
     /// Mask when nothing is forcing landscape: portrait on iPhone, all
     /// orientations on iPad (so iPad follows the device naturally).
     static var base: UIInterfaceOrientationMask {
-        UIDevice.current.userInterfaceIdiom == .pad ? .all : .portrait
+        // iPad free-rotates. iPhone allows device-driven rotation (portrait
+        // + both landscapes) so the player follows the device again. Before
+        // #38 there was no AppDelegate mask, so the Info.plist orientations
+        // governed and the app auto-rotated; returning `.portrait` here
+        // pinned it portrait and killed auto-rotate. `.allButUpsideDown`
+        // restores it; the force-landscape toggle still pins `.landscape`.
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : .allButUpsideDown
     }
 
     /// The mask UIKit honors. Seeded to `.portrait` and corrected for the

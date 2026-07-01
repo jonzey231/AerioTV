@@ -3665,15 +3665,64 @@ final class AVPlayerProgressDriver {
             store.streamInfo.width = Int(size.width)
             store.streamInfo.height = Int(size.height)
         }
-        // Observed bitrate from the access log, when available.
-        if let event = item.accessLog()?.events.last {
-            if event.observedBitrate > 0 {
-                store.streamInfo.bitrate = event.observedBitrate / 8
-            }
-            if event.indicatedBitrate > 0, store.streamInfo.videoCodec.isEmpty {
-                store.streamInfo.videoCodec = "HLS"
+        // AVPlayer decodes through AVFoundation / VideoToolbox. Label the
+        // decoder so the card reads as a healthy native session rather than a
+        // blank mpv one. mpv's fps/hwdec/audio/cache fields don't exist on the
+        // AVPlayer path, so fill the ones AVFoundation exposes and leave the
+        // internal-only ones (avsync, dropped frames) at 0.
+        store.streamInfo.hwdec = "AVFoundation"
+
+        for track in item.tracks {
+            guard let asset = track.assetTrack else { continue }
+            switch asset.mediaType {
+            case .video:
+                if track.currentVideoFrameRate > 0 {
+                    store.streamInfo.fps = Double(track.currentVideoFrameRate)
+                } else if asset.nominalFrameRate > 0 {
+                    store.streamInfo.fps = Double(asset.nominalFrameRate)
+                }
+                if let fd = asset.formatDescriptions.first {
+                    store.streamInfo.videoCodec = Self.fourCCString(
+                        CMFormatDescriptionGetMediaSubType(fd as! CMFormatDescription))
+                }
+            case .audio:
+                if let fd = asset.formatDescriptions.first {
+                    let desc = fd as! CMFormatDescription
+                    if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
+                        store.streamInfo.sampleRate = Int(asbd.mSampleRate)
+                        store.streamInfo.channels = Int(asbd.mChannelsPerFrame)
+                    }
+                    store.streamInfo.audioCodec = Self.fourCCString(
+                        CMFormatDescriptionGetMediaSubType(desc))
+                }
+            default:
+                break
             }
         }
+
+        // Buffered-ahead seconds (the AVPlayer analog of mpv's demuxer cache).
+        if let range = item.loadedTimeRanges.last?.timeRangeValue {
+            let end = CMTimeGetSeconds(range.start + range.duration)
+            let now = CMTimeGetSeconds(item.currentTime())
+            if end.isFinite, now.isFinite, end > now {
+                store.streamInfo.cacheDuration = end - now
+            }
+        }
+
+        // Observed bitrate from the access log, when available.
+        if let event = item.accessLog()?.events.last, event.observedBitrate > 0 {
+            store.streamInfo.bitrate = event.observedBitrate / 8
+        }
+    }
+
+    /// Render a CoreMedia media-subtype FourCC (e.g. 'avc1', 'ac-3') as a
+    /// readable codec string for the stream-info card.
+    private static func fourCCString(_ code: FourCharCode) -> String {
+        let bytes = [UInt8((code >> 24) & 0xFF), UInt8((code >> 16) & 0xFF),
+                     UInt8((code >> 8) & 0xFF), UInt8(code & 0xFF)]
+        let s = String(bytes: bytes, encoding: .ascii)?
+            .trimmingCharacters(in: CharacterSet(charactersIn: " \0")) ?? ""
+        return s.isEmpty ? String(format: "0x%08X", code) : s
     }
 
     /// Intents OUT: store command closures -> AVPlayer.
