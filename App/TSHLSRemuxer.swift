@@ -659,14 +659,16 @@ struct AVPlayerMultiviewTile: View {
         }
         let asset = AVURLAsset(url: url, options: options)
         let playerItem = AVPlayerItem(asset: asset)
-        // Live-buffer headroom. The stall signature was "buffer ran empty"
-        // (0 dropped frames), i.e. network jitter emptied AVPlayer's small
-        // default forward buffer. Hold ~15s ahead so a late segment rides
-        // through instead of pausing to rebuffer. This does NOT add live
-        // latency: it governs how far AVPlayer downloads ahead of the
-        // playhead, not where the playhead sits vs the live edge (and it's
-        // capped by the live edge regardless).
-        playerItem.preferredForwardBufferDuration = 15
+        // Live-edge headroom. The stalls were CoreMedia -16832 "stall danger"
+        // (AVPlayer riding ~1 segment from the live edge), NOT a download-ahead
+        // shortfall, so hold the playhead ~9s behind live instead of forcing a
+        // big forward buffer (which only delayed first frame). The cushion is
+        // content already in the playlist window, so the start segment is
+        // available immediately and startup stays fast: AVPlayer picks a start
+        // point ~9s back and maintains that offset. (mpv never needs this: it
+        // reads a continuous MPEG-TS stream with no live edge to ride.)
+        playerItem.automaticallyPreservesTimeOffsetFromLive = true
+        playerItem.configuredTimeOffsetFromLive = CMTime(seconds: 9, preferredTimescale: 1)
         let avPlayer = AVPlayer(playerItem: playerItem)
         // Live truth at this instant, never a captured snapshot.
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
