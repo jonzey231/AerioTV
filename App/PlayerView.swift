@@ -4388,6 +4388,11 @@ struct NativeHLSPlayerScreen: View {
         }
         let asset = AVURLAsset(url: url, options: options)
         let playerItem = AVPlayerItem(asset: asset)
+        // Live-buffer headroom (parity with the multiview tile). Holds ~15s
+        // ahead so network jitter doesn't empty the buffer and stall; does
+        // not add live latency (governs download-ahead, not the playhead's
+        // distance from the live edge).
+        playerItem.preferredForwardBufferDuration = 15
         // Feed the native info panel real channel/program names instead
         // of whatever stale Now Playing state it can scrape.
         playerItem.externalMetadata = Self.nativeMetadata(

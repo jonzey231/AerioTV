@@ -659,6 +659,14 @@ struct AVPlayerMultiviewTile: View {
         }
         let asset = AVURLAsset(url: url, options: options)
         let playerItem = AVPlayerItem(asset: asset)
+        // Live-buffer headroom. The stall signature was "buffer ran empty"
+        // (0 dropped frames), i.e. network jitter emptied AVPlayer's small
+        // default forward buffer. Hold ~15s ahead so a late segment rides
+        // through instead of pausing to rebuffer. This does NOT add live
+        // latency: it governs how far AVPlayer downloads ahead of the
+        // playhead, not where the playhead sits vs the live edge (and it's
+        // capped by the live edge regardless).
+        playerItem.preferredForwardBufferDuration = 15
         let avPlayer = AVPlayer(playerItem: playerItem)
         // Live truth at this instant, never a captured snapshot.
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
