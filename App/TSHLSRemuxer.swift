@@ -669,25 +669,20 @@ struct AVPlayerMultiviewTile: View {
         // reads a continuous MPEG-TS stream with no live edge to ride.)
         playerItem.automaticallyPreservesTimeOffsetFromLive = true
         playerItem.configuredTimeOffsetFromLive = CMTime(seconds: 9, preferredTimescale: 1)
-        // Forward-buffer depth. The measured stall was a single "buffer ran
-        // empty" ~7.5s in: a startup TRANSIENT while the buffer built from thin
-        // to steady state, not -16832 edge-danger (the 9s offset already killed
-        // that) and not throughput (0 dropped frames). Live measurement of the
-        // Dispatcharr output shows real segments are ~5s (the ~2s source GOP
-        // floors them above the 4s config) publishing every ~5s, so a thin
-        // startup buffer can drain before the next segment is written. This hint
-        // tells AVPlayer to fill the forward buffer aggressively at startup; it
-        // is a fill-AHEAD ceiling, capped in practice by the ~9s of content the
-        // live offset exposes ahead of the playhead, so it fills to ~the offset.
-        // It does NOT gate first frame while automaticallyWaitsToMinimizeStalling
-        // stays default-true, so startup is unaffected (the cushion fills behind
-        // the playhead, the mpv cache-secs analog). CAVEAT: AVPlayer over
-        // segmented HLS is inherently segment-gated and cannot fully match mpv's
-        // continuous-TS low-latency-no-stall profile at this ~9s latency; the
-        // complete zero-stall fix is a deeper offset (~15s = 3 segments, more
-        // latency) or server-side LL-HLS. This smothers the early transient.
-        playerItem.preferredForwardBufferDuration = 12
-        debugLog("[AVP-MV] fwdBuf set=12 effective=\(playerItem.preferredForwardBufferDuration) offset=9s channel=\(channelName)")
+        // Forward buffer: left at AVPlayer's automatic default (0). A device
+        // capture DISPROVED the idea that a forced preferredForwardBufferDuration
+        // does not gate first frame: forcing 12s gated tune-in to ~11.8s on a
+        // bandwidth-limited (WAN/cellular) path, because
+        // automaticallyWaitsToMinimizeStalling (default true) waits to fill that
+        // buffer and a ~1x-realtime link needs ~12s to do so (Apple's own caveat
+        // that a large value delays start). On LAN the same 12s filled instantly
+        // (343ms first frame, zero stalls over a long run), so the cushion was
+        // invisible there but pure downside off-LAN, and it did NOT prevent the
+        // one WAN stall anyway. Automatic adapts per link: near-instant on LAN
+        // (huge headroom keeps it stall-free), fastest-safe off-LAN. The 9s
+        // offset above stays as the only explicit live-edge lever; the real
+        // low-latency-AND-no-stall fix off-LAN is server-side LL-HLS.
+        debugLog("[AVP-MV] live offset=9s fwdBuf=automatic channel=\(channelName)")
         let avPlayer = AVPlayer(playerItem: playerItem)
         // Live truth at this instant, never a captured snapshot.
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)

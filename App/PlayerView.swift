@@ -4404,15 +4404,13 @@ struct NativeHLSPlayerScreen: View {
         // (AVPlayer picks a start point ~9s back, not a big pre-buffer).
         playerItem.automaticallyPreservesTimeOffsetFromLive = true
         playerItem.configuredTimeOffsetFromLive = CMTime(seconds: 9, preferredTimescale: 1)
-        // Forward-buffer depth (parity with the multiview tile). Live-measured
-        // Dispatcharr segments are ~5s; this hint fills the startup buffer
-        // aggressively (capped by the ~9s the live offset exposes) to smother the
-        // one early build-up stall, without gating first frame (auto-wait stays
-        // default-true). See TSHLSRemuxer.startPlayer for the full rationale and
-        // the segment-gated-HLS caveat vs mpv's continuous-TS path.
-        playerItem.preferredForwardBufferDuration = 12
+        // Forward buffer: left at automatic (parity with the multiview tile). A
+        // device capture showed a forced 12s gated first frame to ~11.8s on a
+        // bandwidth-limited path while being invisible on LAN, so automatic
+        // (auto-wait=true) is the fast-start choice on every link. See
+        // TSHLSRemuxer.startPlayer for the full rationale.
         DebugLogger.shared.log(
-            "[AVP-HLS] fwdBuf set=12 effective=\(playerItem.preferredForwardBufferDuration) offset=9s channel=\(item.name)",
+            "[AVP-HLS] live offset=9s fwdBuf=automatic channel=\(item.name)",
             category: "Playback", level: .info
         )
         // Feed the native info panel real channel/program names instead
@@ -4421,13 +4419,11 @@ struct NativeHLSPlayerScreen: View {
             title: item.name,
             subtitle: item.currentProgram
         )
-        // Startup lever resolved (v1.7.x): preferredForwardBufferDuration=12
-        // above. The measured failure was a single frontier-drain buffer-empty
-        // ~7.5s in, so the forward-buffer lever targets it without the latency
-        // cost of a deeper offset or the visible-stall risk of
-        // automaticallyWaitsToMinimizeStalling=false (left at default true, the
-        // mpv cache-pause analog). Confirm the exact depth from the next device
-        // [AVP-STREAM] startup=/STALL run.
+        // Startup lever resolved (v1.7.x): forward buffer left at AVPlayer's
+        // automatic default. A device run showed forcing a large forward buffer
+        // gated tune-in to ~11.8s on a bandwidth-limited path (invisible on LAN),
+        // so automatic (auto-wait=true) is the fast-start choice on every link.
+        // The 9s live offset is the only explicit live-edge lever.
         let avPlayer = AVPlayer(playerItem: playerItem)
         avPlayer.play()
         player = avPlayer
