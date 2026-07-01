@@ -4199,10 +4199,26 @@ struct MainTabView: View {
     /// No-op on iOS.
     private func syncTabVisibility() {
         #if os(tvOS)
-        guard !isSettingsSubviewPushed, !isVODDetailPushed, selectedTab != .settings else { return }
-        if tabShowFavorites != hasFavorites { tabShowFavorites = hasFavorites }
-        if tabShowRecordings != hasRecordings { tabShowRecordings = hasRecordings }
-        if tabShowVOD != hasVOD { tabShowVOD = hasVOD }
+        guard !isSettingsSubviewPushed, !isVODDetailPushed, selectedTab != .settings else {
+            // Diagnostic for the sticky blank-Settings bug: confirm the latch is
+            // deferring while in Settings/nav. If a blank ever coincides with a
+            // DEFER-less tab-set mutation below, this + the APPLYING line pinpoint it.
+            debugLog("🔶 syncTabVisibility DEFER (settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed) tab=\(selectedTab.rawValue)) live[fav=\(hasFavorites) rec=\(hasRecordings) vod=\(hasVOD)] latched[fav=\(tabShowFavorites) rec=\(tabShowRecordings) vod=\(tabShowVOD)]")
+            return
+        }
+        let favChange = tabShowFavorites != hasFavorites
+        let recChange = tabShowRecordings != hasRecordings
+        let vodChange = tabShowVOD != hasVOD
+        if favChange || recChange || vodChange {
+            // A tab APPEARING/DISAPPEARING mutates the TabView child set — the
+            // exact action that can tear down a fragile Settings NavigationStack.
+            // If the blank recurs, the last such line before it (with tab context)
+            // is the culprit trigger.
+            debugLog("🔶 syncTabVisibility APPLYING tab-set change (tab=\(selectedTab.rawValue) settingsPushed=\(isSettingsSubviewPushed) vodPushed=\(isVODDetailPushed)): fav \(tabShowFavorites)→\(hasFavorites) rec \(tabShowRecordings)→\(hasRecordings) vod \(tabShowVOD)→\(hasVOD)")
+        }
+        if favChange { tabShowFavorites = hasFavorites }
+        if recChange { tabShowRecordings = hasRecordings }
+        if vodChange { tabShowVOD = hasVOD }
         #endif
     }
 
