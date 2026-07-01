@@ -221,6 +221,7 @@ struct PlaybackChromeOverlay: View {
             // truncate inside a ~160pt gap that can't hold them.
             HStack(alignment: .center, spacing: 12) {
                 closeButton_iOS
+                engineBadge_iOS
                 // v1.6.15: title removed from the chrome bar — the
                 // new top-left `ChannelInfoBanner` (HomeView) shows
                 // channel logo, number, name, program title, and
@@ -327,6 +328,26 @@ struct PlaybackChromeOverlay: View {
         // (re)created for a new player session.
         .onAppear { forcedLandscape = AppOrientationLock.isForcingLandscape }
         #endif
+    }
+
+    /// Dev-only engine badge in the iOS top bar so a tester can confirm at a
+    /// glance which pipeline is playing (AVPlayer Direct HLS / Remux TS / mpv).
+    /// Only shown while an AVPlayer engine toggle is on; normal users on the
+    /// default mpv engine never see it. Mirrors the tvOS badge.
+    @ViewBuilder
+    private var engineBadge_iOS: some View {
+        if (PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS),
+           let audioID = store.audioTileID,
+           let engine = store.tileEngines[audioID] {
+            Text(engine)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.25), lineWidth: 0.5))
+                .fixedSize()
+        }
     }
 
     private var closeButton_iOS: some View {

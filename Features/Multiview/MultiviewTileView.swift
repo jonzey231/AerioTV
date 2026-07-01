@@ -172,6 +172,19 @@ struct MultiviewTileView: View {
         return store.sessionEngine.isAVPlayer
     }
 
+    /// Precise engine label for the dev-only chrome badge, so a tester can
+    /// tell WHICH pipeline is actually playing: native direct HLS vs the
+    /// on-device TS->HLS remux vs mpv. Reads the session-locked engine, which
+    /// a mid-session HEVC fallback downgrades to .mpv, so it reflects reality.
+    private var engineBadgeLabel: String {
+        guard tile.kind == .live else { return "mpv" }
+        switch store.sessionEngine {
+        case .avPlayerDirectHLS: return "AVPlayer · Direct HLS"
+        case .avPlayerRemuxTS:   return "AVPlayer · Remux TS"
+        default:                 return "mpv"
+        }
+    }
+
     /// The URL the AVPlayer tile plays. The seed tile uses the locked
     /// upgraded URL (server-side TS->HLS); added tiles already carry their
     /// upgraded URL on tile.streamURL (MultiviewStore.add does the upgrade
@@ -624,7 +637,7 @@ struct MultiviewTileView: View {
             // incompatible channel will hit onEngineFallback ->
             // downgradeToMPV, the deliberate one-way session policy).
             .onChange(of: tile.streamURL) { _, _ in
-                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
+                store.registerEngine(engineBadgeLabel, for: tile.id)
             }
             .id(tile.id)
             .onAppear {
@@ -635,7 +648,7 @@ struct MultiviewTileView: View {
                 // the audio tile's store regardless of which tile it
                 // happens to be.
                 store.registerProgressStore(progressStore, for: tile.id)
-                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
+                store.registerEngine(engineBadgeLabel, for: tile.id)
                 applyVODIdentityToProgressStore()
             }
             .onDisappear {
@@ -658,7 +671,7 @@ struct MultiviewTileView: View {
             .task(id: "\(tile.id)|\(store.progressStoreRegistrationEpoch)") {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
-                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
+                store.registerEngine(engineBadgeLabel, for: tile.id)
                 applyVODIdentityToProgressStore()
             }
 
@@ -893,7 +906,7 @@ struct MultiviewTileView: View {
             .task(id: "\(tile.id)|\(store.progressStoreRegistrationEpoch)") {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
-                store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
+                store.registerEngine(engineBadgeLabel, for: tile.id)
                 applyVODIdentityToProgressStore()
             }
 
