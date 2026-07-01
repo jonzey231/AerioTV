@@ -5156,13 +5156,34 @@ struct MainTabView: View {
             // Back minimizes").
             debugLog("🎮 [HMP]   → branch: full-screen player → posting .playerBackPress")
             NotificationCenter.default.post(name: .playerBackPress, object: nil)
+        } else if isVODDetailPushed {
+            // #42 fix: a pushed navigation submenu (VOD detail / Settings
+            // subview) must pop BEFORE the mini-player Menu handling below —
+            // otherwise, with a mini active, the mini's single/double-Back
+            // debounce eats the press and you can't back out of the submenu.
+            // Pop programmatically because `.onExitCommand` consumes Menu
+            // before NavigationStack can handle it.
+            debugLog("🎮 Menu pressed: VOD detail pushed → popping to browse list")
+            isVODDetailPushed = false
+            vodNavPopRequested = true
+        } else if isSettingsSubviewPushed {
+            // Same as VOD: pop the innermost pushed Settings level before the
+            // mini-player handling. Our `.onExitCommand` intercepts Menu before
+            // SettingsView's NavigationStack can pop, so signal SettingsView to
+            // pop — classic stack first (ServerDetailView, MyRecordingsView),
+            // then navPath (Appearance, Guide Display, Network, DVR, Developer,
+            // Edit Server). SettingsView resets the flag.
+            debugLog("🎮 Menu pressed: Settings subview pushed → popping")
+            settingsPopRequested = true
         } else if nowPlaying.isActive && nowPlaying.isMinimized {
             // #42 Part 3: with a mini-player active, a SINGLE Back restores it to
             // fullscreen; a DOUBLE Back jumps to the top channel (the long-press
             // route isn't viable — tvOS owns a held Menu). Debounce ~0.3s: the
             // expand is DEFERRED so the mini stays minimized during the window,
             // letting a quick second press land here and bump the count to 2.
-            // (Stopping playback now lives only on the explicit close control.)
+            // Checked AFTER pushed navigation submenus (above) so Back can back
+            // out of Settings/VOD while a mini plays. (Stopping playback now
+            // lives only on the explicit close control.)
             nowPlaying.menuMiniPressCount += 1
             nowPlaying.menuMiniDebounce?.cancel()
             nowPlaying.menuMiniDebounce = Task { @MainActor in
@@ -5178,22 +5199,6 @@ struct MainTabView: View {
                     withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
                 }
             }
-        } else if isVODDetailPushed {
-            // Pop the VOD detail view back to the browse list.
-            // We must do this programmatically because .onExitCommand consumes
-            // the Menu event before NavigationStack can handle it.
-            debugLog("🎮 Menu pressed: VOD detail pushed → popping to browse list")
-            isVODDetailPushed = false
-            vodNavPopRequested = true
-        } else if isSettingsSubviewPushed {
-            // Same problem as VOD: our `.onExitCommand` intercepts Menu
-            // before SettingsView's NavigationStack can pop. Signal
-            // SettingsView to pop its innermost pushed level — classic
-            // stack first (ServerDetailView, MyRecordingsView), then
-            // navPath (Appearance, Guide Display, Network, DVR,
-            // Developer, Edit Server). SettingsView resets the flag.
-            debugLog("🎮 Menu pressed: Settings subview pushed → popping")
-            settingsPopRequested = true
         } else if selectedTab == .liveTV {
             // Menu on the guide (nothing playing, no mini) =
             // "take me back to the top of the list". Matches the
@@ -5494,10 +5499,10 @@ private struct ChannelInfoBanner: View {
                     // riding the banner's same 5s appear/fade window on tune-in.
                     // Left-padded by sidePadding to line up with the card's edge.
                     VStack(alignment: .leading, spacing: 6) {
-                        playerHint("Press Menu/Back to return to TV Guide")
-                        playerHint("Press Select to show player controls")
+                        playerHint("Press Menu/Back to return to TV Guide.")
+                        playerHint("Press Select to show player controls.")
                         if appleTVChannelFlip {
-                            playerHint("Press Up/Down to change channels")
+                            playerHint("Press Up/Down to change channels.")
                         }
                     }
                     .padding(.leading, sidePadding)
