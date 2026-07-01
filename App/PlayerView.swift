@@ -4404,18 +4404,30 @@ struct NativeHLSPlayerScreen: View {
         // (AVPlayer picks a start point ~9s back, not a big pre-buffer).
         playerItem.automaticallyPreservesTimeOffsetFromLive = true
         playerItem.configuredTimeOffsetFromLive = CMTime(seconds: 9, preferredTimescale: 1)
+        // Forward-buffer depth (parity with the multiview tile). Live-measured
+        // Dispatcharr segments are ~5s; this hint fills the startup buffer
+        // aggressively (capped by the ~9s the live offset exposes) to smother the
+        // one early build-up stall, without gating first frame (auto-wait stays
+        // default-true). See TSHLSRemuxer.startPlayer for the full rationale and
+        // the segment-gated-HLS caveat vs mpv's continuous-TS path.
+        playerItem.preferredForwardBufferDuration = 12
+        DebugLogger.shared.log(
+            "[AVP-HLS] fwdBuf set=12 effective=\(playerItem.preferredForwardBufferDuration) offset=9s channel=\(item.name)",
+            category: "Playback", level: .info
+        )
         // Feed the native info panel real channel/program names instead
         // of whatever stale Now Playing state it can scrape.
         playerItem.externalMetadata = Self.nativeMetadata(
             title: item.name,
             subtitle: item.currentProgram
         )
-        // No startup tuning yet, deliberately. "Slow load" and "skipping
-        // in the first few seconds" pull in opposite directions
-        // (buffer headroom vs latency), so the next device run's
-        // [AVP-STREAM] startup= and stall numbers decide the lever
-        // (configuredTimeOffsetFromLive, preferredForwardBufferDuration,
-        // or automaticallyWaitsToMinimizeStalling) rather than a guess.
+        // Startup lever resolved (v1.7.x): preferredForwardBufferDuration=12
+        // above. The measured failure was a single frontier-drain buffer-empty
+        // ~7.5s in, so the forward-buffer lever targets it without the latency
+        // cost of a deeper offset or the visible-stall risk of
+        // automaticallyWaitsToMinimizeStalling=false (left at default true, the
+        // mpv cache-pause analog). Confirm the exact depth from the next device
+        // [AVP-STREAM] startup=/STALL run.
         let avPlayer = AVPlayer(playerItem: playerItem)
         avPlayer.play()
         player = avPlayer

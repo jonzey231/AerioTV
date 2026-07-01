@@ -93,18 +93,33 @@ enum MPVLibraryWarmup {
         guard !hasStarted else { return }
         hasStarted = true
 
-        // v1.7.x (tvOS 26.5): deferred 0.8s → 2.5s. The EAGL context
-        // creation inside doWarmUp() takes a process-wide GPU driver lock
-        // for ~1s; at 0.8s that lock landed on top of the channel-list first
-        // paint AND the cold-start EPG/category publishes, stalling the main
-        // thread (watchdog ~1.2s hang that coincided with the warmup-complete
-        // log). 2.5s lets first paint + the initial EPG publishes drain
-        // before the GPU allocation. First-tap warmth is still gated by
-        // waitUntilComplete(timeout:5.0), and the user cannot tap a channel
-        // within 2.5s of cold launch (the list is still mid-render).
+        // v1.7.x: the warmup is SPLIT into two independently-scheduled phases
+        // because they have opposite scheduling needs.
+        //
+        // Phase 1 (libmpv registration, doWarmUpMPV) takes NO GPU lock and is
+        // the ONLY thing the first-tile decoder-race gate (waitUntilComplete)
+        // needs, so it runs early (0.3s) on the low-priority utility queue: it
+        // cannot preempt the main thread's launch UI (higher QoS), and getting
+        // it done well before the splash clears means an early first tap still
+        // hits the warm mpv path.
+        //
+        // Phase 2 (the throwaway EAGLContext GPU pre-warm, doWarmUpEAGL) takes a
+        // process-wide GPU driver lock for ~1-2s. When both phases shared one
+        // 2.5s defer, on the heavier multi-server startup that lock still landed
+        // on top of the channel-list first paint + the cold-start EPG publishes,
+        // stalling the main thread (the ~2s launch hang). Deferring it alone to
+        // 6.0s lets first paint + the initial publishes drain before the GPU
+        // allocation. isComplete flips after Phase 1 ONLY (never gated on EAGL),
+        // so a rare tap-before-EAGL just pays the one-time cold EAGLContext cost
+        // in the first setupMPV; playback is still correct. Both defers are safe
+        // on an empty/no-source install (fixed timers, unlike a readiness gate).
         DispatchQueue.global(qos: .utility)
-            .asyncAfter(deadline: .now() + 2.5) {
-                doWarmUp()
+            .asyncAfter(deadline: .now() + 0.3) {
+                doWarmUpMPV()
+            }
+        DispatchQueue.global(qos: .utility)
+            .asyncAfter(deadline: .now() + 6.0) {
+                doWarmUpEAGL()
             }
     }
 
@@ -149,36 +164,30 @@ enum MPVLibraryWarmup {
         return isComplete
     }
 
-    private static func doWarmUp() {
-        let totalStart = Date()
-        // v1.6.15: capture thermal state at warmup entry so we can
-        // tell, from a stutter report, whether the device was
-        // already cooking when the user opened the app vs. whether
-        // playback itself heated it up. Resume Last Channel + warmup
-        // both fire near launch and compete for the same CPU/GPU
-        // budget; on a hot device that's been observed to produce
-        // brief audio/video stutters during the first ~10s of
-        // playback. The MultiviewStore observer covers state
-        // transitions DURING playback; this captures the "starting
-        // point" before that observer is even mounted.
+    private static func doWarmUpMPV() {
+        // v1.6.15: capture thermal at Phase-1 entry so a later stutter report
+        // can tell whether the device was already hot at launch (Resume Last
+        // Channel + warmup both compete for the same CPU/GPU budget near launch).
         let thermalAtStart = thermalStateString(ProcessInfo.processInfo.thermalState)
 
-        // ── Phase 1: libmpv ────────────────────────────────────────
+        // Phase 1: libmpv process-wide registration (videotoolbox hwdec, vo
+        // init, fast-profile filter chain). This is the ONLY thing the
+        // first-tile decoder-race gate needs: waitUntilComplete unblocks on
+        // isComplete, flipped at the END of this function. It takes no GPU lock,
+        // so warmUp() schedules it on an early defer.
         let mpvStart = Date()
         guard let mpv = mpv_create() else {
             #if DEBUG
-            debugLog("[MPV-WARMUP] mpv_create failed — warm-up skipped (thermal=\(thermalAtStart))")
+            debugLog("[MPV-WARMUP] mpv_create failed, warm-up skipped (thermal=\(thermalAtStart))")
             #endif
             return
         }
 
-        // Match `Coordinator.setupMPV()` generic options as closely
-        // as possible without hitting per-stream config. The goal
-        // is to trigger the same libmpv init codepath real
-        // playback uses: videotoolbox hwdec registration, libmpv
-        // vo init, fast-profile filter chain load. v1.7.x: hwdec
-        // default is now videotoolbox-copy (was videotoolbox); see
-        // the rationale block above the matching call in setupMPV.
+        // Match Coordinator.setupMPV() generic options as closely as possible
+        // without hitting per-stream config, to trigger the same libmpv init
+        // codepath real playback uses. v1.7.x: hwdec default is now
+        // videotoolbox-copy (was videotoolbox); see the rationale block above
+        // the matching call in setupMPV.
         mpv_set_option_string(mpv, "vo", "libmpv")
         mpv_set_option_string(mpv, "profile", "fast")
         #if !targetEnvironment(simulator)
@@ -187,59 +196,61 @@ enum MPVLibraryWarmup {
 
         let initResult = mpv_initialize(mpv)
 
-        // Destroy immediately — we don't need the handle, just the
-        // side effects of initialize. `terminate_destroy` is
-        // synchronous; no event-loop stragglers.
+        // Destroy immediately: we don't need the handle, just the side effects
+        // of initialize. terminate_destroy is synchronous; no event-loop
+        // stragglers.
         mpv_terminate_destroy(mpv)
         let mpvMs = Int(Date().timeIntervalSince(mpvStart) * 1000)
 
-        // ── Phase 2: OpenGL ES driver ──────────────────────────────
-        // On a fresh app install, the FIRST `EAGLContext(api:)` call
-        // in the process pays a ~2 s one-time cost while tvOS pages
-        // the OpenGL ES driver in from disk. Per-phase timing inside
-        // `setupMPV` confirmed this: cold first tile shows
-        // `EAGLContext_create: 2053ms`, subsequent tiles ~11 ms.
+        // Flip the decoder-race gate now, after Phase 1 only. The first
+        // multiview tile's setupMPV can proceed the instant libmpv is
+        // registered; it does NOT need the Phase-2 EAGL pre-warm (that only
+        // hides a one-time GL driver load). Set even when initialize returned an
+        // error, matching the prior behavior (only mpv_create failing skips it).
+        isComplete = true
+
+        #if DEBUG
+        if initResult < 0 {
+            let err = String(cString: mpv_error_string(initResult))
+            debugLog("[MPV-WARMUP] phase1 libmpv registration in \(mpvMs)ms (thermal=\(thermalAtStart)), isComplete flipped, initialize returned error: \(err)")
+        } else {
+            debugLog("[MPV-WARMUP] phase1 libmpv registration in \(mpvMs)ms (thermal=\(thermalAtStart)), isComplete flipped, first tap hits the warm mpv path")
+        }
+        #endif
+    }
+
+    private static func doWarmUpEAGL() {
+        // Phase 2: OpenGL ES driver pre-warm. On a fresh app install the FIRST
+        // EAGLContext(api:) call in the process pays a ~2s one-time cost while
+        // the OS pages the OpenGL ES driver in from disk (per-phase timing in
+        // setupMPV confirmed it: cold first tile shows EAGLContext_create
+        // ~2053ms, subsequent tiles ~11ms). Create a throwaway context + texture
+        // cache and discard it, so the driver load amortises during idle startup
+        // instead of during the user's first channel tap; later real
+        // EAGLContext creations in Coordinator.setupMPV hit the warm path.
         //
-        // The fix is the same pattern as the mpv warm-up: create a
-        // throwaway EAGLContext + texture cache during launch, discard
-        // immediately, let the driver load amortise during idle
-        // startup time instead of during the user's first channel
-        // tap. Subsequent real EAGLContext creations in
-        // `Coordinator.setupMPV` hit the warm path.
+        // This takes a process-wide GPU driver lock for ~1-2s, so warmUp()
+        // defers it well past channel-list first paint (see the note there).
+        // Pure background pre-warm: it does NOT touch isComplete.
         //
-        // Simulator skips — the simulator GLES path uses a different
-        // software renderer that doesn't share this cost and the
-        // CVOpenGLESTextureCacheCreate call is a no-op there.
+        // Simulator skips: its GLES path uses a different software renderer that
+        // does not share this cost and CVOpenGLESTextureCacheCreate is a no-op.
         let eaglStart = Date()
         #if !targetEnvironment(simulator)
         if let ctx = EAGLContext(api: .openGLES3) ?? EAGLContext(api: .openGLES2) {
             EAGLContext.setCurrent(ctx)
             var cache: CVOpenGLESTextureCache?
             CVOpenGLESTextureCacheCreate(kCFAllocatorDefault, nil, ctx, nil, &cache)
-            // `cache` retained through scope end then released —
-            // we just need the first-time driver allocation to
-            // happen. The real cache is built per-Coordinator.
+            // cache retained through scope end then released; we just need the
+            // first-time driver allocation to happen. The real cache is built
+            // per-Coordinator.
             _ = cache
             EAGLContext.setCurrent(nil)
         }
         #endif
         let eaglMs = Int(Date().timeIntervalSince(eaglStart) * 1000)
-
-        isComplete = true
-
         #if DEBUG
-        let totalMs = Int(Date().timeIntervalSince(totalStart) * 1000)
-        // Sample thermal again at completion. If the state moved
-        // during warmup (entry=fair, exit=serious) that itself is a
-        // signal — the warmup pushed the device hotter, which then
-        // bites the auto-resume that's about to start a stream.
-        let thermalAtEnd = thermalStateString(ProcessInfo.processInfo.thermalState)
-        if initResult < 0 {
-            let err = String(cString: mpv_error_string(initResult))
-            debugLog("[MPV-WARMUP] done in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms, thermal=\(thermalAtStart)→\(thermalAtEnd)) — initialize returned error: \(err)")
-        } else {
-            debugLog("[MPV-WARMUP] process-wide init complete in \(totalMs)ms (mpv=\(mpvMs)ms, eagl=\(eaglMs)ms, thermal=\(thermalAtStart)→\(thermalAtEnd)) — first channel tap will hit the warm path")
-        }
+        debugLog("[MPV-WARMUP] phase2 EAGL GPU pre-warm in \(eaglMs)ms, first tap hits the warm GL path")
         #endif
     }
 

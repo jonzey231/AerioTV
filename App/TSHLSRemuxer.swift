@@ -669,6 +669,25 @@ struct AVPlayerMultiviewTile: View {
         // reads a continuous MPEG-TS stream with no live edge to ride.)
         playerItem.automaticallyPreservesTimeOffsetFromLive = true
         playerItem.configuredTimeOffsetFromLive = CMTime(seconds: 9, preferredTimescale: 1)
+        // Forward-buffer depth. The measured stall was a single "buffer ran
+        // empty" ~7.5s in: a startup TRANSIENT while the buffer built from thin
+        // to steady state, not -16832 edge-danger (the 9s offset already killed
+        // that) and not throughput (0 dropped frames). Live measurement of the
+        // Dispatcharr output shows real segments are ~5s (the ~2s source GOP
+        // floors them above the 4s config) publishing every ~5s, so a thin
+        // startup buffer can drain before the next segment is written. This hint
+        // tells AVPlayer to fill the forward buffer aggressively at startup; it
+        // is a fill-AHEAD ceiling, capped in practice by the ~9s of content the
+        // live offset exposes ahead of the playhead, so it fills to ~the offset.
+        // It does NOT gate first frame while automaticallyWaitsToMinimizeStalling
+        // stays default-true, so startup is unaffected (the cushion fills behind
+        // the playhead, the mpv cache-secs analog). CAVEAT: AVPlayer over
+        // segmented HLS is inherently segment-gated and cannot fully match mpv's
+        // continuous-TS low-latency-no-stall profile at this ~9s latency; the
+        // complete zero-stall fix is a deeper offset (~15s = 3 segments, more
+        // latency) or server-side LL-HLS. This smothers the early transient.
+        playerItem.preferredForwardBufferDuration = 12
+        debugLog("[AVP-MV] fwdBuf set=12 effective=\(playerItem.preferredForwardBufferDuration) offset=9s channel=\(channelName)")
         let avPlayer = AVPlayer(playerItem: playerItem)
         // Live truth at this instant, never a captured snapshot.
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
