@@ -19,6 +19,9 @@
   Left in the guide to jump to the All group, a single Back restores the
   mini-player while a double Back jumps to the top channel, and a single Back
   minimizes a full-screen channel in one press.
+- **Apple TV: refreshed player controls.** The Live TV player controls now use a
+  cleaner, native-style layout (frosted circular buttons for Record, Add Stream,
+  and Options).
 
 ### Fixed
 
@@ -27,6 +30,11 @@
   splices a different encode at an ad break.
 - **The multiview performance warning can be dismissed for good** with a "Don't
   show again" option.
+- **Apple TV: the player Options button stays responsive after a stream
+  re-tune.** A background re-tune could leave it unresponsive; it now works.
+- **Apple TV: Back exits Settings sub-pages while a channel is minimized.** With
+  a mini-player playing, Back inside a Settings sub-page now goes back a level
+  instead of acting on the mini-player.
 
 ## v1.7.9 - 2026-06-30
 
