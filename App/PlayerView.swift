@@ -3672,32 +3672,10 @@ final class AVPlayerProgressDriver {
         // internal-only ones (avsync, dropped frames) at 0.
         store.streamInfo.hwdec = "AVFoundation"
 
-        for track in item.tracks {
-            guard let asset = track.assetTrack else { continue }
-            switch asset.mediaType {
-            case .video:
-                if track.currentVideoFrameRate > 0 {
-                    store.streamInfo.fps = Double(track.currentVideoFrameRate)
-                } else if asset.nominalFrameRate > 0 {
-                    store.streamInfo.fps = Double(asset.nominalFrameRate)
-                }
-                if let fd = asset.formatDescriptions.first {
-                    store.streamInfo.videoCodec = Self.fourCCString(
-                        CMFormatDescriptionGetMediaSubType(fd as! CMFormatDescription))
-                }
-            case .audio:
-                if let fd = asset.formatDescriptions.first {
-                    let desc = fd as! CMFormatDescription
-                    if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
-                        store.streamInfo.sampleRate = Int(asbd.mSampleRate)
-                        store.streamInfo.channels = Int(asbd.mChannelsPerFrame)
-                    }
-                    store.streamInfo.audioCodec = Self.fourCCString(
-                        CMFormatDescriptionGetMediaSubType(desc))
-                }
-            default:
-                break
-            }
+        // Quick sync frame rate from the currently-playing track (0 until
+        // playback actually starts; the async nominalFrameRate below fills in).
+        for track in item.tracks where track.currentVideoFrameRate > 0 {
+            store.streamInfo.fps = Double(track.currentVideoFrameRate)
         }
 
         // Buffered-ahead seconds (the AVPlayer analog of mpv's demuxer cache).
@@ -3712,6 +3690,38 @@ final class AVPlayerProgressDriver {
         // Observed bitrate from the access log, when available.
         if let event = item.accessLog()?.events.last, event.observedBitrate > 0 {
             store.streamInfo.bitrate = event.observedBitrate / 8
+        }
+
+        // Codec + audio format need iOS 16's async track loads. This class is
+        // @MainActor, so the Task resumes on the main actor and the store
+        // writes stay actor-isolated.
+        let assetTracks = item.tracks.compactMap(\.assetTrack)
+        Task { [weak self] in
+            guard let self else { return }
+            for asset in assetTracks {
+                switch asset.mediaType {
+                case .video:
+                    if self.store.streamInfo.fps == 0,
+                       let rate = try? await asset.load(.nominalFrameRate), rate > 0 {
+                        self.store.streamInfo.fps = Double(rate)
+                    }
+                    if let fds = try? await asset.load(.formatDescriptions), let fd = fds.first {
+                        self.store.streamInfo.videoCodec =
+                            Self.fourCCString(CMFormatDescriptionGetMediaSubType(fd))
+                    }
+                case .audio:
+                    if let fds = try? await asset.load(.formatDescriptions), let fd = fds.first {
+                        if let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd)?.pointee {
+                            self.store.streamInfo.sampleRate = Int(asbd.mSampleRate)
+                            self.store.streamInfo.channels = Int(asbd.mChannelsPerFrame)
+                        }
+                        self.store.streamInfo.audioCodec =
+                            Self.fourCCString(CMFormatDescriptionGetMediaSubType(fd))
+                    }
+                default:
+                    break
+                }
+            }
         }
     }
 
