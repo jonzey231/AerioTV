@@ -762,20 +762,21 @@ struct PlaybackBottomChrome_tvOS: View {
             PlaybackLiveProgressBand(store: store)
                 .padding(.horizontal, 80)
 
-            // TEST (branch test/avplayer-hls-engine): when an AVPlayer
-            // toggle is on, the controls mirror the native
-            // AVPlayerViewController transport (frosted circular tool
-            // cells, bottom-RIGHT, label shown under the focused cell)
-            // so the custom chrome and the system player read as ONE
-            // design across surfaces (user direction: no differing
-            // control styles between screens). With both toggles off
-            // the stock labeled pill row renders, identical to main,
-            // so the experiment is invisible to regular users.
-            if PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS {
+            // Modern player chrome (DEFAULT): the controls mirror the native
+            // AVPlayerViewController transport (frosted circular tool cells,
+            // bottom-RIGHT, label under the focused cell) for BOTH engines, so
+            // the custom chrome and the system player read as ONE design (user
+            // direction: no differing control styles between screens). Gated on
+            // `useModernPlayerChrome` (default on, decoupled from the AVPlayer
+            // engine) so it can be reverted to the legacy labeled pill row (the
+            // `else` branch) via UserDefaults without a code change.
+            if PlaybackFeatureFlags.useModernPlayerChrome {
             HStack(alignment: .top, spacing: 18) {
-                // Engine badge (evaluation aid), bottom-left of the
-                // tool row. Non-focusable, informational.
-                if let audioID = store.audioTileID,
+                // Engine badge is a dev evaluation aid — only shown while an
+                // AVPlayer engine toggle is on. Regular users on the default
+                // (mpv) modern chrome see clean controls with no engine tag.
+                if (PlaybackFeatureFlags.avPlayerForHLS || PlaybackFeatureFlags.avPlayerRemuxTS),
+                   let audioID = store.audioTileID,
                    let engine = store.tileEngines[audioID] {
                     Text(engine)
                         .font(.system(size: 18, weight: .semibold))

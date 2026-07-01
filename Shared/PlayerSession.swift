@@ -620,4 +620,18 @@ enum PlaybackFeatureFlags {
         }
         return defaults.bool(forKey: "playback.unified")
     }
+
+    /// `true` (default) → the tvOS Live-TV transport uses the native-style
+    /// circular tool row (frosted icon buttons, bottom-right) for BOTH engines,
+    /// instead of the legacy labeled pill row. This is the "modern player
+    /// chrome" — deliberately decoupled from the AVPlayer engine so users get
+    /// the native look on the stable mpv path. Same absent-key-means-default-on
+    /// convention as `useUnifiedPlayback` so existing users are not regressed.
+    static var useModernPlayerChrome: Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "playback.modernChrome") == nil {
+            return true
+        }
+        return defaults.bool(forKey: "playback.modernChrome")
+    }
 }
