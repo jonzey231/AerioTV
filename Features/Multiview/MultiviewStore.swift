@@ -340,6 +340,14 @@ final class MultiviewStore: ObservableObject {
     /// handles the most common case (swap audio between tiles).
     @Published private(set) var audioProgressStoreRevision: Int = 0
 
+    /// Bumps on every `reset()` (which wipes `progressStoresByTileID`). Tile
+    /// views fold this into their `.task(id:)` so a SAME-ID re-seed after a
+    /// `PlayerSession.exit()` + `enterMultiview()` cycle (e.g. a LAN/WAN
+    /// failover re-tune, common on the AVPlayer engine) re-registers the tile's
+    /// `PlayerProgressStore`. Without it the wipe leaves `audioProgressStore`
+    /// nil and the Options panel can't mount, so the Options pill goes dead.
+    @Published private(set) var progressStoreRegistrationEpoch: Int = 0
+
     /// Currently-audible tile's progress store. `nil` when there's
     /// no audio tile or the audio tile hasn't registered yet (brief
     /// window between tile mount and first SwiftUI body pass). The
@@ -792,6 +800,11 @@ final class MultiviewStore: ObservableObject {
         // tile asynchronously, but this wipe runs now and covers
         // the window between mode flip and disappear.
         progressStoresByTileID = [:]
+        // Force still-mounted tiles to re-register after this wipe. A same-id
+        // re-seed (exit()+enterMultiview on a failover re-tune) does NOT re-fire
+        // the tile's `.task(id: tile.id)`, so without this bump the audio tile's
+        // store stays unregistered and the Options panel never mounts.
+        progressStoreRegistrationEpoch &+= 1
         tileEngines = [:]
         // Engine lock is per-session: clear it so the next session
         // re-resolves (and honors a freshly-toggled Developer flag).

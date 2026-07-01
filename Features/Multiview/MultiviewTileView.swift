@@ -655,7 +655,7 @@ struct MultiviewTileView: View {
             // whenever the id changes, regardless of whether
             // onAppear ran — guarantees the registration even
             // when the diff swallows onAppear.
-            .task(id: tile.id) {
+            .task(id: "\(tile.id)|\(store.progressStoreRegistrationEpoch)") {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
                 store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
@@ -890,7 +890,7 @@ struct MultiviewTileView: View {
             // v1.6.15.x: same belt + suspenders as the tvOS body —
             // see the matching `.task(id: tile.id)` block in
             // `tvOSBody` for the freeze-after-channel-flip rationale.
-            .task(id: tile.id) {
+            .task(id: "\(tile.id)|\(store.progressStoreRegistrationEpoch)") {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
                 store.registerEngine(usesAVPlayerEngine ? "AVPlayer" : "MPV", for: tile.id)
