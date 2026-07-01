@@ -684,11 +684,25 @@ struct AVPlayerMultiviewTile: View {
             player: avPlayer, store: progressStore, isLive: true, applyGravity: { _ in })
         // Report the real video aspect once decode knows it, so the
         // focus border can trace the picture instead of the tile frame.
+        // presentationSize fires repeatedly (often with the SAME size) as the
+        // pipeline settles; each distinct value writes @Published
+        // tileVideoAspects, which re-lays out the whole container. removeDuplicates()
+        // collapses the redundant fires so the aspect (and its layout pass) lands
+        // once instead of on every KVO tick during the first-frame window. The
+        // timing log tells us, from the next device run, whether that layout pass
+        // is the ~650ms first-frame hang or whether the cost is inside
+        // AVFoundation's own first-frame decode (in which case it isn't ours to fix).
         sizeObservation = playerItem.publisher(for: \.presentationSize)
             .receive(on: DispatchQueue.main)
+            .removeDuplicates()
             .sink { size in
                 guard size.width > 0, size.height > 0 else { return }
+                let t0 = Date()
                 MultiviewStore.shared.registerVideoAspect(size.width / size.height, for: tileID)
+                let ms = Int(Date().timeIntervalSince(t0) * 1000)
+                if ms > 50 {
+                    debugLog("[AVP-MV] registerVideoAspect relayout took \(ms)ms (size=\(Int(size.width))x\(Int(size.height)))")
+                }
             }
 
         // No-renderable-video fallback. Some server HLS is "playable" to
