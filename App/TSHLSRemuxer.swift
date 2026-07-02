@@ -528,6 +528,97 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
 /// mixed-engine grids (e.g. an HEVC UHD channel on mpv next to H.264
 /// channels on AVPlayer) are the normal failure mode, not an error.
 ///
+/// Self-rescheduling stall/freeze watchdog for a live AVPlayer item. Polls
+/// every `interval` while `player.currentItem === item`; calls `onDead(reason)`
+/// exactly once and stops when the item fails, never becomes ready, renders no
+/// video, or freezes (clock not advancing while the player is trying to play).
+/// The one-shot +Ns "no renderable video" check it replaces could be
+/// permanently disarmed by a single rendered frame; this keeps watching, so a
+/// mid-stream server wedge (a rejected reload, a stuck live edge) self-heals to
+/// the mpv engine instead of stranding the viewer on a frozen frame. Store the
+/// instance and `cancel()` it on teardown / channel swap.
+///
+/// Uses DispatchQueue.main.asyncAfter (not Timer, whose @Sendable block rejects
+/// the non-Sendable AVPlayer/closure captures) and MainActor.assumeIsolated on
+/// each fire, matching the codebase's main-queue-callback idiom.
+@MainActor
+final class AVPStallWatchdog {
+    private weak var player: AVPlayer?
+    private weak var item: AVPlayerItem?
+    private let label: String
+    private let interval: TimeInterval
+    private let onDead: (String) -> Void
+    private var lastTime = -1.0
+    private var stuckPolls = 0     // consecutive polls with a frozen clock
+    private var unknownPolls = 0   // consecutive polls stuck at .unknown
+    private var cancelled = false
+    private var fired = false      // onDead is strictly one-shot
+
+    init(player: AVPlayer, item: AVPlayerItem, label: String,
+         interval: TimeInterval = 4.0, onDead: @escaping (String) -> Void) {
+        self.player = player
+        self.item = item
+        self.label = label
+        self.interval = interval
+        self.onDead = onDead
+    }
+
+    func start() { schedule() }
+    func cancel() { cancelled = true }
+
+    private func schedule() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
+            MainActor.assumeIsolated { self?.poll() }
+        }
+    }
+
+    private func poll() {
+        guard !cancelled, !fired else { return }
+        guard let player, let item, player.currentItem === item else { return }
+        func die(_ reason: String) {
+            fired = true
+            debugLog("[AVP-WATCHDOG] \(label): \(reason); falling back to mpv")
+            onDead(reason)
+        }
+        switch item.status {
+        case .failed:
+            die("item failed (\(item.error.map { "\($0)" } ?? "unknown error"))")
+            return
+        case .unknown:
+            unknownPolls += 1
+            if unknownPolls >= 3 { die("never became ready (~\(Int(interval * 3))s at .unknown)"); return }
+        case .readyToPlay:
+            unknownPolls = 0
+            let size = item.presentationSize
+            if size.width == 0 && size.height == 0 {
+                die("ready but no renderable video (audio-only / undecodable video)")
+                return
+            }
+            // Frozen clock: the player is trying to play (not user-paused) but
+            // the playhead is not advancing. Two consecutive polls (~2*interval)
+            // distinguish a true wedge from a brief rebuffer.
+            if player.timeControlStatus != .paused {
+                let t = CMTimeGetSeconds(item.currentTime())
+                if t.isFinite, lastTime >= 0, (t - lastTime) < 0.25 {
+                    stuckPolls += 1
+                    if stuckPolls >= 2 {
+                        die(String(format: "playback frozen (clock stuck at %.2fs while not paused)", t))
+                        return
+                    }
+                } else {
+                    stuckPolls = 0
+                }
+                if t.isFinite { lastTime = t }
+            } else {
+                stuckPolls = 0   // user paused: never accumulate
+            }
+        @unknown default:
+            break
+        }
+        schedule()
+    }
+}
+
 /// Known evaluation limitations: the chrome scrubber and track pickers
 /// bind to the mpv progress store, so they are inert while the audio
 /// tile is AVPlayer-backed; play/pause via `shouldPause` works.
@@ -568,7 +659,7 @@ struct AVPlayerMultiviewTile: View {
     /// Fires a few seconds after start: if the item became ready but never
     /// reported a video size, the stream is audio-only to AVFoundation
     /// (e.g. HEVC carried in MPEG-TS HLS) and we fall the tile back to mpv.
-    @State private var noVideoCheck: DispatchWorkItem?
+    @State private var stallWatchdog: AVPStallWatchdog?
 
     var body: some View {
         ZStack {
@@ -667,7 +758,11 @@ struct AVPlayerMultiviewTile: View {
         // would override both and, on the LL path, pin latency at our guess
         // instead of riding the live edge. Preserve whatever start point the
         // server hands us across stalls. (mpv never needs this: it reads a
-        // continuous MPEG-TS stream with no live edge to ride.)
+        // continuous MPEG-TS stream with no live edge to ride.) Deliberately no
+        // fallback configuredTimeOffsetFromLive when EXT-X-START is absent:
+        // AVPlayer's own PART-HOLD-BACK / 3x-TARGETDURATION default is safe, an
+        // override would pin LL latency, and a server that joins us into an
+        // unservable edge is recovered by the stall watchdog below.
         playerItem.automaticallyPreservesTimeOffsetFromLive = true
         // Forward buffer: left at AVPlayer's automatic default (0). A device
         // capture DISPROVED the idea that a forced preferredForwardBufferDuration
@@ -696,6 +791,10 @@ struct AVPlayerMultiviewTile: View {
         driver?.teardown()
         driver = AVPlayerProgressDriver(
             player: avPlayer, store: progressStore, isLive: true, applyGravity: { _ in })
+        // Fast path: AVFoundation's own diagnosis of a rejected playlist / failed
+        // reload arrives as an errorLog entry; escalate the fatal codes straight
+        // to the mpv engine instead of logging and stranding the tile.
+        driver?.onUnrecoverable = onEngineFallback
         // Report the real video aspect once decode knows it, so the
         // focus border can trace the picture instead of the tile frame.
         // presentationSize fires repeatedly (often with the SAME size) as the
@@ -719,28 +818,18 @@ struct AVPlayerMultiviewTile: View {
                 }
             }
 
-        // No-renderable-video fallback. Some server HLS is "playable" to
-        // AVFoundation (audio decodes, the item reaches readyToPlay) but
-        // carries NO renderable video track, so it plays audio over a black
-        // screen forever, e.g. HEVC carried in MPEG-TS, which AVFoundation
-        // will not decode (HEVC over HLS needs fMP4/CMAF). mpv CAN decode it,
-        // so when a ready item never reports a video size, hand the tile back
-        // to the mpv engine instead of stranding the viewer on a black tile.
-        // The work self-guards on the live item state at fire time; stop()
-        // cancels it on teardown / channel swap.
-        let checkedItem = playerItem
-        let fallback = onEngineFallback
-        let name = channelName
-        let work = DispatchWorkItem {
-            guard checkedItem.status == .readyToPlay,
-                  checkedItem.presentationSize.width == 0,
-                  checkedItem.presentationSize.height == 0 else { return }
-            debugLog("[AVP-MV] audio-only, no renderable video channel=\(name); falling back to mpv tile")
-            fallback("no renderable video")
-        }
-        noVideoCheck?.cancel()
-        noVideoCheck = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
+        // Stall/freeze watchdog. Covers the old audio-only/no-renderable-video
+        // case (HEVC-in-TS reaches readyToPlay with presentationSize 0x0) AND,
+        // unlike the previous one-shot +4s check, keeps watching so a mid-stream
+        // wedge (a rejected LL reload, a stuck live edge) that arrives AFTER the
+        // first frame still self-heals to the mpv engine. Self-invalidates on
+        // channel swap (currentItem changes); stop() invalidates it on teardown.
+        stallWatchdog?.cancel()
+        let watchdog = AVPStallWatchdog(
+            player: avPlayer, item: playerItem, label: "tile \(channelName)",
+            onDead: onEngineFallback)
+        watchdog.start()
+        stallWatchdog = watchdog
     }
 
     private func stop() {
@@ -753,8 +842,8 @@ struct AVPlayerMultiviewTile: View {
         statusText = nil
         readyLocalURL = nil
         sizeObservation = nil
-        noVideoCheck?.cancel()
-        noVideoCheck = nil
+        stallWatchdog?.cancel()
+        stallWatchdog = nil
         MultiviewStore.shared.unregisterVideoAspect(for: tileID)
     }
 }

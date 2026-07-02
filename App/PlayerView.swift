@@ -3420,6 +3420,16 @@ final class AVPlayerProgressDriver {
     /// mpv vo_drops/dec_drops deltas.
     private var lastStallCount = 0
     private var lastDroppedFrames = 0
+    /// Escalation sink for a fatal/persistent stream error the errorLog
+    /// surfaces (e.g. a rejected playlist or a failed blocking reload that
+    /// never throws to `status`). The host wires this to its engine fallback.
+    /// Fired at most once per driver.
+    var onUnrecoverable: ((String) -> Void)?
+    private var firedUnrecoverable = false
+    /// Consecutive non-fatal fetch errors (segment/part 404, playlist not
+    /// received); escalated only after a few strikes so a single transient
+    /// blip does not bounce the engine.
+    private var softErrorCount = 0
 
     init(player: AVPlayer,
          store: PlayerProgressStore,
@@ -3496,6 +3506,9 @@ final class AVPlayerProgressDriver {
         // never re-run populateTracks/populateStreamInfo with stale data.
         itemObservations.forEach { $0.invalidate() }
         itemObservations.removeAll()
+        // New item gets a fresh error-escalation budget.
+        softErrorCount = 0
+        firedUnrecoverable = false
         guard let item else { return }
         // Duration (VOD / seekable). Live HLS reports indefinite, which
         // we leave as durationMs == 0.
@@ -3566,9 +3579,39 @@ final class AVPlayerProgressDriver {
         // bitrate switch failures) that show as skips but never throw.
         itemNotificationTokens.append(nc.addObserver(
             forName: AVPlayerItem.newErrorLogEntryNotification,
-            object: item, queue: .main) { _ in
+            object: item, queue: .main) { [weak self] _ in
             guard let event = item.errorLog()?.events.last else { return }
             debugLog("[AVP-STREAM] error log: status=\(event.errorStatusCode) domain=\(event.errorDomain) \(event.errorComment ?? "")")
+            MainActor.assumeIsolated {
+                guard let self, !self.firedUnrecoverable else { return }
+                let code = event.errorStatusCode
+                // Fatal, one entry is enough: playlist parse/validation failure
+                // (-12642), variant/media selection failure (-12646), and
+                // Blocking Playlist Reload failure (-15416). All three leave
+                // AVPlayer wedged with no throw to `status`, which is exactly
+                // why nothing surfaced for the frozen live channels.
+                let fatal: Set<Int> = [-12642, -12646, -15416]
+                if fatal.contains(code) {
+                    self.firedUnrecoverable = true
+                    let reason = "fatal stream error \(code) (\(event.errorComment ?? "?"))"
+                    debugLog("[AVP-STREAM] \(reason); escalating to engine fallback")
+                    self.onUnrecoverable?(reason)
+                    return
+                }
+                // Persistent (not one-off) fetch failures: playlist not received
+                // (-12888) or segment/part 404 out of the window (-12938).
+                // Escalate only after 3 strikes so a single transient blip does
+                // not bounce the engine.
+                if code == -12888 || code == -12938 {
+                    self.softErrorCount += 1
+                    if self.softErrorCount >= 3 {
+                        self.firedUnrecoverable = true
+                        let reason = "persistent fetch error \(code) x\(self.softErrorCount)"
+                        debugLog("[AVP-STREAM] \(reason); escalating to engine fallback")
+                        self.onUnrecoverable?(reason)
+                    }
+                }
+            }
         })
 
         // Hard stall: the player ran dry. This is the "skipping in the
@@ -3782,6 +3825,7 @@ final class AVPlayerProgressDriver {
         perfTimer = nil
         aspectCancellable?.cancel()
         aspectCancellable = nil
+        onUnrecoverable = nil
         // Drop the closures so a torn-down driver can't drive a dead player.
         store.togglePauseAction = nil
         store.seekAction = nil
@@ -4148,7 +4192,7 @@ struct NativeHLSPlayerScreen: View {
     /// AVFoundation decodes audio-only over a black screen), hand the
     /// channel back to mpv. The direct-HLS path otherwise only fell back on
     /// AVPlayerItemFailedToPlayToEndTime, which neither of those cases fires.
-    @State private var noVideoCheck: DispatchWorkItem?
+    @State private var stallWatchdog: AVPStallWatchdog?
     /// One-shot guard so the watchdog, the failure notification, and a remux
     /// error can't each trigger a fallback into an already-dismissed screen.
     @State private var didFallback = false
@@ -4351,8 +4395,8 @@ struct NativeHLSPlayerScreen: View {
             remuxer = nil
             sleepWork?.cancel()
             sleepWork = nil
-            noVideoCheck?.cancel()
-            noVideoCheck = nil
+            stallWatchdog?.cancel()
+            stallWatchdog = nil
             AudioSessionRefCount.decrement(caller: "native-hls")
             IdleTimerRefCount.decrement(caller: "native-hls")
             DebugLogger.shared.log(
@@ -4434,22 +4478,19 @@ struct NativeHLSPlayerScreen: View {
         // permanent black screen (presentationSize stays 0x0). Neither fires
         // AVPlayerItemFailedToPlayToEndTime, so without this the single-stream
         // direct-HLS path would strand the viewer. mpv decodes these fine.
-        let checkedItem = playerItem
-        let channelName = item.name
-        let work = DispatchWorkItem {
-            let status = checkedItem.status
-            let noVideo = checkedItem.presentationSize.width == 0
-                && checkedItem.presentationSize.height == 0
-            guard status == .failed || (status == .readyToPlay && noVideo) else { return }
-            DebugLogger.shared.log(
-                "[AVP-HLS] no renderable video (status=\(status.rawValue)) channel=\(channelName); falling back to mpv",
-                category: "Playback", level: .warning
-            )
-            fallbackToMPV()
-        }
-        noVideoCheck?.cancel()
-        noVideoCheck = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
+        // Stall/freeze watchdog (also covers tvOS, where the AVPlayerProgressDriver
+        // below is #if os(iOS)-gated and so its errorLog escalation does not run).
+        // Replaces the old one-shot +4s no-video check, which a single rendered
+        // frame permanently disarmed: this keeps polling, so a wedge that lands
+        // AFTER first frame (a rejected LL reload, a stuck live edge) still
+        // self-heals to mpv instead of freezing forever. Self-invalidates on item
+        // swap; onDisappear invalidates it on teardown.
+        stallWatchdog?.cancel()
+        let watchdog = AVPStallWatchdog(
+            player: avPlayer, item: playerItem, label: "native-hls \(item.name)",
+            onDead: { _ in fallbackToMPV() })
+        watchdog.start()
+        stallWatchdog = watchdog
         #if os(iOS)
         // Bridge AVPlayer state into the shared store the chrome reads.
         // Gravity is applied declaratively (the layer view reads
@@ -4461,6 +4502,10 @@ struct NativeHLSPlayerScreen: View {
             isLive: true,
             applyGravity: { _ in }
         )
+        // Fast path: escalate a fatal errorLog entry (rejected playlist / failed
+        // reload) straight to mpv. The watchdog above is the universal slow net;
+        // this is the ~1s reaction when AVFoundation names the failure.
+        driver?.onUnrecoverable = { _ in fallbackToMPV() }
         scheduleControlsHide()
         #if DEBUG
         // -AerioChromeSelfTest: scripted chrome exercise for simulator
