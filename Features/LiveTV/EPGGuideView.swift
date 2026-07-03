@@ -1389,7 +1389,8 @@ final class GuideStore: ObservableObject {
     /// is a multi-second frozen UI.
     /// Returns `true` when the fetch+parse+merge completed and at
     /// least some programs landed in `programs`. Returns `false` on
-    /// network/HTTP/parse failure so callers can fall through to a
+    /// network/HTTP/parse failure, OR when the feed parsed but matched
+    /// zero of these channels, so callers can fall through to a
     /// non-XMLTV backstop. The Dispatcharr-specific 403 case
     /// (LAN-only `/output/epg` policy) is the v1.6.22 reason this
     /// signal exists; Dispatcharr also publishes its programs via
@@ -1557,7 +1558,16 @@ final class GuideStore: ObservableObject {
         // Back-fill ChannelStore so Tint Channel Cards reflects
         // the XMLTV categories on every channel row.
         ChannelStore.shared.applyXMLTVCategories(result.currentCategoriesByChannelID, serverID: categoryServerID)
-        return true
+        // Honor the documented contract: "landed" means programmes actually
+        // matched channels, not merely that the HTTP fetch + parse succeeded. A
+        // reachable feed that matches zero of these channels (an XC provider
+        // whose channels carry no epg_channel_id, or an empty <tv/>) must read
+        // as false so the caller falls through to its backstop (XC
+        // get_short_epg, Dispatcharr /api/epg/grid/). Returning true
+        // unconditionally silently stranded those channels with no guide at all
+        // (issue #49's own "no channel carries an epg_channel_id" fallback case
+        // never fired, because a 0-match parse still reported success).
+        return result.matched > 0
     }
 
     // MARK: - Rolling Prefetch
