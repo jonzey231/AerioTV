@@ -32,3 +32,9 @@ IPAs/
 
 # AI-assistant scratch / instructions — local-only
 CLAUDE.md
+
+# Windows cruft (stray Thumbs.db from cross-platform asset editing)
+Thumbs.db
+
+# Local-only UITest harness (see file header: heat/regression, not committed)
+AerioUITests/
