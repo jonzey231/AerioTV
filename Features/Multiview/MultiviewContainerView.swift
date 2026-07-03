@@ -607,12 +607,6 @@ struct MultiviewContainerView: View {
                 }
             }
         }
-        #if os(iOS)
-        // Issue #38: whenever the player leaves the hierarchy (close,
-        // channel teardown, error dismiss), return to the natural
-        // orientation so the app is never left stuck in landscape.
-        .onDisappear { AppOrientationLock.release() }
-        #endif
         // When the user minimizes to the corner, tvOS won't release
         // focus from the tile Button on its own — `.focusable(false)`
         // via the tile isn't honoured reliably for a focused view.
@@ -622,12 +616,6 @@ struct MultiviewContainerView: View {
         // focus off the container on tvOS.
         .onChange(of: nowPlaying.isMinimized) { _, minimized in
             if minimized {
-                #if os(iOS)
-                // Issue #38: shrinking a forced-landscape player to the
-                // corner mini-player brings the full portrait app UI back,
-                // so drop the forced orientation here too.
-                AppOrientationLock.release()
-                #endif
                 // Clear local @FocusState so the binding no longer
                 // pulls focus to the tile, then post the guide-focus
                 // claim.

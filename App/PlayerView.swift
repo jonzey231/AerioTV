@@ -1029,6 +1029,17 @@ private struct PlayerRootView: View {
         // `.focusable(...)` re-evaluation and the engine's
         // bookkeeping both settle before we claim focus.
         .onChange(of: nowPlayingManager.isMinimized) { _, minimized in
+            #if os(iOS)
+            // Issue #38: minimizing keeps this PlayerView mounted (HomeView just
+            // offsets it off-screen for the mini-player), so `.onDisappear`
+            // never fires and a forced-landscape lock would otherwise strand the
+            // whole browse UI in landscape until full close. Drop it here on the
+            // minimize edge, mirroring the unified multiview path.
+            if minimized, forcedLandscape {
+                forcedLandscape = false
+                requestOrientation(landscape: false)
+            }
+            #endif
             guard !minimized else { return }
             DispatchQueue.main.async {
                 resetFocus(in: playerFocusScope)

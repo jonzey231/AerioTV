@@ -18,6 +18,13 @@ final class RecordingCoordinator: ObservableObject {
     /// Active local recording sessions keyed by `Recording.id`.
     @Published private(set) var activeSessions: [UUID: LocalRecordingSession] = [:]
 
+    /// Pending auto-stop tasks keyed by `Recording.id`. Each sleeps until the
+    /// recording's `effectiveEnd` and then stops it. Tracked (not fire-and-
+    /// forget) so an early stop can cancel the pending task instead of leaving
+    /// it sleeping for the rest of the scheduled duration, holding the
+    /// `Recording` + `ModelContext` and later firing against removed state.
+    private var autoStopTasks: [UUID: Task<Void, Never>] = [:]
+
     /// Whether any recording (local or server-side) is currently in progress.
     @Published private(set) var isRecording = false
 
@@ -133,12 +140,15 @@ final class RecordingCoordinator: ObservableObject {
         do {
             try await session.start()
 
-            // Schedule auto-stop at effectiveEnd
+            // Schedule auto-stop at effectiveEnd. Tracked so an early stop can
+            // cancel it (see autoStopTasks / stopLocalRecording).
             let delay = recording.effectiveEnd.timeIntervalSinceNow
             if delay > 0 {
-                Task {
+                let recID = recording.id
+                autoStopTasks[recID] = Task { [weak self] in
                     try? await Task.sleep(for: .seconds(delay))
-                    await stopLocalRecording(recording, modelContext: modelContext)
+                    guard !Task.isCancelled else { return }
+                    await self?.stopLocalRecording(recording, modelContext: modelContext)
                 }
             }
         } catch {
@@ -152,6 +162,11 @@ final class RecordingCoordinator: ObservableObject {
 
     /// Stops a local recording, finalizes the file, updates model state.
     func stopLocalRecording(_ recording: Recording, modelContext: ModelContext) async {
+        // Cancel any pending auto-stop for this recording. On an early stop this
+        // prevents the scheduled task from sleeping (and retaining state) until
+        // effectiveEnd; when this IS the auto-stop firing, cancelling an
+        // already-completed task is a harmless no-op.
+        autoStopTasks.removeValue(forKey: recording.id)?.cancel()
         guard let session = activeSessions.removeValue(forKey: recording.id) else {
             // Diagnostic for the "Stop doesn't stop" report: if no session is
             // tracked here when Stop is pressed, the underlying URLSession may
