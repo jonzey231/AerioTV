@@ -1543,6 +1543,9 @@ struct RootView: View {
                     // leaves the local field unfiltered; only a positively
                     // synced non-empty value applies the filter.
                     local.dispatcharrChannelProfileIDs = remote.dispatcharrChannelProfileIDs
+                    // Catch-up: adopt the remote guide-history retention
+                    // so the replay window matches across devices.
+                    local.epgRetentionDays = remote.epgRetentionDays
                     // Queue credential writes for after the merge
                     if !remote.password.isEmpty {
                         pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))
@@ -1598,6 +1601,8 @@ struct RootView: View {
                 // the same way on this device. Absent in the payload
                 // defaults to "" (no profile = show all) via deserialize.
                 newServer.dispatcharrChannelProfileIDs = remote.dispatcharrChannelProfileIDs
+                // Catch-up: inherit the guide-history retention setting.
+                newServer.epgRetentionDays = remote.epgRetentionDays
                 // Queue credential writes for after the merge
                 if !remote.password.isEmpty {
                     pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))

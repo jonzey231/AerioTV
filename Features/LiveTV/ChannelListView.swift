@@ -1500,6 +1500,27 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// when the optional "Tint channel cards" toggle is on. Nil for sources that
     /// don't expose category data (Dispatcharr and Xtream Codes currently).
     var currentProgramCategory: String? = nil
+    /// Catch-up (timeshift): how many days of already-aired programming
+    /// this channel's provider archives. 0 = no catch-up. Dispatcharr:
+    /// the server-side MAX across the channel's provider streams
+    /// (`is_catchup`/`catchup_days` on /api/channels/channels/). Xtream
+    /// Codes: get_live_streams `tv_archive`/`tv_archive_duration`.
+    var catchupDays: Int = 0
+
+    /// True when this channel has any catch-up archive at all.
+    var hasCatchup: Bool { catchupDays > 0 }
+
+    /// Whether a programme spanning [start, end] can be replayed from the
+    /// channel's archive right now: it must have ENDED and still be inside
+    /// the provider's retention window (capped at 30 days, matching the
+    /// Dispatcharr server cap). Same gate drives the guide badge and the
+    /// Watch action so the two can never disagree (AerioTV-Android parity).
+    func canReplay(start: Date, end: Date, now: Date = Date()) -> Bool {
+        guard hasCatchup else { return false }
+        guard end <= now else { return false }
+        let windowDays = min(catchupDays, 30)
+        return now.timeIntervalSince(end) <= Double(windowDays) * 86_400
+    }
 }
 
 // MARK: - EPG Entry (for upcoming schedule)
@@ -1658,6 +1679,15 @@ struct ChannelRow: View {
         }
     }
     @State private var activeSheet: ChannelRowSheet? = nil
+    /// Catch-up: the resolved timeshift playback presented full screen
+    /// (recordings-pattern), or nil. Row-local: only the expanded row
+    /// that launched a replay ever sets it.
+    @State private var playingCatchup: CatchupPlayback? = nil
+    /// Catch-up: user-facing resolve failure, shown as an alert.
+    @State private var catchupErrorMessage: String? = nil
+    /// Catch-up: whether the "Previously aired" history section is
+    /// expanded. Collapsed by default so the panel lands on upcoming.
+    @State private var showAiredPrograms = false
     /// Tracks which upcoming-program row currently owns the popover
     /// shown in response to a long-press. `EPGEntry.id` is
     /// deterministic (title + start + end) so the binding is stable
@@ -2309,6 +2339,46 @@ struct ChannelRow: View {
     /// cold launch where a channel exists but XMLTV hasn't
     /// parsed yet — in that case we still show SOMETHING rather
     /// than an empty panel.
+    /// Catch-up: this channel's ALREADY-AIRED programmes from the retained
+    /// guide history, oldest first. Everything retained is listed (the
+    /// per-server Guide History setting bounds the depth); the section
+    /// renders collapsed so the panel still lands on the upcoming
+    /// schedule, Android-parity semantics adapted to SwiftUI.
+    private var airedPrograms: [EPGEntry] {
+        let now = Date()
+        let fromGuideStore = guideStore.programs[item.id] ?? []
+        return fromGuideStore
+            .filter { $0.end <= now }
+            .sorted { $0.start < $1.start }
+            .map {
+                EPGEntry(title: $0.title, description: $0.description,
+                         startTime: $0.start, endTime: $0.end,
+                         category: $0.category, programID: $0.programID)
+            }
+    }
+
+    /// Catch-up: resolve an aired programme and present the player,
+    /// silencing any live session first (recordings-pattern teardown).
+    private func watchCatchup(_ entry: EPGEntry) {
+        guard let server = ChannelStore.shared.activeServer,
+              let start = entry.startTime, let end = entry.endTime else { return }
+        Task { @MainActor in
+            do {
+                let pb = try await CatchupSupport.resolve(
+                    server: server,
+                    channel: item,
+                    programTitle: entry.title,
+                    programStart: start,
+                    programEnd: end
+                )
+                PlayerSession.shared.exit()
+                playingCatchup = pb
+            } catch {
+                catchupErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private var futurePrograms: [EPGEntry] {
         let now = Date()
         let fromGuideStore = guideStore.programs[item.id] ?? []
@@ -2494,11 +2564,108 @@ struct ChannelRow: View {
     }
     #endif
 
+    /// One aired programme row inside the "Previously aired" disclosure.
+    /// Replayable entries (inside the channel's archive window) carry the
+    /// rewind badge and tap straight into catch-up playback; the rest are
+    /// dimmed reference rows.
+    @ViewBuilder
+    private func airedEntryRow(_ entry: EPGEntry) -> some View {
+        let replayable: Bool = {
+            guard let start = entry.startTime, let end = entry.endTime else { return false }
+            return item.canReplay(start: start, end: end)
+        }()
+        Button {
+            if replayable { watchCatchup(entry) }
+        } label: {
+            HStack(spacing: 6) {
+                if replayable {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 11))
+                        .foregroundColor(.accentPrimary)
+                }
+                Text(entry.title)
+                    .font(.labelSmall)
+                    .foregroundColor(replayable ? .textPrimary : .textTertiary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if let start = entry.startTime, let end = entry.endTime {
+                    HStack(spacing: 3) {
+                        Text(start, style: .time)
+                        Text("-")
+                        Text(end, style: .time)
+                    }
+                    .font(.system(size: 11))
+                    .foregroundColor(.textTertiary)
+                }
+            }
+            .padding(.vertical, 5)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!replayable)
+    }
+
     @ViewBuilder
     private var guidePanel: some View {
         Divider()
             .background(Color.borderSubtle)
             .padding(.horizontal, 14)
+
+        // Catch-up: retained history, collapsed by default so the panel
+        // still lands on the upcoming schedule. Replayable entries tap
+        // straight into playback; older-than-retention entries (or
+        // channels with no archive) render as plain reference rows.
+        // DisclosureGroup is unavailable on tvOS, so this is a manual
+        // expander that renders identically on both platforms.
+        if !airedPrograms.isEmpty {
+            VStack(alignment: .leading, spacing: 0) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showAiredPrograms.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: 12))
+                        Text("Previously aired")
+                            .font(.labelSmall)
+                        Image(systemName: showAiredPrograms ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundColor(.textTertiary)
+                    .padding(.vertical, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if showAiredPrograms {
+                    ForEach(airedPrograms) { entry in
+                        airedEntryRow(entry)
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 4)
+            .fullScreenCover(item: $playingCatchup) { pb in
+                PlayerView(
+                    urls: [pb.url],
+                    title: pb.title,
+                    headers: pb.headers,
+                    isLive: false,
+                    isDVR: false,
+                    catchup: pb
+                )
+            }
+            .alert("Catch-up Unavailable",
+                   isPresented: Binding(
+                        get: { catchupErrorMessage != nil },
+                        set: { if !$0 { catchupErrorMessage = nil } })) {
+                Button("OK", role: .cancel) { catchupErrorMessage = nil }
+            } message: {
+                Text(catchupErrorMessage ?? "")
+            }
+        }
 
         if fetchUpcoming != nil {
             if isLoadingUpcoming {

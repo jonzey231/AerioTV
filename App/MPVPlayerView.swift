@@ -427,6 +427,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     /// multiview tiles leave it false. Drives the live-edge seek clamp
     /// and keeps a transient end-of-playlist EOF from locking seeks.
     var isDVR: Bool = false
+    /// Catch-up (timeshift): non-nil when playing an aired programme from
+    /// the provider archive. The Coordinator then (a) pins the reported
+    /// duration to the programme length, (b) offsets time-pos by the
+    /// current re-tune window, and (c) turns seeks into URL rebuilds.
+    var catchup: CatchupPlayback? = nil
     let nowPlayingTitle: String
     let nowPlayingSubtitle: String?
     let nowPlayingArtworkURL: URL?
@@ -497,6 +502,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         c.nowPlayingTitle = nowPlayingTitle
         c.nowPlayingSubtitle = nowPlayingSubtitle
         c.nowPlayingArtworkURL = nowPlayingArtworkURL
+        // Catch-up: hand the playback context to the Coordinator and pin
+        // the store's duration to the programme's real length up front
+        // (the timeshift TS reports an estimated duration that must never
+        // drive the scrubber). makeCoordinator runs on the main thread.
+        if let cu = catchup {
+            c.catchup = cu
+            progressStore.durationMs = cu.programDurationMs
+        }
         return c
     }
 
@@ -636,6 +649,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// is allowed to land. Seeking exactly to the live edge of an
         /// in-progress HLS playlist lands on EOF and stalls; staying a
         /// few seconds back keeps playback flowing into the live edge.
+        /// Catch-up (timeshift) context, or nil for every other playback.
+        /// Set once by makeCoordinator before the view mounts.
+        var catchup: CatchupPlayback? = nil
+        /// Programme-relative start (ms) of the currently tuned timeshift
+        /// window: 0 on first tune, the floored seek target after each
+        /// re-tune. Displayed position = this + mpv time-pos.
+        var catchupBaseOffsetMs: Int32 = 0
+        /// Residual seconds to seek once the re-tuned file loads (the
+        /// timeshift URL's start segment has minute granularity; this
+        /// lands the exact second). Consumed by handleFileLoaded.
+        var catchupPendingSeekSecs: Double? = nil
+
         fileprivate static let dvrLiveEdgeGuardSec: Double = 6.0
         fileprivate let progressStore: PlayerProgressStore
         private let logStore: AttemptLogStore
@@ -2188,6 +2213,35 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 guard let self, !self.isLive else { return }
                 self.mpvQueue.async { [weak self] in
                     guard let self, let mpv = self.activeMPVHandle() else { return }
+                    if let cu = self.catchup {
+                        // Catch-up: the bounded timeshift TS has no reliable
+                        // in-stream random access (estimated Content-Length,
+                        // session-bound 301s), but the URL encodes its start
+                        // time -- so a seek IS a re-tune at programmeStart +
+                        // target. Floor to the minute (the URL's start
+                        // granularity) and land the exact second with a
+                        // residual in-stream seek once the file loads.
+                        // Mirrors the shipped AerioTV-Android seek model.
+                        let durMs = cu.programDurationMs
+                        let clamped = min(max(targetMs, 0), max(0, durMs - 5_000))
+                        let offsetSecs = Double(clamped) / 1000.0
+                        let flooredSecs = (offsetSecs / 60.0).rounded(.down) * 60.0
+                        guard let newURL = CatchupSupport.rebuildForOffset(
+                            url: cu.url,
+                            panelTimeZoneID: cu.panelTimeZoneID,
+                            programStart: cu.programStart,
+                            programEnd: cu.programEnd,
+                            offsetSeconds: flooredSecs) else { return }
+                        self.playbackEnded = false
+                        self.catchupBaseOffsetMs = Int32(flooredSecs * 1000)
+                        let residual = offsetSecs - flooredSecs
+                        self.catchupPendingSeekSecs = residual > 0.5 ? residual : nil
+                        self.mpvCommandAsync(mpv, ["loadfile", newURL.absoluteString, "replace"])
+                        let ps = self.progressStore
+                        DispatchQueue.main.async { ps.currentMs = clamped }
+                        debugLog("[CATCHUP] re-tune to \(clamped / 1000)s (window \(Int(flooredSecs))s)")
+                        return
+                    }
                     if self.isDVR {
                         // DVR (in-progress recording): the seekable window grows
                         // toward a moving live edge. Clamp the target a few
@@ -4070,6 +4124,29 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // print). If another HTTP/TLS investigation comes up,
             // re-enable selectively at that point — don't leave
             // info-level on for everyone permanently.
+            // Catch-up timeshift: the server advertises an ESTIMATED
+            // Content-Length (Dispatcharr computes it from bitrate *
+            // duration), so ffmpeg's open-time duration probe -- a seek
+            // to the advertised end to read the last PTS -- lands past
+            // the real data, fails, and then the recovery seek back to 0
+            // fails too, killing the load with "nothing to play". Marking
+            // the stream unseekable skips the end probe entirely. The
+            // player never needs byte-range seeks here anyway: the
+            // timeline is pinned to the programme duration and every
+            // scrub re-tunes via a rebuilt /timeshift/ URL (same model
+            // as the Android UnboundedLengthDataSource fix). Scoped to
+            // this instance, which only ever plays catch-up streams.
+            // Both option sets are needed: mpv may route the URL through
+            // its stream layer (stream-lavf-o) or hand it to libavformat
+            // directly inside demux_lavf (demuxer-lavf-o) depending on
+            // the protocol match, and the http AVOptions only apply to
+            // whichever layer actually opens the connection.
+            if catchup != nil {
+                let r1 = mpv_set_option_string(mpv, "stream-lavf-o", "seekable=0")
+                let r2 = mpv_set_option_string(mpv, "demuxer-lavf-o", "seekable=0")
+                debugLog("[CATCHUP] mpv unseekable opts set: stream-lavf-o=\(r1) demuxer-lavf-o=\(r2)")
+            }
+
             #if DEBUG
             checkError(mpv_request_log_messages(mpv, "warn"))
             #else
@@ -5523,6 +5600,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }
 
         private func handleFileLoaded() {
+            // Catch-up: land the exact second after a minute-granular
+            // re-tune. Runs on the event thread; the seek goes through the
+            // async command path like every other seek.
+            if let residual = catchupPendingSeekSecs {
+                catchupPendingSeekSecs = nil
+                mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    let secs = String(format: "%.3f", residual)
+                    self.mpvCommandAsync(mpv, ["seek", secs, "absolute"])
+                }
+            }
             // Track buffer exit
             if let entered = bufferEnteredTime {
                 let bufDuration = Date().timeIntervalSince(entered)
@@ -5924,7 +6012,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
 
             case "duration":
-                if prop.format == MPV_FORMAT_DOUBLE, let data = prop.data, !isLive {
+                // Catch-up: NEVER let mpv's reported duration overwrite the
+                // pinned programme length (the timeshift TS advertises an
+                // estimated size, and each re-tune reports the remaining
+                // window, not the whole programme).
+                if prop.format == MPV_FORMAT_DOUBLE, let data = prop.data, !isLive, catchup == nil {
                     let duration = data.assumingMemoryBound(to: Double.self).pointee
                     let ms = Int32(duration * 1000)
                     let ps = progressStore
@@ -5952,7 +6044,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     if !isLive, now.timeIntervalSince(lastProgressUpdate) >= 1.0 {
                         lastProgressUpdate = now
                         let ps = progressStore
-                        DispatchQueue.main.async { ps.currentMs = ms }
+                        // Catch-up: mpv's clock restarts at ~0 after every
+                        // re-tune; the programme-relative position adds the
+                        // tuned window's base offset.
+                        let display = catchup != nil ? catchupBaseOffsetMs + ms : ms
+                        DispatchQueue.main.async { ps.currentMs = display }
                     }
 
                     // Save VOD progress every 30 seconds (non-live only).

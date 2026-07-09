@@ -2657,6 +2657,26 @@ struct EditServerSheet: View {
                 }
             }
 
+            // Catch-up: how far back guide data is retained. Bounds the
+            // "Previously aired" history in the List view and the
+            // replay window shown in the Guide.
+            Section {
+                Picker("Guide History", selection: $server.epgRetentionDays) {
+                    Text("1 day").tag(1)
+                    Text("3 days").tag(3)
+                    Text("7 days").tag(7)
+                    Text("14 days").tag(14)
+                    Text("30 days").tag(30)
+                }
+                .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("Guide History").sectionHeaderStyle()
+            } footer: {
+                Text("How many days of already-aired guide data to keep for this playlist. Longer history lets you browse and replay older catch-up programs, at the cost of a larger guide cache.")
+                    .font(.labelSmall)
+                    .foregroundColor(.textTertiary)
+            }
+
             Section {
                 HStack {
                     Text("Type")
@@ -2813,6 +2833,23 @@ struct EditServerSheet: View {
                             .foregroundColor(.textTertiary)
                             .padding(.top, 4)
                     }
+                }
+
+                // Catch-up: retained guide-history depth. Mirrors the
+                // iOS edit form's "Guide History" picker.
+                tvEditSection("Guide History") {
+                    Picker("Guide History", selection: $server.epgRetentionDays) {
+                        Text("1 day").tag(1)
+                        Text("3 days").tag(3)
+                        Text("7 days").tag(7)
+                        Text("14 days").tag(14)
+                        Text("30 days").tag(30)
+                    }
+                    .pickerStyle(.segmented)
+                    Text("How many days of already-aired guide data to keep for this playlist. Longer history lets you browse and replay older catch-up programs, at the cost of a larger guide cache.")
+                        .font(.system(size: 22))
+                        .foregroundColor(.textTertiary)
+                        .padding(.top, 4)
                 }
 
                 // Info

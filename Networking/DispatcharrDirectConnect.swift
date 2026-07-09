@@ -84,6 +84,15 @@ struct DispatcharrUser: Decodable {
     /// channels (a child-safety filter).
     let channelProfiles: [Int]
 
+    /// Catch-up (timeshift): the user's XC-output password from
+    /// `custom_properties.xc_password`. Dispatcharr's /timeshift/ endpoint
+    /// authenticates ONLY with path-embedded XC credentials (Django
+    /// username + this value, hmac-compared) -- no JWT/ApiKey support --
+    /// so Direct Connect catch-up reads it from the same /me/ call that
+    /// already yields api_key. nil when the account has no XC output
+    /// configured; catch-up then surfaces an explanatory error.
+    let xcPassword: String?
+
     private enum CodingKeys: String, CodingKey {
         case id
         case username
@@ -92,6 +101,12 @@ struct DispatcharrUser: Decodable {
         case isSuperuser = "is_superuser"
         case userLevel   = "user_level"
         case channelProfiles = "channel_profiles"
+        case customProperties = "custom_properties"
+    }
+
+    private struct CustomProps: Decodable {
+        let xcPassword: String?
+        enum CodingKeys: String, CodingKey { case xcPassword = "xc_password" }
     }
 
     init(from decoder: Decoder) throws {
@@ -107,6 +122,11 @@ struct DispatcharrUser: Decodable {
         // Default to [] (no profile = show every channel) when absent so
         // older Dispatcharr builds that predate the field still decode.
         channelProfiles = (try? c.decodeIfPresent([Int].self, forKey: .channelProfiles)) ?? []
+        // custom_properties is a free-form object; only xc_password is
+        // read, permissively, so any other shape never fails the decode.
+        let props = try? c.decodeIfPresent(CustomProps.self, forKey: .customProperties)
+        let raw = (props ?? nil)?.xcPassword?.trimmingCharacters(in: .whitespaces)
+        xcPassword = (raw?.isEmpty == false) ? raw : nil
     }
 }
 

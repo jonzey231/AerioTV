@@ -912,6 +912,13 @@ final class SyncManager: ObservableObject {
         if !server.dispatcharrChannelProfileIDs.isEmpty {
             dict["dispatcharrChannelProfileIDs"] = server.dispatcharrChannelProfileIDs
         }
+        // Catch-up: per-server guide-history retention (days). Only
+        // carried when it differs from the default 7 so the payload
+        // stays identical to today for untouched servers and older
+        // clients never see an unfamiliar key.
+        if server.epgRetentionDays != 7 {
+            dict["epgRetentionDays"] = server.epgRetentionDays
+        }
         // v1.6.23: re-include credentials in the KVS payload as a
         // **transport fallback** when iCloud Keychain isn't propagating.
         //
@@ -1000,7 +1007,10 @@ final class SyncManager: ObservableObject {
             // assigned) means "" = no filter = show all channels. Only a
             // positively synced non-empty value drives the child-safety
             // Channel Profile filter on this device.
-            dispatcharrChannelProfileIDs: dict["dispatcharrChannelProfileIDs"] as? String ?? ""
+            dispatcharrChannelProfileIDs: dict["dispatcharrChannelProfileIDs"] as? String ?? "",
+            // Catch-up: absent (older sender or untouched default)
+            // means 7 days of retained guide history.
+            epgRetentionDays: dict["epgRetentionDays"] as? Int ?? 7
         )
     }
 
@@ -1387,6 +1397,9 @@ struct SyncedServer: Sendable {
     /// the payload (older sender, or a server with no profile assigned),
     /// keeping unrestricted servers unfiltered.
     let dispatcharrChannelProfileIDs: String
+    /// Catch-up: per-server guide-history retention in days. Absent
+    /// in payloads from older clients; deserialize defaults it to 7.
+    let epgRetentionDays: Int
 }
 
 // MARK: - Notification Names

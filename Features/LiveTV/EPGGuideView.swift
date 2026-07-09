@@ -242,6 +242,8 @@ final class GuideStore: ObservableObject {
         let container = modelContext.container
         let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
         let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
+        // Catch-up: load retained history too, not just the last hour.
+        let retentionSecs = GuideStore.activeRetentionSeconds()
         let refreshMins = UserDefaults.standard.integer(forKey: "bgRefreshIntervalMins")
         let effectiveMins = refreshMins > 0 ? refreshMins : 1440 // 0 means unset → default 24h
         let stalenessThreshold = TimeInterval(effectiveMins * 60)
@@ -293,7 +295,7 @@ final class GuideStore: ObservableObject {
                 }
 
                 let now = Date()
-                let windowStart = now.addingTimeInterval(-3600)
+                let windowStart = now.addingTimeInterval(-retentionSecs)
                 let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
                 let descriptor = FetchDescriptor<EPGProgram>(
                     predicate: #Predicate<EPGProgram> {
@@ -460,6 +462,9 @@ final class GuideStore: ObservableObject {
         let snapshot = programs
         let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
         let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
+        // Catch-up: retained-history horizon (read on the main actor; the
+        // detached save below must not touch ChannelStore).
+        let retentionSecs = GuideStore.activeRetentionSeconds()
 
         // Invalidate the loadFromCache idempotency cache — a fresh
         // network fetch is landing, so the next loadFromCache caller
@@ -474,32 +479,60 @@ final class GuideStore: ObservableObject {
             bgContext.autosaveEnabled = false
 
             let now = Date()
-            let hourAgo = now.addingTimeInterval(-3600)
-
-            // Delete stale programs (ended > 1 hour ago)
+            // Catch-up: aired programmes are the archive the Watch action
+            // hangs off, so the old ended-1h-ago purge becomes a retention
+            // prune (Edit Server > Guide History, default 7 days).
+            let retentionCutoff = now.addingTimeInterval(-retentionSecs)
             let staleDescriptor = FetchDescriptor<EPGProgram>(
-                predicate: #Predicate<EPGProgram> { $0.endTime < hourAgo }
+                predicate: #Predicate<EPGProgram> { $0.endTime < retentionCutoff }
             )
             if let stale = try? bgContext.fetch(staleDescriptor) {
                 for s in stale { bgContext.delete(s) }
             }
 
-            // Delete existing programs for this server in the current window
-            let windowStart = now.addingTimeInterval(-3600)
-            let windowEnd = now.addingTimeInterval(Double(max(effectiveWindowHours, 24)) * 3600)
+            // The fresh snapshot owns the PRESENT AND FUTURE outright:
+            // delete that region and re-insert. Already-aired rows are
+            // left in place so history accumulates across refreshes
+            // (feeds trim their own history between refreshes; deleting
+            // the snapshot window used to erase recently-ended shows the
+            // feed no longer carried -- the AerioTV-Android data-loss
+            // bug, fixed there in DB v20 and mirrored here).
             let existingDescriptor = FetchDescriptor<EPGProgram>(
                 predicate: #Predicate<EPGProgram> {
-                    $0.serverID == serverID && $0.endTime > windowStart && $0.startTime < windowEnd
+                    $0.serverID == serverID && $0.endTime > now
                 }
             )
             if let existing = try? bgContext.fetch(existingDescriptor) {
                 for e in existing { bgContext.delete(e) }
             }
 
-            // Insert current programs
+            // Dedup guard for the PAST region: the in-memory snapshot also
+            // carries history (merged from this same cache), so inserting
+            // it blindly would duplicate retained rows. SwiftData has no
+            // unique index, so skip past inserts whose (channel, start)
+            // already exists.
+            var pastKeys = Set<String>()
+            let pastDescriptor = FetchDescriptor<EPGProgram>(
+                predicate: #Predicate<EPGProgram> {
+                    $0.serverID == serverID && $0.endTime <= now && $0.endTime > retentionCutoff
+                }
+            )
+            if let pastRows = try? bgContext.fetch(pastDescriptor) {
+                for r in pastRows {
+                    pastKeys.insert("\(r.channelID)|\(Int(r.startTime.timeIntervalSince1970))")
+                }
+            }
+
+            // Insert current programs (future always; past only when new)
             var count = 0
             for (channelID, progs) in snapshot {
                 for gp in progs {
+                    if gp.end <= now {
+                        let key = "\(channelID)|\(Int(gp.start.timeIntervalSince1970))"
+                        if pastKeys.contains(key) { continue }
+                        if gp.end <= retentionCutoff { continue }
+                        pastKeys.insert(key)
+                    }
                     // v1.7.x: persist `programID` so cold-launch
                     // Program Info lazy-load survives the cache hit.
                     let ep = EPGProgram(channelID: channelID, title: gp.title,
@@ -570,8 +603,22 @@ final class GuideStore: ObservableObject {
     /// removed, so a no-op foreground doesn't churn the guide. Aired programs
     /// sit below "now" in the grid and are never visible, so the trim is
     /// invisible to the user. Runs on warm foreground.
+    /// Catch-up (task: Android parity): how many days of ALREADY-AIRED
+    /// programming the active server keeps (Edit Server > Guide History,
+    /// default 7, clamped 1...30 to match the Dispatcharr server cap).
+    /// Everything that used to hard-code the 1-hour history horizon now
+    /// derives from this so aired programmes stay replayable.
+    static func activeRetentionDays() -> Int {
+        let d = ChannelStore.shared.activeServer?.epgRetentionDays ?? 7
+        return min(max(d, 1), 30)
+    }
+
+    static func activeRetentionSeconds() -> TimeInterval {
+        TimeInterval(activeRetentionDays()) * 86_400
+    }
+
     func trimExpiredPrograms() {
-        let cutoff = Date().addingTimeInterval(-3600)
+        let cutoff = Date().addingTimeInterval(-GuideStore.activeRetentionSeconds())
         var trimmed: [String: [GuideProgram]] = [:]
         var removedAny = false
         for (channelID, list) in programs {
@@ -2170,6 +2217,12 @@ struct EPGGuideView: View {
     /// `showStagingToast` helper. Same pattern as
     /// `AddToMultiviewSheet.toastMessage`.
     @State private var stagingToast: String? = nil
+    /// Catch-up: the resolved timeshift playback being presented full
+    /// screen (recordings-pattern presentation), or nil when none.
+    @State private var playingCatchup: CatchupPlayback? = nil
+    /// Catch-up: user-facing resolve failure (missing XC password,
+    /// unsupported server, URL build failure), shown as an alert.
+    @State private var catchupErrorMessage: String? = nil
     #if os(iOS)
     /// GH #20 (Android parity): hide the iPhone tab bar while the guide
     /// scrolls down, reveal near the top. Same 80/20 hysteresis and phone
@@ -2224,7 +2277,15 @@ struct EPGGuideView: View {
     // because there was nothing left to scroll to. The computed
     // form also means toggling Settings live updates the grid on
     // the next render without any observer plumbing.
-    private let hoursBack: TimeInterval = 1
+    // Catch-up: the grid scrolls back through aired programmes. Capped at
+    // 24h (not the full retention) because every visible row lays out one
+    // cell per programme across the whole window -- 7 days of columns
+    // would multiply the per-row cell count ~5x on tvOS. Deeper history
+    // stays reachable from the channel list's expanded schedule panel,
+    // which lists ALL retained aired programmes.
+    private var hoursBack: TimeInterval {
+        min(TimeInterval(GuideStore.activeRetentionDays()) * 24, 24)
+    }
     private var hoursForward: TimeInterval {
         let raw = UserDefaults.standard.integer(forKey: "epgWindowHours")
         return TimeInterval(raw > 0 ? raw : 36)
@@ -2413,11 +2474,16 @@ struct EPGGuideView: View {
     // Manual horizontal offset — only changes when user explicitly scrolls (drag/swipe).
     // Focus changes do NOT cause horizontal movement.
     // Initial value positions "now" at the left edge of the visible area.
+    // The literal defaults assume the legacy 1h-back window; the guide's
+    // .onAppear immediately re-lands on "now" using the real catch-up
+    // history depth (hoursBack * pixelsPerHour), gated by
+    // `didSetInitialGuideOffset` so later size changes don't re-jump.
     #if os(tvOS)
     @State private var horizontalOffset: CGFloat = -600  // -(hoursBack=1 * pixelsPerHour=600)
     #else
     @State private var horizontalOffset: CGFloat = -360  // -(hoursBack=1 * pixelsPerHour=360)
     #endif
+    @State private var didSetInitialGuideOffset = false
 
     /// Captured `horizontalOffset` at the start of an active drag
     /// gesture. `DragGesture.Value.translation` is cumulative from
@@ -2511,7 +2577,18 @@ struct EPGGuideView: View {
                 .toolbar(guideTabBarHidden ? .hidden : .visible, for: .tabBar)
                 #endif
             .clipped()
-            .onAppear { visibleProgramWidth = geo.size.width - channelColumnWidth }
+            .onAppear {
+                visibleProgramWidth = geo.size.width - channelColumnWidth
+                // Catch-up: the grid now extends `hoursBack` (up to 24h)
+                // into the past, so the initial offset must land the
+                // viewport on "now", not on the grid origin. The @State
+                // default still assumes the legacy 1h window; correct it
+                // once, before first paint of the cells.
+                if !didSetInitialGuideOffset {
+                    didSetInitialGuideOffset = true
+                    horizontalOffset = -CGFloat(hoursBack) * pixelsPerHour
+                }
+            }
             .onChange(of: geo.size.width) { _, w in visibleProgramWidth = w - channelColumnWidth }
             #if os(iOS)
             // Horizontal drag for scrubbing the guide timeline.
@@ -2602,6 +2679,27 @@ struct EPGGuideView: View {
                 rightHoldSafetyTask?.cancel()
                 rightHoldSafetyTask = nil
                 #endif
+            }
+            .fullScreenCover(item: $playingCatchup) { pb in
+                // Catch-up playback: the recordings-pattern presentation.
+                // PlayerSession.exit() already silenced any live session
+                // before this cover was set, so exactly one player runs.
+                PlayerView(
+                    urls: [pb.url],
+                    title: pb.title,
+                    headers: pb.headers,
+                    isLive: false,
+                    isDVR: false,
+                    catchup: pb
+                )
+            }
+            .alert("Catch-up Unavailable",
+                   isPresented: Binding(
+                        get: { catchupErrorMessage != nil },
+                        set: { if !$0 { catchupErrorMessage = nil } })) {
+                Button("OK", role: .cancel) { catchupErrorMessage = nil }
+            } message: {
+                Text(catchupErrorMessage ?? "")
             }
             .onReceive(
                 NotificationCenter.default.publisher(for: .guideScrollToTop)
@@ -3025,6 +3123,7 @@ struct EPGGuideView: View {
             shortTimeFormatter: shortTimeFormatter,
             onSelect: onSelectChannel,
             onMultiviewIntent: { handleMultiviewIntent(channel: $0) },
+            onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) },
             focusedProgramID: $focusedProgramID
         )
         .offset(x: x, y: 0)
@@ -3034,7 +3133,8 @@ struct EPGGuideView: View {
             leadingClip: leadingClip,
             shortTimeFormatter: shortTimeFormatter,
             onSelect: onSelectChannel,
-            onMultiviewIntent: { handleMultiviewIntent(channel: $0) }
+            onMultiviewIntent: { handleMultiviewIntent(channel: $0) },
+            onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) }
         )
         .offset(x: x, y: 0)
         #endif
@@ -3280,6 +3380,30 @@ struct EPGGuideView: View {
 
     // MARK: - Helpers
 
+    /// Catch-up: resolve the aired programme into a playable timeshift URL
+    /// and present the player. Silences any live/multiview session FIRST
+    /// (the recordings-pattern teardown) so live audio can't keep playing
+    /// under the catch-up programme. Resolve failures (missing XC password,
+    /// unsupported server type) surface as an alert.
+    private func handleWatchCatchup(channel: ChannelDisplayItem, prog: GuideProgram) {
+        guard let server = ChannelStore.shared.activeServer else { return }
+        Task { @MainActor in
+            do {
+                let pb = try await CatchupSupport.resolve(
+                    server: server,
+                    channel: channel,
+                    programTitle: prog.title,
+                    programStart: prog.start,
+                    programEnd: prog.end
+                )
+                PlayerSession.shared.exit()
+                playingCatchup = pb
+            } catch {
+                catchupErrorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func xOffset(for date: Date) -> CGFloat {
         let elapsed = date.timeIntervalSince(windowStart)
         return CGFloat(elapsed / totalDuration) * totalGridWidth
@@ -3515,6 +3639,11 @@ private struct GuideProgramButton: View {
     /// The parent does the wipe-on-first-entry, the add / remove
     /// toggle, and the toast.
     let onMultiviewIntent: (ChannelDisplayItem) -> Void
+    /// Catch-up: routes a "Watch" tap on an aired, replayable programme
+    /// back to `EPGGuideView`, which resolves the timeshift URL and
+    /// presents the player. The same `canReplayNow` gate drives the
+    /// cell badge and this action so the two can never disagree.
+    let onWatchCatchup: (ChannelDisplayItem, GuideProgram) -> Void
     #if os(tvOS)
     /// Parent's program-focus binding. The cell binds
     /// `.focused(focusedProgramID, equals: prog.id)` so the guide can
@@ -3567,6 +3696,12 @@ private struct GuideProgramButton: View {
         VStack(alignment: .leading, spacing: 2) {
             #if os(tvOS)
             HStack(spacing: 4) {
+                // Catch-up badge: aired + replayable from the archive.
+                if canReplayNow {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(isFocused ? .white : .accentPrimary)
+                }
                 Text(prog.title)
                     .font(.system(size: 26, weight: .semibold))
                     .foregroundColor(isFocused ? .white : .textPrimary)
@@ -3588,6 +3723,12 @@ private struct GuideProgramButton: View {
                 .foregroundColor(isFocused ? .white.opacity(0.6) : .textTertiary)
             #else
             HStack(spacing: 4) {
+                // Catch-up badge: aired + replayable from the archive.
+                if canReplayNow {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 9 * guideScale, weight: .semibold))
+                        .foregroundColor(.accentPrimary)
+                }
                 Text(prog.title)
                     .font(.system(size: 12 * guideScale, weight: .semibold))
                     .foregroundColor(.textPrimary)
@@ -3643,6 +3784,12 @@ private struct GuideProgramButton: View {
 
     private var isFutureProgram: Bool {
         prog.start > Date()
+    }
+
+    /// Catch-up: this programme has ENDED and is inside the channel's
+    /// archive retention window, so the provider can replay it.
+    private var canReplayNow: Bool {
+        channelItem.canReplay(start: prog.start, end: prog.end)
     }
 
     /// Whether this program can be recorded (future or currently live).
@@ -3756,6 +3903,13 @@ private struct GuideProgramButton: View {
             .confirmationDialog(prog.title,
                                 isPresented: $showCtxDialog,
                                 titleVisibility: .visible) {
+                // Catch-up: a replayable aired programme leads with Watch
+                // (the primary action for a show that already aired).
+                if canReplayNow {
+                    Button("Watch") {
+                        onWatchCatchup(channelItem, prog)
+                    }
+                }
                 // Favorite toggle first — most frequent action users take
                 // on a program cell that isn't "just play it."
                 Button(favoritesStore.isFavorite(channelItem.id)
@@ -3967,6 +4121,18 @@ private struct GuideProgramButton: View {
             Divider()
 
             VStack(spacing: 0) {
+                // Catch-up: a replayable aired programme leads with Watch
+                // (the primary action for a show that already aired).
+                if canReplayNow {
+                    guidePopoverActionButton(
+                        title: "Watch",
+                        systemImage: "clock.arrow.circlepath",
+                        isDestructive: false
+                    ) {
+                        showGuidePopover = false
+                        onWatchCatchup(channelItem, prog)
+                    }
+                }
                 // Favorite toggle first — most frequent action on a
                 // program cell that isn't "just play it."
                 guidePopoverActionButton(

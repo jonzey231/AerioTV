@@ -175,6 +175,16 @@ final class ServerConnection {
     /// playlists today).
     var vodEnabled: Bool = true
 
+    /// Catch-up (timeshift): how many days of ALREADY-AIRED guide data to
+    /// keep in the EPG cache for this server. Past programmes are what the
+    /// catch-up "Watch" action hangs off, so the cache must retain them
+    /// after the upstream feed stops covering them (feeds carry little or
+    /// no history). 7-day default matches the common provider catch-up
+    /// window; user-configurable in Edit Server ("Guide History").
+    /// Inline default = SwiftData lightweight migration, same pattern as
+    /// every post-v1.6 field on this model.
+    var epgRetentionDays: Int = 7
+
     /// v1.6.20: per-server Dispatcharr auth header shape, auto-detected
     /// during Test Connection and persisted so subsequent API calls and
     /// stream playback use the same shape. Empty string means

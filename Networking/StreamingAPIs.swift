@@ -637,8 +637,20 @@ struct XtreamAccountInfo: Decodable {
             case activeConnections = "active_connections"
         }
     }
+    /// Catch-up (timeshift): the panel's server_info block. `timezone` is
+    /// the zone the panel renders EPG times AND parses the timeshift URL's
+    /// `start` segment in -- sending UTC to a non-UTC panel plays the wrong
+    /// hour (the classic XC catch-up footgun).
+    struct ServerInfo: Decodable {
+        let timezone: String?
+        enum CodingKeys: String, CodingKey { case timezone }
+    }
     let userInfo: UserInfo
-    enum CodingKeys: String, CodingKey { case userInfo = "user_info" }
+    let serverInfo: ServerInfo?
+    enum CodingKeys: String, CodingKey {
+        case userInfo = "user_info"
+        case serverInfo = "server_info"
+    }
 }
 
 struct XtreamCategory: Decodable, Identifiable {
@@ -664,6 +676,11 @@ struct XtreamStream: Decodable, Identifiable {
     let num: Int?
     let allowedOutputFormats: [String]?  // e.g. ["ts"], ["ts","m3u8"]
     let directSource: String?            // sometimes set to a direct HLS URL
+    /// Catch-up: 1 when the provider archives this channel. Real panels
+    /// send Int OR String ("1"), so this is parsed loosely in init.
+    let tvArchive: Int
+    /// Catch-up retention window in DAYS (mixed String/Int upstream).
+    let tvArchiveDuration: Int
 
     enum CodingKeys: String, CodingKey {
         case streamID = "stream_id"
@@ -675,6 +692,8 @@ struct XtreamStream: Decodable, Identifiable {
         case num
         case allowedOutputFormats = "allowed_output_formats"
         case directSource = "direct_source"
+        case tvArchive = "tv_archive"
+        case tvArchiveDuration = "tv_archive_duration"
     }
 
     init(from decoder: Decoder) throws {
@@ -695,6 +714,20 @@ struct XtreamStream: Decodable, Identifiable {
         num = try? c.decode(Int.self, forKey: .num)
         allowedOutputFormats = try? c.decode([String].self, forKey: .allowedOutputFormats)
         directSource = try? c.decode(String.self, forKey: .directSource)
+        if let i = try? c.decode(Int.self, forKey: .tvArchive) {
+            tvArchive = i
+        } else if let str = try? c.decode(String.self, forKey: .tvArchive) {
+            tvArchive = Int(str) ?? 0
+        } else {
+            tvArchive = 0
+        }
+        if let i = try? c.decode(Int.self, forKey: .tvArchiveDuration) {
+            tvArchiveDuration = i
+        } else if let str = try? c.decode(String.self, forKey: .tvArchiveDuration) {
+            tvArchiveDuration = Int(str) ?? 0
+        } else {
+            tvArchiveDuration = 0
+        }
         id = num ?? streamID
     }
 
@@ -3569,6 +3602,14 @@ struct DispatcharrChannel: Decodable, Identifiable {
     /// Mirrors the AerioTV-Android EPG bridge.
     let effectiveEpgDataID: Int?
 
+    /// Catch-up (timeshift) capability, rolled up server-side from the
+    /// channel's provider streams (Dispatcharr dev, PR #1242): true when
+    /// ANY active stream's XC provider reports tv_archive=1.
+    let isCatchup: Bool
+    /// Retention window in days, the MAX across the channel's catch-up
+    /// streams (server caps at 30). 0 when not catch-up capable.
+    let catchupDays: Int
+
     enum CodingKeys: String, CodingKey {
         case id
         case name
@@ -3579,6 +3620,8 @@ struct DispatcharrChannel: Decodable, Identifiable {
         case tvgID = "tvg_id"
         case epgDataID = "epg_data_id"
         case effectiveEpgDataID = "effective_epg_data_id"
+        case isCatchup = "is_catchup"
+        case catchupDays = "catchup_days"
         // channelGroupID handled in init(from:)
     }
 
@@ -3624,6 +3667,15 @@ struct DispatcharrChannel: Decodable, Identifiable {
             effectiveEpgDataID = Int(strVal)
         } else {
             effectiveEpgDataID = nil
+        }
+        // Absent on pre-catch-up servers: default to not-capable.
+        isCatchup = (try? container.decodeIfPresent(Bool.self, forKey: .isCatchup)) ?? false ?? false
+        if let intVal = try? container.decodeIfPresent(Int.self, forKey: .catchupDays) {
+            catchupDays = intVal
+        } else if let strVal = try? container.decodeIfPresent(String.self, forKey: .catchupDays) {
+            catchupDays = Int(strVal) ?? 0
+        } else {
+            catchupDays = 0
         }
 
         // Try both "channel_group_id" and "channel_group" keys
@@ -4315,5 +4367,221 @@ struct DispatcharrChannelGroup: Decodable, Identifiable {
     enum CodingKeys: String, CodingKey {
         case id, name
         case channelCount = "channel_count"
+    }
+}
+
+
+// MARK: - Catch-up (timeshift) support
+
+/// A resolved, playable catch-up request: the timeshift URL for the
+/// programme plus everything the player needs to REBUILD that URL when the
+/// user scrubs (the timeshift protocol's only random access is the start
+/// time encoded in the URL path).
+struct CatchupPlayback: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let url: URL
+    /// IANA zone the panel parses the URL's start segment in
+    /// (Dispatcharr = "UTC"; a raw XC panel advertises its own).
+    let panelTimeZoneID: String
+    let programStart: Date
+    let programEnd: Date
+    let title: String
+    let headers: [String: String]
+
+    var programDurationMs: Int32 {
+        Int32(max(0, programEnd.timeIntervalSince(programStart)) * 1000)
+    }
+}
+
+enum CatchupError: LocalizedError {
+    case notCatchup
+    case missingXCPassword
+    case unsupportedServer
+    case badURL
+
+    var errorDescription: String? {
+        switch self {
+        case .notCatchup:
+            return "This channel has no catch-up archive."
+        case .missingXCPassword:
+            return "Catch-up needs an XC password on your Dispatcharr user. Ask an admin to set one under Users in Dispatcharr."
+        case .unsupportedServer:
+            return "Catch-up is available on Dispatcharr and Xtream Codes servers."
+        case .badURL:
+            return "Could not build a catch-up URL for this programme."
+        }
+    }
+}
+
+/// Builds and resolves XC/Dispatcharr timeshift URLs. Mirrors the shipped
+/// AerioTV-Android implementation (CatchupUrlBuilder + CatchupPlaybackResolver)
+/// so the two platforms speak the identical protocol:
+///
+///   {base}/timeshift/{user}/{pass}/{durationMinutes}/{YYYY-MM-DD:HH-MM}/{streamID}.ts
+///
+/// THE FOOTGUN is the start segment: the panel parses it as wall-clock time
+/// in ITS OWN timezone (server_info.timezone), NOT UTC and NOT device-local.
+/// Dispatcharr pins its zone to UTC; a raw XC panel's zone is fetched from
+/// the player_api handshake. Two device-verified Dispatcharr behaviors are
+/// baked in: (1) never pre-resolve the 301 that appends ?session_id= (the
+/// session is bound to the request that created it; a probe SPENDS it and
+/// the player's real open 404s); (2) the response advertises an ESTIMATED
+/// Content-Length, so the player must not trust it for end-seeks -- seeks
+/// re-tune by rebuilding the URL instead.
+@MainActor
+enum CatchupSupport {
+
+    /// Per-server-id memo of Dispatcharr XC credentials (username, xc_password).
+    private static var xcCredsCache: [UUID: (String, String)] = [:]
+    /// Per-server-id memo of the XC panel's advertised timezone.
+    private static var panelTzCache: [UUID: String] = [:]
+
+    /// Render an epoch date in the panel's zone as the canonical XC start
+    /// shape `YYYY-MM-DD:HH-MM` (iPlayTV / TiviMate colon-dash form).
+    nonisolated static func formatStart(_ date: Date, panelTimeZoneID: String) -> String {
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyy-MM-dd:HH-mm"
+        fmt.timeZone = TimeZone(identifier: panelTimeZoneID) ?? TimeZone(identifier: "UTC")
+        return fmt.string(from: date)
+    }
+
+    /// Build the timeshift URL for the programme [start, end).
+    nonisolated static func buildTimeshiftURL(base: String,
+                                  username: String,
+                                  password: String,
+                                  streamID: String,
+                                  programStart: Date,
+                                  programEnd: Date,
+                                  panelTimeZoneID: String) -> URL? {
+        let trimmedBase = base.hasSuffix("/") ? String(base.dropLast()) : base
+        let durationMin = max(1, Int(ceil(programEnd.timeIntervalSince(programStart) / 60.0)))
+        let start = formatStart(programStart, panelTimeZoneID: panelTimeZoneID)
+        let allowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))
+        let user = username.addingPercentEncoding(withAllowedCharacters: allowed) ?? username
+        let pass = password.addingPercentEncoding(withAllowedCharacters: allowed) ?? password
+        return URL(string: "\(trimmedBase)/timeshift/\(user)/\(pass)/\(durationMin)/\(start)/\(streamID).ts")
+    }
+
+    /// Rebuild an existing timeshift URL to start `offsetSeconds` into the
+    /// programme -- the scrub/seek primitive. Credentials, host, and stream
+    /// id are reused verbatim; only the {durationMin}/{start} path segments
+    /// are replaced. The start segment has MINUTE granularity, so callers
+    /// floor the offset to the minute and seek the residual in-stream.
+    nonisolated static func rebuildForOffset(url: URL,
+                                 panelTimeZoneID: String,
+                                 programStart: Date,
+                                 programEnd: Date,
+                                 offsetSeconds: Double) -> URL? {
+        let str = url.absoluteString
+        guard let regex = try? NSRegularExpression(
+            pattern: "/timeshift/([^/]+)/([^/]+)/(\\d+)/([^/]+)/") else { return nil }
+        let range = NSRange(str.startIndex..., in: str)
+        guard let m = regex.firstMatch(in: str, range: range),
+              let full = Range(m.range, in: str),
+              let userR = Range(m.range(at: 1), in: str),
+              let passR = Range(m.range(at: 2), in: str) else { return nil }
+        let newStartDate = programStart.addingTimeInterval(max(0, offsetSeconds))
+        let durationMin = max(1, Int(ceil(programEnd.timeIntervalSince(newStartDate) / 60.0)))
+        let start = formatStart(newStartDate, panelTimeZoneID: panelTimeZoneID)
+        let replacement = "/timeshift/\(str[userR])/\(str[passR])/\(durationMin)/\(start)/"
+        return URL(string: str.replacingCharacters(in: full, with: replacement))
+    }
+
+    /// Derive the Dispatcharr base (scheme://host:port) from a live proxy
+    /// stream URL so catch-up follows the SAME LAN/WAN host the live stream
+    /// resolved to. nil when the URL isn't a recognizable proxy URL.
+    nonisolated static func dispatcharrBase(fromStreamURL url: URL?) -> String? {
+        guard let str = url?.absoluteString, let r = str.range(of: "/proxy/") else { return nil }
+        return String(str[..<r.lowerBound])
+    }
+
+    /// Resolve a past programme on a catch-up channel into a playable
+    /// timeshift request for the given server. Throws CatchupError with a
+    /// user-facing message on the known failure shapes.
+    static func resolve(server: ServerConnection,
+                        channel: ChannelDisplayItem,
+                        programTitle: String,
+                        programStart: Date,
+                        programEnd: Date) async throws -> CatchupPlayback {
+        guard channel.hasCatchup else { throw CatchupError.notCatchup }
+        switch server.type {
+        case .dispatcharrAPI:
+            // The /timeshift/ endpoint takes PATH-embedded XC creds only
+            // (no JWT/ApiKey), readable by the authenticated user from
+            // /api/accounts/users/me/. Memoized per server.
+            let creds: (String, String)
+            if let cached = xcCredsCache[server.id] {
+                creds = cached
+            } else {
+                let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                         auth: .apiKey(server.effectiveApiKey),
+                                         userAgent: server.effectiveUserAgent,
+                                         authMode: server.dispatcharrHeaderMode,
+                                         serverID: server.id,
+                                         savedUsername: server.username.isEmpty ? nil : server.username)
+                let user = try await api.fetchCurrentUser()
+                guard let xcPass = user.xcPassword else { throw CatchupError.missingXCPassword }
+                creds = (user.username, xcPass)
+                xcCredsCache[server.id] = creds
+            }
+            // Follow the live stream's host (LAN/WAN-aware) when possible.
+            let base = dispatcharrBase(fromStreamURL: channel.streamURL) ?? server.effectiveBaseURL
+            guard let streamID = channel.dispatcharrChannelID.map(String.init) ?? Optional(channel.id),
+                  let url = buildTimeshiftURL(base: base,
+                                              username: creds.0,
+                                              password: creds.1,
+                                              streamID: streamID,
+                                              programStart: programStart,
+                                              programEnd: programEnd,
+                                              panelTimeZoneID: "UTC") else {
+                throw CatchupError.badURL
+            }
+            var headers: [String: String] = [:]
+            let ua = server.effectiveUserAgent
+            if !ua.isEmpty { headers["User-Agent"] = ua }
+            // Creds live in the URL path; log only the shape, never the URL.
+            debugLog("[CATCHUP] resolved Dispatcharr timeshift host=\(url.host ?? "?") stream=\(streamID) start=\(formatStart(programStart, panelTimeZoneID: "UTC")) durMin=\(Int(programEnd.timeIntervalSince(programStart) / 60))")
+            return CatchupPlayback(url: url,
+                                   panelTimeZoneID: "UTC",
+                                   programStart: programStart,
+                                   programEnd: programEnd,
+                                   title: programTitle,
+                                   headers: headers)
+        case .xtreamCodes:
+            let tz: String
+            if let cached = panelTzCache[server.id] {
+                tz = cached
+            } else {
+                let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL,
+                                         username: server.username,
+                                         password: server.effectivePassword)
+                let info = try? await api.verifyConnection()
+                tz = info?.serverInfo?.timezone ?? "UTC"
+                panelTzCache[server.id] = tz
+            }
+            guard let url = buildTimeshiftURL(base: server.effectiveBaseURL,
+                                              username: server.username,
+                                              password: server.effectivePassword,
+                                              streamID: channel.id,
+                                              programStart: programStart,
+                                              programEnd: programEnd,
+                                              panelTimeZoneID: tz) else {
+                throw CatchupError.badURL
+            }
+            var headers: [String: String] = [:]
+            let ua = server.effectiveUserAgent
+            if !ua.isEmpty { headers["User-Agent"] = ua }
+            // Creds live in the URL path; log only the shape, never the URL.
+            debugLog("[CATCHUP] resolved XC timeshift host=\(url.host ?? "?") stream=\(channel.id) tz=\(tz) start=\(formatStart(programStart, panelTimeZoneID: tz)) durMin=\(Int(programEnd.timeIntervalSince(programStart) / 60))")
+            return CatchupPlayback(url: url,
+                                   panelTimeZoneID: tz,
+                                   programStart: programStart,
+                                   programEnd: programEnd,
+                                   title: programTitle,
+                                   headers: headers)
+        default:
+            throw CatchupError.unsupportedServer
+        }
     }
 }

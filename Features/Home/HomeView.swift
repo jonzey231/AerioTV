@@ -2186,6 +2186,12 @@ final class ChannelStore: ObservableObject {
             // xmltv.php guide can match `<programme channel="...">` back to
             // this channel through the same path M3U/Dispatcharr use.
             if let epgID = s.epgChannelID, !epgID.isEmpty { item.tvgID = epgID }
+            // Catch-up: carry the provider's archive window (days); 0 when
+            // tv_archive is off. The XC stream_id doubles as item.id, which
+            // is what the timeshift URL builder needs.
+            if s.tvArchive == 1, s.tvArchiveDuration > 0 {
+                item.catchupDays = s.tvArchiveDuration
+            }
             return item
         }
         let sorted = sortChannels(items, groupOrder: groupOrder)
@@ -2369,6 +2375,11 @@ final class ChannelStore: ObservableObject {
             // servers. Single assignment site, so all three bridge loops
             // (guide, list-enrichment, category-enrichment) inherit it.
             item.dispatcharrEPGDataID = ch.effectiveEpgDataID ?? ch.epgDataID
+            // Catch-up: server-side rollup of the channel's provider
+            // streams (is_catchup + MAX catchup_days, Dispatcharr dev).
+            if ch.isCatchup, ch.catchupDays > 0 {
+                item.catchupDays = ch.catchupDays
+            }
             return item
         }
         items = sortChannels(items, groupOrder: groupOrder)

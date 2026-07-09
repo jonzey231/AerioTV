@@ -392,6 +392,11 @@ struct PlayerView: View {
     let vodServerID: String?
     let vodType: String  // "movie" or "episode" — only used when vodID != nil
     let resumePositionMs: Int32?
+    /// Catch-up (timeshift): non-nil when this playback is an aired
+    /// programme replayed from the provider archive. Fixes the timeline
+    /// to the programme's real duration and turns seeks into URL
+    /// re-tunes (the timeshift protocol's only random access).
+    let catchup: CatchupPlayback?
     let onMinimize: (() -> Void)?
     let onClose: (() -> Void)?
 
@@ -402,6 +407,7 @@ struct PlayerView: View {
          vodID: String? = nil, vodPosterURL: String? = nil,
          vodServerID: String? = nil, vodType: String = "movie",
          resumePositionMs: Int32? = nil,
+         catchup: CatchupPlayback? = nil,
          onMinimize: (() -> Void)? = nil, onClose: (() -> Void)? = nil) {
         self.urls = urls
         self.title = title
@@ -417,6 +423,7 @@ struct PlayerView: View {
         self.vodServerID = vodServerID
         self.vodType = vodType
         self.resumePositionMs = resumePositionMs
+        self.catchup = catchup
         self.onMinimize = onMinimize
         self.onClose = onClose
     }
@@ -439,6 +446,7 @@ struct PlayerView: View {
             vodID: vodID, vodPosterURL: vodPosterURL, vodServerID: vodServerID,
             vodType: vodType,
             resumePositionMs: resumePositionMs,
+            catchup: catchup,
             onDismiss: { if let c = onClose { c() } else { dismiss() } },
             onMinimize: onMinimize,
             logStore: logStore,
@@ -482,6 +490,9 @@ private struct PlayerRootView: View {
     let vodServerID: String?
     let vodType: String  // "movie" or "episode"
     let resumePositionMs: Int32?
+    /// See `PlayerView.catchup`. Mirrored here for the fixed-duration
+    /// timeline and threaded into the Coordinator for re-tune seeks.
+    var catchup: CatchupPlayback? = nil
     let onDismiss: () -> Void
     let onMinimize: (() -> Void)?
 
@@ -625,6 +636,7 @@ private struct PlayerRootView: View {
         MPVPlayerViewRepresentable(
             urls: urls, headers: headers,
             isLive: isLive, isDVR: isDVR,
+            catchup: catchup,
             nowPlayingTitle: title,
             nowPlayingSubtitle: subtitle,
             nowPlayingArtworkURL: artworkURL,
@@ -1276,6 +1288,11 @@ private struct PlayerRootView: View {
     ///   ever sitting left of the playhead during a playlist-refresh
     ///   wobble. The right edge therefore represents "live".
     private var timelineEndMs: Int32 {
+        // Catch-up: the timeline is ALWAYS the programme's real length.
+        // The bounded timeshift TS reports an unreliable (estimated)
+        // duration, and each re-tune resets mpv's clock, so neither is
+        // allowed to drive the scrubber's right edge.
+        if let cu = catchup { return cu.programDurationMs }
         if isDVR { return max(progressStore.durationMs, progressStore.currentMs) }
         return progressStore.durationMs
     }
