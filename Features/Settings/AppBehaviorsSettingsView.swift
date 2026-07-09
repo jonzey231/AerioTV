@@ -25,6 +25,12 @@ struct AppBehaviorsSettingsView: View {
     /// behind a blocking modal. The cost is brief UI stutter or
     /// empty-state flicker during the first ~30 s while data
     /// streams in. Default OFF — the cover is the safe path.
+    // Moved here from Appearance (2026-07 settings unification): the
+    // landing tab and default Live TV layout are launch behavior, and
+    // Android has always kept Default Tab on this page.
+    @AppStorage("defaultTab") private var defaultTabRaw = AppTab.liveTV.rawValue
+    @AppStorage("defaultLiveTVView") private var defaultLiveTVView = "guide"
+
     @AppStorage("appBehaviorsSkipLoadingScreen")
     private var skipLoadingScreen = false
 
@@ -193,6 +199,72 @@ struct AppBehaviorsSettingsView: View {
             }
             .listSectionSeparator(.hidden)
 
+            // MARK: Default Tab
+            Section {
+                ForEach(AppTab.allCases, id: \.self) { tab in
+                    Button {
+                        defaultTabRaw = tab.rawValue
+                    } label: {
+                        HStack {
+                            Image(systemName: tab.icon)
+                                .font(.system(size: 15))
+                                .foregroundColor(theme.accent)
+                                .frame(width: 24)
+                            Text(tab.title)
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Spacer()
+                            if defaultTabRaw == tab.rawValue {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundColor(theme.accent)
+                            }
+                        }
+                    }
+                    .listRowBackground(Color.cardBackground)
+                }
+            } header: {
+                Text("Default Landing Tab").sectionHeaderStyle()
+            } footer: {
+                Text("The tab shown when the app first launches.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+            .listSectionSeparator(.hidden)
+
+            // MARK: Default Live TV View (iPad only — iPhone always uses list)
+            if UIDevice.current.userInterfaceIdiom == .pad {
+                Section {
+                    ForEach(["list", "guide"], id: \.self) { option in
+                        Button {
+                            defaultLiveTVView = option
+                        } label: {
+                            HStack {
+                                Image(systemName: option == "list" ? "list.bullet" : "calendar")
+                                    .font(.system(size: 15))
+                                    .foregroundColor(theme.accent)
+                                    .frame(width: 24)
+                                Text(option == "list" ? "List" : "Guide")
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textPrimary)
+                                Spacer()
+                                if defaultLiveTVView == option {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(theme.accent)
+                                }
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
+                } header: {
+                    Text("Default Live TV View").sectionHeaderStyle()
+                } footer: {
+                    Text("The layout shown when you open the Live TV tab.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+                .listSectionSeparator(.hidden)
+            }
+
             // MARK: Channel Flip Gesture
             //
             // Single toggle that gates both input paths (Apple TV
@@ -349,6 +421,32 @@ struct AppBehaviorsSettingsView: View {
                         subtitle: "Auto-start the last-played channel in the corner mini-player on launch",
                         isOn: $autoResumeLastChannel
                     ) { _ in }
+                }
+
+                // Default Tab
+                tvSection("Default Landing Tab") {
+                    ForEach(AppTab.allCases, id: \.self) { tab in
+                        TVSettingsSelectionRow(
+                            icon: tab.icon,
+                            iconColor: theme.accent,
+                            label: tab.title,
+                            isSelected: defaultTabRaw == tab.rawValue,
+                            action: { defaultTabRaw = tab.rawValue }
+                        )
+                    }
+                }
+
+                // Default Live TV View
+                tvSection("Default Live TV View") {
+                    ForEach(["list", "guide"], id: \.self) { option in
+                        TVSettingsSelectionRow(
+                            icon: option == "list" ? "list.bullet" : "calendar",
+                            iconColor: theme.accent,
+                            label: option == "list" ? "List" : "Guide",
+                            isSelected: defaultLiveTVView == option,
+                            action: { defaultLiveTVView = option }
+                        )
+                    }
                 }
 
                 tvSection("Channel Flip Gesture") {

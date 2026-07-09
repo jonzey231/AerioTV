@@ -191,17 +191,6 @@ struct DVRSettingsView: View {
             }
             .listRowBackground(Color.cardBackground)
 
-            // MARK: - Recording Behavior
-            Section {
-                Toggle("Keep device awake during recording", isOn: $keepAwake)
-            } header: {
-                Text("Behavior")
-                    .sectionHeaderStyle()
-            } footer: {
-                Text("When enabled, the screen won't turn off while a local recording is in progress. Recommended to prevent recording interruption.")
-            }
-            .listRowBackground(Color.cardBackground)
-
             // MARK: - Recordings folder
             // v1.7.x: also shown when the account can't record to the
             // server (non-admin); recordings then go local regardless
@@ -228,6 +217,17 @@ struct DVRSettingsView: View {
                 .listRowBackground(Color.cardBackground)
             }
 
+            // MARK: - Recording Behavior
+            Section {
+                Toggle("Keep device awake during recording", isOn: $keepAwake)
+            } header: {
+                Text("Behavior")
+                    .sectionHeaderStyle()
+            } footer: {
+                Text("When enabled, the screen won't turn off while a local recording is in progress. Recommended to prevent recording interruption.")
+            }
+            .listRowBackground(Color.cardBackground)
+
             // MARK: - My Recordings
             Section {
                 NavigationLink(destination: MyRecordingsView()) {
@@ -241,13 +241,18 @@ struct DVRSettingsView: View {
             }
             .listRowBackground(Color.cardBackground)
 
-            // MARK: - Danger zone
+            // MARK: - Danger Zone
             Section {
                 Button(role: .destructive) {
                     showClearConfirmation = true
                 } label: {
                     Label("Delete All Local Recordings", systemImage: "trash.fill")
                 }
+            } header: {
+                Text("Danger Zone").sectionHeaderStyle()
+            } footer: {
+                Text("Deletes every recording saved on this device. Server recordings on Dispatcharr are not affected.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listRowBackground(Color.cardBackground)
         }

@@ -138,6 +138,27 @@ struct DeveloperSettingsView: View {
     private var iOSBody: some View {
         List {
 
+                // MARK: - What's Logged
+                Section {
+                    logCategoryRow(icon: "network",                title: "Network",     detail: "All API requests — URL, method, status code, duration, payload size")
+                    logCategoryRow(icon: "play.rectangle.fill",    title: "Playback",    detail: "Stream URLs loaded, player state transitions, DVR mode, failover attempts")
+                    logCategoryRow(icon: "calendar",               title: "EPG",         detail: "Current program fetches, upcoming program loads, decode errors")
+                    logCategoryRow(icon: "antenna.radiowaves.left.and.right", title: "Channels", detail: "Channel list loads, server type, item counts, timing")
+                    logCategoryRow(icon: "app.badge",              title: "Lifecycle",   detail: "App foreground/background, launch, scene transitions")
+                    logCategoryRow(icon: "exclamationmark.triangle.fill", title: "Errors", detail: "Caught exceptions with full context, source file and line number")
+                    logCategoryRow(icon: "gauge.with.dots.needle.67percent", title: "Performance", detail: "Timed operations — parse time, load time, memory at session start")
+                } header: {
+                    Text("What's Captured")
+                        .sectionHeaderStyle()
+                } footer: {
+                    Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                }
+                #if os(iOS)
+                .listSectionSeparator(.hidden)
+                #endif
+
                 // MARK: - Unified Playback (experimental)
                 Section {
                     HStack(spacing: 14) {
@@ -567,26 +588,6 @@ struct DeveloperSettingsView: View {
                 .listSectionSeparator(.hidden)
                 #endif
 
-                // MARK: - What's Logged
-                Section {
-                    logCategoryRow(icon: "network",                title: "Network",     detail: "All API requests — URL, method, status code, duration, payload size")
-                    logCategoryRow(icon: "play.rectangle.fill",    title: "Playback",    detail: "Stream URLs loaded, player state transitions, DVR mode, failover attempts")
-                    logCategoryRow(icon: "calendar",               title: "EPG",         detail: "Current program fetches, upcoming program loads, decode errors")
-                    logCategoryRow(icon: "antenna.radiowaves.left.and.right", title: "Channels", detail: "Channel list loads, server type, item counts, timing")
-                    logCategoryRow(icon: "app.badge",              title: "Lifecycle",   detail: "App foreground/background, launch, scene transitions")
-                    logCategoryRow(icon: "exclamationmark.triangle.fill", title: "Errors", detail: "Caught exceptions with full context, source file and line number")
-                    logCategoryRow(icon: "gauge.with.dots.needle.67percent", title: "Performance", detail: "Timed operations — parse time, load time, memory at session start")
-                } header: {
-                    Text("What's Captured")
-                        .sectionHeaderStyle()
-                } footer: {
-                    Text("Logs rotate automatically when the file exceeds 10 MB. The previous log is preserved as aerio_debug_logs_archive.txt.")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                }
-                #if os(iOS)
-                .listSectionSeparator(.hidden)
-                #endif
 
             }
             .listStyle(.insetGrouped)

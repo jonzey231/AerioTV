@@ -3,8 +3,9 @@ import SwiftUI
 // MARK: - Appearance Settings View (full replacement for the inline one in SettingsView)
 struct AppearanceSettingsView: View {
     @ObservedObject private var theme = ThemeManager.shared
-    @AppStorage("defaultTab") private var defaultTabRaw = AppTab.liveTV.rawValue
-    @AppStorage("defaultLiveTVView") private var defaultLiveTVView = "guide"
+    // "Default Landing Tab" and "Default Live TV View" moved to App
+    // Behaviors (2026-07 settings unification): they are launch
+    // behavior, not appearance, and Android keeps them there.
     /// VOD (Movies / TV Shows) poster-grid scale multiplier. Storage
     /// key retained as `"uiScale"` so existing users' settings carry
     /// forward when we split the single "UI Scale" slider into three
@@ -103,32 +104,6 @@ struct AppearanceSettingsView: View {
     private var tvOSBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                // Default Tab
-                tvAppearanceSection("Default Landing Tab") {
-                    ForEach(AppTab.allCases, id: \.self) { tab in
-                        TVSettingsSelectionRow(
-                            icon: tab.icon,
-                            iconColor: theme.accent,
-                            label: tab.title,
-                            isSelected: defaultTabRaw == tab.rawValue,
-                            action: { defaultTabRaw = tab.rawValue }
-                        )
-                    }
-                }
-
-                // Default Live TV View
-                tvAppearanceSection("Default Live TV View") {
-                    ForEach(["list", "guide"], id: \.self) { option in
-                        TVSettingsSelectionRow(
-                            icon: option == "list" ? "list.bullet" : "calendar",
-                            iconColor: theme.accent,
-                            label: option == "list" ? "List" : "Guide",
-                            isSelected: defaultLiveTVView == option,
-                            action: { defaultLiveTVView = option }
-                        )
-                    }
-                }
-
                 // App Behaviors moved to its own top-level Settings
                 // entry in v1.7.x. See `AppBehaviorsSettingsView`.
 
@@ -137,6 +112,7 @@ struct AppearanceSettingsView: View {
                     ForEach(AppTheme.allCases, id: \.self) { t in
                         TVSettingsSelectionRow(
                             label: t.displayName,
+                            subtitle: themeSubtitle(t),
                             isSelected: theme.selectedTheme == t,
                             action: { theme.setTheme(t) },
                             leading: {
@@ -180,13 +156,6 @@ struct AppearanceSettingsView: View {
                     }
                 }
 
-                // Display Scale — two sliders on tvOS (List view is
-                // not used on tvOS; guide grid and VOD posters are).
-                tvAppearanceSection("Display Scale") {
-                    scaleSliderRow_tvOS(title: "Movies & Series", binding: $vodScale)
-                    scaleSliderRow_tvOS(title: "Guide", binding: $guideScale)
-                }
-
                 // Liquid Glass
                 tvAppearanceSection("Glass Effect") {
                     ForEach(LiquidGlassStyle.allCases, id: \.self) { style in
@@ -203,6 +172,13 @@ struct AppearanceSettingsView: View {
                 tvAppearanceSection("Preview") {
                     swatchPreview
                         .padding(.horizontal, 20)
+                }
+
+                // Display Scale — two sliders on tvOS (List view is
+                // not used on tvOS; guide grid and VOD posters are).
+                tvAppearanceSection("Display Scale") {
+                    scaleSliderRow_tvOS(title: "Movies & Series", binding: $vodScale)
+                    scaleSliderRow_tvOS(title: "Guide", binding: $guideScale)
                 }
 
                 // Channel List (issue #28 logos + GH #19 numbers)
@@ -316,120 +292,25 @@ struct AppearanceSettingsView: View {
     }
     #endif
 
+    /// One-line palette description per theme, matching the Android
+    /// theme picker so the copy reads identically across platforms.
+    private func themeSubtitle(_ t: AppTheme) -> String {
+        switch t {
+        case .aerio:      return "Cyan on deep navy (default)"
+        case .midnight:   return "Cool blue on near-black"
+        case .sunset:     return "Warm orange on near-black"
+        case .forest:     return "Green on near-black"
+        case .lavender:   return "Purple on near-black"
+        case .monochrome: return "Greyscale on near-black"
+        }
+    }
+
     // MARK: - iOS Body
     #if os(iOS)
     private var iOSBody: some View {
         List {
-                // MARK: Default Tab
-                Section {
-                    ForEach(AppTab.allCases, id: \.self) { tab in
-                        Button {
-                            defaultTabRaw = tab.rawValue
-                        } label: {
-                            HStack {
-                                Image(systemName: tab.icon)
-                                    .font(.system(size: 15))
-                                    .foregroundColor(theme.accent)
-                                    .frame(width: 24)
-                                Text(tab.title)
-                                    .font(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Spacer()
-                                if defaultTabRaw == tab.rawValue {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-                } header: {
-                    Text("Default Landing Tab").sectionHeaderStyle()
-                } footer: {
-                    Text("The tab shown when the app first launches.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-                .listSectionSeparator(.hidden)
-
-                // MARK: Default Live TV View (iPad only — iPhone always uses list)
-                if UIDevice.current.userInterfaceIdiom == .pad {
-                    Section {
-                        ForEach(["list", "guide"], id: \.self) { option in
-                            Button {
-                                defaultLiveTVView = option
-                            } label: {
-                                HStack {
-                                    Image(systemName: option == "list" ? "list.bullet" : "calendar")
-                                        .font(.system(size: 15))
-                                        .foregroundColor(theme.accent)
-                                        .frame(width: 24)
-                                    Text(option == "list" ? "List" : "Guide")
-                                        .font(.bodyMedium)
-                                        .foregroundColor(.textPrimary)
-                                    Spacer()
-                                    if defaultLiveTVView == option {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 14, weight: .semibold))
-                                            .foregroundColor(theme.accent)
-                                    }
-                                }
-                            }
-                            .listRowBackground(Color.cardBackground)
-                        }
-                    } header: {
-                        Text("Default Live TV View").sectionHeaderStyle()
-                    } footer: {
-                        Text("The layout shown when you open the Live TV tab.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
-                    }
-                    .listSectionSeparator(.hidden)
-                }
-
                 // App Behaviors moved to its own top-level Settings
                 // entry in v1.7.x. See `AppBehaviorsSettingsView`.
-
-                // MARK: Display Scale — per-view sliders (#21)
-                //
-                // Split from the previous single "UI Scale" slider
-                // (which only affected VOD on iPad/Mac). Each slider
-                // governs one view family so users can independently
-                // tune poster density, Guide cell text, and channel-
-                // list text sizes.
-                //
-                // iPhone only renders the Guide view on iPad (the
-                // Live TV tab always uses List view on a phone — see
-                // ChannelListView.swift line ~252 where showGuideView
-                // is pinned to false on .phone idiom). Showing the
-                // Guide slider on iPhone was cargo-culted from iPad
-                // and confused users — feedback pass flagged it as
-                // "iPhone shouldn't have a scale slider for Guide
-                // view." Pad + Mac Catalyst still get all three.
-                Section {
-                    scaleSliderRow_iOS(
-                        title: "Movies & Series",
-                        binding: $vodScale
-                    )
-                    if UIDevice.current.userInterfaceIdiom != .phone {
-                        scaleSliderRow_iOS(
-                            title: "Guide",
-                            binding: $guideScale
-                        )
-                    }
-                    scaleSliderRow_iOS(
-                        title: "Live TV List",
-                        binding: $listScale
-                    )
-                } header: {
-                    Text("Display Scale").sectionHeaderStyle()
-                } footer: {
-                    Text(UIDevice.current.userInterfaceIdiom == .phone
-                         ? "Independent scale for Movies & Series and Live TV List. 100% matches the default; 85–125% lets you trade density for readability. Changes apply live — no restart needed."
-                         : "Independent scale for Movies & Series, the Guide grid, and the Live TV List. 100% matches the default; 85–125% lets you trade density for readability. Changes apply live — no restart needed."
-                    )
-                    .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-                .listSectionSeparator(.hidden)
 
                 // MARK: Color Theme
                 Section {
@@ -443,9 +324,14 @@ struct AppearanceSettingsView: View {
                                     .frame(width: 22, height: 22)
                                     .overlay(Circle().stroke(Color.borderMedium, lineWidth: 1))
 
-                                Text(t.displayName)
-                                    .font(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(t.displayName)
+                                        .font(.bodyMedium)
+                                        .foregroundColor(.textPrimary)
+                                    Text(themeSubtitle(t))
+                                        .font(.labelSmall)
+                                        .foregroundColor(.textTertiary)
+                                }
 
                                 Spacer()
 
@@ -560,6 +446,48 @@ struct AppearanceSettingsView: View {
                         .listRowBackground(Color.cardBackground)
                 } header: {
                     Text("Preview").sectionHeaderStyle()
+                }
+                .listSectionSeparator(.hidden)
+
+                // MARK: Display Scale — per-view sliders (#21)
+                //
+                // Split from the previous single "UI Scale" slider
+                // (which only affected VOD on iPad/Mac). Each slider
+                // governs one view family so users can independently
+                // tune poster density, Guide cell text, and channel-
+                // list text sizes.
+                //
+                // iPhone only renders the Guide view on iPad (the
+                // Live TV tab always uses List view on a phone — see
+                // ChannelListView.swift line ~252 where showGuideView
+                // is pinned to false on .phone idiom). Showing the
+                // Guide slider on iPhone was cargo-culted from iPad
+                // and confused users — feedback pass flagged it as
+                // "iPhone shouldn't have a scale slider for Guide
+                // view." Pad + Mac Catalyst still get all three.
+                Section {
+                    scaleSliderRow_iOS(
+                        title: "Movies & Series",
+                        binding: $vodScale
+                    )
+                    if UIDevice.current.userInterfaceIdiom != .phone {
+                        scaleSliderRow_iOS(
+                            title: "Guide",
+                            binding: $guideScale
+                        )
+                    }
+                    scaleSliderRow_iOS(
+                        title: "Live TV List",
+                        binding: $listScale
+                    )
+                } header: {
+                    Text("Display Scale").sectionHeaderStyle()
+                } footer: {
+                    Text(UIDevice.current.userInterfaceIdiom == .phone
+                         ? "Independent scale for Movies & Series and Live TV List. 100% matches the default; 85–125% lets you trade density for readability. Changes apply live — no restart needed."
+                         : "Independent scale for Movies & Series, the Guide grid, and the Live TV List. 100% matches the default; 85–125% lets you trade density for readability. Changes apply live — no restart needed."
+                    )
+                    .font(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
 

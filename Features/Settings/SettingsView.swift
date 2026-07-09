@@ -271,7 +271,7 @@ struct SettingsView: View {
                         #endif
                         NavigationLink(destination: AppBehaviorsSettingsView()) {
                             SettingsRow(icon: "switch.2", iconColor: .accentPrimary,
-                                        title: "App Behaviors", subtitle: "Launch flow, remote behavior")
+                                        title: "App Behaviors", subtitle: "Default tab, launch & gestures")
                         }
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
@@ -285,7 +285,7 @@ struct SettingsView: View {
                         #endif
                         NavigationLink(destination: NetworkSettingsView()) {
                             SettingsRow(icon: "network", iconColor: .accentSecondary,
-                                        title: "Network", subtitle: "Timeout, buffer & refresh")
+                                        title: "Network", subtitle: "Timeout, buffer & background refresh")
                         }
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
@@ -581,94 +581,7 @@ struct SettingsView: View {
             .alert("Delete Playlist?", isPresented: $showDeleteAlert) {
                 Button("Delete", role: .destructive) {
                     if let server = serverToDelete {
-                        let sid = server.id.uuidString
-                        server.deleteCredentialsFromKeychain()
-                        // Cascade: delete any EPGProgram rows scoped to this
-                        // server so they don't orphan and get reused by a
-                        // later server of a different type with different
-                        // channel IDs. Without this, deleting an Xtream
-                        // playlist and re-adding the same server via
-                        // Dispatcharr API leaves stale XC EPG rows in
-                        // SwiftData that loadFromCache would otherwise
-                        // return, bypassing the network fetch and leaving
-                        // the guide empty.
-                        let epgDescriptor = FetchDescriptor<EPGProgram>(
-                            predicate: #Predicate<EPGProgram> { $0.serverID == sid }
-                        )
-                        if let stale = try? modelContext.fetch(epgDescriptor) {
-                            for p in stale { modelContext.delete(p) }
-                            debugLog("🗑️ Deleted \(stale.count) orphaned EPGProgram rows for server \(sid)")
-                        }
-                        // v1.7.x: cascade delete WatchProgress rows
-                        // scoped to this server so movie / series /
-                        // recording resume positions don't orphan
-                        // when the server is removed. Mirrors the
-                        // EPGProgram cascade above. WatchProgress.
-                        // serverID is Optional<String>; the SwiftData
-                        // #Predicate `$0.serverID == sid` unwraps and
-                        // matches only rows whose serverID is exactly
-                        // `sid`, leaving legacy nil-serverID rows
-                        // (pre-multi-server era) untouched. Same
-                        // safety pattern the EPGProgram cascade uses.
-                        let wpDescriptor = FetchDescriptor<WatchProgress>(
-                            predicate: #Predicate<WatchProgress> { $0.serverID == sid }
-                        )
-                        if let stale = try? modelContext.fetch(wpDescriptor) {
-                            for w in stale { modelContext.delete(w) }
-                            debugLog("🗑️ Deleted \(stale.count) orphaned WatchProgress rows for server \(sid)")
-                        }
-                        // v1.7.x: cascade delete server-side Recording
-                        // rows scoped to this server. These are
-                        // Dispatcharr server-side recordings (rows
-                        // where `localFilePath == nil` and
-                        // `remoteRecordingID != nil`). After the
-                        // server is removed, the row is useless: the
-                        // Dispatcharr playback URL it references
-                        // (`/api/channels/recordings/<id>/file/` or
-                        // `/api/channels/recordings/<id>/hls/`) is
-                        // unreachable, and `MyRecordingsView` would
-                        // surface unplayable rows pointing at a
-                        // server the user just deleted.
-                        //
-                        // Local recordings (rows where
-                        // `localFilePath != nil`) are intentionally
-                        // NOT cascaded. The user may have captured
-                        // those locally on purpose and want to keep
-                        // the `.ts` files in `Documents/Recordings/`
-                        // even after the source server is removed.
-                        // The `localFilePath == nil` predicate is
-                        // the gate.
-                        let recDescriptor = FetchDescriptor<Recording>(
-                            predicate: #Predicate<Recording> {
-                                $0.serverID == sid && $0.localFilePath == nil
-                            }
-                        )
-                        if let stale = try? modelContext.fetch(recDescriptor) {
-                            for r in stale { modelContext.delete(r) }
-                            debugLog("🗑️ Deleted \(stale.count) orphaned server-side Recording rows for server \(sid)")
-                        }
-                        modelContext.delete(server)
-                        try? modelContext.save()
-                        // Issue #25: wipe in-memory VOD so On Demand stops
-                        // showing the removed server's movies / series. Live
-                        // already clears (ChannelStore.refresh re-runs on the
-                        // server-list change), but VODStore's no-active-server
-                        // path returns without clearing, so stale, unplayable
-                        // entries lingered. The orchestrator re-fires on the
-                        // allServers change and repopulates VOD for whatever
-                        // server remains active (if any).
-                        VODStore.shared.clear()
-                        // Push updated list to iCloud (server removed)
-                        SyncManager.shared.pushServers(servers.filter { $0.id != server.id })
-                        // Push the post-cascade WatchProgress set to
-                        // iCloud (immediate, not debounced) so the
-                        // deletion replicates to other devices before
-                        // they next pull. Without this, another device
-                        // would re-introduce the orphaned rows on its
-                        // next merge pass via the KVS payload.
-                        if let remaining = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
-                            SyncManager.shared.pushWatchProgress(remaining, immediate: true)
-                        }
+                        performServerCascadeDelete(server, servers: Array(servers), modelContext: modelContext)
                     }
                 }
                 Button("Cancel", role: .cancel) {}
@@ -952,7 +865,7 @@ struct SettingsView: View {
                         navPath.append("appearance")
                     }
                     TVSettingsNavButton(label: "App Behaviors", icon: "switch.2",
-                                        iconColor: .accentPrimary, subtitle: "Launch flow, remote behavior") {
+                                        iconColor: .accentPrimary, subtitle: "Default tab, launch & gestures") {
                         navPath.append("app-behaviors")
                     }
                     TVSettingsNavButton(label: "Multiview", icon: "rectangle.split.2x2.fill",
@@ -960,7 +873,7 @@ struct SettingsView: View {
                         navPath.append("multiview")
                     }
                     TVSettingsNavButton(label: "Network", icon: "network",
-                                        iconColor: .accentSecondary, subtitle: "Timeout, buffer & refresh") {
+                                        iconColor: .accentSecondary, subtitle: "Timeout, buffer & background refresh") {
                         navPath.append("network")
                     }
                 }
@@ -1618,6 +1531,107 @@ struct SettingsRow: View {
 }
 
 // MARK: - Server Detail View
+// MARK: - Shared playlist delete cascade
+
+/// Deletes a playlist and everything scoped to it: Keychain
+/// credentials, EPGProgram rows, WatchProgress rows, server-side
+/// Recording rows, in-memory VOD, and the iCloud copies. Shared by
+/// the Settings root list and the playlist detail page's Danger
+/// Zone so both delete paths stay in lockstep.
+@MainActor
+func performServerCascadeDelete(_ server: ServerConnection,
+                                servers: [ServerConnection],
+                                modelContext: ModelContext) {
+    let sid = server.id.uuidString
+    server.deleteCredentialsFromKeychain()
+    // Cascade: delete any EPGProgram rows scoped to this
+    // server so they don't orphan and get reused by a
+    // later server of a different type with different
+    // channel IDs. Without this, deleting an Xtream
+    // playlist and re-adding the same server via
+    // Dispatcharr API leaves stale XC EPG rows in
+    // SwiftData that loadFromCache would otherwise
+    // return, bypassing the network fetch and leaving
+    // the guide empty.
+    let epgDescriptor = FetchDescriptor<EPGProgram>(
+        predicate: #Predicate<EPGProgram> { $0.serverID == sid }
+    )
+    if let stale = try? modelContext.fetch(epgDescriptor) {
+        for p in stale { modelContext.delete(p) }
+        debugLog("🗑️ Deleted \(stale.count) orphaned EPGProgram rows for server \(sid)")
+    }
+    // v1.7.x: cascade delete WatchProgress rows
+    // scoped to this server so movie / series /
+    // recording resume positions don't orphan
+    // when the server is removed. Mirrors the
+    // EPGProgram cascade above. WatchProgress.
+    // serverID is Optional<String>; the SwiftData
+    // #Predicate `$0.serverID == sid` unwraps and
+    // matches only rows whose serverID is exactly
+    // `sid`, leaving legacy nil-serverID rows
+    // (pre-multi-server era) untouched. Same
+    // safety pattern the EPGProgram cascade uses.
+    let wpDescriptor = FetchDescriptor<WatchProgress>(
+        predicate: #Predicate<WatchProgress> { $0.serverID == sid }
+    )
+    if let stale = try? modelContext.fetch(wpDescriptor) {
+        for w in stale { modelContext.delete(w) }
+        debugLog("🗑️ Deleted \(stale.count) orphaned WatchProgress rows for server \(sid)")
+    }
+    // v1.7.x: cascade delete server-side Recording
+    // rows scoped to this server. These are
+    // Dispatcharr server-side recordings (rows
+    // where `localFilePath == nil` and
+    // `remoteRecordingID != nil`). After the
+    // server is removed, the row is useless: the
+    // Dispatcharr playback URL it references
+    // (`/api/channels/recordings/<id>/file/` or
+    // `/api/channels/recordings/<id>/hls/`) is
+    // unreachable, and `MyRecordingsView` would
+    // surface unplayable rows pointing at a
+    // server the user just deleted.
+    //
+    // Local recordings (rows where
+    // `localFilePath != nil`) are intentionally
+    // NOT cascaded. The user may have captured
+    // those locally on purpose and want to keep
+    // the `.ts` files in `Documents/Recordings/`
+    // even after the source server is removed.
+    // The `localFilePath == nil` predicate is
+    // the gate.
+    let recDescriptor = FetchDescriptor<Recording>(
+        predicate: #Predicate<Recording> {
+            $0.serverID == sid && $0.localFilePath == nil
+        }
+    )
+    if let stale = try? modelContext.fetch(recDescriptor) {
+        for r in stale { modelContext.delete(r) }
+        debugLog("🗑️ Deleted \(stale.count) orphaned server-side Recording rows for server \(sid)")
+    }
+    modelContext.delete(server)
+    try? modelContext.save()
+    // Issue #25: wipe in-memory VOD so On Demand stops
+    // showing the removed server's movies / series. Live
+    // already clears (ChannelStore.refresh re-runs on the
+    // server-list change), but VODStore's no-active-server
+    // path returns without clearing, so stale, unplayable
+    // entries lingered. The orchestrator re-fires on the
+    // allServers change and repopulates VOD for whatever
+    // server remains active (if any).
+    VODStore.shared.clear()
+    // Push updated list to iCloud (server removed)
+    SyncManager.shared.pushServers(servers.filter { $0.id != server.id })
+    // Push the post-cascade WatchProgress set to
+    // iCloud (immediate, not debounced) so the
+    // deletion replicates to other devices before
+    // they next pull. Without this, another device
+    // would re-introduce the orphaned rows on its
+    // next merge pass via the KVS payload.
+    if let remaining = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
+        SyncManager.shared.pushWatchProgress(remaining, immediate: true)
+    }
+}
+
 struct ServerDetailView: View {
     let server: ServerConnection
     /// See SettingsView for the rationale — observing ThemeManager
@@ -1656,6 +1670,14 @@ struct ServerDetailView: View {
     /// LAN signal — there is no SSID / location dependence.
     @ObservedObject private var tvLANProbe = TVLANProbe.shared
     @State private var lanRefreshAcked = false
+    /// Unified playlist page (2026-07): edit is a top-right toolbar
+    /// button on iOS and the first Actions row on tvOS (a corner
+    /// button is off the D-pad path). Delete lives in Danger Zone.
+    @State private var editingServer: ServerConnection? = nil
+    @State private var showDeleteConfirm = false
+    @State private var isRefreshingPlaylist = false
+    @State private var playlistRefreshDone = false
+    @Environment(\.dismiss) private var dismiss
 
     private var hasLANConfigured: Bool {
         // LAN means "we have a localURL we can probe" on every
@@ -1674,7 +1696,12 @@ struct ServerDetailView: View {
             List {
                 Section {
                     infoRow("Type", value: server.type.displayName)
-                    infoRow("Remote URL", value: server.normalizedBaseURL, isMonospaced: true)
+                    connectionURLRow("Remote URL", value: server.normalizedBaseURL,
+                                     isActiveRoute: !isOnLAN)
+                    if hasLANConfigured {
+                        connectionURLRow("Local URL", value: server.localURL,
+                                         isActiveRoute: isOnLAN)
+                    }
                     if !server.username.isEmpty {
                         infoRow("Username", value: server.username)
                     }
@@ -1682,49 +1709,92 @@ struct ServerDetailView: View {
                     if let last = server.lastConnected {
                         infoRow("Last Connected", value: last.formatted(.relative(presentation: .named)))
                     }
+                    if server.isActive {
+                        infoRow("Channels", value: "\(ChannelStore.shared.channels.count)")
+                    }
+                    if !server.epgURL.isEmpty {
+                        infoRow("EPG", value: server.epgURL, isMonospaced: true)
+                    }
                 } header: {
                     Text("Connection Details").sectionHeaderStyle()
+                } footer: {
+                    if hasLANConfigured {
+                        Text("A checkmark marks the connection in use right now. The local URL is used automatically whenever the server answers on your home network; run Refresh LAN Detection below after a network change.")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
                 }
                 .listRowBackground(Color.cardBackground)
 
-                if hasLANConfigured {
-                    Section {
+                Section {
+                    #if os(tvOS)
+                    // TV: a top-right toolbar button is off the D-pad
+                    // path, so editing is the first action row here
+                    // (same pattern as Android TV).
+                    NavigationLink(destination: EditServerPage(server: server).trackedAsClassicSettingsChild()) {
                         HStack {
-                            Text("Mode")
-                                .font(.bodyMedium)
-                                .foregroundColor(.textSecondary)
-                            Spacer()
-                            LANWANBadge(isLAN: isOnLAN)
-                            Text(isOnLAN ? "Local (LAN)" : "Remote (WAN)")
-                                .font(.bodyMedium)
-                                .foregroundColor(isOnLAN ? .statusOnline : .accentSecondary)
+                            Image(systemName: "pencil")
+                                .foregroundColor(.accentPrimary)
+                            Text("Edit Playlist")
+                                .foregroundColor(.accentPrimary)
+                        }
+                    }
+                    .listRowBackground(Color.cardBackground)
+                    #endif
+
+                    Button {
+                        Task { await testConnection() }
+                    } label: {
+                        HStack {
+                            if isTestingConnection {
+                                ProgressView().tint(.accentPrimary)
+                            } else {
+                                Image(systemName: "network")
+                                    .foregroundColor(.accentPrimary)
+                            }
+                            Text(isTestingConnection ? "Testing..." : "Test Connection")
+                                .foregroundColor(.accentPrimary)
+                        }
+                    }
+                    .listRowBackground(Color.cardBackground)
+
+                    if let result = connectionResult {
+                        HStack(spacing: 8) {
+                            Image(systemName: connectionSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundColor(connectionSuccess ? .statusOnline : .statusLive)
+                            Text(result)
+                                .font(.bodySmall)
+                                .foregroundColor(connectionSuccess ? .statusOnline : .statusLive)
                         }
                         .listRowBackground(Color.cardBackground)
+                    }
 
-                        infoRow("Active URL", value: server.effectiveBaseURL, isMonospaced: true)
+                    // Re-fetch channels (and the guide) for the active
+                    // playlist. Parity with Android's "Refresh Playlist"
+                    // action; non-active playlists reload on activation,
+                    // so the row only shows for the active one.
+                    if server.isActive {
+                        Button {
+                            refreshPlaylist()
+                        } label: {
+                            HStack {
+                                if isRefreshingPlaylist {
+                                    ProgressView().tint(.accentPrimary)
+                                } else {
+                                    Image(systemName: playlistRefreshDone ? "checkmark.circle.fill" : "arrow.clockwise")
+                                        .foregroundColor(playlistRefreshDone ? .statusOnline : .accentPrimary)
+                                }
+                                Text(isRefreshingPlaylist ? "Refreshing…"
+                                     : playlistRefreshDone ? "Refreshed"
+                                     : "Refresh Playlist")
+                                    .foregroundColor(isRefreshingPlaylist ? .textSecondary
+                                                     : playlistRefreshDone ? .statusOnline : .accentPrimary)
+                            }
+                        }
+                        .disabled(isRefreshingPlaylist)
+                        .listRowBackground(Color.cardBackground)
+                    }
 
-                        // Cross-platform LAN probe rows. `TVLANProbe`
-                        // is the SOLE LAN signal on every platform —
-                        // it HEAD-probes each server's localURL and
-                        // decides LAN vs WAN. No SSID, location, or
-                        // Wi-Fi-info is involved.
-                        // The "Refresh LAN Detection" button kicks a
-                        // fresh probe of every server's localURL; the
-                        // global `tvosLANDetected` UserDefaults flag
-                        // means a refresh on one server's detail page
-                        // picks up the result for all of them.
-                        if let host = tvLANProbe.lastHost, tvLANProbe.lastDetected {
-                            infoRow("Last Probe Host", value: host, isMonospaced: true)
-                        }
-                        if let ms = tvLANProbe.lastLatencyMs, tvLANProbe.lastDetected {
-                            infoRow("Last Probe Latency", value: "\(ms) ms")
-                        }
-                        if let ts = tvLANProbe.lastTimestamp {
-                            infoRow(
-                                "Last Checked",
-                                value: ts.formatted(.relative(presentation: .named))
-                            )
-                        }
+                    if hasLANConfigured {
                         Button {
                             tvLANProbe.probe(servers: Array(servers))
                         } label: {
@@ -1753,51 +1823,6 @@ struct ServerDetailView: View {
                                 }
                             }
                         }
-                    } header: {
-                        Text("Active Connection").sectionHeaderStyle()
-                    } footer: {
-                        // The LAN probe is the source of truth on every
-                        // platform. When it reaches the local server we
-                        // use the local URL; otherwise the remote URL.
-                        if tvLANProbe.lastDetected {
-                            Text("Local server reachable — streams will use local URL.")
-                                .font(.labelSmall)
-                                .foregroundColor(.textTertiary)
-                        } else {
-                            Text("Local server not reachable — streams will use remote URL. Tap Refresh LAN Detection after a network change.")
-                                .font(.labelSmall)
-                                .foregroundColor(.textTertiary)
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-                }
-
-                Section {
-                    Button {
-                        Task { await testConnection() }
-                    } label: {
-                        HStack {
-                            if isTestingConnection {
-                                ProgressView().tint(.accentPrimary)
-                            } else {
-                                Image(systemName: "network")
-                                    .foregroundColor(.accentPrimary)
-                            }
-                            Text(isTestingConnection ? "Testing..." : "Test Connection")
-                                .foregroundColor(.accentPrimary)
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-
-                    if let result = connectionResult {
-                        HStack(spacing: 8) {
-                            Image(systemName: connectionSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundColor(connectionSuccess ? .statusOnline : .statusLive)
-                            Text(result)
-                                .font(.bodySmall)
-                                .foregroundColor(connectionSuccess ? .statusOnline : .statusLive)
-                        }
-                        .listRowBackground(Color.cardBackground)
                     }
                 } header: {
                     Text("Actions").sectionHeaderStyle()
@@ -1881,6 +1906,28 @@ struct ServerDetailView: View {
                          : "Clears every cache (channels, guide data, and On Demand). This playlist reloads automatically the next time you make it active.")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
+            
+                // MARK: Danger Zone
+                Section {
+                    Button(role: .destructive) {
+                        showDeleteConfirm = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("Delete Playlist")
+                                .font(.bodyMedium)
+                            Spacer()
+                        }
+                        .foregroundColor(.statusLive)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Danger Zone").sectionHeaderStyle()
+                } footer: {
+                    Text("Removes this playlist and its credentials from this device. Your server data will not be affected.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
             }
             #if os(iOS)
             .listStyle(.insetGrouped)
@@ -1898,6 +1945,24 @@ struct ServerDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         #endif
         .toolbarBackground(Color.appBackground, for: .navigationBar)
+        #if os(iOS)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Edit") { editingServer = server }
+                    .foregroundColor(.accentPrimary)
+            }
+        }
+        .sheet(item: $editingServer) { EditServerSheet(server: $0) }
+        #endif
+        .alert("Delete Playlist?", isPresented: $showDeleteConfirm) {
+            Button("Delete", role: .destructive) {
+                performServerCascadeDelete(server, servers: Array(servers), modelContext: modelContext)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove \"\(server.name)\" from the app. Your server data will not be affected.")
+        }
         // Per-playlist EPG-purge confirmation. The action handler:
         //   1. Always calls `GuideStore.shared.purgePrograms(for:…)`
         //      to delete this playlist's EPGProgram rows on a
@@ -2006,6 +2071,41 @@ struct ServerDetailView: View {
             "First Installed: \(aboutInstallDate)",
             "Last Updated: \(aboutUpdateDate)"
         ].joined(separator: "\n")
+    }
+
+    /// Connection Details URL row: like `infoRow` but with a green
+    /// checkmark marking the route (LAN or WAN) currently in use.
+    private func connectionURLRow(_ label: String, value: String, isActiveRoute: Bool) -> some View {
+        HStack {
+            Text(label)
+                .font(.bodyMedium)
+                .foregroundColor(.textSecondary)
+            Spacer()
+            if isActiveRoute {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundColor(.statusOnline)
+            }
+            Text(value)
+                .font(.monoSmall)
+                .foregroundColor(.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+    }
+
+    /// Android-parity "Refresh Playlist": re-fetch channels and the
+    /// guide for the active playlist without purging any caches.
+    private func refreshPlaylist() {
+        guard !isRefreshingPlaylist else { return }
+        isRefreshingPlaylist = true
+        Task {
+            await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
+            isRefreshingPlaylist = false
+            playlistRefreshDone = true
+            try? await Task.sleep(for: .seconds(2))
+            playlistRefreshDone = false
+        }
     }
 
     private func infoRow(_ label: String, value: String, isMonospaced: Bool = false) -> some View {
@@ -2646,12 +2746,12 @@ struct EditServerSheet: View {
             // don't carry it.
             if server.supportsVOD {
                 Section {
-                    Toggle("Fetch VOD from this playlist", isOn: $server.vodEnabled)
+                    Toggle("Fetch On Demand from this playlist", isOn: $server.vodEnabled)
                         .listRowBackground(Color.cardBackground)
                 } header: {
-                    Text("Content").sectionHeaderStyle()
+                    Text("On Demand").sectionHeaderStyle()
                 } footer: {
-                    Text("When off, this playlist's movies and TV shows aren't loaded into the On Demand tab. Useful when you have a \"sandbox\" playlist for testing — keep its Live TV channels but skip the (sometimes massive) VOD library.")
+                    Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
@@ -2664,7 +2764,7 @@ struct EditServerSheet: View {
                 Picker("Guide History", selection: $server.epgRetentionDays) {
                     Text("1 day").tag(1)
                     Text("3 days").tag(3)
-                    Text("7 days").tag(7)
+                    Text("7 days (default)").tag(7)
                     Text("14 days").tag(14)
                     Text("30 days").tag(30)
                 }
@@ -2672,7 +2772,7 @@ struct EditServerSheet: View {
             } header: {
                 Text("Guide History").sectionHeaderStyle()
             } footer: {
-                Text("How many days of already-aired guide data to keep for this playlist. Longer history lets you browse and replay older catch-up programs, at the cost of a larger guide cache.")
+                Text("How many days of already-aired guide data to keep for this playlist. Past shows on channels with catch-up can be replayed from the guide. Longer history means a larger guide cache.")
                     .font(.labelSmall)
                     .foregroundColor(.textTertiary)
             }
@@ -2696,209 +2796,10 @@ struct EditServerSheet: View {
 
     // MARK: - tvOS Layout
     #if os(tvOS)
-    private var tvOSEditContent: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                // Connection
-                tvEditSection("Connection") {
-                    tvEditField("Name", text: $server.name)
-                    tvEditField("URL", text: $server.baseURL)
-                }
-
-                // Credentials
-                if server.type == .xtreamCodes {
-                    tvEditSection("Credentials") {
-                        tvEditField("Username", text: $server.username)
-                        tvEditField("Password", text: $server.password, isSecure: true)
-                    }
-                    tvEditSection("EPG Source") {
-                        tvEditField("Custom XMLTV URL (optional)", text: $server.xtreamXMLTVURL)
-                        Text("Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own.")
-                            .font(.system(size: 22))
-                            .foregroundColor(.textTertiary)
-                            .padding(.top, 4)
-                    }
-                } else if server.type == .dispatcharrAPI {
-                    Group {
-                        tvEditSection("Authentication") {
-                            // v1.7.x: credential mode picker on tvOS.
-                            // The Apple TV typing-burden is the
-                            // primary reason Direct Connect exists,
-                            // so the edit screen needs to support
-                            // switching modes here too.
-                            Picker("Sign-in method", selection: directConnectModeBinding) {
-                                Text("Username & Password").tag(DispatcharrCredentialType.usernamePassword)
-                                Text("API Key").tag(DispatcharrCredentialType.apiKey)
-                            }
-                            .pickerStyle(.segmented)
-                            .padding(.vertical, 8)
-
-                            switch effectiveCredentialType {
-                            case .usernamePassword:
-                                tvEditField("Username", text: $server.username)
-                                tvEditField("Password", text: $server.password, isSecure: true)
-                                // v1.7.x: Dashboard-vs-XC password
-                                // hint mirrored on tvOS Edit Server
-                                // (the .formStyle path).
-                                Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
-                                    .font(.system(size: 22))
-                                    .foregroundColor(.textTertiary)
-                                    .padding(.top, 4)
-                                if !server.effectiveApiKey.isEmpty {
-                                    HStack {
-                                        Text("API Key (cached)")
-                                            .font(.system(size: 28, weight: .medium))
-                                            .foregroundColor(.textSecondary)
-                                        Spacer()
-                                        Text(maskedAPIKey(server.effectiveApiKey))
-                                            .font(.system(size: 22, design: .monospaced))
-                                            .foregroundColor(.textTertiary)
-                                    }
-                                    .padding(.vertical, 4)
-                                }
-                                Button {
-                                    Task { await refreshDirectConnectSession() }
-                                } label: {
-                                    HStack(spacing: 8) {
-                                        if isRefreshingSession {
-                                            ProgressView().scaleEffect(0.8)
-                                        } else {
-                                            Image(systemName: "arrow.clockwise")
-                                        }
-                                        Text(isRefreshingSession ? "Refreshing…" : "Refresh Session")
-                                    }
-                                    .font(.system(size: 26, weight: .semibold))
-                                }
-                                .disabled(server.username.isEmpty
-                                          || server.effectivePassword.isEmpty
-                                          || isRefreshingSession)
-                                .padding(.top, 6)
-                                if let msg = sessionRefreshMessage {
-                                    Text(msg)
-                                        .font(.system(size: 22))
-                                        .foregroundColor(sessionRefreshSucceeded ? .statusOnline : .statusLive)
-                                        .padding(.top, 2)
-                                }
-                            case .apiKey:
-                                tvEditField("Admin API Key", text: $server.apiKey, isSecure: true)
-                            }
-                        }
-                        tvEditSection("EPG Source") {
-                            tvEditField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)
-                            Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
-                                .font(.system(size: 22))
-                                .foregroundColor(.textTertiary)
-                                .padding(.top, 4)
-                        }
-                    }
-                } else if server.type == .m3uPlaylist {
-                    tvEditSection("EPG Guide") {
-                        tvEditField("EPG URL (optional)", text: $server.epgURL)
-                    }
-                }
-
-                // Local Network
-                if server.type != .m3uPlaylist {
-                    tvEditSection("Local Network") {
-                        tvEditField("Local URL", text: $server.localURL)
-                        Text("Used when the Apple TV detects the local server is reachable. Leave blank to always use the main URL.")
-                            .font(.system(size: 22))
-                            .foregroundColor(.textTertiary)
-                            .padding(.top, 4)
-                    }
-                }
-
-                // User-Agent (Dispatcharr only)
-                if server.type == .dispatcharrAPI {
-                    tvEditSection("User-Agent") {
-                        tvEditField("User-Agent", text: $server.customUserAgent)
-                        Text("Shown in Dispatcharr's admin Stats panel. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
-                            .font(.system(size: 22))
-                            .foregroundColor(.textTertiary)
-                            .padding(.top, 4)
-                    }
-                }
-
-                // v1.6.12: per-server VOD toggle. Mirrors the iOS
-                // edit form's "Content" section. Hidden for M3U-only
-                // playlists since they don't carry VOD anyway.
-                if server.supportsVOD {
-                    tvEditSection("Content") {
-                        Toggle("Fetch VOD from this playlist", isOn: $server.vodEnabled)
-                            .font(.system(size: 28, weight: .medium))
-                            .foregroundColor(.textPrimary)
-                            .padding(.vertical, 4)
-                        Text("When off, this playlist's movies and TV shows aren't loaded into the On Demand tab. Useful when you have a \"sandbox\" playlist for testing — keep its Live TV channels but skip the (sometimes massive) VOD library.")
-                            .font(.system(size: 22))
-                            .foregroundColor(.textTertiary)
-                            .padding(.top, 4)
-                    }
-                }
-
-                // Catch-up: retained guide-history depth. Mirrors the
-                // iOS edit form's "Guide History" picker.
-                tvEditSection("Guide History") {
-                    Picker("Guide History", selection: $server.epgRetentionDays) {
-                        Text("1 day").tag(1)
-                        Text("3 days").tag(3)
-                        Text("7 days").tag(7)
-                        Text("14 days").tag(14)
-                        Text("30 days").tag(30)
-                    }
-                    .pickerStyle(.segmented)
-                    Text("How many days of already-aired guide data to keep for this playlist. Longer history lets you browse and replay older catch-up programs, at the cost of a larger guide cache.")
-                        .font(.system(size: 22))
-                        .foregroundColor(.textTertiary)
-                        .padding(.top, 4)
-                }
-
-                // Info
-                tvEditSection("Info") {
-                    HStack {
-                        Text("Type")
-                            .font(.system(size: 28, weight: .medium))
-                            .foregroundColor(.textSecondary)
-                        Spacer()
-                        Text(server.type.displayName)
-                            .font(.system(size: 28))
-                            .foregroundColor(.textTertiary)
-                    }
-                    .padding(.vertical, 8)
-                }
-            }
-            // v1.7.5: centered 1200pt reading column (matches EditServerPage)
-            // so the form does not stretch across the full TV width.
-            .frame(maxWidth: 1200, alignment: .leading)
-            .padding(48)
-            .frame(maxWidth: .infinity)
-        }
-    }
-
-    private func tvEditSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title.uppercased())
-                .font(.system(size: 22, weight: .bold))
-                .foregroundColor(.textTertiary)
-                .tracking(1)
-            VStack(spacing: 16) {
-                content()
-            }
-            .padding(24)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.cardBackground)
-            )
-        }
-    }
-
-    private func tvEditField(_ placeholder: String, text: Binding<String>, isSecure: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(placeholder)
-                .font(.system(size: 22, weight: .medium))
-                .foregroundColor(.textTertiary)
-            TVSettingsTextField(placeholder: placeholder, text: text, isSecure: isSecure)
-        }
-    }
+    // EditServerSheet is never presented on tvOS -- editing goes through
+    // the pushed EditServerPage below. This stub only keeps the struct
+    // compiling for the tvOS target.
+    private var tvOSEditContent: some View { EmptyView() }
     #endif
 
     // MARK: - XMLTV Edit Test Helpers (iOS only — tvOS editor omits the button)
@@ -2968,19 +2869,9 @@ struct EditServerPage: View {
     /// whichever theme was active when the page was first pushed.
     @ObservedObject private var theme = ThemeManager.shared
 
-    // v1.7.5: Refresh EPG Data + Refresh Everything actions, ported
-    // from the iOS ServerDetailView. They were missing on the tvOS
-    // Edit Playlist page entirely (Archie field report: "the whole
-    // refresh entire playlist option isn't showing up, neither is
-    // refresh EPG"), so Apple TV users had no way to purge a wedged
-    // guide / stale channel list without an iPhone. Same GuideStore /
-    // EPGCache / VODStore / ChannelStore calls as the iOS path.
-    @Query private var servers: [ServerConnection]
-    @Environment(\.modelContext) private var modelContext
-    @State private var showPurgeConfirmation = false
-    @State private var isPurgingEPG = false
-    @State private var showRefreshAllConfirmation = false
-    @State private var isRefreshingAll = false
+    // 2026-07 unification: the EPG Cache / Full Refresh actions moved
+    // to the playlist detail page (ServerDetailView), which tvOS now
+    // reaches the same way iOS does. This page is purely the edit form.
 
     // v1.7.x: Direct Connect mode picker + Refresh Session button
     // state. Mirrors EditServerSheet's iOS Form path so Apple TV
@@ -3192,6 +3083,50 @@ struct EditServerPage: View {
                         }
                     }
 
+                    // User-Agent (Dispatcharr only) -- parity with the
+                    // iOS edit sheet.
+                    if server.type == .dispatcharrAPI {
+                        tvSection("User-Agent") {
+                            tvField("User-Agent", text: $server.customUserAgent)
+                            Text("Shown in Dispatcharr's admin Stats panel to identify this device. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
+                                .font(.system(size: 22))
+                                .foregroundColor(.textTertiary)
+                                .padding(.top, 4)
+                        }
+                    }
+
+                    // On Demand (per-server VOD toggle). Previously this
+                    // and Guide History only existed on the iOS edit
+                    // sheet; Apple TV users had no way to change them.
+                    if server.supportsVOD {
+                        tvSection("On Demand") {
+                            Toggle("Fetch On Demand from this playlist", isOn: $server.vodEnabled)
+                                .font(.system(size: 28, weight: .medium))
+                                .foregroundColor(.textPrimary)
+                                .padding(.vertical, 4)
+                            Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
+                                .font(.system(size: 22))
+                                .foregroundColor(.textTertiary)
+                                .padding(.top, 4)
+                        }
+                    }
+
+                    // Guide History (catch-up retention)
+                    tvSection("Guide History") {
+                        Picker("Guide History", selection: $server.epgRetentionDays) {
+                            Text("1 day").tag(1)
+                            Text("3 days").tag(3)
+                            Text("7 days (default)").tag(7)
+                            Text("14 days").tag(14)
+                            Text("30 days").tag(30)
+                        }
+                        .pickerStyle(.segmented)
+                        Text("How many days of already-aired guide data to keep for this playlist. Past shows on channels with catch-up can be replayed from the guide. Longer history means a larger guide cache.")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.top, 4)
+                    }
+
                     // Info
                     tvSection("Info") {
                         HStack {
@@ -3204,58 +3139,6 @@ struct EditServerPage: View {
                                 .foregroundColor(.textTertiary)
                         }
                         .padding(.vertical, 8)
-                    }
-
-                    // v1.7.5: Refresh EPG Data (per-playlist guide purge)
-                    tvSection("EPG Cache") {
-                        Button {
-                            showPurgeConfirmation = true
-                        } label: {
-                            HStack(spacing: 12) {
-                                if isPurgingEPG {
-                                    ProgressView().scaleEffect(0.9)
-                                } else {
-                                    Image(systemName: "arrow.triangle.2.circlepath")
-                                }
-                                Text(isPurgingEPG ? "Refreshing EPG Data…" : "Refresh EPG Data")
-                                Spacer()
-                            }
-                            .font(.system(size: 28, weight: .semibold))
-                            .foregroundColor(isPurgingEPG ? .textSecondary : .statusWarning)
-                        }
-                        .buttonStyle(TVNoHighlightButtonStyle())
-                        .disabled(isPurgingEPG || isRefreshingAll)
-                        Text(server.isActive
-                             ? "Clears this playlist's cached guide data and downloads it fresh from the server. Use this if program cells look wrong or are missing."
-                             : "Clears this playlist's cached guide data. The fresh fetch runs automatically the next time you make this playlist active.")
-                            .font(.system(size: 22))
-                            .foregroundColor(.textTertiary)
-                            .padding(.top, 4)
-                    }
-
-                    // v1.7.5: Refresh Everything (nuclear)
-                    tvSection("Full Refresh") {
-                        Button {
-                            showRefreshAllConfirmation = true
-                        } label: {
-                            HStack(spacing: 12) {
-                                if isRefreshingAll {
-                                    ProgressView().scaleEffect(0.9)
-                                } else {
-                                    Image(systemName: "arrow.clockwise.circle")
-                                }
-                                Text(isRefreshingAll ? "Refreshing Everything…" : "Refresh Everything")
-                                Spacer()
-                            }
-                            .font(.system(size: 28, weight: .semibold))
-                            .foregroundColor(isRefreshingAll ? .textSecondary : .statusWarning)
-                        }
-                        .buttonStyle(TVNoHighlightButtonStyle())
-                        .disabled(isRefreshingAll || isPurgingEPG)
-                        Text("Clears all cached channels, guide data, and On Demand for this playlist, then reloads from scratch. Use this if channels or guide data are missing or stale.")
-                            .font(.system(size: 22))
-                            .foregroundColor(.textTertiary)
-                            .padding(.top, 4)
                     }
 
                     // Save
@@ -3300,51 +3183,6 @@ struct EditServerPage: View {
         }
         .navigationTitle("Edit Playlist")
         .toolbar(.hidden, for: .navigationBar)
-        // v1.7.5: confirmation alerts for the two refresh actions,
-        // mirroring iOS ServerDetailView. Same GuideStore / EPGCache /
-        // VODStore / ChannelStore call sequence.
-        .alert("Refresh EPG Data?", isPresented: $showPurgeConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Refresh", role: .destructive) {
-                Task {
-                    isPurgingEPG = true
-                    await GuideStore.shared.purgePrograms(
-                        for: server.id.uuidString,
-                        isActiveServer: server.isActive,
-                        modelContext: modelContext
-                    )
-                    await EPGCache.shared.invalidateAll()
-                    if server.isActive {
-                        await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
-                    }
-                    isPurgingEPG = false
-                }
-            }
-        } message: {
-            Text(server.isActive
-                 ? "All cached guide data for \"\(server.name)\" will be cleared and reloaded from the server. This may take a few minutes on large playlists."
-                 : "All cached guide data for \"\(server.name)\" will be cleared. The next time you make this playlist active, fresh guide data will load automatically.")
-        }
-        .alert("Refresh Everything?", isPresented: $showRefreshAllConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Refresh", role: .destructive) {
-                Task {
-                    isRefreshingAll = true
-                    await GuideStore.shared.purgeAllPrograms(modelContext: modelContext)
-                    await EPGCache.shared.invalidateAll()
-                    VODStore.shared.clear()
-                    if server.isActive {
-                        await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
-                        VODStore.shared.refresh(servers: Array(servers))
-                    }
-                    isRefreshingAll = false
-                }
-            }
-        } message: {
-            Text(server.isActive
-                 ? "Clears all cached channels, guide data, and On Demand, then reloads \"\(server.name)\" from scratch. Use this if channels or guide data are missing or stale. May take a few minutes on large playlists."
-                 : "Clears all cached channels, guide data, and On Demand. \"\(server.name)\" reloads automatically the next time you make it active.")
-        }
     }
 
     private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
