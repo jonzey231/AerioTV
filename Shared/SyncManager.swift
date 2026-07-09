@@ -1416,6 +1416,13 @@ extension Notification.Name {
     /// press cannot overshoot left into the leading Guide/Search/List controls.
     static let guideLeftHoldBegan = Notification.Name("guideLeftHoldBegan")
     static let guideLeftHoldEnded = Notification.Name("guideLeftHoldEnded")
+    /// #42: a guide long-press Right while a corner mini-player is minimized.
+    /// `Began` posts when the hold crosses the threshold (close the mini);
+    /// `Ended` posts on release. Between them EPGGuideView pins its timeline
+    /// (gates onMoveCommand(.right)) so the still-held Right does not scroll the
+    /// EPG forward after the mini closes.
+    static let guideRightHoldBegan = Notification.Name("guideRightHoldBegan")
+    static let guideRightHoldEnded = Notification.Name("guideRightHoldEnded")
     /// Posted by `ChannelStore.primeXMLTVFromURL` after it has
     /// finished the XMLTV parse AND written category-enriched
     /// entries into EPGCache via `GuideStore.seedEPGCache`. Any

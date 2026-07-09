@@ -577,6 +577,21 @@ struct ChannelListView: View {
                         onEnded: { NotificationCenter.default.post(name: .guideLeftHoldEnded, object: nil) }
                     )
                 )
+                // Hold Right to close the corner mini-player (Android TV parity).
+                // Only armed while a mini is minimized on screen, so ordinary
+                // Right navigation in the guide is untouched the rest of the time.
+                .background(
+                    GuideLongPressRightDetector(
+                        isEnabled: nowPlaying.isActive && nowPlaying.isMinimized,
+                        onBegan: {
+                            NotificationCenter.default.post(name: .guideRightHoldBegan, object: nil)
+                            withAnimation(.spring(response: 0.35)) { nowPlaying.stop() }
+                        },
+                        onEnded: {
+                            NotificationCenter.default.post(name: .guideRightHoldEnded, object: nil)
+                        }
+                    )
+                )
                 .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldBegan)) { _ in
                     // Jump focus to "All" and pin it there for the duration of the
                     // hold so the still-held Left can't overshoot into the leading
@@ -839,6 +854,10 @@ struct ChannelListView: View {
                     }
                 }
             }
+            // GH #20 (Android parity): the same scroll state also tucks the
+            // tab bar away so the list reclaims its height. Phone-only by
+            // construction: the observer above never sets the flag on iPad.
+            .toolbar(isChromeCollapsed ? .hidden : .visible, for: .tabBar)
             #endif
         }
         // v1.6.13: same mini push-down as the Guide branch above.
@@ -1608,6 +1627,9 @@ struct ChannelRow: View {
     /// can use the full row width (the logo eats space and crops long names,
     /// especially on iPhone). Cross-platform; defaults on.
     @AppStorage("ui.showChannelLogos") private var showChannelLogos = true
+    /// GH #19 (Android parity): when off, the channel-number column is
+    /// hidden. Cross-platform; defaults on.
+    @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
     @State private var reminderTarget: EPGEntry?
@@ -1891,11 +1913,14 @@ struct ChannelRow: View {
                 onTap()
             } label: {
                 HStack(spacing: 14) {
-                    Text(item.number)
-                        .font(.system(size: 24, weight: .bold, design: .monospaced))
-                        .lineLimit(1)
-                        .foregroundColor(.textTertiary)
-                        .frame(width: 42, alignment: .trailing)
+                    // GH #19: number column collapses when numbers are off.
+                    if showChannelNumbers {
+                        Text(item.number)
+                            .font(.system(size: 24, weight: .bold, design: .monospaced))
+                            .lineLimit(1)
+                            .foregroundColor(.textTertiary)
+                            .frame(width: 42, alignment: .trailing)
+                    }
 
                     if showChannelLogos {
                         CachedLogoImage(url: item.logoURL, width: 72, height: 48)
@@ -1999,11 +2024,14 @@ struct ChannelRow: View {
         // iPad vs. iPhone branch before scale is applied.
         let s = listScaleClamped
         return HStack(spacing: (isWide ? 14 : 10) * s) {
-            Text(item.number)
-                .font(.system(size: (isWide ? 17 : 13) * s, weight: .bold, design: .monospaced))
-                .lineLimit(1)
-                .foregroundColor(.textTertiary)
-                .frame(width: (isWide ? 36 : 26) * s, alignment: .trailing)
+            // GH #19: number column collapses when numbers are off.
+            if showChannelNumbers {
+                Text(item.number)
+                    .font(.system(size: (isWide ? 17 : 13) * s, weight: .bold, design: .monospaced))
+                    .lineLimit(1)
+                    .foregroundColor(.textTertiary)
+                    .frame(width: (isWide ? 36 : 26) * s, alignment: .trailing)
+            }
 
             if showChannelLogos {
                 CachedLogoImage(

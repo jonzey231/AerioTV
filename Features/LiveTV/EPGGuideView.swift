@@ -2170,6 +2170,12 @@ struct EPGGuideView: View {
     /// `showStagingToast` helper. Same pattern as
     /// `AddToMultiviewSheet.toastMessage`.
     @State private var stagingToast: String? = nil
+    #if os(iOS)
+    /// GH #20 (Android parity): hide the iPhone tab bar while the guide
+    /// scrolls down, reveal near the top. Same 80/20 hysteresis and phone
+    /// gate as ChannelListView.isChromeCollapsed; iPad keeps its bar.
+    @State private var guideTabBarHidden = false
+    #endif
     #if os(tvOS)
     /// Programmatic focus target for a channel row's left-hand cell.
     /// Normally nil (focus engine drives navigation).
@@ -2184,6 +2190,13 @@ struct EPGGuideView: View {
     /// SwiftUI-native focusable (the cells are now `.focusable()`, not a
     /// UIKit press overlay) is what finally makes the restore work.
     @FocusState private var focusedProgramID: String?
+
+    /// #42: while a hold-Right (close corner mini) is in progress, pin the guide
+    /// timeline so the still-held Right does not scroll the EPG forward after the
+    /// mini closes. Gated in `onMoveCommand(.right)`; driven by the
+    /// `.guideRightHold*` notifications with a 2.5s safety backstop.
+    @State private var rightHoldPinningTimeline = false
+    @State private var rightHoldSafetyTask: Task<Void, Never>?
 
     /// Namespace + imperative reset hook for the guide's focus
     /// scope. See ChannelListView's identical setup for the full
@@ -2476,6 +2489,27 @@ struct EPGGuideView: View {
                         }
                     }
                 }
+                #if os(iOS)
+                // GH #20 (Android parity): auto-hide the iPhone tab bar on
+                // vertical guide scroll. Same 80/20 hysteresis + phone gate
+                // as ChannelListView's chrome collapse; only vertical offset
+                // is observed so timeline scrubbing can't toggle the bar.
+                .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
+                    scrollGeo.contentOffset.y
+                } action: { _, y in
+                    guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+                    if y > 80 && !guideTabBarHidden {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            guideTabBarHidden = true
+                        }
+                    } else if y < 20 && guideTabBarHidden {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            guideTabBarHidden = false
+                        }
+                    }
+                }
+                .toolbar(guideTabBarHidden ? .hidden : .visible, for: .tabBar)
+                #endif
             .clipped()
             .onAppear { visibleProgramWidth = geo.size.width - channelColumnWidth }
             .onChange(of: geo.size.width) { _, w in visibleProgramWidth = w - channelColumnWidth }
@@ -2538,6 +2572,10 @@ struct EPGGuideView: View {
                         horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
                     }
                 case .right:
+                    // #42: a hold-Right (close corner mini) freezes the timeline so
+                    // the still-held Right does not scroll the EPG forward after the
+                    // mini closes. Short/normal Right scrolling is unaffected.
+                    if rightHoldPinningTimeline { break }
                     withAnimation(.easeOut(duration: 0.3)) {
                         horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * 0.5)
                     }
@@ -2546,6 +2584,25 @@ struct EPGGuideView: View {
                 }
             }
             #endif
+            .onReceive(NotificationCenter.default.publisher(for: .guideRightHoldBegan)) { _ in
+                #if os(tvOS)
+                // Freeze the EPG timeline for the duration of the close-mini hold.
+                // A safety backstop clears the pin if the release event is missed.
+                rightHoldPinningTimeline = true
+                rightHoldSafetyTask?.cancel()
+                rightHoldSafetyTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    if !Task.isCancelled { rightHoldPinningTimeline = false }
+                }
+                #endif
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .guideRightHoldEnded)) { _ in
+                #if os(tvOS)
+                rightHoldPinningTimeline = false
+                rightHoldSafetyTask?.cancel()
+                rightHoldSafetyTask = nil
+                #endif
+            }
             .onReceive(
                 NotificationCenter.default.publisher(for: .guideScrollToTop)
             ) { _ in
@@ -3315,6 +3372,10 @@ private struct GuideChannelButton: View {
     let channel: ChannelDisplayItem
     let onSelect: (ChannelDisplayItem) -> Void
     @EnvironmentObject private var favoritesStore: FavoritesStore
+    /// GH #19 (Android parity): hide the channel number in the guide rail.
+    /// Same key as the List view's toggle; the guide's logo is gated by
+    /// logoURL presence only, so this is the guide's first appearance flag.
+    @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
 
     var body: some View {
         #if os(tvOS)
@@ -3366,12 +3427,15 @@ private struct GuideChannelButton: View {
         #if os(tvOS)
         // Emby-style: channel number on left, logo + name on right
         HStack(spacing: 8) {
-            Text(channel.number)
-                .font(.system(size: 22, weight: .bold, design: .monospaced))
-                .foregroundColor(.textTertiary)
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-                .frame(minWidth: 38, alignment: .trailing)
+            // GH #19: number column collapses when numbers are off.
+            if showChannelNumbers {
+                Text(channel.number)
+                    .font(.system(size: 22, weight: .bold, design: .monospaced))
+                    .foregroundColor(.textTertiary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: 38, alignment: .trailing)
+            }
 
             VStack(spacing: 4) {
                 // v1.6.23: route through CachedLogoImage so the
@@ -3405,9 +3469,12 @@ private struct GuideChannelButton: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.textPrimary)
                     .lineLimit(1)
-                Text(channel.number)
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundColor(.textTertiary)
+                // GH #19: hide the number line when numbers are off.
+                if showChannelNumbers {
+                    Text(channel.number)
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.textTertiary)
+                }
             }
             .multilineTextAlignment(.center)
         }

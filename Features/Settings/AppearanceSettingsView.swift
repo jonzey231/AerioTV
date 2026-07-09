@@ -44,6 +44,8 @@ struct AppearanceSettingsView: View {
     @AppStorage("tintChannelCards")       private var tintChannelCards = false
     // Issue #28: hide channel logos so the channel name uses the full row width.
     @AppStorage("ui.showChannelLogos")    private var showChannelLogos = true
+    // GH #19 (Android parity): hide channel numbers in the List and Guide.
+    @AppStorage("ui.showChannelNumbers")  private var showChannelNumbers = true
 
     // MARK: - App Behaviors (moved)
     //
@@ -203,7 +205,7 @@ struct AppearanceSettingsView: View {
                         .padding(.horizontal, 20)
                 }
 
-                // Channel List (issue #28)
+                // Channel List (issue #28 logos + GH #19 numbers)
                 tvAppearanceSection("Channel List") {
                     TVSettingsToggleRow(
                         icon: "tv.fill",
@@ -211,6 +213,14 @@ struct AppearanceSettingsView: View {
                         title: "Show Channel Logos",
                         subtitle: "Turn off to hide channel logos so longer channel names get the full row width.",
                         isOn: $showChannelLogos,
+                        onChange: { _ in }
+                    )
+                    TVSettingsToggleRow(
+                        icon: "number",
+                        iconColor: .accentPrimary,
+                        title: "Show Channel Numbers",
+                        subtitle: "Turn off to hide channel numbers in the Live TV list and Guide.",
+                        isOn: $showChannelNumbers,
                         onChange: { _ in }
                     )
                 }
@@ -566,6 +576,20 @@ struct AppearanceSettingsView: View {
                     .tint(theme.accent)
                     .listRowBackground(Color.cardBackground)
                     .onChange(of: showChannelLogos) { _, _ in
+                        SyncManager.shared.pushPreferencesImmediate()
+                    }
+                    // GH #19 (Android parity): hide channel numbers too.
+                    Toggle(isOn: $showChannelNumbers) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Show Channel Numbers")
+                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                            Text("Turn off to hide channel numbers in the Live TV list and Guide.")
+                                .font(.labelSmall).foregroundColor(.textTertiary)
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+                    .onChange(of: showChannelNumbers) { _, _ in
                         SyncManager.shared.pushPreferencesImmediate()
                     }
                 } header: {

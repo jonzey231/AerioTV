@@ -411,4 +411,141 @@ final class LeftHoldHostView: UIView, UIGestureRecognizerDelegate {
     func gestureRecognizer(_ g: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }
+
+// MARK: - guide long-press-Right detector (close corner mini-player)
+
+/// Detects a LONG-press (>= 0.5s) of the Right d-pad and invokes `onBegan`,
+/// used to close the corner mini-player while the guide is on screen (parity
+/// with the Android TV "hold Right to close the mini player" gesture). Modeled
+/// on GuideLongPressLeftDetector: the recognizer is installed on the host's
+/// WINDOW (the only ancestor reliably in the focused cell's `UIPress` responder
+/// chain) but ONLY while `isEnabled` is true — i.e. while a mini-player is
+/// active. When no mini is up the recognizer is removed, so ordinary Right
+/// navigation in the guide (including hold-to-fast-scroll) is completely
+/// untouched. A short Right always passes through to `onMoveCommand`.
+struct GuideLongPressRightDetector: UIViewRepresentable {
+    /// Attach the Right long-press recognizer only while this is true (mini active).
+    let isEnabled: Bool
+    /// Fires once when the Right hold crosses the 0.5s threshold (close mini + pin timeline).
+    let onBegan: () -> Void
+    /// Fires when the Right press is released (unpin the guide timeline).
+    let onEnded: () -> Void
+
+    func makeUIView(context: Context) -> RightHoldHostView {
+        let v = RightHoldHostView()
+        v.onRightHoldBegan = onBegan
+        v.onRightHoldEnded = onEnded
+        v.isEnabled = isEnabled
+        v.isUserInteractionEnabled = false   // passthrough; never steals focus/taps
+        return v
+    }
+    func updateUIView(_ uiView: RightHoldHostView, context: Context) {
+        uiView.onRightHoldBegan = onBegan
+        uiView.onRightHoldEnded = onEnded
+        uiView.isEnabled = isEnabled
+        uiView.syncRecognizer()
+    }
+    static func dismantleUIView(_ uiView: RightHoldHostView, coordinator: ()) {
+        uiView.detachRecognizer()
+    }
+}
+
+/// Non-focusable host that attaches a Right-arrow long-press recognizer to its
+/// window ONLY while `isEnabled` (a corner mini-player is minimized), so ordinary
+/// Right (including hold-to-fast-scroll) is untouched when no mini is up. It fires
+/// `onRightHoldBegan` on the 0.5s threshold (close the mini) and `onRightHoldEnded`
+/// on release. The recognizer is kept attached from `.began` until release even
+/// though `isEnabled` flips false when the mini closes — NOT to "hold focus" (a
+/// window recognizer cannot suppress the tvOS focus engine; see #42 Part 2) — but
+/// so the `.ended` event reliably fires `onRightHoldEnded`. The actual "don't
+/// scroll the guide right during the hold" is done in EPGGuideView, which pins its
+/// timeline (gates onMoveCommand(.right)) between the Began/Ended notifications. A
+/// 5s safety fires onRightHoldEnded and resets the recognizer if the release is
+/// ever missed.
+final class RightHoldHostView: UIView, UIGestureRecognizerDelegate {
+    var onRightHoldBegan: (() -> Void)?
+    var onRightHoldEnded: (() -> Void)?
+    var isEnabled: Bool = false
+    private weak var attachedWindow: UIWindow?
+    private var recognizer: UILongPressGestureRecognizer?
+    /// True from the recognized Right-hold (.began) until release. While true the
+    /// recognizer is not detached even after `isEnabled` flips false (mini closed),
+    /// so the `.ended` release still fires and unpins the guide timeline.
+    private var holdInProgress = false
+    private var holdSafety: DispatchWorkItem?
+
+    override var canBecomeFocused: Bool { false }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window !== attachedWindow { detachRecognizer() }
+        syncRecognizer()
+    }
+
+    /// Attach the recognizer when enabled + windowed; remove it otherwise, but
+    /// NEVER mid-hold — so the `.ended` release still fires `onRightHoldEnded`
+    /// (which unpins the guide timeline) after the mini closes. Idempotent.
+    func syncRecognizer() {
+        if isEnabled, let window, recognizer == nil {
+            let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleRightHold(_:)))
+            lp.allowedPressTypes = [NSNumber(value: UIPress.PressType.rightArrow.rawValue)]
+            lp.minimumPressDuration = 0.5
+            // Consume the recognized long-press so its release "click" does not
+            // resolve into the guide's onMoveCommand. Short Right (< 0.5s) never
+            // recognizes, so its timeline scroll is unaffected.
+            lp.cancelsTouchesInView = true
+            lp.delaysTouchesBegan = false
+            lp.delegate = self
+            window.addGestureRecognizer(lp)
+            recognizer = lp
+            attachedWindow = window
+        } else if !isEnabled && !holdInProgress {
+            detachRecognizer()
+        }
+    }
+
+    func detachRecognizer() {
+        holdSafety?.cancel(); holdSafety = nil
+        holdInProgress = false
+        if let r = recognizer { attachedWindow?.removeGestureRecognizer(r) }
+        recognizer = nil
+        attachedWindow = nil
+    }
+
+    @objc private func handleRightHold(_ gr: UILongPressGestureRecognizer) {
+        switch gr.state {
+        case .began:
+            holdInProgress = true
+            // Backstop in case the release event is missed, so the timeline pin
+            // (and this recognizer) are never left stuck. Mirrors the hold-Left pin.
+            holdSafety?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.endHold() }
+            holdSafety = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5.0, execute: work)
+            onRightHoldBegan?()
+        case .ended, .cancelled, .failed:
+            endHold()
+        default:
+            break
+        }
+    }
+
+    /// Hold released (or safety fired): fire `onRightHoldEnded` exactly once
+    /// (unpins the guide timeline), then reset the recognizer and re-arm fresh if
+    /// a mini is still minimized — so a recognizer left mid-recognition (a missed
+    /// release) is always cleared rather than stuck.
+    private func endHold() {
+        holdSafety?.cancel(); holdSafety = nil
+        guard holdInProgress else { return }
+        holdInProgress = false
+        onRightHoldEnded?()
+        detachRecognizer()
+        syncRecognizer()
+    }
+
+    // Coexist with the focus engine + any other recognizers (e.g. the player's).
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+}
+
 #endif

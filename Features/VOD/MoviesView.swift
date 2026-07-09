@@ -71,6 +71,12 @@ struct MoviesView: View {
     @State private var searchText = ""
     @State private var hiddenGroups: Set<String> = []
     @State private var showManageGroups = false
+    #if os(iOS)
+    /// GH #20 (Android parity): auto-hide the iPhone tab bar while the
+    /// poster grid scrolls down; reveal near the top. Phone-gated in the
+    /// observer, so iPad keeps its bar.
+    @State private var gridTabBarHidden = false
+    #endif
     @State private var navPath = NavigationPath()
     #if os(tvOS)
     @State private var showSearchField = false
@@ -443,6 +449,26 @@ struct MoviesView: View {
                     .focusSection()
                     #endif
                 }
+                #if os(iOS)
+                // GH #20 (Android parity): auto-hide the iPhone tab bar on
+                // grid scroll. Same 80/20 hysteresis + phone gate as the
+                // Live TV chrome collapse.
+                .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
+                    scrollGeo.contentOffset.y
+                } action: { _, y in
+                    guard UIDevice.current.userInterfaceIdiom == .phone else { return }
+                    if y > 80 && !gridTabBarHidden {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            gridTabBarHidden = true
+                        }
+                    } else if y < 20 && gridTabBarHidden {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            gridTabBarHidden = false
+                        }
+                    }
+                }
+                .toolbar(gridTabBarHidden ? .hidden : .visible, for: .tabBar)
+                #endif
             }
         }
     }

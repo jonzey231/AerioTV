@@ -5387,11 +5387,29 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 .joined(separator: "+")
             debugLog("[AUDIO-HEALTH] \(streamTag) (\(context)) codec=\(codec ?? "none") dec_ch=\(decCh) out_ch=\(outCh) ao=\(ao ?? "NONE") route=[\(route)] session=\(Int(session.sampleRate))Hz/\(session.outputNumberOfChannels)ch")
 
-            // Healthy (or no audio track at all, e.g. a decoder-off multiview
-            // tile): nothing to do.
-            guard codec != nil, decCh <= 0 || ao == nil, !audioStereoFallbackApplied else { return }
+            // Two dead-chain shapes get the stereo fallback (one attempt per
+            // stream); anything else is healthy and left alone:
+            //  - codec set, but 0 decoded channels / no ao (#36): the chain
+            //    came up and failed against the Atmos output layout.
+            //  - codec=nil AND ao=nil (#51): the audiounit ao failed so early
+            //    against the receiver's spatial layout (log showed
+            //    route=HDMIOutput/32ch, session 48000Hz/32ch) that mpv
+            //    disabled audio entirely, so no codec is ever reported. The
+            //    old `codec != nil` guard read that as "stream has no audio"
+            //    and skipped the fallback, leaving those setups silent on
+            //    every channel. Only skip when the missing chain is OUR OWN
+            //    doing: the multiview decoder-off strategy (7+ tiles) writes
+            //    aid=no, at option time (lastWrittenAID still nil) or via
+            //    audio-focus (lastWrittenAID == "no").
+            let appDisabledAudio = lastWrittenAID == "no" ||
+                (lastWrittenAID == nil && initialTileCount >= 7 && !initialIsAudioActive)
+            let chainDeadNoCodec = codec == nil && ao == nil && !appDisabledAudio
+            let chainDeadWithCodec = codec != nil && (decCh <= 0 || ao == nil)
+            guard chainDeadNoCodec || chainDeadWithCodec, !audioStereoFallbackApplied else { return }
             audioStereoFallbackApplied = true
-            debugLog("[AUDIO-FALLBACK] \(streamTag) audio chain failed to open (\(ao == nil ? "no audio output" : "0 channels")); forcing stereo downmix + audio chain reinit (Dolby Atmos output workaround)")
+            let failureShape = codec == nil ? "audio disabled after ao init failure"
+                : (ao == nil ? "no audio output" : "0 channels")
+            debugLog("[AUDIO-FALLBACK] \(streamTag) audio chain failed to open (\(failureShape)); forcing stereo downmix + audio chain reinit (Dolby Atmos output workaround)")
             mpv_set_property_string(mpv, "audio-channels", "stereo")
             // Cycle the audio track so the audio output reopens cleanly with
             // the new layout.

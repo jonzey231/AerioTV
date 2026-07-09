@@ -48,7 +48,6 @@ import Foundation
 enum HTTPRouter {
 
     private static let defaultRequestTimeout = URLSessionConfiguration.default.timeoutIntervalForRequest
-    private static let defaultResourceTimeout = URLSessionConfiguration.default.timeoutIntervalForResource
 
     // MARK: - Public API
 
@@ -125,12 +124,14 @@ enum HTTPRouter {
             candidates.append(sessionRequestTimeout)
         }
 
-        let sessionResourceTimeout = session.configuration.timeoutIntervalForResource
-        if sessionResourceTimeout > 0,
-           sessionResourceTimeout != defaultResourceTimeout {
-            candidates.append(sessionResourceTimeout)
-        }
-
+        // timeoutIntervalForResource is deliberately NOT a candidate. This soft
+        // deadline bounds the NWConnection exchange's responsiveness (connect +
+        // response) = the REQUEST timeout. The RESOURCE timeout is the total
+        // large-transfer budget (e.g. the Dispatcharr session's 300s); including
+        // it in the max() let a simple GET to a dead/refused endpoint hang for the
+        // whole resource window instead of failing at the request bound — which
+        // stalled cold start for minutes and blocked VOD/On Demand (sequenced
+        // after the DVR reconcile) when a server's Local URL pointed at a down port.
         return candidates.max() ?? NWHTTPClient.defaultTimeout
     }
 

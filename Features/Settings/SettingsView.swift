@@ -489,6 +489,14 @@ struct SettingsView: View {
                     } header: {
                         Text("About")
                             .sectionHeaderStyle()
+                    } footer: {
+                        Text("In loving memory of Jesse Mann aka EPG Guru")
+                            .font(.footnote)
+                            .italic()
+                            .foregroundColor(.textTertiary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.top, 8)
+                            .padding(.bottom, 4)
                     }
                     #if os(iOS)
                     .listSectionSeparator(.hidden)
@@ -1049,6 +1057,13 @@ struct SettingsView: View {
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Color.cardBackground))
                 .padding(.bottom, 8)
+
+                Text("In loving memory of Jesse Mann aka EPG Guru")
+                    .font(.system(size: 22))
+                    .italic()
+                    .foregroundColor(.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 12)
 
             }
             .padding(.horizontal, 80)
