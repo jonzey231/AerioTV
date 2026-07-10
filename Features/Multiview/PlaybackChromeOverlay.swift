@@ -940,7 +940,15 @@ struct PlaybackBottomChrome_tvOS: View {
             // bar + time remaining. Non-focusable; informational.
             // With a Live Rewind session rolling, the band becomes the
             // rewind timeline over [buffer tail .. live edge] instead.
-            if liveRewind.buffering {
+            if let cu = store.catchupTile?.catchup,
+               let ps = store.audioProgressStore {
+                // Catch-up replay (task #147): position over the pinned
+                // programme duration. Observes the progress store
+                // directly - there is no rewind engine ticking to drive
+                // re-renders in this mode.
+                CatchupTimelineBand(progress: ps, playback: cu)
+                    .padding(.horizontal, 80)
+            } else if liveRewind.buffering {
                 LiveRewindTimelineBand(store: store)
                     .padding(.horizontal, 80)
             } else {
@@ -978,13 +986,17 @@ struct PlaybackBottomChrome_tvOS: View {
                 // Live Rewind transport, leading the row so D-pad LEFT
                 // from the existing cells reaches it (same relative
                 // placement the Android TV pill row uses).
-                if liveRewind.buffering {
+                // The same three transport cells serve live rewind AND
+                // catch-up: currentMs ticks in both modes and seekAction
+                // routes to the right seek model per mode (buffer re-tune
+                // vs archive window re-tune).
+                if store.catchupTile != nil || liveRewind.buffering {
                     nativeToolButton(
                         .rewind30,
                         icon: "gobackward.30",
                         title: "Rewind",
                         a11yLabel: "Rewind 30 seconds",
-                        a11yHint: "Jump back thirty seconds in the live buffer"
+                        a11yHint: "Jump back thirty seconds"
                     ) {
                         chromeState.reportInteraction()
                         if let ps = store.audioProgressStore {
@@ -996,7 +1008,7 @@ struct PlaybackBottomChrome_tvOS: View {
                         icon: (store.audioProgressStore?.isPaused ?? false) ? "play.fill" : "pause.fill",
                         title: (store.audioProgressStore?.isPaused ?? false) ? "Play" : "Pause",
                         a11yLabel: (store.audioProgressStore?.isPaused ?? false) ? "Play" : "Pause",
-                        a11yHint: "Pause live TV; the buffer keeps recording while paused"
+                        a11yHint: "Pause playback"
                     ) {
                         chromeState.reportInteraction()
                         store.audioProgressStore?.togglePauseAction?()
@@ -1006,7 +1018,7 @@ struct PlaybackBottomChrome_tvOS: View {
                         icon: "goforward.30",
                         title: "Forward",
                         a11yLabel: "Forward 30 seconds",
-                        a11yHint: "Jump forward thirty seconds toward live"
+                        a11yHint: "Jump forward thirty seconds"
                     ) {
                         chromeState.reportInteraction()
                         if let ps = store.audioProgressStore {
@@ -1043,15 +1055,19 @@ struct PlaybackBottomChrome_tvOS: View {
                         showRecordSheet = true
                     }
                 }
-                nativeToolButton(
-                    .addStream,
-                    icon: "plus",
-                    title: "Add Stream",
-                    a11yLabel: "Add stream",
-                    a11yHint: "Pick another channel to watch alongside this one"
-                ) {
-                    chromeState.reportInteraction()
-                    showAddSheet = true
+                // Catch-up is a single archived replay; multiview
+                // alongside it isn't supported, so hide Add Stream.
+                if store.catchupTile == nil {
+                    nativeToolButton(
+                        .addStream,
+                        icon: "plus",
+                        title: "Add Stream",
+                        a11yLabel: "Add stream",
+                        a11yHint: "Pick another channel to watch alongside this one"
+                    ) {
+                        chromeState.reportInteraction()
+                        showAddSheet = true
+                    }
                 }
                 nativeToolButton(
                     .options,
@@ -1389,6 +1405,56 @@ struct LiveRewindTimelineBand: View {
             }
         }
         .focusable(false)
+    }
+}
+
+/// Catch-up variant of the timeline band: playback position over the
+/// programme's pinned duration (the archive stream reports no duration
+/// of its own; `programDurationMs` comes from the EPG entry). Unlike
+/// LiveRewindTimelineBand there is no engine publishing window ticks,
+/// so this observes the tile's progress store directly for re-renders.
+struct CatchupTimelineBand: View {
+    @ObservedObject var progress: PlayerProgressStore
+    let playback: CatchupPlayback
+
+    var body: some View {
+        let duration = max(Int32(1), playback.programDurationMs)
+        let current = min(max(0, progress.currentMs), duration)
+        let fraction = Double(current) / Double(duration)
+
+        VStack(spacing: 8) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.white.opacity(0.2))
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.accentColor)
+                        .frame(width: geo.size.width * CGFloat(max(0, min(1, fraction))))
+                }
+            }
+            .frame(height: 6)
+
+            HStack(spacing: 14) {
+                Text(playback.title)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1)
+                Spacer()
+                Text("\(Self.clock(current)) / \(Self.clock(duration))")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .monospacedDigit()
+            }
+        }
+        .focusable(false)
+    }
+
+    private static func clock(_ ms: Int32) -> String {
+        let total = Int(ms) / 1000
+        if total >= 3600 {
+            return String(format: "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+        }
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 #endif

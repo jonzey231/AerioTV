@@ -562,6 +562,48 @@ final class MultiviewStore: ObservableObject {
     /// Record affordance (which gates on `item.streamURL != nil`) stays
     /// hidden for VOD tiles; playback uses the tile's own `streamURL`.
     @discardableResult
+    /// Catch-up unification (task #147): replace whatever is playing
+    /// with a single catch-up tile. Catch-up is always a solo, full
+    /// teardown-and-reseed session — no mixing with live tiles in v1.
+    func seedCatchup(_ pb: CatchupPlayback) {
+        reset()
+        // Catch-up is mpv-only: the aeriocu relay + window re-tune seek
+        // model live in the mpv coordinator. Never route to AVPlayer.
+        clearEngineLock()
+        let syntheticItem = ChannelDisplayItem(
+            id: "catchup-\(pb.id.uuidString)",
+            name: pb.title,
+            number: "",
+            logoURL: nil,
+            group: "Catch-up",
+            categoryOrder: 0,
+            streamURL: nil,   // hides the Record affordance, like VOD
+            streamURLs: []
+        )
+        let tile = MultiviewTile(
+            id: UUID().uuidString,
+            item: syntheticItem,
+            streamURL: pb.url,
+            headers: pb.headers,
+            addedAt: Date(),
+            kind: .catchup,
+            catchup: pb
+        )
+        tiles = [tile]
+        audioTileID = tile.id
+        DebugLogger.shared.log(
+            "[MV-Tile] seedCatchup: \(pb.title)",
+            category: "Playback", level: .info
+        )
+    }
+
+    /// The sole catch-up tile when the session is a catch-up replay;
+    /// nil in every live/VOD configuration. The chrome and container
+    /// key their mode gating on this.
+    var catchupTile: MultiviewTile? {
+        tiles.count == 1 ? tiles.first(where: { $0.kind == .catchup }) : nil
+    }
+
     func addVOD(
         title: String,
         streamURL: URL,

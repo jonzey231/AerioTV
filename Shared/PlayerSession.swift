@@ -180,6 +180,36 @@ final class PlayerSession: ObservableObject {
     /// thus each mpv handle) and returns to `.idle`. Called by the
     /// transport bar's "Exit Multiview" button when the user wants
     /// to stop watching, not just collapse to one stream.
+    /// Catch-up unification (task #147): mode-switch whatever is
+    /// playing into a solo catch-up replay in the SAME container the
+    /// live player uses. Replaces the legacy tvOS fullScreenCover
+    /// presentation. Structured like exit()+enterMultiview: capture
+    /// the guide breadcrumb, tear down the current session's bridges,
+    /// then seed the catch-up tile - with the audio-session refcount
+    /// float so the 0->1 bounce never drops the (48kHz-pinned) session
+    /// between the outgoing and incoming players.
+    func beginCatchup(_ pb: CatchupPlayback) {
+        AudioSessionRefCount.increment()
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            AudioSessionRefCount.decrement()
+        }
+        let store = MultiviewStore.shared
+        if let audioID = store.audioTileID,
+           let audioTile = store.tiles.first(where: { $0.id == audioID }) {
+            NowPlayingManager.shared.lastPlayedChannelID = audioTile.item.id
+        }
+        NowPlayingManager.shared.configuredAsMultiviewAdapter = false
+        NowPlayingBridge.shared.teardown()
+        NowPlayingManager.shared.stop()
+        store.seedCatchup(pb)
+        mode = .multiview
+        DebugLogger.shared.log(
+            "[MV-Mode] beginCatchup: \(pb.title)",
+            category: "Playback", level: .info
+        )
+    }
+
     func exit() {
         // v1.6.18: capture the audio tile's channel id BEFORE we
         // reset the store. NowPlayingManager.lastPlayedChannelID is

@@ -3416,8 +3416,15 @@ struct EPGGuideView: View {
                     programStart: prog.start,
                     programEnd: prog.end
                 )
+                #if os(tvOS)
+                // Unified pipeline (task #147): catch-up plays in the
+                // SAME container/chrome as live via a session mode
+                // switch - no separate cover, no second player UI.
+                PlayerSession.shared.beginCatchup(pb)
+                #else
                 PlayerSession.shared.exit()
                 playingCatchup = pb
+                #endif
             } catch {
                 catchupErrorMessage = error.localizedDescription
             }

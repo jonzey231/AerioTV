@@ -806,6 +806,7 @@ struct MultiviewContainerView: View {
             //   scroll direction).
             if appleTVChannelFlip,
                store.tiles.count == 1,
+               store.catchupTile == nil,   // no channel-flip in a replay
                !nowPlaying.isMinimized,
                !chromeState.isVisible {
                 if direction == .up {
@@ -1340,6 +1341,17 @@ struct MultiviewContainerView: View {
             let isSoleStreamUnified = PlaybackFeatureFlags.useUnifiedPlayback
                 && store.tiles.count == 1
             if isSoleStreamUnified {
+                if store.catchupTile != nil {
+                    // Catch-up replay has no corner-mini model: Menu
+                    // exits the session back to the guide, matching the
+                    // legacy cover's Back behavior (task #147).
+                    DebugLogger.shared.log(
+                        "[MV-Cmd]   → branch: catch-up N=1 → exit session",
+                        category: "Playback", level: .info
+                    )
+                    PlayerSession.shared.exit()
+                    return
+                }
                 DebugLogger.shared.log(
                     "[MV-Cmd]   → branch: chrome visible + N=1 → minimize",
                     category: "Playback", level: .info

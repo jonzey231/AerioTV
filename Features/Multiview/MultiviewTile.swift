@@ -7,6 +7,10 @@ enum TilePlaybackKind: Equatable {
     case live
     case vod
     case dvr
+    /// Server-archive replay of an aired programme (timeshift URL).
+    /// Unified-pipeline mode: same container and chrome as live, with
+    /// a position/duration band and no live-only cells (task #147).
+    case catchup
 }
 
 /// One tile inside the multiview grid.
@@ -88,4 +92,9 @@ struct MultiviewTile: Identifiable, Equatable {
     /// the position up from `WatchProgress` via `vodID` / `vodServerID`;
     /// set it to 0 for a deliberate "watch from the beginning".
     var resumePositionMs: Int32? = nil
+
+    /// Catch-up replay payload, set only for `.catchup` tiles. Flows
+    /// into the shared player's `catchup` param (window re-tune seek
+    /// model, aeriocu relay, pinned duration).
+    var catchup: CatchupPlayback? = nil
 }
