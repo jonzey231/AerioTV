@@ -76,6 +76,14 @@ struct MultiviewContainerView: View {
     /// in place of the options list while `showTVOptions` stays true.
     @State private var streamPickerVisible: Bool = false
 
+    #if os(tvOS)
+    /// tvOS ONLY: the shared D-pad left/right scrub for live rewind and
+    /// catch-up (chrome hidden, N=1). Steps a preview, commits one seek
+    /// through the audio tile's per-mode `seekAction`; `active` mounts
+    /// the band-only scrub HUD over the video.
+    @StateObject private var dpadScrub = DpadScrubController()
+    #endif
+
     /// In-session Switch Stream selection, kept here (not in the picker,
     /// which is recreated each open) so re-opening the picker shows the
     /// stream the user actually switched to — `/status.stream_id` goes
@@ -277,6 +285,18 @@ struct MultiviewContainerView: View {
                             .animation(.easeInOut(duration: 0.25), value: chromeState.isVisible)
                             .accessibilityHidden(!chromeState.isVisible)
                             .disabled(showTVOptions || !chromeState.isVisible)
+                        }
+                    }
+                    // D-pad scrub HUD: just the timeline band (in
+                    // preview mode) while a chrome-hidden left/right
+                    // scrub is in flight. Mutually exclusive with the
+                    // full chrome above; never focusable, so it can't
+                    // disturb the tile's focus hold.
+                    .overlay(alignment: .bottom) {
+                        if isSoleTile && !nowPlaying.isMinimized,
+                           dpadScrub.active, !chromeState.isVisible {
+                            DpadScrubHUD(store: store, scrub: dpadScrub)
+                                .transition(.opacity)
                         }
                     }
                     #endif
@@ -817,6 +837,19 @@ struct MultiviewContainerView: View {
                     return
                 }
             }
+            // D-pad left/right with the chrome hidden = timeline scrub
+            // (task #147 milestone 2): one shared implementation for
+            // live rewind and catch-up. With the chrome hidden the tile
+            // has no left/right focus neighbour, so these presses
+            // always land here. Falls through (rewind off on plain
+            // live) to the focus-indicator wake below.
+            if store.tiles.count == 1,
+               !nowPlaying.isMinimized,
+               !chromeState.isVisible,
+               direction == .left || direction == .right,
+               dpadScrub.step(direction == .left ? -1 : +1, store: store) {
+                return
+            }
             // Normal navigation: just wake the focus indicator.
             chromeState.reportFocusActivity()
         }
@@ -849,13 +882,18 @@ struct MultiviewContainerView: View {
                 //      write lands AFTER the pills' `.disabled(false)`
                 //      realizes — the same deferral every other focus write
                 //      in this file uses (onAppear seed, relocate reassert).
+                // Summoning chrome supersedes any in-flight D-pad
+                // scrub: drop it uncommitted (Menu = "never mind").
+                dpadScrub.cancel()
                 focusedTileID = nil
                 Task { @MainActor in
                     await Task.yield()
                     // Re-check: the user may have dismissed chrome or opened
                     // the Options panel during the hop.
                     if chromeState.isVisible && !showTVOptions {
-                        focusedChrome = .addStream
+                        // Catch-up hides Add Stream, so land on the
+                        // pause cell instead.
+                        focusedChrome = store.catchupTile != nil ? .playPause : .addStream
                     }
                 }
             } else {

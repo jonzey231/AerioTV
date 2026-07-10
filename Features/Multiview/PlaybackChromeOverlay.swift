@@ -1353,13 +1353,18 @@ struct PlaybackLiveProgressBand: View {
 struct LiveRewindTimelineBand: View {
     @ObservedObject var store: MultiviewStore
     @ObservedObject private var liveRewind = LiveRewindEngine.shared
+    /// Non-nil while a D-pad scrub is in flight: the band shows the
+    /// scrub PREVIEW position instead of the playhead (no seek happens
+    /// until the scrub commits - a seek is a whole re-tune here).
+    var previewMs: Int32? = nil
 
     var body: some View {
         let window = max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs)
-        let posMs = Int64(store.audioProgressStore?.currentMs ?? 0)
-        let current = liveRewind.timeshifting ? min(posMs, window) : window
+        let posMs = Int64(previewMs ?? store.audioProgressStore?.currentMs ?? 0)
+        let current = (previewMs != nil || liveRewind.timeshifting) ? min(posMs, window) : window
         let fraction = Double(current) / Double(window)
         let behindMs = window - current
+        let showBehind = (previewMs != nil || liveRewind.timeshifting) && behindMs > 5_000
         let programme = store.tiles.first?.item.currentProgram ?? ""
         let remainingText: String? = {
             guard let end = store.tiles.first?.item.currentProgramEnd else { return nil }
@@ -1395,11 +1400,11 @@ struct LiveRewindTimelineBand: View {
                         .foregroundStyle(.white.opacity(0.6))
                 }
                 Spacer()
-                Text(liveRewind.timeshifting && behindMs > 5_000
+                Text(showBehind
                      ? String(format: "-%d:%02d", behindMs / 60_000, (behindMs / 1000) % 60)
                      : "LIVE")
                     .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(liveRewind.timeshifting && behindMs > 5_000
+                    .foregroundStyle(showBehind
                                      ? Color.white.opacity(0.8)
                                      : Color.accentColor)
             }
@@ -1416,10 +1421,13 @@ struct LiveRewindTimelineBand: View {
 struct CatchupTimelineBand: View {
     @ObservedObject var progress: PlayerProgressStore
     let playback: CatchupPlayback
+    /// Non-nil while a D-pad scrub is in flight: show the scrub
+    /// PREVIEW position instead of the playhead.
+    var previewMs: Int32? = nil
 
     var body: some View {
         let duration = max(Int32(1), playback.programDurationMs)
-        let current = min(max(0, progress.currentMs), duration)
+        let current = min(max(0, previewMs ?? progress.currentMs), duration)
         let fraction = Double(current) / Double(duration)
 
         VStack(spacing: 8) {
@@ -1455,6 +1463,122 @@ struct CatchupTimelineBand: View {
             return String(format: "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
         }
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// ONE D-pad left/right scrub implementation for live rewind AND
+/// catch-up (task #147 milestone 2). Presses with the chrome hidden
+/// step a PREVIEW position - no seek per press, because a seek is a
+/// whole re-tune (relay window re-open / archive URL rebuild) in both
+/// modes. Holding a direction accelerates 1x..12x (10s base step, the
+/// legacy VOD scrub feel), and the seek commits ONCE through the
+/// progress store's per-mode `seekAction` 650ms after the presses
+/// stop. `active` drives the scrub HUD (timeline band only) in
+/// MultiviewContainerView.
+@MainActor
+final class DpadScrubController: ObservableObject {
+    /// HUD visibility: turns on at the first step, lingers ~1.5s past
+    /// the commit so the user sees where playback landed.
+    @Published var active = false
+    /// Preview position within the mode's timeline (buffer window for
+    /// live rewind, programme duration for catch-up).
+    @Published var targetMs: Int32 = 0
+
+    private var accelCount = 0
+    private var lastDirection = 0
+    private var scrubbing = false
+    private var commitTask: Task<Void, Never>? = nil
+    private var hideTask: Task<Void, Never>? = nil
+
+    /// Returns false when neither mode has a scrubbable timeline (live
+    /// with rewind off) so the caller can let the press fall through.
+    @discardableResult
+    func step(_ dir: Int, store: MultiviewStore) -> Bool {
+        let endMs: Int32
+        let isCatchup = store.catchupTile != nil
+        if let cu = store.catchupTile?.catchup {
+            endMs = max(1, cu.programDurationMs)
+        } else {
+            let rewind = LiveRewindEngine.shared
+            guard rewind.buffering else { return false }
+            endMs = Int32(clamping: max(Int64(1), rewind.headWallMs - rewind.tailWallMs))
+        }
+        hideTask?.cancel()
+        commitTask?.cancel()
+        if !scrubbing {
+            scrubbing = true
+            accelCount = 0
+            // Seed from the playhead. At the live edge (rewind mode,
+            // not timeshifting) the playhead IS the window end.
+            if isCatchup || LiveRewindEngine.shared.timeshifting {
+                targetMs = min(max(0, store.audioProgressStore?.currentMs ?? 0), endMs)
+            } else {
+                targetMs = endMs
+            }
+        }
+        if dir == lastDirection { accelCount += 1 } else { accelCount = 0 }
+        lastDirection = dir
+        let mult = Int64(min(12, 1 + accelCount / 2))
+        let stepped = Int64(targetMs) + Int64(dir) * 10_000 * mult
+        targetMs = Int32(max(0, min(Int64(endMs), stepped)))
+        active = true
+        debugLog("[DPAD-SCRUB] step dir=\(dir) x\(mult) -> \(targetMs)/\(endMs)ms \(isCatchup ? "catchup" : "rewind")")
+        let seek = store.audioProgressStore?.seekAction
+        commitTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 650_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.scrubbing = false
+            debugLog("[DPAD-SCRUB] commit \(self.targetMs)ms")
+            seek?(self.targetMs)
+            self.hideTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                guard !Task.isCancelled else { return }
+                self?.active = false
+            }
+        }
+        return true
+    }
+
+    /// Drop an in-flight scrub without committing (Menu pressed, chrome
+    /// summoned, session exited). Playback stays where it was.
+    func cancel() {
+        commitTask?.cancel()
+        hideTask?.cancel()
+        scrubbing = false
+        active = false
+    }
+}
+
+/// Band-only overlay shown while a D-pad scrub is in flight with the
+/// chrome hidden: the mode's timeline band in preview mode over the
+/// same bottom scrim the full chrome uses. Never focusable.
+struct DpadScrubHUD: View {
+    @ObservedObject var store: MultiviewStore
+    @ObservedObject var scrub: DpadScrubController
+
+    var body: some View {
+        Group {
+            if let cu = store.catchupTile?.catchup,
+               let ps = store.audioProgressStore {
+                CatchupTimelineBand(progress: ps, playback: cu, previewMs: scrub.targetMs)
+            } else {
+                LiveRewindTimelineBand(store: store, previewMs: scrub.targetMs)
+            }
+        }
+        .padding(.horizontal, 80)
+        .padding(.top, 24)
+        .padding(.bottom, 40)
+        .frame(maxWidth: .infinity)
+        .background(
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.45), .black.opacity(0.7)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .padding(.top, -30)
+        )
+        .allowsHitTesting(false)
+        .focusable(false)
     }
 }
 #endif
