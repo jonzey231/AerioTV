@@ -2323,7 +2323,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // twin for the same reason: land on the floored
                         // minute and say so.
                         self.catchupPendingSeekSecs = nil
-                        self.mpvCommandAsync(mpv, ["loadfile", newURL.absoluteString, "replace"])
+                        CatchupRelay.currentHeaders = self.headers
+                        let relayURL = CatchupRelay.wrap(newURL)
+                        self.mpvCommandAsync(mpv, ["loadfile", relayURL.absoluteString, "replace"])
                         let ps = self.progressStore
                         let honest = Int32(flooredSecs * 1000)
                         DispatchQueue.main.async { ps.currentMs = honest }
@@ -4852,6 +4854,34 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 return 0
             }
 
+            // Catch-up relay: aeriocu://<base64 http url>. One streaming
+            // connection with no seek/size callbacks, so ffmpeg's
+            // open-time end-of-duration probe (which spent Dispatcharr's
+            // single timeshift session and killed playback on device;
+            // seekable=0 provably did not suppress it) cannot happen.
+            mpv_stream_cb_add_ro(mpv, "aeriocu", nil) { _, uriC, info in
+                guard let uriC, let info else { return Int32(MPV_ERROR_LOADING_FAILED.rawValue) }
+                let uri = String(cString: uriC)
+                guard let target = CatchupRelay.unwrap(uri) else {
+                    debugLog("[CATCHUP-RELAY] bad uri")
+                    return Int32(MPV_ERROR_LOADING_FAILED.rawValue)
+                }
+                let reader = CatchupHTTPReader(url: target, headers: CatchupRelay.currentHeaders)
+                info.pointee.cookie = Unmanaged.passRetained(reader).toOpaque()
+                info.pointee.read_fn = { cookie, buf, nbytes in
+                    guard let cookie, let buf else { return -1 }
+                    let r = Unmanaged<CatchupHTTPReader>.fromOpaque(cookie).takeUnretainedValue()
+                    return Int64(r.read(into: UnsafeMutableRawPointer(buf), max: Int(nbytes)))
+                }
+                info.pointee.close_fn = { cookie in
+                    guard let cookie else { return }
+                    let unmanaged = Unmanaged<CatchupHTTPReader>.fromOpaque(cookie)
+                    unmanaged.takeUnretainedValue().close()
+                    unmanaged.release()
+                }
+                return 0
+            }
+
             #if DEBUG
             let initMs = Date().timeIntervalSince(initStart) * 1000
             debugLog("[MPV-DIAG] setupMPV: mpv_initialize succeeded ✓ (\(String(format: "%.0f", initMs))ms)")
@@ -5281,6 +5311,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // has runway by construction.
             var url = url
             url = routeThroughLiveRewind(url)
+            // Catch-up plays through the aeriocu relay (single-session
+            // Dispatcharr timeshift; see the protocol registration).
+            if catchup != nil, url.scheme?.hasPrefix("http") == true {
+                CatchupRelay.currentHeaders = headers
+                url = CatchupRelay.wrap(url)
+                debugLog("[CATCHUP] playing via aeriocu relay")
+            }
             // stop() can land between the handle check above and the
             // session start inside the routing; without this re-check the
             // engine keeps a full-bitrate download running with no player

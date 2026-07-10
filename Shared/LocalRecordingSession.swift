@@ -783,3 +783,147 @@ extension LiveRewindEngine: URLSessionDataDelegate {
         }
     }
 }
+
+// MARK: - Catch-up HTTP relay (task #140 device fix)
+
+/// Streams a Dispatcharr/XC timeshift URL to mpv through the aeriocu://
+/// stream_cb protocol. The direct http path failed on a physical box:
+/// ffmpeg's open-time end-of-duration probe issues a second request, and
+/// Dispatcharr binds each timeshift session to the connection that
+/// created it, so the probe killed the real stream ("no audio or video
+/// data played"; the seekable=0 options provably did not suppress the
+/// probe). A custom protocol with no seek/size callbacks makes the
+/// probe impossible: one connection, followed 301 and all, exactly like
+/// Android's UnboundedLengthDataSource.
+///
+/// Flow control: Dispatcharr serves the archive at line rate (measured
+/// ~66 MB/s on LAN), so the reader suspends the URLSession task above
+/// a high-water mark and resumes below a low-water mark; without that
+/// a 2-hour programme would balloon straight into memory.
+final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let cond = NSCondition()
+    private var chunks: [Data] = []
+    private var buffered = 0
+    private var finished = false
+    private var failed = false
+    private var suspended = false
+    private var session: URLSession?
+    private var task: URLSessionDataTask?
+
+    private static let highWater = 8 * 1024 * 1024
+    private static let lowWater = 4 * 1024 * 1024
+
+    init(url: URL, headers: [String: String]) {
+        super.init()
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 0
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        let s = URLSession(configuration: config, delegate: self, delegateQueue: queue)
+        session = s
+        var request = URLRequest(url: url)
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+        let t = s.dataTask(with: request)
+        task = t
+        t.resume()
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            debugLog("[CATCHUP-RELAY] HTTP \(http.statusCode)")
+            cond.lock(); failed = true; cond.signal(); cond.unlock()
+            completionHandler(.cancel)
+            return
+        }
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        cond.lock()
+        chunks.append(data)
+        buffered += data.count
+        if buffered > Self.highWater, !suspended {
+            suspended = true
+            dataTask.suspend()
+        }
+        cond.signal()
+        cond.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        cond.lock()
+        if let error, (error as NSError).code != NSURLErrorCancelled {
+            // Mid-stream drop: whatever is buffered still plays, then EOF;
+            // the player's catch-up EOF re-tune recovers the position.
+            debugLog("[CATCHUP-RELAY] connection ended: \(error.localizedDescription)")
+        }
+        finished = true
+        cond.signal()
+        cond.unlock()
+    }
+
+    /// Blocking read for mpv's stream thread. 0 = EOF, -1 = failure.
+    func read(into dest: UnsafeMutableRawPointer, max nbytes: Int) -> Int {
+        cond.lock()
+        defer { cond.unlock() }
+        while chunks.isEmpty {
+            if failed { return -1 }
+            if finished { return 0 }
+            cond.wait()
+        }
+        var first = chunks[0]
+        let n = min(nbytes, first.count)
+        first.withUnsafeBytes { raw in
+            dest.copyMemory(from: raw.baseAddress!, byteCount: n)
+        }
+        if n == first.count {
+            chunks.removeFirst()
+        } else {
+            chunks[0] = first.subdata(in: n..<first.count)
+        }
+        buffered -= n
+        if suspended, buffered < Self.lowWater {
+            suspended = false
+            task?.resume()
+        }
+        return n
+    }
+
+    func close() {
+        cond.lock()
+        finished = true
+        cond.signal()
+        cond.unlock()
+        task?.cancel()
+        session?.invalidateAndCancel()
+    }
+}
+
+/// URL wrapping for the aeriocu:// protocol plus the headers handoff to
+/// the stream_cb open callback (which has no coordinator context).
+enum CatchupRelay {
+    /// Set by the player right before a catch-up loadfile.
+    nonisolated(unsafe) static var currentHeaders: [String: String] = [:]
+
+    static func wrap(_ url: URL) -> URL {
+        let b64 = Data(url.absoluteString.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+        return URL(string: "aeriocu://\(b64)") ?? url
+    }
+
+    static func unwrap(_ uri: String) -> URL? {
+        guard uri.hasPrefix("aeriocu://") else { return nil }
+        var b64 = String(uri.dropFirst("aeriocu://".count))
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while b64.count % 4 != 0 { b64 += "=" }
+        guard let data = Data(base64Encoded: b64),
+              let str = String(data: data, encoding: .utf8) else { return nil }
+        return URL(string: str)
+    }
+}
