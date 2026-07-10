@@ -36,6 +36,21 @@ struct AppBehaviorsSettingsView: View {
     // external targets) lands. Same keys the engine reads.
     @AppStorage("liveRewindEnabled") private var liveRewindEnabled = false
     @AppStorage("liveRewindDepthMinutes") private var liveRewindDepthMinutes = 30
+    @AppStorage("liveRewindRetentionHours") private var liveRewindRetentionHours = 24
+    @AppStorage("liveRewindBudgetGB") private var liveRewindBudgetGB = 10
+    @State private var showCustomRetention = false
+    @State private var customRetentionText = ""
+
+    private static let retentionPresets: [(hours: Int, label: String)] = [
+        (1, "1 hour"), (6, "6 hours"), (12, "12 hours"),
+        (24, "24 hours"), (72, "3 days"), (168, "1 week"),
+    ]
+
+    private func retentionLabel(_ hours: Int) -> String {
+        if hours % 24 == 0 && hours >= 48 { return "\(hours / 24) days" }
+        if hours == 24 { return "1 day" }
+        return hours == 1 ? "1 hour" : "\(hours) hours"
+    }
 
     @AppStorage("appBehaviorsSkipLoadingScreen")
     private var skipLoadingScreen = false
@@ -115,6 +130,21 @@ struct AppBehaviorsSettingsView: View {
         #else
         .toolbar(.hidden, for: .navigationBar)
         #endif
+        .alert("Custom Retention", isPresented: $showCustomRetention) {
+            TextField("Hours", text: $customRetentionText)
+            #if os(iOS)
+                .keyboardType(.numberPad)
+            #endif
+            Button("Set") {
+                if let hours = Int(customRetentionText.trimmingCharacters(in: .whitespaces)),
+                   (1...720).contains(hours) {
+                    liveRewindRetentionHours = hours
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("How long buffered video is kept, in hours (1 to 720).")
+        }
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         .onAppear {
             tmdbKeyDraft = TMDBPosters.loadAPIKey()
@@ -217,15 +247,6 @@ struct AppBehaviorsSettingsView: View {
                 }
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
-                if liveRewindEnabled {
-                    Picker("Rewind depth", selection: $liveRewindDepthMinutes) {
-                        Text("15 minutes").tag(15)
-                        Text("30 minutes (default)").tag(30)
-                        Text("1 hour").tag(60)
-                        Text("2 hours").tag(120)
-                    }
-                    .listRowBackground(Color.cardBackground)
-                }
             } header: {
                 Text("Live Rewind").sectionHeaderStyle()
             } footer: {
@@ -233,6 +254,69 @@ struct AppBehaviorsSettingsView: View {
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
+
+            if liveRewindEnabled {
+                Section {
+                    Picker("Depth", selection: $liveRewindDepthMinutes) {
+                        Text("15 minutes").tag(15)
+                        Text("30 minutes (default)").tag(30)
+                        Text("1 hour").tag(60)
+                        Text("2 hours").tag(120)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Rewind Depth").sectionHeaderStyle()
+                } footer: {
+                    Text("How far back you can rewind while watching. Deeper buffers use more storage while you watch.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+                .listSectionSeparator(.hidden)
+
+                Section {
+                    Picker("Keep for", selection: $liveRewindRetentionHours) {
+                        ForEach(Self.retentionPresets, id: \.hours) { preset in
+                            Text(preset.hours == 24 ? "24 hours (default)" : preset.label)
+                                .tag(preset.hours)
+                        }
+                        if !Self.retentionPresets.contains(where: { $0.hours == liveRewindRetentionHours }) {
+                            Text("Custom (\(retentionLabel(liveRewindRetentionHours)))")
+                                .tag(liveRewindRetentionHours)
+                        }
+                    }
+                    .listRowBackground(Color.cardBackground)
+                    Button {
+                        customRetentionText = String(liveRewindRetentionHours)
+                        showCustomRetention = true
+                    } label: {
+                        Text("Custom Retention…")
+                            .font(.bodyMedium).foregroundColor(theme.accent)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Keep Buffered Video").sectionHeaderStyle()
+                } footer: {
+                    Text("Buffered video stays on this device after you stop watching and is deleted once it reaches this age.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+                .listSectionSeparator(.hidden)
+
+                Section {
+                    Picker("Limit", selection: $liveRewindBudgetGB) {
+                        Text("2 GB").tag(2)
+                        Text("5 GB").tag(5)
+                        Text("10 GB (default)").tag(10)
+                        Text("20 GB").tag(20)
+                        Text("50 GB").tag(50)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                } header: {
+                    Text("Storage Limit").sectionHeaderStyle()
+                } footer: {
+                    Text("Total space buffered video may use across all sessions. The oldest video is removed first when the limit is reached.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+                .listSectionSeparator(.hidden)
+            }
 
             // MARK: Default Tab
             Section {
@@ -492,7 +576,15 @@ struct AppBehaviorsSettingsView: View {
                         subtitle: "Buffer fullscreen live playback on this Apple TV",
                         isOn: $liveRewindEnabled
                     ) { _ in }
-                    if liveRewindEnabled {
+                    Text("Buffers the channel you are watching so you can pause and rewind live TV. Uses device storage while you watch; buffered video is removed automatically.")
+                        .font(.system(size: 22))
+                        .foregroundColor(.textTertiary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
+                }
+
+                if liveRewindEnabled {
+                    tvSection("Rewind Depth") {
                         ForEach([15, 30, 60, 120], id: \.self) { mins in
                             TVSettingsSelectionRow(
                                 label: mins < 60 ? "\(mins) minutes" : (mins == 60 ? "1 hour" : "2 hours"),
@@ -501,12 +593,54 @@ struct AppBehaviorsSettingsView: View {
                                 action: { liveRewindDepthMinutes = mins }
                             )
                         }
+                        Text("How far back you can rewind while watching. Deeper buffers use more storage while you watch.")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 4)
                     }
-                    Text("Buffers the channel you are watching so you can pause and rewind live TV. Uses device storage while you watch; buffered video is removed automatically.")
-                        .font(.system(size: 22))
-                        .foregroundColor(.textTertiary)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 4)
+
+                    tvSection("Keep Buffered Video") {
+                        ForEach(Self.retentionPresets, id: \.hours) { preset in
+                            TVSettingsSelectionRow(
+                                label: preset.label,
+                                subtitle: preset.hours == 24 ? "Default" : nil,
+                                isSelected: liveRewindRetentionHours == preset.hours,
+                                action: { liveRewindRetentionHours = preset.hours }
+                            )
+                        }
+                        TVSettingsSelectionRow(
+                            label: "Custom",
+                            subtitle: Self.retentionPresets.contains(where: { $0.hours == liveRewindRetentionHours })
+                                ? nil : retentionLabel(liveRewindRetentionHours),
+                            isSelected: !Self.retentionPresets.contains(where: { $0.hours == liveRewindRetentionHours }),
+                            action: {
+                                customRetentionText = String(liveRewindRetentionHours)
+                                showCustomRetention = true
+                            }
+                        )
+                        Text("Buffered video stays on this Apple TV after you stop watching and is deleted once it reaches this age.")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 4)
+                    }
+
+                    tvSection("Storage Limit") {
+                        ForEach([2, 5, 10, 20, 50], id: \.self) { gb in
+                            TVSettingsSelectionRow(
+                                label: "\(gb) GB",
+                                subtitle: gb == 10 ? "Default" : nil,
+                                isSelected: liveRewindBudgetGB == gb,
+                                action: { liveRewindBudgetGB = gb }
+                            )
+                        }
+                        Text("Total space buffered video may use across all sessions. The oldest video is removed first when the limit is reached.")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 4)
+                    }
                 }
 
                 tvSection("Channel Flip Gesture") {

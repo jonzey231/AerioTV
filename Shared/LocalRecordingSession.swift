@@ -446,8 +446,16 @@ final class LiveRewindReader: @unchecked Sendable {
 final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     static let shared = LiveRewindEngine()
 
-    static let defaultRetentionMs: Int64 = 24 * 60 * 60 * 1000
-    static let defaultBudgetBytes: Int64 = 10 * 1024 * 1024 * 1024
+    /// P2 settings-backed bounds (Android liveRewindRetentionHours /
+    /// liveRewindBudgetGB parity). Defaults: 24 hours, 10 GB.
+    var retentionMs: Int64 {
+        let hours = UserDefaults.standard.integer(forKey: "liveRewindRetentionHours")
+        return Int64(hours > 0 ? hours : 24) * 60 * 60 * 1000
+    }
+    var budgetBytes: Int64 {
+        let gb = UserDefaults.standard.integer(forKey: "liveRewindBudgetGB")
+        return Int64(gb > 0 ? gb : 10) * 1024 * 1024 * 1024
+    }
 
     /// UI-facing state (mirrors Android's TimeshiftController.State).
     @Published private(set) var buffering = false
@@ -600,7 +608,7 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     // MARK: retention + budget
 
     private func pruneExpired() {
-        let cutoff = Date().addingTimeInterval(-Double(Self.defaultRetentionMs) / 1000)
+        let cutoff = Date().addingTimeInterval(-Double(retentionMs) / 1000)
         let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
         for dir in dirs {
             let newest = LiveRewindBuffer.listSegments(in: dir).last
@@ -622,7 +630,7 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         }
         var total = segs.reduce(0) { $0 + $1.size }
         for seg in segs.sorted(by: { $0.start < $1.start }) {
-            if total <= Self.defaultBudgetBytes { break }
+            if total <= budgetBytes { break }
             total -= seg.size
             try? FileManager.default.removeItem(at: seg.url)
         }
