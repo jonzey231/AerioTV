@@ -593,8 +593,14 @@ struct RewindTransportBar_iOS: View {
                         .frame(width: 14, height: 14)
                         .offset(x: geo.size.width * max(0, min(1, fraction)) - 7)
                 }
+                // The player surface owns competing drag gestures (the
+                // swipe-up/down channel flip most notably), which were
+                // swallowing the scrub drag. High priority makes the
+                // timeline win while a finger is ON it, and the padded
+                // contentShape gives the thumb a real touch target.
+                .padding(.vertical, 12)
                 .contentShape(Rectangle())
-                .gesture(
+                .highPriorityGesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { v in
                             dragFraction = max(0, min(1, v.location.x / geo.size.width))
@@ -605,6 +611,7 @@ struct RewindTransportBar_iOS: View {
                             store.audioProgressStore?.seekAction?(Int32(Double(window) * Double(f)))
                         }
                 )
+                .padding(.vertical, -12)
             }
             .frame(height: 14)
 
