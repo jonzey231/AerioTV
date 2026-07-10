@@ -60,6 +60,16 @@ enum AudioSessionRefCount {
                 #else
                 try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
                 #endif
+                // Pin the hardware rate BEFORE activation: a fresh
+                // activation otherwise negotiates whatever the system
+                // offers, and an ATV+receiver chain that came up at
+                // 44100Hz played SILENCE while every mpv diagnostic
+                // read healthy (catch-up field capture: live session
+                // 48000Hz/6ch audible, catch-up session 44100Hz/2ch
+                // silent, ao=NONE at the activation route-change).
+                // 48kHz is the HDMI/broadcast standard and what every
+                // live session on this box negotiates.
+                try? AVAudioSession.sharedInstance().setPreferredSampleRate(48_000)
                 try AVAudioSession.sharedInstance().setActive(true)
                 // Landed 0→1 — good entry-point to attribute audio
                 // regressions (wrong category, deactivation bounce).

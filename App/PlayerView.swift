@@ -1762,6 +1762,16 @@ private struct PlayerRootView: View {
         }
     }
 
+    /// tvOS: timeline band inset matching the unified live chrome's
+    /// 80pt (this section already carries a 20pt section inset).
+    private var tvBandInset: CGFloat {
+        #if os(tvOS)
+        return 60
+        #else
+        return 0
+        #endif
+    }
+
     // MARK: - VOD Controls (scrubber + skip + time labels)
     private var vodControlsSection: some View {
         VStack(spacing: 8) {
@@ -1771,36 +1781,16 @@ private struct PlayerRootView: View {
             // scrubber but "no player controls"). Centered above the
             // timeline; the focus engine hands left/right between them
             // and down to the scrubber row.
-            // Right-aligned like the unified live chrome's cell row
-            // (user request: catch-up controls should LOOK like Live TV,
-            // whose skip/pause/options cells sit bottom-right).
-            HStack(spacing: 18) {
-                Spacer()
-                tvTransportButton(icon: "gobackward.30", focus: .transportRW) {
-                    progressStore.seekAction?(max(0, progressStore.currentMs - 30_000))
-                    scheduleControlsHide()
-                }
-                tvTransportButton(
-                    icon: progressStore.isPaused ? "play.fill" : "pause.fill",
-                    focus: .playPause
-                ) {
-                    progressStore.togglePauseAction?()
-                    scheduleControlsHide()
-                }
-                tvTransportButton(icon: "goforward.30", focus: .transportFF) {
-                    progressStore.seekAction?(progressStore.currentMs + 30_000)
-                    scheduleControlsHide()
-                }
-            }
-            .padding(.bottom, 6)
-
-            // tvOS: small play/pause indicator left of the focusable
-            // timeline. The hardware Play/Pause button still drives the
-            // pause toggle; this row owns left/right scrubbing.
+            // Structure mirrors the unified live chrome exactly: thin
+            // timeline band FIRST (inset like the live band, no leading
+            // play indicator), labels under it, and the circular cells
+            // row BELOW, bottom-right (screenshot-matched user request).
+            // The hardware Play/Pause button still drives the pause
+            // toggle; this row owns left/right scrubbing.
             HStack(spacing: 12) {
-                tvPlayPauseIndicator
                 tvScrubberBar
             }
+            .padding(.horizontal, 60)
             .focusable(showControls && (!isLive || isLiveRewindMode) && isScrubberActive)
             .focused($tvFocus, equals: .scrubber)
             .onMoveCommand { direction in
@@ -1875,6 +1865,32 @@ private struct PlayerRootView: View {
 
                 timelineTrailingLabel
             }
+            .padding(.horizontal, tvBandInset)
+
+            #if os(tvOS)
+            // Circular cells BELOW the band, bottom-right — the live
+            // chrome's exact arrangement.
+            HStack(spacing: 18) {
+                Spacer()
+                tvTransportButton(icon: "gobackward.30", focus: .transportRW) {
+                    progressStore.seekAction?(max(0, progressStore.currentMs - 30_000))
+                    scheduleControlsHide()
+                }
+                tvTransportButton(
+                    icon: progressStore.isPaused ? "play.fill" : "pause.fill",
+                    focus: .playPause
+                ) {
+                    progressStore.togglePauseAction?()
+                    scheduleControlsHide()
+                }
+                tvTransportButton(icon: "goforward.30", focus: .transportFF) {
+                    progressStore.seekAction?(progressStore.currentMs + 30_000)
+                    scheduleControlsHide()
+                }
+            }
+            .padding(.trailing, 60)
+            .padding(.top, 10)
+            #endif
         }
         // YouTube-style scrub readout: a floating bubble above the bar
         // showing exactly where a scrub will land + how far that is from
