@@ -469,6 +469,8 @@ enum TVPlayerFocus: Hashable {
     case playPause    // center play/pause button
     case optionsPanel // inside the options popup
     case scrubber     // VOD timeline (focusable while chrome is visible)
+    case transportRW  // circular skip-back cell (catch-up/VOD/rewind)
+    case transportFF  // circular skip-forward cell
 }
 #endif
 
@@ -1436,6 +1438,29 @@ private struct PlayerRootView: View {
     }
 
     #if os(tvOS)
+    /// Circular transport cell (RW / play-pause / FF) for the legacy
+    /// player chrome, visually matching the unified live chrome's
+    /// nativeToolButton cells.
+    @ViewBuilder
+    private func tvTransportButton(icon: String, focus: TVPlayerFocus,
+                                   action: @escaping () -> Void) -> some View {
+        let focused = tvFocus == focus
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(width: 68, height: 68)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(Color.white.opacity(focused ? 0.9 : 0.15),
+                                         lineWidth: focused ? 3 : 1))
+                .scaleEffect(focused ? 1.08 : 1.0)
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focusEffectDisabled()
+        .focused($tvFocus, equals: focus)
+        .animation(.easeOut(duration: 0.15), value: focused)
+    }
+
     // MARK: - tvOS Scrubber (visual only — input handled by TVRemoteInputView)
 
     private var tvScrubberBar: some View {
@@ -1741,6 +1766,31 @@ private struct PlayerRootView: View {
     private var vodControlsSection: some View {
         VStack(spacing: 8) {
             #if os(tvOS)
+            // Circular RW / Play-Pause / FF cells, matching the live
+            // chrome's transport (ATV field request: catch-up had a
+            // scrubber but "no player controls"). Centered above the
+            // timeline; the focus engine hands left/right between them
+            // and down to the scrubber row.
+            HStack(spacing: 30) {
+                tvTransportButton(icon: "gobackward.30", focus: .transportRW) {
+                    progressStore.seekAction?(max(0, progressStore.currentMs - 30_000))
+                    scheduleControlsHide()
+                }
+                tvTransportButton(
+                    icon: progressStore.isPaused ? "play.fill" : "pause.fill",
+                    focus: .playPause
+                ) {
+                    progressStore.togglePauseAction?()
+                    scheduleControlsHide()
+                }
+                tvTransportButton(icon: "goforward.30", focus: .transportFF) {
+                    progressStore.seekAction?(progressStore.currentMs + 30_000)
+                    scheduleControlsHide()
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.bottom, 6)
+
             // tvOS: small play/pause indicator left of the focusable
             // timeline. The hardware Play/Pause button still drives the
             // pause toggle; this row owns left/right scrubbing.
@@ -1754,7 +1804,7 @@ private struct PlayerRootView: View {
                 switch direction {
                 case .left:  scrubStep(-1)
                 case .right: scrubStep(+1)
-                case .up:    tvFocus = .gearIcon
+                case .up:    tvFocus = .playPause
                 default:     break
                 }
             }

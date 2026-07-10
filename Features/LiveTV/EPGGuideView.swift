@@ -2250,6 +2250,11 @@ struct EPGGuideView: View {
     /// `.guideRightHold*` notifications with a 2.5s safety backstop.
     @State private var rightHoldPinningTimeline = false
     @State private var rightHoldSafetyTask: Task<Void, Never>?
+    /// Timeline offset before the most recent Right-step. A hold-Right
+    /// close-mini gesture delivers its press-down as a normal Right
+    /// move BEFORE the 0.5s hold recognizes, so the guide scrolls one
+    /// step it should not have; the holdBegan handler reverts to this.
+    @State private var preRightStepOffset: CGFloat?
 
     /// Namespace + imperative reset hook for the guide's focus
     /// scope. See ChannelListView's identical setup for the full
@@ -2653,6 +2658,7 @@ struct EPGGuideView: View {
                     // the still-held Right does not scroll the EPG forward after the
                     // mini closes. Short/normal Right scrolling is unaffected.
                     if rightHoldPinningTimeline { break }
+                    preRightStepOffset = horizontalOffset
                     withAnimation(.easeOut(duration: 0.3)) {
                         horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * 0.5)
                     }
@@ -2666,6 +2672,12 @@ struct EPGGuideView: View {
                 // Freeze the EPG timeline for the duration of the close-mini hold.
                 // A safety backstop clears the pin if the release event is missed.
                 rightHoldPinningTimeline = true
+                // The hold's press-down already scrolled one step before
+                // recognition; put the timeline back where it was.
+                if let restore = preRightStepOffset {
+                    withAnimation(.easeOut(duration: 0.3)) { horizontalOffset = restore }
+                    preRightStepOffset = nil
+                }
                 rightHoldSafetyTask?.cancel()
                 rightHoldSafetyTask = Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 2_500_000_000)
