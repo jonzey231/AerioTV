@@ -333,6 +333,15 @@ struct DVRSettingsView: View {
 
                 tvSection("Local Storage") {
                     tvStorageCard
+                    // tvOS treats all app storage as purgeable: under
+                    // severe storage pressure the system can evict app
+                    // data, recordings included. Disclose it rather than
+                    // let a vanished recording look like an app bug.
+                    Text("Recordings are stored on this Apple TV. If the system runs critically low on space, tvOS may remove stored app data, including recordings. For must-keep recordings, use a Dispatcharr server destination.")
+                        .font(.system(size: 22))
+                        .foregroundColor(.textTertiary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
                 }
 
                 tvSection("Behavior") {

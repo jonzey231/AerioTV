@@ -67,11 +67,26 @@ final class RecordingCoordinator: ObservableObject {
 
     // MARK: - Paths
 
-    /// Default local recordings directory — `Documents/Recordings/`.
-    /// Created lazily.
+    /// Default local recordings directory.
+    ///
+    /// iOS: `Documents/Recordings/` (user-visible in the Files app).
+    ///
+    /// tvOS: `Application Support/Recordings/`. The tvOS sandbox mounts
+    /// the app's own Documents directory READ-ONLY, so every recording
+    /// there failed at file-create time with "You don't have permission
+    /// to save the file" - the same field failure that moved the debug
+    /// log to Caches (see DebugLogger's directory note, 2026-06-05 ATV
+    /// test). Application Support is writable on tvOS (SwiftData already
+    /// lives there, see AerioApp) and more durable than Caches, but tvOS
+    /// treats ALL app storage as purgeable under pressure - the DVR
+    /// settings copy discloses that.
     var localRecordingsDirectory: URL? {
-        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
-        let dir = docs.appendingPathComponent("Recordings", isDirectory: true)
+        #if os(tvOS)
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        #else
+        guard let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
+        #endif
+        let dir = base.appendingPathComponent("Recordings", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
