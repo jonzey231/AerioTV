@@ -1219,31 +1219,8 @@ struct PlaybackBottomChrome_tvOS: View {
     ) -> some View {
         let isFocused = focusedChrome == target
         return Button(action: action) {
-            VStack(spacing: 8) {
-                ZStack {
-                    Circle()
-                        .fill(.ultraThinMaterial)
-                        .opacity(isFocused ? 0 : 1)
-                    Circle()
-                        .fill(Color.white)
-                        .opacity(isFocused ? 1 : 0)
-                    Image(systemName: icon)
-                        .font(.system(size: 26, weight: .semibold))
-                        .foregroundStyle(
-                            iconColor == .red ? Color.red
-                                : (isFocused ? Color.black : Color.white)
-                        )
-                }
-                .frame(width: 68, height: 68)
-                .scaleEffect(isFocused ? 1.12 : 1.0)
-                .animation(.easeOut(duration: 0.15), value: isFocused)
-
-                Text(title)
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(.white)
-                    .opacity(isFocused ? 1 : 0)
-                    .frame(height: 24)
-            }
+            TVPlayerToolCellVisual(icon: icon, title: title,
+                                   iconColor: iconColor, focused: isFocused)
         }
         .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($focusedChrome, equals: target)
@@ -1251,6 +1228,50 @@ struct PlaybackBottomChrome_tvOS: View {
         .accessibilityHint(a11yHint)
     }
 }
+
+#if os(tvOS)
+/// The circular tool cell's VISUAL, shared by the unified live chrome
+/// and the legacy player transport (catch-up/VOD/recordings): frosted
+/// circle that inverts to solid white with a black icon when focused,
+/// title fading in beneath. ONE implementation so the two players can
+/// never drift apart again (user directive 2026-07-10 after three
+/// rounds of lookalike coloring mismatches). Visual only - each host
+/// wires its own focus system and passes `focused`.
+struct TVPlayerToolCellVisual: View {
+    let icon: String
+    let title: String
+    var iconColor: Color = .white
+    let focused: Bool
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ZStack {
+                Circle()
+                    .fill(.ultraThinMaterial)
+                    .opacity(focused ? 0 : 1)
+                Circle()
+                    .fill(Color.white)
+                    .opacity(focused ? 1 : 0)
+                Image(systemName: icon)
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(
+                        iconColor == .red ? Color.red
+                            : (focused ? Color.black : Color.white)
+                    )
+            }
+            .frame(width: 68, height: 68)
+            .scaleEffect(focused ? 1.12 : 1.0)
+            .animation(.easeOut(duration: 0.15), value: focused)
+
+            Text(title)
+                .font(.system(size: 20, weight: .medium))
+                .foregroundStyle(.white)
+                .opacity(focused ? 1 : 0)
+                .frame(height: 24)
+        }
+    }
+}
+#endif
 
 /// Extracted standalone live-progress band view so
 /// `PlaybackBottomChrome_tvOS` can reuse the same layout as

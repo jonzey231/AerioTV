@@ -1438,27 +1438,17 @@ private struct PlayerRootView: View {
     }
 
     #if os(tvOS)
-    /// Circular transport cell (RW / play-pause / FF) for the legacy
-    /// player chrome, visually matching the unified live chrome's
-    /// nativeToolButton cells.
+    /// Circular transport cell for the legacy player chrome. Renders
+    /// the SAME TVPlayerToolCellVisual the unified live chrome uses -
+    /// not a lookalike - so the two players cannot drift.
     @ViewBuilder
-    private func tvTransportButton(icon: String, focus: TVPlayerFocus,
+    private func tvTransportButton(icon: String, title: String, focus: TVPlayerFocus,
                                    action: @escaping () -> Void) -> some View {
-        let focused = tvFocus == focus
         Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 26, weight: .semibold))
-                .foregroundColor(.white)
-                .frame(width: 68, height: 68)
-                .background(.ultraThinMaterial, in: Circle())
-                .overlay(Circle().stroke(Color.white.opacity(focused ? 0.9 : 0.15),
-                                         lineWidth: focused ? 3 : 1))
-                .scaleEffect(focused ? 1.12 : 1.0)
+            TVPlayerToolCellVisual(icon: icon, title: title, focused: tvFocus == focus)
         }
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .focusEffectDisabled()
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
         .focused($tvFocus, equals: focus)
-        .animation(.easeOut(duration: 0.15), value: focused)
     }
 
     // MARK: - tvOS Scrubber (visual only — input handled by TVRemoteInputView)
@@ -1851,22 +1841,26 @@ private struct PlayerRootView: View {
             // chrome's exact arrangement.
             HStack(spacing: 18) {
                 Spacer()
-                tvTransportButton(icon: "gobackward.30", focus: .transportRW) {
+                tvTransportButton(icon: "gobackward.30", title: "Rewind",
+                                  focus: .transportRW) {
                     progressStore.seekAction?(max(0, progressStore.currentMs - 30_000))
                     scheduleControlsHide()
                 }
                 tvTransportButton(
                     icon: progressStore.isPaused ? "play.fill" : "pause.fill",
+                    title: progressStore.isPaused ? "Play" : "Pause",
                     focus: .playPause
                 ) {
                     progressStore.togglePauseAction?()
                     scheduleControlsHide()
                 }
-                tvTransportButton(icon: "goforward.30", focus: .transportFF) {
+                tvTransportButton(icon: "goforward.30", title: "Forward",
+                                  focus: .transportFF) {
                     progressStore.seekAction?(progressStore.currentMs + 30_000)
                     scheduleControlsHide()
                 }
-                tvTransportButton(icon: "slider.horizontal.3", focus: .gearIcon) {
+                tvTransportButton(icon: "slider.horizontal.3", title: "Options",
+                                  focus: .gearIcon) {
                     controlsHideTask?.cancel()
                     withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
                         showTVOptions = true
