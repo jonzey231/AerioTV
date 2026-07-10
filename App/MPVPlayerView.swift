@@ -656,6 +656,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// the aeriots:// buffer relay (fullscreen single live only).
         /// Set in play(url:) when the engine session starts.
         var liveRewindActive = false
+        /// Live Rewind: the relay failed for the CURRENT tune, so play
+        /// direct and stop re-routing through it. Reset on channel
+        /// change (swapStream); a fresh coordinator starts clear.
+        var liveRewindFallbackDirect = false
         /// Programme-relative start (ms) of the currently tuned timeshift
         /// window: 0 on first tune, the floored seek target after each
         /// re-tune. Displayed position = this + mpv time-pos.
@@ -987,9 +991,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 "[MV-Tile] swapStream: \(streamTag) to=\(newTitle) url=\(safeURL.prefix(80))",
                 category: "MPV-STREAM", level: .info
             )
+            // Live Rewind: a channel flip bypasses play(url:), so route
+            // here too. This starts a fresh buffer session for the NEW
+            // channel (startSession stops the old one) or, when the new
+            // tune is ineligible, stops the old session; before this the
+            // flip left the engine buffering the PREVIOUS channel with
+            // liveRewindActive still true, so the transport, the time-pos
+            // mapping, and any seek pointed at the wrong channel's
+            // buffer. A flip is also a fresh tune for the relay: clear
+            // the direct-stream fallback latch.
+            liveRewindFallbackDirect = false
+            let routedURL = routeThroughLiveRewind(newURL)
             mpvQueue.async { [weak self] in
                 guard let self, let mpv = self.activeMPVHandle() else { return }
-                self.mpvCommand(mpv, ["loadfile", newURL.absoluteString, "replace"])
+                self.mpvCommand(mpv, ["loadfile", routedURL.absoluteString, "replace"])
             }
         }
 
@@ -1305,7 +1320,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // pause doesn't leave us meaningfully behind live —
             // skip the reload entirely and let mpv resume from
             // cache. Long pauses (genuine idle) still snap.
-            if wasPaused && !paused && isLive, !urls.isEmpty {
+            // Live Rewind: NO snap when the relay carries playback. Pause
+            // is the feature (the buffer keeps filling underneath); resume
+            // continues from the pause point like a cable box, and Go Live
+            // is one press away. The reload here would also silently swap
+            // mpv onto the direct URL while liveRewindActive stayed true,
+            // stranding the transport/mapping on a buffer mpv left.
+            if wasPaused && !paused && isLive, !liveRewindActive, !urls.isEmpty {
                 let dwell = pauseStartedAt.map { Date().timeIntervalSince($0) } ?? 0
                 if dwell < Self.snapToLiveMinPauseSeconds {
                     #if DEBUG
@@ -5106,6 +5127,70 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         // MARK: - Playback
 
+        /// Live Rewind: route an eligible fullscreen-single-live URL
+        /// through the app-owned buffer relay, returning the URL mpv
+        /// should actually load. Shared by `play(url:)` (fresh tune,
+        /// every retry path) and `swapStream` (channel flip), so a flip
+        /// re-routes for the NEW channel instead of leaving the old
+        /// session buffering the previous one under a live transport.
+        /// When the tune is NOT eligible (or the relay is in direct
+        /// fallback), any running session is stopped so the transport
+        /// chrome and the buffer can never point at a stale channel.
+        ///
+        /// "Fullscreen single live" includes the unified N=1 path,
+        /// where the sole stream is a multiview tile with a non-nil
+        /// tileID (PlayerSession routes everything through
+        /// MultiviewStore by default). Same solo-tile predicate the
+        /// PiP eligibility gate uses.
+        private func routeThroughLiveRewind(_ url: URL) -> URL {
+            let isSoloLive = tileID == nil ||
+                (initialIsAudioActive && initialTileCount <= 1)
+            guard isLive, isSoloLive, catchup == nil,
+                  url.scheme?.hasPrefix("http") == true,
+                  !liveRewindFallbackDirect,
+                  LiveRewindEngine.shared.isEnabled else {
+                if url.scheme != "aeriots", liveRewindActive {
+                    liveRewindActive = false
+                    LiveRewindEngine.shared.stopSession()
+                }
+                return url
+            }
+            let started = LiveRewindEngine.shared.startSession(
+                channelID: url.absoluteString,
+                channelName: nowPlayingTitle,
+                streamURL: url,
+                headers: headers)
+            if started {
+                liveRewindActive = true
+                debugLog("[REWIND] live playback via buffer relay")
+                return URL(string: "aeriots://live")!
+            }
+            return url
+        }
+
+        /// Drop the relay for the CURRENT tune and replay the direct
+        /// stream. The relay is a best-effort enhancement: it must never
+        /// turn a channel that direct playback can play into a red error
+        /// card (ATV field report 2026-07-10: "Decoder unavailable /
+        /// loading failed" during plain live viewing). The fallback
+        /// sticks until the next channel change (`swapStream` resets it)
+        /// or a fresh player.
+        private func fallBackToDirectStream(reason: String) {
+            liveRewindActive = false
+            liveRewindFallbackDirect = true
+            LiveRewindEngine.shared.stopSession()
+            loadFailureRetryCount = 0
+            sameURLRetryCount = 0
+            debugLog("[REWIND] relay failed (\(reason)); falling back to direct stream")
+            logStore.append("↻ MPV: relay failed — retrying direct stream")
+            cachedRenderer?.flush(removingDisplayedImage: false)
+            let retryURL = urls[currentIndex]
+            DispatchQueue.global(qos: .userInitiated)
+                .asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    self?.play(url: retryURL)
+                }
+        }
+
         private func play(url: URL) {
             guard let mpv = activeMPVHandle() else { return }
 
@@ -5115,29 +5200,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // so pausing never stops the buffer from filling and rewind
             // has runway by construction.
             var url = url
-            // "Fullscreen single live" includes the unified N=1 path,
-            // where the sole stream is a multiview tile with a non-nil
-            // tileID (PlayerSession routes everything through
-            // MultiviewStore by default). Same solo-tile predicate the
-            // PiP eligibility gate uses.
-            let isSoloLive = tileID == nil ||
-                (initialIsAudioActive && initialTileCount <= 1)
-            if isLive, isSoloLive, catchup == nil,
-               url.scheme?.hasPrefix("http") == true,
-               LiveRewindEngine.shared.isEnabled {
-                let started = LiveRewindEngine.shared.startSession(
-                    channelID: url.absoluteString,
-                    channelName: nowPlayingTitle,
-                    streamURL: url,
-                    headers: headers)
-                if started {
-                    liveRewindActive = true
-                    url = URL(string: "aeriots://live")!
-                    debugLog("[REWIND] live playback via buffer relay")
-                }
-            } else if url.scheme != "aeriots" {
-                liveRewindActive = false
-            }
+            url = routeThroughLiveRewind(url)
 
             hasStarted = false
             playbackStartTime = nil
@@ -5908,6 +5971,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 logStore.append("✗ MPV error: \(errStr)")
                 DebugLogger.shared.logPlayback(event: "error: \(errStr)")
 
+                // Live Rewind: ANY load error while routed through the
+                // relay drops to the direct stream before the generic
+                // retry machinery runs. Retrying the relay re-enters the
+                // same failure (the retry path re-routes through
+                // play(url:)), which is how a transient relay hiccup
+                // burned all three retries and painted the red card.
+                if liveRewindActive {
+                    fallBackToDirectStream(reason: errStr)
+                    return
+                }
+
                 // Loading-failed specific retry: when Dispatcharr (or
                 // the upstream proxy) returns 503 under concurrent
                 // tile-load pressure, mpv reports
@@ -6004,6 +6078,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     self?.failoverOrError("Playback error: \(errStr)")
                 }
+                return
+            }
+
+            // Live Rewind: a reader EOF means the engine closed the
+            // session under mpv (reconnect budget exhausted on a
+            // provider/network drop, or an external stop). Same policy
+            // as the error branch: go direct rather than treating a
+            // live channel as "ended".
+            if isLive, liveRewindActive {
+                fallBackToDirectStream(reason: "relay EOF")
                 return
             }
 
