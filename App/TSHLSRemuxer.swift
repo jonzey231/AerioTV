@@ -132,7 +132,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// uses, so the retention reaper's stale-directory sweep collects
     /// abandoned sessions (e.g. after a crash) on the next launch.
     private func setupSpillDir() {
+        // Same platform split as LiveRewindEngine.rootDir: tvOS denies
+        // Application Support writes on device; Caches is the only option.
+        #if os(tvOS)
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        #else
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        #endif
         let dir = base
             .appendingPathComponent("LiveRewind", isDirectory: true)
             .appendingPathComponent("avp_sess_\(Int64(Date().timeIntervalSince1970 * 1000))", isDirectory: true)

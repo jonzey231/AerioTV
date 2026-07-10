@@ -504,7 +504,16 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private var rootDir: URL {
+        // tvOS: mkdir under Application Support fails with EPERM on a
+        // PHYSICAL box (verified via device console 2026-07-10; the
+        // simulator does not enforce it). Caches is the platform's only
+        // large-file location; the OS may purge it, which is acceptable
+        // for a regenerable rewind buffer.
+        #if os(tvOS)
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        #else
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        #endif
         return base.appendingPathComponent("LiveRewind", isDirectory: true)
     }
 
