@@ -1453,7 +1453,7 @@ private struct PlayerRootView: View {
                 .background(.ultraThinMaterial, in: Circle())
                 .overlay(Circle().stroke(Color.white.opacity(focused ? 0.9 : 0.15),
                                          lineWidth: focused ? 3 : 1))
-                .scaleEffect(focused ? 1.08 : 1.0)
+                .scaleEffect(focused ? 1.12 : 1.0)
         }
         .buttonStyle(TVNoHighlightButtonStyle())
         .focusEffectDisabled()
@@ -1771,7 +1771,11 @@ private struct PlayerRootView: View {
             // scrubber but "no player controls"). Centered above the
             // timeline; the focus engine hands left/right between them
             // and down to the scrubber row.
-            HStack(spacing: 30) {
+            // Right-aligned like the unified live chrome's cell row
+            // (user request: catch-up controls should LOOK like Live TV,
+            // whose skip/pause/options cells sit bottom-right).
+            HStack(spacing: 18) {
+                Spacer()
                 tvTransportButton(icon: "gobackward.30", focus: .transportRW) {
                     progressStore.seekAction?(max(0, progressStore.currentMs - 30_000))
                     scheduleControlsHide()
@@ -1788,7 +1792,6 @@ private struct PlayerRootView: View {
                     scheduleControlsHide()
                 }
             }
-            .frame(maxWidth: .infinity)
             .padding(.bottom, 6)
 
             // tvOS: small play/pause indicator left of the focusable
