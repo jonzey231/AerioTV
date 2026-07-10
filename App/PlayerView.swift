@@ -4416,7 +4416,17 @@ struct NativeHLSPlayerScreen: View {
                 // playlist URL once two segments exist. The codec gate
                 // (H.264 + AC-3/AAC only) falls back to mpv otherwise.
                 statusText = "Preparing stream..."
-                let mux = TSHLSRemuxer(sourceURL: url, headers: ingestHeaders)
+                // Live Rewind (task #145): widen the remuxed playlist to
+                // the rewind depth so AVPlayer's native seekable range IS
+                // the rewind window. Fullscreen live only; VOD/catch-up
+                // and multiview tiles keep the classic live-edge window.
+                let rewindSeconds: Double = {
+                    guard UserDefaults.standard.bool(forKey: "liveRewindEnabled") else { return 0 }
+                    let depth = UserDefaults.standard.integer(forKey: "liveRewindDepthMinutes")
+                    return Double(depth > 0 ? depth : 30) * 60
+                }()
+                let mux = TSHLSRemuxer(sourceURL: url, headers: ingestHeaders,
+                                       rewindWindowSeconds: rewindSeconds)
                 mux.onReady = { localURL in
                     statusText = nil
                     startPlayer(with: localURL, headers: [:])

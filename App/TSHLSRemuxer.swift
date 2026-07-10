@@ -97,9 +97,21 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var errorSignaled = false
     private var totalBytesIngested = 0
 
-    init(sourceURL: URL, headers: [String: String]) {
+    // Live Rewind window (task #145): when > 0, every closed segment is
+    // also spilled to disk and the playlist advertises the WHOLE spilled
+    // window instead of the last `liveWindowSegments`. AVPlayer's own
+    // seekableTimeRanges then spans the rewind depth, so native
+    // pause/scrub IS the rewind UI. Memory stays bounded by
+    // `maxBufferedSegments`; scrubbed-back requests read from disk.
+    // Fullscreen single-stream only; multiview tiles pass 0.
+    private let rewindWindowSeconds: Double
+    private var spillDir: URL?
+    private var spilled: [(seq: Int, url: URL, duration: Double)] = []
+
+    init(sourceURL: URL, headers: [String: String], rewindWindowSeconds: Double = 0) {
         self.sourceURL = sourceURL
         self.headers = headers
+        self.rewindWindowSeconds = rewindWindowSeconds
         super.init()
     }
 
@@ -108,8 +120,34 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     func start() {
         queue.async { [weak self] in
             guard let self else { return }
+            if self.rewindWindowSeconds > 0 {
+                self.setupSpillDir()
+            }
             self.startServer()
             self.startIngest()
+        }
+    }
+
+    /// Spill lives under the same LiveRewind root the mpv-path engine
+    /// uses, so the retention reaper's stale-directory sweep collects
+    /// abandoned sessions (e.g. after a crash) on the next launch.
+    private func setupSpillDir() {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = base
+            .appendingPathComponent("LiveRewind", isDirectory: true)
+            .appendingPathComponent("avp_sess_\(Int64(Date().timeIntervalSince1970 * 1000))", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            var mutableDir = dir
+            try? mutableDir.setResourceValues(values)
+            spillDir = dir
+            debugLog("[TS-REMUX] rewind spill dir ready (window \(Int(rewindWindowSeconds))s): \(dir.lastPathComponent)")
+        } catch {
+            // No disk window: degrade to the classic 6-segment live edge.
+            spillDir = nil
+            debugLog("[TS-REMUX] rewind spill dir FAILED (\(error)); classic live window only")
         }
     }
 
@@ -122,6 +160,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.listener?.cancel()
             self.segments.removeAll()
             self.currentSegment.removeAll()
+            self.spilled.removeAll()
+            if let dir = self.spillDir {
+                try? FileManager.default.removeItem(at: dir)
+                self.spillDir = nil
+            }
             debugLog("[TS-REMUX] stopped (ingested \(self.totalBytesIngested / 1_048_576) MB)")
         }
     }
@@ -364,6 +407,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         var duration = endPTS - start
         if duration <= 0 || duration > 10 { duration = targetSegmentSeconds }
         segments.append((seq: nextSeq, data: currentSegment, duration: duration))
+        spillSegment(seq: nextSeq, data: currentSegment, duration: duration)
         nextSeq += 1
         if segments.count > maxBufferedSegments {
             segments.removeFirst(segments.count - maxBufferedSegments)
@@ -379,8 +423,36 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
+    /// Write the closed segment into the rewind spill window, then ring
+    /// it by total duration so the playlist never exceeds the depth.
+    private func spillSegment(seq: Int, data: Data, duration: Double) {
+        guard rewindWindowSeconds > 0, let dir = spillDir else { return }
+        let url = dir.appendingPathComponent("seg\(seq).ts")
+        do {
+            try data.write(to: url)
+        } catch {
+            debugLog("[TS-REMUX] spill write failed (\(error)); dropping disk window")
+            spillDir = nil
+            spilled.removeAll()
+            return
+        }
+        spilled.append((seq: seq, url: url, duration: duration))
+        var total = spilled.reduce(0) { $0 + $1.duration }
+        while total > rewindWindowSeconds, spilled.count > liveWindowSegments {
+            let oldest = spilled.removeFirst()
+            total -= oldest.duration
+            try? FileManager.default.removeItem(at: oldest.url)
+        }
+    }
+
     private func playlistText() -> String {
-        let window = segments.suffix(liveWindowSegments)
+        // Rewind mode: advertise the whole disk window; AVPlayer's
+        // seekable range then IS the rewind window. Every spilled entry
+        // also existed in memory when written, so seq numbering is one
+        // continuous run either way.
+        let window: [(seq: Int, duration: Double)] = (spillDir != nil && !spilled.isEmpty)
+            ? spilled.map { (seq: $0.seq, duration: $0.duration) }
+            : segments.suffix(liveWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
         guard let first = window.first else {
             return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:\(Int(targetSegmentSeconds.rounded(.up)))\n#EXT-X-MEDIA-SEQUENCE:0\n"
         }
@@ -396,6 +468,18 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             text += "#EXTINF:\(String(format: "%.3f", segment.duration)),\nseg\(segment.seq).ts\n"
         }
         return text
+    }
+
+    /// Memory-first (live edge), disk-fallback (scrubbed back into the
+    /// rewind window). Called on `queue`.
+    private func segmentData(seq: Int) -> Data? {
+        if let segment = segments.first(where: { $0.seq == seq }) {
+            return segment.data
+        }
+        if let entry = spilled.first(where: { $0.seq == seq }) {
+            return try? Data(contentsOf: entry.url)
+        }
+        return nil
     }
 
     // MARK: Loopback HTTP server
@@ -465,8 +549,8 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 contentType = "application/vnd.apple.mpegurl"
             } else if path.hasPrefix("/seg"), path.hasSuffix(".ts"),
                       let seq = Int(path.dropFirst(4).dropLast(3)),
-                      let segment = self.segments.first(where: { $0.seq == seq }) {
-                body = segment.data
+                      let data = self.segmentData(seq: seq) {
+                body = data
                 contentType = "video/mp2t"
             } else {
                 body = Data("not found".utf8)
