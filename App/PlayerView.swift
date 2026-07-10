@@ -1649,37 +1649,16 @@ private struct PlayerRootView: View {
                         .padding(.bottom, 48) // offset above the pill
                     }
 
-                    // Options pill / hint
+                    // Options hint while the panel is open. The Options
+                    // BUTTON now lives as a circular sliders cell in the
+                    // transport row (live-chrome parity); the floating
+                    // capsule pill is gone.
                     if showTVOptions {
-                        // Hint text when panel is open
                         Text("Press \(Image(systemName: "chevron.left")) to close")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(.white.opacity(0.5))
                             .padding(.horizontal, 16)
                             .padding(.vertical, 8)
-                    } else {
-                        // Options pill button
-                        Button {
-                            controlsHideTask?.cancel()
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
-                                showTVOptions = true
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "slider.horizontal.3")
-                                    .font(.system(size: 16, weight: .semibold))
-                                Text("Options")
-                                    .font(.system(size: 16, weight: .semibold))
-                            }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 18)
-                            .padding(.vertical, 10)
-                            .background(.ultraThinMaterial, in: Capsule())
-                            .overlay(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 1))
-                        }
-                        .buttonStyle(TVNoHighlightButtonStyle())
-                        .focusEffectDisabled()
-                        .focused($tvFocus, equals: .gearIcon)
                     }
                 }
             }
@@ -1887,9 +1866,19 @@ private struct PlayerRootView: View {
                     progressStore.seekAction?(progressStore.currentMs + 30_000)
                     scheduleControlsHide()
                 }
+                tvTransportButton(icon: "slider.horizontal.3", focus: .gearIcon) {
+                    controlsHideTask?.cancel()
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                        showTVOptions = true
+                    }
+                }
             }
             .padding(.trailing, 60)
             .padding(.top, 10)
+            // Lift the row off the screen edge to where the live
+            // chrome's cells sit (it was flush against the bottom,
+            // overlapping broadcaster tickers).
+            .padding(.bottom, 24)
             #endif
         }
         // YouTube-style scrub readout: a floating bubble above the bar
