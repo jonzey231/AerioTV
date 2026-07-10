@@ -726,12 +726,18 @@ extension LiveRewindEngine: URLSessionDataDelegate {
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
                     didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        // A non-200 (401 re-auth window, 404, 503 under load) must not
-        // pour an HTML error body into the TS buffer; cancel and let the
-        // completion handler run the normal reconnect backoff.
+        // A non-200 (Dispatcharr prime-up 500, 401 re-auth window, 503
+        // under load) must not pour an HTML error body into the TS
+        // buffer. Cancel AND schedule the reconnect EXPLICITLY: the
+        // disposition-cancel surfaces in didCompleteWithError as
+        // NSURLErrorCancelled, which that handler rightly filters as
+        // our own teardown - relying on it meant a prime-up 500 never
+        // reconnected and the tune sat on an empty buffer until the
+        // reader deadline (ATV field capture, twice).
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
             debugLog("[REWIND] live connect HTTP \(http.statusCode); treating as drop")
             completionHandler(.cancel)
+            handleConnectionDrop(session: session, reason: "HTTP \(http.statusCode)")
             return
         }
         completionHandler(.allow)
@@ -753,8 +759,13 @@ extension LiveRewindEngine: URLSessionDataDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         // Cancellation is OUR teardown (stopSession / a superseded
-        // connect / the non-200 disposition), never a drop to retry.
+        // connect) or the non-200 disposition, which schedules its own
+        // reconnect in the response handler - never a drop to retry here.
         if let e = error as NSError?, e.code == NSURLErrorCancelled { return }
+        handleConnectionDrop(session: session, reason: error?.localizedDescription ?? "eof")
+    }
+
+    private func handleConnectionDrop(session: URLSession, reason: String) {
         stateLock.lock()
         // Session-identity guard: a completion from a PREVIOUS channel's
         // connection must not schedule a reconnect against the CURRENT
@@ -775,7 +786,7 @@ extension LiveRewindEngine: URLSessionDataDelegate {
             return
         }
         let delay = min(5.0, 0.5 * Double(attempt))
-        debugLog("[REWIND] connection dropped (\(error?.localizedDescription ?? "eof")); reconnect #\(attempt) in \(delay)s")
+        debugLog("[REWIND] connection dropped (\(reason)); reconnect #\(attempt) in \(delay)s")
         Task {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             // The session this reconnect was scheduled for must still be
