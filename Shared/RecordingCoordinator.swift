@@ -71,18 +71,19 @@ final class RecordingCoordinator: ObservableObject {
     ///
     /// iOS: `Documents/Recordings/` (user-visible in the Files app).
     ///
-    /// tvOS: `Application Support/Recordings/`. The tvOS sandbox mounts
-    /// the app's own Documents directory READ-ONLY, so every recording
-    /// there failed at file-create time with "You don't have permission
-    /// to save the file" - the same field failure that moved the debug
-    /// log to Caches (see DebugLogger's directory note, 2026-06-05 ATV
-    /// test). Application Support is writable on tvOS (SwiftData already
-    /// lives there, see AerioApp) and more durable than Caches, but tvOS
-    /// treats ALL app storage as purgeable under pressure - the DVR
-    /// settings copy discloses that.
+    /// tvOS: `Caches/Recordings/`. A physical Apple TV mounts BOTH the
+    /// app's Documents directory AND Application Support read-only:
+    /// Documents failed at file-create ("You don't have permission to
+    /// save the file", 2026-06-05 ATV test), and mkdir under Application
+    /// Support fails with NSCocoaError 513 / POSIX EPERM (2026-07-10
+    /// device console, found via the identical Live Rewind failure; the
+    /// SIMULATOR enforces neither, so only device runs catch this).
+    /// Caches is the platform's only writable large-file location; the
+    /// OS may purge it under pressure, which the DVR settings copy
+    /// disclosed already - tvOS treats all app storage as purgeable.
     var localRecordingsDirectory: URL? {
         #if os(tvOS)
-        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return nil }
         #else
         guard let base = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else { return nil }
         #endif

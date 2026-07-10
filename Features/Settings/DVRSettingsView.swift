@@ -560,15 +560,21 @@ struct DVRSettingsView: View {
     }
 
     /// Defensive guard: only allow bulk-delete when the resolved directory is
-    /// actually inside this app's Documents container. Prevents a corrupted
-    /// bookmark or unexpected symlink from nuking something outside the sandbox.
+    /// actually inside this app's data container. Prevents a corrupted
+    /// bookmark or unexpected symlink from nuking something outside the
+    /// sandbox. Scoped to the container root (Documents' parent), not
+    /// Documents itself: the default recordings dir lives under Documents
+    /// on iOS but under Caches on tvOS (the only writable large-file
+    /// location there), and a Documents-only check turned tvOS delete-all
+    /// into a silent no-op.
     private func isInsideAppSandbox(_ url: URL) -> Bool {
         guard let docs = try? FileManager.default.url(for: .documentDirectory,
                                                        in: .userDomainMask,
                                                        appropriateFor: nil,
                                                        create: false) else { return false }
+        let container = docs.deletingLastPathComponent()
         let resolved = url.standardizedFileURL.resolvingSymlinksInPath().path
-        let base = docs.standardizedFileURL.resolvingSymlinksInPath().path
+        let base = container.standardizedFileURL.resolvingSymlinksInPath().path
         return resolved.hasPrefix(base)
     }
 
