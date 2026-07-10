@@ -117,7 +117,11 @@ struct MultiviewContainerView: View {
     /// via D-pad-left from the "+" landing position. Resets to `nil`
     /// (implicit fallback to the tile's `prefersDefaultFocus`) when
     /// the chrome fades back out.
-    enum ChromeFocusTarget: Hashable { case options, addStream, record }
+    enum ChromeFocusTarget: Hashable {
+        case options, addStream, record
+        // Live Rewind transport (task #144)
+        case rewind30, playPause, forward30, goLive
+    }
     @FocusState private var focusedChrome: ChromeFocusTarget?
 
     /// Tile-level focus state, keyed on tile id. Used ONLY to pin

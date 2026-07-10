@@ -774,6 +774,11 @@ struct PlaybackBottomChrome_tvOS: View {
 
     @EnvironmentObject private var chromeState: MultiviewChromeState
 
+    /// Live Rewind: engine state drives the timeline band swap and the
+    /// transport cells. Its 0.5s window publisher also provides the
+    /// re-render cadence for the position readouts below.
+    @ObservedObject private var liveRewind = LiveRewindEngine.shared
+
     /// Record pill availability (tvOS). v1.6.8 (B1 Phase 1): no
     /// longer gates on EPG — see `canRecordCurrentProgram_iOS`
     /// for full rationale. We only need a stream URL.
@@ -788,8 +793,15 @@ struct PlaybackBottomChrome_tvOS: View {
         VStack(spacing: 18) {
             // Live program progress band — program name + progress
             // bar + time remaining. Non-focusable; informational.
-            PlaybackLiveProgressBand(store: store)
-                .padding(.horizontal, 80)
+            // With a Live Rewind session rolling, the band becomes the
+            // rewind timeline over [buffer tail .. live edge] instead.
+            if liveRewind.buffering {
+                LiveRewindTimelineBand(store: store)
+                    .padding(.horizontal, 80)
+            } else {
+                PlaybackLiveProgressBand(store: store)
+                    .padding(.horizontal, 80)
+            }
 
             // Modern player chrome (DEFAULT): the controls mirror the native
             // AVPlayerViewController transport (frosted circular tool cells,
@@ -817,6 +829,59 @@ struct PlaybackBottomChrome_tvOS: View {
                 }
 
                 Spacer()
+
+                // Live Rewind transport, leading the row so D-pad LEFT
+                // from the existing cells reaches it (same relative
+                // placement the Android TV pill row uses).
+                if liveRewind.buffering {
+                    nativeToolButton(
+                        .rewind30,
+                        icon: "gobackward.30",
+                        title: "Rewind",
+                        a11yLabel: "Rewind 30 seconds",
+                        a11yHint: "Jump back thirty seconds in the live buffer"
+                    ) {
+                        chromeState.reportInteraction()
+                        if let ps = store.audioProgressStore {
+                            ps.seekAction?(max(0, ps.currentMs - 30_000))
+                        }
+                    }
+                    nativeToolButton(
+                        .playPause,
+                        icon: (store.audioProgressStore?.isPaused ?? false) ? "play.fill" : "pause.fill",
+                        title: (store.audioProgressStore?.isPaused ?? false) ? "Play" : "Pause",
+                        a11yLabel: (store.audioProgressStore?.isPaused ?? false) ? "Play" : "Pause",
+                        a11yHint: "Pause live TV; the buffer keeps recording while paused"
+                    ) {
+                        chromeState.reportInteraction()
+                        store.audioProgressStore?.togglePauseAction?()
+                    }
+                    nativeToolButton(
+                        .forward30,
+                        icon: "goforward.30",
+                        title: "Forward",
+                        a11yLabel: "Forward 30 seconds",
+                        a11yHint: "Jump forward thirty seconds toward live"
+                    ) {
+                        chromeState.reportInteraction()
+                        if let ps = store.audioProgressStore {
+                            ps.seekAction?(ps.currentMs + 30_000)
+                        }
+                    }
+                    if liveRewind.timeshifting {
+                        nativeToolButton(
+                            .goLive,
+                            icon: "forward.end.fill",
+                            title: "Go Live",
+                            a11yLabel: "Go live",
+                            a11yHint: "Return to the live broadcast"
+                        ) {
+                            chromeState.reportInteraction()
+                            let window = Int32(clamping: max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs))
+                            store.audioProgressStore?.seekAction?(window)
+                        }
+                    }
+                }
 
                 // Same ordering as the native transport custom items:
                 // Record, Add Stream, then Options rightmost.
@@ -1095,6 +1160,69 @@ struct PlaybackLiveProgressBand: View {
                     : "\(programName), \(remainingText)"
             )
         }
+    }
+}
+
+/// Live Rewind timeline band (tvOS native chrome): track spanning the
+/// rewind window, programme name + remaining on the LEFT, LIVE or the
+/// behind-live counter on the RIGHT (the locked transport layout).
+/// Position values are truthful to the shifted playback point; the
+/// engine's 0.5s window publisher drives re-render.
+struct LiveRewindTimelineBand: View {
+    @ObservedObject var store: MultiviewStore
+    @ObservedObject private var liveRewind = LiveRewindEngine.shared
+
+    var body: some View {
+        let window = max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs)
+        let posMs = Int64(store.audioProgressStore?.currentMs ?? 0)
+        let current = liveRewind.timeshifting ? min(posMs, window) : window
+        let fraction = Double(current) / Double(window)
+        let behindMs = window - current
+        let programme = store.tiles.first?.item.currentProgram ?? ""
+        let remainingText: String? = {
+            guard let end = store.tiles.first?.item.currentProgramEnd else { return nil }
+            let wall = liveRewind.tailWallMs + current
+            let rem = max(0, Int64(end.timeIntervalSince1970 * 1000) - wall)
+            let mins = Int(rem / 60_000)
+            if mins >= 60 { return "\(mins / 60) h \(mins % 60) min remaining" }
+            return mins > 0 ? "\(mins) min remaining" : "Ending soon"
+        }()
+
+        VStack(spacing: 8) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.white.opacity(0.2))
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.accentColor)
+                        .frame(width: geo.size.width * CGFloat(max(0, min(1, fraction))))
+                }
+            }
+            .frame(height: 6)
+
+            HStack(spacing: 14) {
+                if !programme.isEmpty {
+                    Text(programme)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .lineLimit(1)
+                }
+                if let remainingText {
+                    Text(remainingText)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                Spacer()
+                Text(liveRewind.timeshifting && behindMs > 5_000
+                     ? String(format: "-%d:%02d", behindMs / 60_000, (behindMs / 1000) % 60)
+                     : "LIVE")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(liveRewind.timeshifting && behindMs > 5_000
+                                     ? Color.white.opacity(0.8)
+                                     : Color.accentColor)
+            }
+        }
+        .focusable(false)
     }
 }
 #endif

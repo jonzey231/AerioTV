@@ -1896,7 +1896,35 @@ private struct PlayerRootView: View {
         // preview per-platform (tvOS step state vs iOS drag fraction).
         let displayMs = scrubReadoutTargetMs
         let atLive = timelineEndMs > 0 && displayMs >= timelineEndMs - 15_000
-        if isDVR {
+        if isLiveRewindMode {
+            // Live Rewind (locked layout): LIVE at the timeline's right
+            // edge, or the behind-live countdown while rewound. Tap =
+            // Go Live (seek to the window end snaps to the live relay).
+            let behindMs = max(0, timelineEndMs - displayMs)
+            HStack(spacing: 5) {
+                if behindMs <= 15_000 {
+                    Circle().fill(Color.red).frame(width: 8, height: 8)
+                }
+                Text(behindMs > 15_000
+                     ? String(format: "-%d:%02d", behindMs / 60_000, (behindMs / 1000) % 60)
+                     : "LIVE")
+                    #if os(tvOS)
+                    .font(.system(size: 18, weight: .semibold))
+                    #else
+                    .font(.system(size: 11, weight: .semibold))
+                    #endif
+                    .foregroundColor(behindMs > 15_000 ? .white.opacity(0.8) : .white)
+                    .monospacedDigit()
+            }
+            .frame(minWidth: 46, alignment: .trailing)
+            #if !os(tvOS)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                progressStore.seekAction?(timelineEndMs)
+                scheduleControlsHide()
+            }
+            #endif
+        } else if isDVR {
             HStack(spacing: 5) {
                 Circle()
                     .fill(atLive ? Color.red : Color.white.opacity(0.4))
