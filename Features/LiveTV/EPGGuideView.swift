@@ -4384,7 +4384,13 @@ private struct GuideMiniCloseRightHoldArm: View {
             isEnabled: nowPlaying.isActive && nowPlaying.isMinimized,
             onBegan: {
                 NotificationCenter.default.post(name: .guideRightHoldBegan, object: nil)
-                withAnimation(.spring(response: 0.35)) { NowPlayingManager.shared.stop() }
+                // Full session teardown, not just the manager flags: on
+                // the unified path the corner mini's player is owned by
+                // PlayerSession, so nowPlaying.stop() alone cleared the
+                // hint state while the video kept rendering, and Back
+                // then EXPANDED the orphan (ATV field report: hold-Right
+                // "resumed" the mini).
+                withAnimation(.spring(response: 0.35)) { PlayerSession.shared.exit() }
             },
             onEnded: {
                 NotificationCenter.default.post(name: .guideRightHoldEnded, object: nil)

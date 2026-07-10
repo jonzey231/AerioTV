@@ -585,7 +585,10 @@ struct ChannelListView: View {
                         isEnabled: nowPlaying.isActive && nowPlaying.isMinimized,
                         onBegan: {
                             NotificationCenter.default.post(name: .guideRightHoldBegan, object: nil)
-                            withAnimation(.spring(response: 0.35)) { nowPlaying.stop() }
+                            // Full session teardown (see the guide's twin):
+                            // on the unified path nowPlaying.stop() alone
+                            // orphaned the PlayerSession-owned mini.
+                            withAnimation(.spring(response: 0.35)) { PlayerSession.shared.exit() }
                         },
                         onEnded: {
                             NotificationCenter.default.post(name: .guideRightHoldEnded, object: nil)
