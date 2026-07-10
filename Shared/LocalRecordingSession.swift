@@ -392,13 +392,16 @@ final class LiveRewindReader: @unchecked Sendable {
             target = max(buffer.tailWallMs, buffer.headWallMs - 1_500)
         }
         startWallMs = target
-        // Wait briefly for the first segment on a brand-new session.
-        // 3s deadline: a session whose connection cannot deliver a first
-        // segment (dead provider, auth failure) should hand mpv the open
-        // failure quickly so the direct-stream fallback runs, instead of
-        // pinning a black screen for 10s.
+        // Wait for the first segment on a brand-new session. 10s: a cold
+        // channel tune can hit a transient prime-up 500 from Dispatcharr
+        // followed by the engine's reconnect backoff before the first
+        // byte lands (observed live on the ATV: 500 at +2s, data ~+5s).
+        // A shorter "fail fast" deadline was tried and made tunes SLOWER:
+        // the open failure only kicks off the re-tune/fallback ladder,
+        // which costs more than waiting out the reconnect. A genuinely
+        // dead session closes the buffer and exits this loop early.
         var tries = 0
-        while segments.isEmpty && tries < 30 && !buffer.closed {
+        while segments.isEmpty && tries < 100 && !buffer.closed {
             Thread.sleep(forTimeInterval: 0.1)
             segments = LiveRewindBuffer.listSegments(in: buffer.sessionDir)
             tries += 1

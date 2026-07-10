@@ -5264,7 +5264,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// and drops to the direct stream.
         private func relayErrorRecovery(reason: String) {
             if !liveRewindTailRetuneUsed,
-               let buf = LiveRewindEngine.shared.bufferForReader, !buf.closed {
+               let buf = LiveRewindEngine.shared.bufferForReader, !buf.closed,
+               // Only when the buffer actually HAS content: a cold-tune
+               // failure (connection still priming, zero segments) has
+               // nothing to re-tune into, and the extra attempt just
+               // stacked seconds onto the fallback ladder (ATV field
+               // observation during the 500-at-prime tune).
+               buf.headWallMs - buf.tailWallMs > 5_000 {
                 liveRewindTailRetuneUsed = true
                 LiveRewindEngine.shared.noteTimeshifting(true)
                 debugLog("[REWIND] relay error (\(reason)); one-shot re-tune at buffer tail")
