@@ -364,12 +364,19 @@ final class LiveRewindReader: @unchecked Sendable {
     init?(buffer: LiveRewindBuffer, fromWallMs: Int64?) {
         self.buffer = buffer
         self.segments = LiveRewindBuffer.listSegments(in: buffer.sessionDir)
-        // Live join: 4s behind head. Rewind: clamp into the window.
+        // Live join: slightly behind head so reads never starve, but
+        // tight enough that "Go Live" lands near true live. 4s tested
+        // safe but read as "3-5s delayed" on the ATV (offset + mpv's
+        // ~1s startup buffering); 1.5s keeps enough runway because the
+        // writer appends per network chunk (sub-second cadence) and a
+        // longer provider stall is absorbed by mpv's own cache, with
+        // the direct-stream fallback behind it. Rewind: clamp into the
+        // window.
         let target: Int64
         if let t = fromWallMs {
             target = max(buffer.tailWallMs, min(t, buffer.headWallMs))
         } else {
-            target = max(buffer.tailWallMs, buffer.headWallMs - 4_000)
+            target = max(buffer.tailWallMs, buffer.headWallMs - 1_500)
         }
         startWallMs = target
         // Wait briefly for the first segment on a brand-new session.
