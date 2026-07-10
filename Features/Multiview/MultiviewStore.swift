@@ -533,6 +533,13 @@ final class MultiviewStore: ObservableObject {
             addedAt: Date()
         )
         tiles.append(tile)
+        // Live Rewind: going 1 -> 2 tiles leaves the first tile's relay
+        // session buffering (its eligibility was captured at play time);
+        // tell it to drop to the direct stream so multiview never rides
+        // the relay or holds the extra engine connection.
+        if tiles.count == 2 {
+            NotificationCenter.default.post(name: .aerioLiveRewindDropRelay, object: nil)
+        }
         // Last-added gets audio (matches the plan's default).
         audioTileID = tile.id
         DebugLogger.shared.log(
@@ -608,6 +615,9 @@ final class MultiviewStore: ObservableObject {
             resumePositionMs: resumePositionMs
         )
         tiles.append(tile)
+        if tiles.count == 2 {
+            NotificationCenter.default.post(name: .aerioLiveRewindDropRelay, object: nil)
+        }
         audioTileID = tile.id
         DebugLogger.shared.log(
             "[MV-Tile] addVOD ok: \(title) kind=\(kind) tileID=\(tile.id) total=\(tiles.count)",
@@ -824,4 +834,11 @@ final class MultiviewStore: ObservableObject {
     var nextAddNeedsWarning: Bool {
         tiles.count >= softLimit && !warningRecentlyShown
     }
+}
+
+extension Notification.Name {
+    /// Live Rewind: posted when the tile count goes 1 -> 2 so the solo
+    /// tile's coordinator drops the buffer relay (its eligibility was
+    /// captured at play time and multiview must never ride the relay).
+    static let aerioLiveRewindDropRelay = Notification.Name("aerioLiveRewindDropRelay")
 }

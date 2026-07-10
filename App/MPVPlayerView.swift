@@ -654,12 +654,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         var catchup: CatchupPlayback? = nil
         /// Live Rewind: this coordinator's live playback runs through
         /// the aeriots:// buffer relay (fullscreen single live only).
-        /// Set in play(url:) when the engine session starts.
-        var liveRewindActive = false
+        /// Set in play(url:) when the engine session starts. Backed by
+        /// the playback-state lock (cross-thread access).
+        var liveRewindActive: Bool {
+            get { withPlaybackStateLock { $0.liveRewindActive } }
+            set { withPlaybackStateLock { $0.liveRewindActive = newValue } }
+        }
         /// Live Rewind: the relay failed for the CURRENT tune, so play
         /// direct and stop re-routing through it. Reset on channel
         /// change (swapStream); a fresh coordinator starts clear.
-        var liveRewindFallbackDirect = false
+        var liveRewindFallbackDirect: Bool {
+            get { withPlaybackStateLock { $0.liveRewindFallbackDirect } }
+            set { withPlaybackStateLock { $0.liveRewindFallbackDirect = newValue } }
+        }
         /// Programme-relative start (ms) of the currently tuned timeshift
         /// window: 0 on first tune, the floored seek target after each
         /// re-tune. Displayed position = this + mpv time-pos.
@@ -668,6 +675,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// timeshift URL's start segment has minute granularity; this
         /// lands the exact second). Consumed by handleFileLoaded.
         var catchupPendingSeekSecs: Double? = nil
+        /// One-shot guard for the mid-programme EOF re-tune; reset per
+        /// fresh play() so each window gets one recovery attempt.
+        var catchupEofRetuneUsed = false
 
         fileprivate static let dvrLiveEdgeGuardSec: Double = 6.0
         fileprivate let progressStore: PlayerProgressStore
@@ -1451,6 +1461,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             var hwdecFallbackApplied = false
             var isInBackground = false
             var autoPausedOnBackground = false
+            // Live Rewind flags live in the locked state: they are
+            // touched from the render queue (play routing), main
+            // (swapStream), the mpv queue (seekAction, fallback), and
+            // the event thread (end-file, pump).
+            var liveRewindActive = false
+            var liveRewindFallbackDirect = false
         }
         private var playbackState = PlaybackState()
         private var playbackStateLock = os_unfair_lock()
@@ -1483,18 +1499,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// (e.g. stop() racing an unexpected MPV_EVENT_SHUTDOWN) can never
         /// both capture the handle.
         private func markShuttingDownAndSnapshotMPV() -> OpaquePointer? {
-            withPlaybackStateLock { state in
-                guard !state.isShuttingDown else { return nil }
+            // Read/clear the relay flag via the STATE FIELD, not the
+            // locked property (os_unfair_lock is non-reentrant), and run
+            // the engine teardown outside the lock.
+            let (handle, hadRelay): (OpaquePointer?, Bool) = withPlaybackStateLock { state in
+                guard !state.isShuttingDown else { return (nil, false) }
                 state.isShuttingDown = true
                 // Live Rewind: the buffer session dies with its player.
                 // Buffered segments stay on disk for the retention
                 // reaper (user spec: age-out, not session-scoped).
-                if liveRewindActive {
-                    liveRewindActive = false
-                    LiveRewindEngine.shared.stopSession()
-                }
-                return state.mpv
+                let had = state.liveRewindActive
+                state.liveRewindActive = false
+                return (state.mpv, had)
             }
+            if hadRelay { LiveRewindEngine.shared.stopSession() }
+            return handle
         }
 
         private func takeMPVHandle() -> OpaquePointer? {
@@ -2294,12 +2313,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             offsetSeconds: flooredSecs) else { return }
                         self.playbackEnded = false
                         self.catchupBaseOffsetMs = Int32(flooredSecs * 1000)
-                        let residual = offsetSecs - flooredSecs
-                        self.catchupPendingSeekSecs = residual > 0.5 ? residual : nil
+                        // NO residual in-stream seek: the stream is opened
+                        // seekable=0, so the post-load seek only worked when
+                        // the target happened to sit in the demuxer cache
+                        // (~never at FILE_LOADED) and otherwise failed - the
+                        // scrubber flashed the target then snapped back. It
+                        // also raced rapid double-seeks (the OLD file's load
+                        // consumed the NEW residual). Android removed its
+                        // twin for the same reason: land on the floored
+                        // minute and say so.
+                        self.catchupPendingSeekSecs = nil
                         self.mpvCommandAsync(mpv, ["loadfile", newURL.absoluteString, "replace"])
                         let ps = self.progressStore
-                        DispatchQueue.main.async { ps.currentMs = clamped }
-                        debugLog("[CATCHUP] re-tune to \(clamped / 1000)s (window \(Int(flooredSecs))s)")
+                        let honest = Int32(flooredSecs * 1000)
+                        DispatchQueue.main.async { ps.currentMs = honest }
+                        debugLog("[CATCHUP] re-tune to window \(Int(flooredSecs))s (requested \(clamped / 1000)s)")
                         return
                     }
                     if self.isDVR {
@@ -2385,6 +2413,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Audio route change — log AirPlay connect/disconnect
             NotificationCenter.default.addObserver(self, selector: #selector(audioRouteChanged),
                                                    name: AVAudioSession.routeChangeNotification, object: nil)
+            // Live Rewind: a second multiview tile invalidates this
+            // tile's solo-live relay eligibility (captured at play time);
+            // drop to the direct stream. Removed via removeObserver(self)
+            // in deinit alongside the others.
+            NotificationCenter.default.addObserver(self, selector: #selector(dropLiveRewindRelay),
+                                                   name: .aerioLiveRewindDropRelay, object: nil)
             // Switch Stream: after a confirmed switch the picker asks the live
             // player to reload so libmpv re-locks onto the channel's fresh
             // buffer (recovers the dead-upstream/failover-cascade freeze). Only
@@ -5213,6 +5247,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             fallBackToDirectStream(reason: reason)
         }
 
+        /// A second multiview tile was added while this tile rode the
+        /// relay: switch to the direct stream (the fallback latch clears
+        /// on the next channel change, and a fresh solo tune re-relays).
+        @objc private func dropLiveRewindRelay() {
+            guard liveRewindActive else { return }
+            fallBackToDirectStream(reason: "multiview tile added")
+        }
+
         private func fallBackToDirectStream(reason: String) {
             liveRewindActive = false
             liveRewindFallbackDirect = true
@@ -5260,6 +5302,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // the start window under the old seek target's offset and the
             // whole timeline lied from then on.
             catchupBaseOffsetMs = 0
+            catchupEofRetuneUsed = false
             // v1.7.4.x: invalidate the previous stream's container-fps
             // hint so the watchdog reverts to the floor until the perf
             // pump re-measures the new stream. Prevents a 60fps -> 25fps
@@ -6190,6 +6233,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DebugLogger.shared.logPlayback(event: "DVR reached live edge")
                 logStore.append("ℹ️ MPV: DVR live edge")
             } else {
+                // Catch-up: a dropped archive session mid-programme
+                // reaches this arm looking like a normal end. When the
+                // clock says we are well short of the programme end,
+                // re-tune once at the last played position instead of
+                // ending playback (the seek path already rebuilds the
+                // window URL and clears playbackEnded).
+                if let cu = catchup, !catchupEofRetuneUsed {
+                    let posMs = progressStore.currentMs
+                    if posMs < cu.programDurationMs - 60_000 {
+                        catchupEofRetuneUsed = true
+                        debugLog("[CATCHUP] EOF \((cu.programDurationMs - posMs) / 1000)s early; one-shot re-tune")
+                        progressStore.seekAction?(posMs)
+                        return
+                    }
+                }
                 // VOD ended normally, not an error. This branch is the
                 // non-live, non-DVR case (the `isLive` / `!hasStarted` /
                 // `isDVR` arms above already returned), so setting
