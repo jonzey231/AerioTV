@@ -4833,9 +4833,23 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let fromWall: Int64? = uri.hasPrefix("aeriots://at/")
                     ? Int64(uri.dropFirst("aeriots://at/".count))
                     : nil
-                guard let buffer = LiveRewindEngine.shared.bufferForReader,
+                // A channel flip mid-open closes the session this file
+                // was routed for and starts the next channel's within
+                // milliseconds; adopt the replacement instead of failing
+                // (a stale open failure surfaced as an end-file ERROR
+                // that could latch the NEW tune off the relay). Genuine
+                // teardown never produces a fresh session, so this
+                // drains to the failure path in ~3s during shutdown.
+                var candidate = LiveRewindEngine.shared.bufferForReader
+                var waited = 0
+                while (candidate == nil || candidate!.closed), waited < 30 {
+                    Thread.sleep(forTimeInterval: 0.1)
+                    waited += 1
+                    candidate = LiveRewindEngine.shared.bufferForReader
+                }
+                guard let buffer = candidate, !buffer.closed,
                       let reader = LiveRewindReader(buffer: buffer, fromWallMs: fromWall) else {
-                    debugLog("[REWIND] aeriots open failed (no buffer/reader) uri=\(uri)")
+                    debugLog("[REWIND] aeriots open failed (no live session) uri=\(uri)")
                     return Int32(MPV_ERROR_LOADING_FAILED.rawValue)
                 }
                 LiveRewindEngine.shared.noteReaderStart(reader.startWallMs)

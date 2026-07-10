@@ -392,19 +392,21 @@ final class LiveRewindReader: @unchecked Sendable {
             target = max(buffer.tailWallMs, buffer.headWallMs - 1_500)
         }
         startWallMs = target
-        // Wait for the first segment on a brand-new session. 10s: a cold
-        // channel tune can hit a transient prime-up 500 from Dispatcharr
-        // followed by the engine's reconnect backoff before the first
-        // byte lands (observed live on the ATV: 500 at +2s, data ~+5s).
-        // A shorter "fail fast" deadline was tried and made tunes SLOWER:
-        // the open failure only kicks off the re-tune/fallback ladder,
-        // which costs more than waiting out the reconnect. A genuinely
-        // dead session closes the buffer and exits this loop early.
-        var tries = 0
-        while segments.isEmpty && tries < 100 && !buffer.closed {
+        // Wait for the first segment on a brand-new session with NO
+        // fixed deadline: engine liveness is the bound. ATV field
+        // captures proved any wall-clock cap here is a losing race -
+        // Dispatcharr can HOLD the connect socket ~10s while priming a
+        // cold channel upstream and then 500 (the engine reconnects and
+        // wins on a later attempt), so a capped wait expired exactly
+        // when the server was about to deliver, failed mpv's open, and
+        // ran the whole fallback ladder ON TOP of the remaining prime
+        // time (22.8s to first frame, measured). Blocking here keeps
+        // mpv in its normal "opening" state, identical to the direct
+        // path waiting on ffmpeg's connect; a truly dead channel closes
+        // the buffer (engine attempt cap) and exits immediately.
+        while segments.isEmpty && !buffer.closed {
             Thread.sleep(forTimeInterval: 0.1)
             segments = LiveRewindBuffer.listSegments(in: buffer.sessionDir)
-            tries += 1
         }
         guard !segments.isEmpty else { return nil }
         segIndex = max(0, segments.lastIndex(where: { $0.startWallMs <= target }) ?? 0)
@@ -517,6 +519,11 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     private var urlSession: URLSession?
     private var task: URLSessionDataTask?
     private var reconnectAttempts = 0
+    /// Whether THIS session has ever delivered a byte. Gates the
+    /// reconnect budget: a proven-alive stream gets patience (20
+    /// attempts), a never-primed one fails fast (5) so a dead channel
+    /// closes the buffer and unblocks the reader's open promptly.
+    private var everReceivedData = false
     private(set) var liveURL: URL?
     private(set) var liveHeaders: [String: String] = [:]
     private var windowTimer: Timer?
@@ -596,6 +603,7 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         liveURL = streamURL
         liveHeaders = headers
         reconnectAttempts = 0
+        everReceivedData = false
         stateLock.unlock()
         Task { @MainActor in
             self.buffering = true
@@ -751,8 +759,11 @@ extension LiveRewindEngine: URLSessionDataDelegate {
         // 20-attempt cap only counts CONSECUTIVE failures. Without this
         // a long session on a drop-prone provider hit the cap hours
         // later and silently closed mid-watch.
-        if reconnectAttempts != 0 {
-            stateLock.lock(); reconnectAttempts = 0; stateLock.unlock()
+        if reconnectAttempts != 0 || !everReceivedData {
+            stateLock.lock()
+            reconnectAttempts = 0
+            everReceivedData = true
+            stateLock.unlock()
         }
         buffer.append(data)
     }
@@ -775,12 +786,13 @@ extension LiveRewindEngine: URLSessionDataDelegate {
         let alive = activeBuffer != nil && activeBuffer?.closed == false
         if isCurrent { reconnectAttempts += 1 }
         let attempt = reconnectAttempts
+        let cap = everReceivedData ? 20 : 5
         let expectedBuffer = activeBuffer
         stateLock.unlock()
         guard isCurrent, alive else { return }
         // Live connection dropped: reconnect with backoff; the writer
         // realigns on the fresh mid-packet join.
-        guard attempt <= 20 else {
+        guard attempt <= cap else {
             debugLog("[REWIND] connection lost permanently; closing session")
             stopSession()
             return
