@@ -29,6 +29,9 @@ import SwiftUI
 /// we hit in an earlier iteration where the tvOS focus halo fought
 /// with our custom chrome.
 struct PlaybackChromeOverlay: View {
+    /// Live Rewind engine state (iOS unified chrome): drives the band
+    /// swap; its 0.5s window publisher paces position re-render.
+    @ObservedObject private var liveRewindIOS = LiveRewindEngine.shared
     @ObservedObject var store: MultiviewStore
 
     /// Bound from the container. Tapping `+` flips this to `true` so
@@ -301,9 +304,15 @@ struct PlaybackChromeOverlay: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 8)
-            liveProgressBand
-                .padding(.horizontal, 20)
-                .padding(.bottom, 24)
+            if liveRewindIOS.buffering {
+                RewindTransportBar_iOS(store: store)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+            } else {
+                liveProgressBand
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+            }
         }
         .background(
             // Top gradient matches the rest of the app's in-player
@@ -549,6 +558,135 @@ struct PlaybackChromeOverlay: View {
         }
     }
 }
+
+// MARK: - Live Rewind transport (iOS unified chrome)
+
+#if !os(tvOS)
+/// Live Rewind transport for the iOS unified chrome (locked layout):
+/// draggable timeline over [buffer tail .. live edge]; under it the
+/// remaining time LEFT and LIVE / behind-live countdown RIGHT;
+/// centered skip/pause controls with the Go Live pill on the right
+/// while rewound. Actions dispatch through the sole tile's
+/// PlayerProgressStore closures into the coordinator's re-tune branch.
+struct RewindTransportBar_iOS: View {
+    @ObservedObject var store: MultiviewStore
+    @ObservedObject private var liveRewind = LiveRewindEngine.shared
+    @State private var dragFraction: CGFloat? = nil
+
+    var body: some View {
+        let window = max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs)
+        let posMs = Int64(store.audioProgressStore?.currentMs ?? 0)
+        let current = liveRewind.timeshifting ? min(posMs, window) : window
+        let fraction = dragFraction ?? CGFloat(Double(current) / Double(window))
+        let behindMs = window - current
+        let isPaused = store.audioProgressStore?.isPaused ?? false
+
+        VStack(spacing: 6) {
+            // Timeline: tap/drag to scrub anywhere in the window.
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.2))
+                    Capsule().fill(Color.accentColor)
+                        .frame(width: geo.size.width * max(0, min(1, fraction)))
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 14, height: 14)
+                        .offset(x: geo.size.width * max(0, min(1, fraction)) - 7)
+                }
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { v in
+                            dragFraction = max(0, min(1, v.location.x / geo.size.width))
+                        }
+                        .onEnded { v in
+                            let f = max(0, min(1, v.location.x / geo.size.width))
+                            dragFraction = nil
+                            store.audioProgressStore?.seekAction?(Int32(Double(window) * Double(f)))
+                        }
+                )
+            }
+            .frame(height: 14)
+
+            // Status line: remaining LEFT, LIVE / behind RIGHT.
+            HStack {
+                if let end = store.tiles.first?.item.currentProgramEnd {
+                    let wall = liveRewind.tailWallMs + current
+                    let rem = max(0, Int64(end.timeIntervalSince1970 * 1000) - wall)
+                    let mins = Int(rem / 60_000)
+                    Text(mins >= 60 ? "\(mins / 60) h \(mins % 60) min remaining"
+                         : (mins > 0 ? "\(mins) min remaining" : "Ending soon"))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.6))
+                }
+                Spacer()
+                HStack(spacing: 4) {
+                    if !(liveRewind.timeshifting && behindMs > 5_000) {
+                        Circle().fill(Color.red).frame(width: 7, height: 7)
+                    }
+                    Text(liveRewind.timeshifting && behindMs > 5_000
+                         ? String(format: "-%d:%02d", behindMs / 60_000, (behindMs / 1000) % 60)
+                         : "LIVE")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(liveRewind.timeshifting && behindMs > 5_000
+                                         ? Color.white.opacity(0.8) : Color.white)
+                        .monospacedDigit()
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    store.audioProgressStore?.seekAction?(Int32(clamping: window))
+                }
+            }
+
+            // Controls: centered skip/pause cluster; Go Live pill
+            // anchors right without disturbing the centering.
+            ZStack {
+                HStack(spacing: 26) {
+                    transportButton("gobackward.30") {
+                        if let ps = store.audioProgressStore {
+                            ps.seekAction?(max(0, (liveRewind.timeshifting ? ps.currentMs : Int32(clamping: window)) - 30_000))
+                        }
+                    }
+                    transportButton(isPaused ? "play.fill" : "pause.fill") {
+                        store.audioProgressStore?.togglePauseAction?()
+                    }
+                    transportButton("goforward.30") {
+                        if let ps = store.audioProgressStore {
+                            ps.seekAction?((liveRewind.timeshifting ? ps.currentMs : Int32(clamping: window)) + 30_000)
+                        }
+                    }
+                }
+                if liveRewind.timeshifting {
+                    HStack {
+                        Spacer()
+                        Button {
+                            store.audioProgressStore?.seekAction?(Int32(clamping: window))
+                        } label: {
+                            Text("Go Live")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.accentColor, in: Capsule())
+                        }
+                    }
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func transportButton(_ icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(Color.black.opacity(0.55), in: Circle())
+        }
+    }
+}
+#endif
 
 // MARK: - iPadOS overflow-menu adapter
 
