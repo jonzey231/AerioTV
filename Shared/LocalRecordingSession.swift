@@ -828,19 +828,46 @@ extension LiveRewindEngine: URLSessionDataDelegate {
 /// a 2-hour programme would balloon straight into memory.
 final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let cond = NSCondition()
-    private var chunks: [Data] = []
-    private var buffered = 0
     private var finished = false
     private var failed = false
-    private var suspended = false
+    private var bytesWritten: Int64 = 0
+    private var readOffset: Int64 = 0
     private var session: URLSession?
     private var task: URLSessionDataTask?
+    private let spoolURL: URL
+    private var writeHandle: FileHandle?
+    private var readHandle: FileHandle?
 
-    private static let highWater = 8 * 1024 * 1024
-    private static let lowWater = 4 * 1024 * 1024
-
+    /// Disk spool, NOT suspend/resume flow control: Dispatcharr sends
+    /// the whole remaining archive at line rate (~66 MB/s measured), so
+    /// a suspended task blocks the server's writes for tens of seconds
+    /// per drain cycle and the server times the connection out (ATV
+    /// field capture: stream died ~65s in; only the EOF re-tune saved
+    /// it). The spool accepts at line rate, the reader tails it at
+    /// playback rate, and the file is deleted on close.
     init(url: URL, headers: [String: String]) {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("CatchupSpool", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Sweep leftovers from crashed sessions (anything over an hour
+        // old cannot belong to a live reader).
+        if let leftovers = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) {
+            let cutoff = Date().addingTimeInterval(-3600)
+            for f in leftovers {
+                let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                if (m ?? .distantPast) < cutoff { try? FileManager.default.removeItem(at: f) }
+            }
+        }
+        spoolURL = dir.appendingPathComponent(UUID().uuidString + ".ts")
+        FileManager.default.createFile(atPath: spoolURL.path, contents: nil)
+        writeHandle = try? FileHandle(forWritingTo: spoolURL)
+        readHandle = try? FileHandle(forReadingFrom: spoolURL)
         super.init()
+        if writeHandle == nil || readHandle == nil {
+            failed = true
+            return
+        }
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 0
@@ -869,11 +896,12 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         cond.lock()
-        chunks.append(data)
-        buffered += data.count
-        if buffered > Self.highWater, !suspended {
-            suspended = true
-            dataTask.suspend()
+        do {
+            try writeHandle?.write(contentsOf: data)
+            bytesWritten += Int64(data.count)
+        } catch {
+            debugLog("[CATCHUP-RELAY] spool write failed: \(error)")
+            failed = true
         }
         cond.signal()
         cond.unlock()
@@ -882,7 +910,7 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         cond.lock()
         if let error, (error as NSError).code != NSURLErrorCancelled {
-            // Mid-stream drop: whatever is buffered still plays, then EOF;
+            // Mid-stream drop: whatever is spooled still plays, then EOF;
             // the player's catch-up EOF re-tune recovers the position.
             debugLog("[CATCHUP-RELAY] connection ended: \(error.localizedDescription)")
         }
@@ -895,27 +923,21 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
     func read(into dest: UnsafeMutableRawPointer, max nbytes: Int) -> Int {
         cond.lock()
         defer { cond.unlock() }
-        while chunks.isEmpty {
+        while readOffset >= bytesWritten {
             if failed { return -1 }
             if finished { return 0 }
             cond.wait()
         }
-        var first = chunks[0]
-        let n = min(nbytes, first.count)
-        first.withUnsafeBytes { raw in
-            dest.copyMemory(from: raw.baseAddress!, byteCount: n)
+        let want = min(nbytes, Int(bytesWritten - readOffset))
+        guard let rh = readHandle,
+              let data = try? rh.read(upToCount: want), !data.isEmpty else {
+            return failed ? -1 : 0
         }
-        if n == first.count {
-            chunks.removeFirst()
-        } else {
-            chunks[0] = first.subdata(in: n..<first.count)
+        data.withUnsafeBytes { raw in
+            dest.copyMemory(from: raw.baseAddress!, byteCount: data.count)
         }
-        buffered -= n
-        if suspended, buffered < Self.lowWater {
-            suspended = false
-            task?.resume()
-        }
-        return n
+        readOffset += Int64(data.count)
+        return data.count
     }
 
     func close() {
@@ -925,6 +947,9 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
         cond.unlock()
         task?.cancel()
         session?.invalidateAndCancel()
+        try? writeHandle?.close()
+        try? readHandle?.close()
+        try? FileManager.default.removeItem(at: spoolURL)
     }
 }
 

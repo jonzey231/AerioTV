@@ -2680,6 +2680,14 @@ struct EPGGuideView: View {
                 rightHoldSafetyTask = nil
                 #endif
             }
+            // Hold Right to close the corner mini-player. The detector was
+            // wired into the LIST view only; the Guide (where tvOS users
+            // actually live) merely LISTENED for the pinning notifications
+            // and never armed it, so hold-Right did nothing here (ATV
+            // field report: "can't stop playback"). Isolated in a wrapper
+            // view so this perf-sensitive body does not re-render on
+            // every NowPlayingManager publish.
+            .background(GuideMiniCloseRightHoldArm())
             .fullScreenCover(item: $playingCatchup) { pb in
                 // Catch-up playback: the recordings-pattern presentation.
                 // PlayerSession.exit() already silenced any live session
@@ -4363,3 +4371,29 @@ private struct GuideButtonStyle: ButtonStyle {
 // unconditionally returned nil. The gesture therefore never
 // fired, which only became visible once the guide grid was
 // wide enough to actually require horizontal scrolling.
+
+#if os(tvOS)
+/// Arms the hold-Right close-mini detector for the Guide (parity with
+/// the List view's wiring in ChannelListView). Isolated struct so only
+/// THIS invisible background re-renders when NowPlayingManager
+/// publishes, never the guide grid.
+private struct GuideMiniCloseRightHoldArm: View {
+    @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    var body: some View {
+        GuideLongPressRightDetector(
+            isEnabled: nowPlaying.isActive && nowPlaying.isMinimized,
+            onBegan: {
+                NotificationCenter.default.post(name: .guideRightHoldBegan, object: nil)
+                withAnimation(.spring(response: 0.35)) { NowPlayingManager.shared.stop() }
+            },
+            onEnded: {
+                NotificationCenter.default.post(name: .guideRightHoldEnded, object: nil)
+            }
+        )
+    }
+}
+#else
+private struct GuideMiniCloseRightHoldArm: View {
+    var body: some View { Color.clear }
+}
+#endif

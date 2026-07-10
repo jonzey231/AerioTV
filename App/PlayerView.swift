@@ -778,6 +778,21 @@ private struct PlayerRootView: View {
                                 else if direction == .right { scrubStep(+1) }
                             }
                         }
+                        // Select summons the chrome, matching the unified
+                        // live chrome's model (its on-screen hint even
+                        // says "Press Select to show player controls").
+                        // In this legacy presentation (catch-up, VOD,
+                        // recordings) only D-pad moves and play/pause
+                        // summoned, so a Select-pressing user saw a
+                        // player with "no controls" (ATV field report:
+                        // 76 inert Select presses in one catch-up
+                        // session). Attached to the hidden-chrome
+                        // background layer, so it never fires while
+                        // controls are up.
+                        .onTapGesture {
+                            withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
+                            scheduleControlsHide()
+                        }
                         .ignoresSafeArea()
 
                     #else
