@@ -4558,7 +4558,13 @@ enum CatchupSupport {
                                          password: server.effectivePassword)
                 let info = try? await api.verifyConnection()
                 tz = info?.serverInfo?.timezone ?? "UTC"
-                panelTzCache[server.id] = tz
+                // Memoize only a REAL answer: caching the UTC fallback
+                // after one transient handshake failure poisoned every
+                // later catch-up on a non-UTC panel for the whole run
+                // (Android deliberately caches on success only).
+                if info?.serverInfo?.timezone != nil {
+                    panelTzCache[server.id] = tz
+                }
             }
             guard let url = buildTimeshiftURL(base: server.effectiveBaseURL,
                                               username: server.username,

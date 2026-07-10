@@ -3343,7 +3343,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // when watchdog re-enqueue has already fired, which by
             // definition means we are NOT in the steady-state hot
             // path of clean playback.
+            // isLive gate (parity with the black-frame sibling): off-live
+            // the reload is never the right move, and for CATCH-UP it
+            // reloaded urls.first (the programme-start URL, re-tunes
+            // bypass `urls`) with a stale catchupBaseOffsetMs - snapping
+            // a paused/rebuffering replay back to 0:00 under a lying
+            // timeline.
             if staleAge >= staleFrameStormThresholdSec,
+               isLive,
                lastAppliedPause != true,
                watchdogReloadEnabled,
                hasReachedPlaybackRestartForStream {
@@ -4770,10 +4777,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 return
             }
 
-            #if DEBUG
-            let initMs = Date().timeIntervalSince(initStart) * 1000
-            debugLog("[MPV-DIAG] setupMPV: mpv_initialize succeeded ✓ (\(String(format: "%.0f", initMs))ms)")
-
             // Live Rewind: register the aeriots:// protocol so mpv can
             // read the local timeshift buffer. "aeriots://live" tails
             // the write head a few seconds behind; "aeriots://at/<ms>"
@@ -4781,6 +4784,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // seek/size callbacks: the stream is deliberately
             // unseekable and unsized, which also sidesteps ffmpeg's
             // open-time end probe entirely.
+            //
+            // MUST stay OUTSIDE any #if DEBUG: this registration
+            // originally landed inside the DEBUG-only diagnostics block
+            // below, which would have shipped Release builds where every
+            // relay tune failed with "protocol not found" (caught in the
+            // 2026-07-10 pre-release review; all device testing had been
+            // Debug builds).
             mpv_stream_cb_add_ro(mpv, "aeriots", nil) { _, uriC, info in
                 guard let uriC, let info else { return Int32(MPV_ERROR_LOADING_FAILED.rawValue) }
                 let uri = String(cString: uriC)
@@ -4807,6 +4817,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
                 return 0
             }
+
+            #if DEBUG
+            let initMs = Date().timeIntervalSince(initStart) * 1000
+            debugLog("[MPV-DIAG] setupMPV: mpv_initialize succeeded ✓ (\(String(format: "%.0f", initMs))ms)")
             markPhase("mpv_initialize")
             #endif
 
@@ -5162,6 +5176,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 headers: headers)
             if started {
                 liveRewindActive = true
+                liveRewindTailRetuneUsed = false
                 debugLog("[REWIND] live playback via buffer relay")
                 return URL(string: "aeriots://live")!
             }
@@ -5175,6 +5190,29 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// loading failed" during plain live viewing). The fallback
         /// sticks until the next channel change (`swapStream` resets it)
         /// or a fresh player.
+        /// One-shot per tune; reset when a fresh relay route succeeds.
+        private var liveRewindTailRetuneUsed = false
+
+        /// Relay error triage. A pause past the rewind depth evicts the
+        /// READER's position while the session itself stays healthy; one
+        /// re-tune at the buffer tail preserves rewind for that case.
+        /// Anything else (or a second failure) is a genuinely sick relay
+        /// and drops to the direct stream.
+        private func relayErrorRecovery(reason: String) {
+            if !liveRewindTailRetuneUsed,
+               let buf = LiveRewindEngine.shared.bufferForReader, !buf.closed {
+                liveRewindTailRetuneUsed = true
+                LiveRewindEngine.shared.noteTimeshifting(true)
+                debugLog("[REWIND] relay error (\(reason)); one-shot re-tune at buffer tail")
+                mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    self.mpvCommandAsync(mpv, ["loadfile", "aeriots://at/\(buf.tailWallMs + 2_000)", "replace"])
+                }
+                return
+            }
+            fallBackToDirectStream(reason: reason)
+        }
+
         private func fallBackToDirectStream(reason: String) {
             liveRewindActive = false
             liveRewindFallbackDirect = true
@@ -5201,9 +5239,27 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // has runway by construction.
             var url = url
             url = routeThroughLiveRewind(url)
+            // stop() can land between the handle check above and the
+            // session start inside the routing; without this re-check the
+            // engine keeps a full-bitrate download running with no player
+            // attached until the next tune.
+            if withPlaybackStateLock({ $0.isShuttingDown }) {
+                if liveRewindActive {
+                    liveRewindActive = false
+                    LiveRewindEngine.shared.stopSession()
+                }
+                return
+            }
 
             hasStarted = false
             playbackStartTime = nil
+            // play() always loads the coordinator's ORIGINAL url (for
+            // catch-up: the programme-start window), so the display base
+            // must be zero. The load-error retry path funnels through
+            // here after a failed re-tune; without this reset it replayed
+            // the start window under the old seek target's offset and the
+            // whole timeline lied from then on.
+            catchupBaseOffsetMs = 0
             // v1.7.4.x: invalidate the previous stream's container-fps
             // hint so the watchdog reverts to the floor until the perf
             // pump re-measures the new stream. Prevents a 60fps -> 25fps
@@ -5978,7 +6034,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // play(url:)), which is how a transient relay hiccup
                 // burned all three retries and painted the red card.
                 if liveRewindActive {
-                    fallBackToDirectStream(reason: errStr)
+                    relayErrorRecovery(reason: errStr)
                     return
                 }
 
@@ -6087,7 +6143,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // as the error branch: go direct rather than treating a
             // live channel as "ended".
             if isLive, liveRewindActive {
-                fallBackToDirectStream(reason: "relay EOF")
+                relayErrorRecovery(reason: "relay EOF")
                 return
             }
 

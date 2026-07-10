@@ -292,8 +292,21 @@ final class LiveRewindBuffer: @unchecked Sendable {
         if handle == nil || now - currentSegStartMs >= Self.segmentMs {
             rollSegmentLocked(now: now)
         }
-        handle?.write(merged.prefix(whole))
-        headWallMs = now
+        // write(contentsOf:) throws Swift errors; the legacy write(_:)
+        // raises an uncatchable ObjC exception on ENOSPC, which is a
+        // realistic state here (tvOS Caches on a full 32GB box, or a
+        // marathon session outrunning the budget sweep). On failure the
+        // buffer self-closes; the reader EOFs and the player's relay
+        // recovery takes over.
+        do {
+            if let h = handle { try h.write(contentsOf: merged.prefix(whole)) }
+            headWallMs = now
+        } catch {
+            debugLog("[REWIND] segment write failed (\(error)); closing buffer")
+            closed = true
+            try? handle?.close()
+            handle = nil
+        }
     }
 
     /// First index with 0x47 at i, i+188, i+376 (three-packet verify).
@@ -380,8 +393,12 @@ final class LiveRewindReader: @unchecked Sendable {
         }
         startWallMs = target
         // Wait briefly for the first segment on a brand-new session.
+        // 3s deadline: a session whose connection cannot deliver a first
+        // segment (dead provider, auth failure) should hand mpv the open
+        // failure quickly so the direct-stream fallback runs, instead of
+        // pinning a black screen for 10s.
         var tries = 0
-        while segments.isEmpty && tries < 100 && !buffer.closed {
+        while segments.isEmpty && tries < 30 && !buffer.closed {
             Thread.sleep(forTimeInterval: 0.1)
             segments = LiveRewindBuffer.listSegments(in: buffer.sessionDir)
             tries += 1
@@ -403,8 +420,21 @@ final class LiveRewindReader: @unchecked Sendable {
     /// Blocking read: waits at the write head (the mpv stream thread is
     /// dedicated, brief sleeps are fine). Returns 0 only when the
     /// session is closed and drained (EOF), -1 on unrecoverable error.
+    /// Directory-listing throttle for the read loop. Instance state, not
+    /// per-call: at the live head mpv issues short reads in bursts, and
+    /// a per-call counter would still re-list on nearly every call.
+    private var listCountdown = 0
+
     func read(into dest: UnsafeMutableRawPointer, max nbytes: Int) -> Int {
         var waits = 0
+        // Directory-listing throttle: at the live head the reader idles
+        // in this loop constantly (mpv read-ahead pacing), and an
+        // unthrottled loop re-listed the whole session directory (up to
+        // ~700 files at 120-min depth) on EVERY 100ms wait. The current
+        // file keeps growing in place, so most waits resume without any
+        // listing; a segment roll only needs discovering within its
+        // ~6-10s cadence, and the reader's head cushion plus mpv's
+        // demuxer buffer absorb the <=0.5s worst-case discovery delay.
         while true {
             if let h = handle,
                let data = try? h.read(upToCount: nbytes),
@@ -414,29 +444,34 @@ final class LiveRewindReader: @unchecked Sendable {
                 }
                 return data.count
             }
-            // Current segment exhausted: advance if a newer one exists.
-            let fresh = LiveRewindBuffer.listSegments(in: buffer.sessionDir)
-            if !fresh.isEmpty {
-                let currentStart = segments.indices.contains(segIndex)
-                    ? segments[segIndex].startWallMs : -1
-                guard let freshIdx = fresh.firstIndex(where: { $0.startWallMs == currentStart }) else {
-                    // Ring evicted the segment under us (paused past the
-                    // rewind depth). Error out; the player-side recovery
-                    // re-tunes at the buffer tail.
-                    return -1
-                }
-                if freshIdx < fresh.count - 1 {
+            // Current segment exhausted or grown-to-EOF: periodically
+            // check whether a newer segment exists to advance into.
+            if listCountdown <= 0 {
+                listCountdown = 5
+                let fresh = LiveRewindBuffer.listSegments(in: buffer.sessionDir)
+                if !fresh.isEmpty {
+                    let currentStart = segments.indices.contains(segIndex)
+                        ? segments[segIndex].startWallMs : -1
+                    guard let freshIdx = fresh.firstIndex(where: { $0.startWallMs == currentStart }) else {
+                        // Ring evicted the segment under us (paused past the
+                        // rewind depth). Error out; the player-side recovery
+                        // re-tunes at the buffer tail.
+                        return -1
+                    }
+                    if freshIdx < fresh.count - 1 {
+                        segments = fresh
+                        segIndex = freshIdx + 1
+                        try? handle?.close()
+                        handle = try? FileHandle(forReadingFrom: segments[segIndex].url)
+                        continue
+                    }
                     segments = fresh
-                    segIndex = freshIdx + 1
-                    try? handle?.close()
-                    handle = try? FileHandle(forReadingFrom: segments[segIndex].url)
-                    continue
                 }
-                segments = fresh
             }
             if buffer.closed { return 0 }
             if waits > 600 { return -1 } // 60s stalled: give up
             waits += 1
+            listCountdown -= 1
             Thread.sleep(forTimeInterval: 0.1)
         }
     }
@@ -529,8 +564,16 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     func startSession(channelID: String, channelName: String, streamURL: URL, headers: [String: String]) -> Bool {
         guard isEnabled else { return false }
         stopSession()
-        pruneExpired()
-        enforceBudget()
+        // Retention + budget sweep OFF the caller's thread: swapStream
+        // routes through here on MAIN during a channel flip, and the
+        // sweep walks every session directory on disk. A brand-new
+        // session dir is never stale (mtime = now) and budget eviction
+        // of the active session's oldest segments is the designed
+        // behavior, so running the sweep concurrently is safe.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.pruneExpired()
+            self?.enforceBudget()
+        }
         let dir = rootDir.appendingPathComponent("sess_\(Int64(Date().timeIntervalSince1970 * 1000))", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -597,6 +640,10 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         let session = URLSession(configuration: config, delegate: self, delegateQueue: queue)
         var request = URLRequest(url: url)
         stateLock.lock()
+        // Un-invalidated URLSessions leak (each holds its delegate and
+        // OperationQueue); a reconnecting session replaced the previous
+        // one every cycle without invalidating it.
+        urlSession?.invalidateAndCancel()
         urlSession = session
         let headers = liveHeaders
         stateLock.unlock()
@@ -612,11 +659,26 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     @MainActor
     private func startWindowTimer() {
         windowTimer?.invalidate()
+        var ticks = 0
         windowTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self, let b = self.bufferForReader else { return }
             Task { @MainActor in
-                self.tailWallMs = b.tailWallMs
-                self.headWallMs = b.headWallMs
+                // Delta-gate: every @Published write re-renders PlayerView
+                // and the chrome whether or not the value changed; second
+                // resolution is all the transport needs.
+                if abs(b.tailWallMs - self.tailWallMs) >= 1_000 { self.tailWallMs = b.tailWallMs }
+                if abs(b.headWallMs - self.headWallMs) >= 1_000 { self.headWallMs = b.headWallMs }
+            }
+            // Every ~5 minutes, re-run the retention + budget sweep so a
+            // single marathon session (120-min depth on a UHD channel
+            // can outgrow the budget) converges without waiting for the
+            // next channel tune.
+            ticks += 1
+            if ticks % 600 == 0 {
+                DispatchQueue.global(qos: .utility).async {
+                    self.pruneExpired()
+                    self.enforceBudget()
+                }
             }
         }
     }
@@ -636,16 +698,20 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func enforceBudget() {
+        // Enumerate EVERY .ts under the root by modification date, not
+        // just parseable seg_<wallMs> names: the AVPlayer spill files
+        // (seg<seq>.ts in avp_sess_ dirs) were invisible to the budget.
         let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: nil)) ?? []
-        var segs: [(url: URL, start: Int64, size: Int64)] = []
+        var segs: [(url: URL, mtime: Date, size: Int64)] = []
         for dir in dirs where dir.hasDirectoryPath {
-            for seg in LiveRewindBuffer.listSegments(in: dir) {
-                let size = (try? FileManager.default.attributesOfItem(atPath: seg.url.path)[.size] as? Int64) ?? 0
-                segs.append((seg.url, seg.startWallMs, size))
+            let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
+            for f in files where f.pathExtension == "ts" {
+                let vals = try? f.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+                segs.append((f, vals?.contentModificationDate ?? .distantPast, Int64(vals?.fileSize ?? 0)))
             }
         }
         var total = segs.reduce(0) { $0 + $1.size }
-        for seg in segs.sorted(by: { $0.start < $1.start }) {
+        for seg in segs.sorted(by: { $0.mtime < $1.mtime }) {
             if total <= budgetBytes { break }
             total -= seg.size
             try? FileManager.default.removeItem(at: seg.url)
@@ -654,20 +720,50 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
 }
 
 extension LiveRewindEngine: URLSessionDataDelegate {
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        // A non-200 (401 re-auth window, 404, 503 under load) must not
+        // pour an HTML error body into the TS buffer; cancel and let the
+        // completion handler run the normal reconnect backoff.
+        if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+            debugLog("[REWIND] live connect HTTP \(http.statusCode); treating as drop")
+            completionHandler(.cancel)
+            return
+        }
+        completionHandler(.allow)
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         // Resolved PER APPEND (the Android channel-change race fix):
         // whichever session is current receives the bytes.
         guard let buffer = bufferForReader, !buffer.closed else { return }
+        // Data is flowing again: refund the reconnect budget so the
+        // 20-attempt cap only counts CONSECUTIVE failures. Without this
+        // a long session on a drop-prone provider hit the cap hours
+        // later and silently closed mid-watch.
+        if reconnectAttempts != 0 {
+            stateLock.lock(); reconnectAttempts = 0; stateLock.unlock()
+        }
         buffer.append(data)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        // Cancellation is OUR teardown (stopSession / a superseded
+        // connect / the non-200 disposition), never a drop to retry.
+        if let e = error as NSError?, e.code == NSURLErrorCancelled { return }
         stateLock.lock()
+        // Session-identity guard: a completion from a PREVIOUS channel's
+        // connection must not schedule a reconnect against the CURRENT
+        // session (a stale reconnect dialed the new channel's URL a
+        // second time and interleaved two byte streams into one buffer).
+        let isCurrent = session === urlSession
         let alive = activeBuffer != nil && activeBuffer?.closed == false
-        reconnectAttempts += 1
+        if isCurrent { reconnectAttempts += 1 }
         let attempt = reconnectAttempts
+        let expectedBuffer = activeBuffer
         stateLock.unlock()
-        guard alive else { return }
+        guard isCurrent, alive else { return }
         // Live connection dropped: reconnect with backoff; the writer
         // realigns on the fresh mid-packet join.
         guard attempt <= 20 else {
@@ -679,7 +775,10 @@ extension LiveRewindEngine: URLSessionDataDelegate {
         debugLog("[REWIND] connection dropped (\(error?.localizedDescription ?? "eof")); reconnect #\(attempt) in \(delay)s")
         Task {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            guard self.bufferForReader?.closed == false else { return }
+            // The session this reconnect was scheduled for must still be
+            // the active one when the backoff fires.
+            guard let expected = expectedBuffer,
+                  self.bufferForReader === expected, !expected.closed else { return }
             self.connect()
         }
     }
