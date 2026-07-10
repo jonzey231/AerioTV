@@ -473,6 +473,9 @@ enum TVPlayerFocus: Hashable {
 #endif
 
 private struct PlayerRootView: View {
+    /// Live Rewind engine state: drives the live scrubber window
+    /// (fullscreen single live with a rolling buffer session).
+    @ObservedObject private var liveRewind = LiveRewindEngine.shared
     let urls: [URL]
     let title: String
     let headers: [String: String]
@@ -770,7 +773,7 @@ private struct PlayerRootView: View {
                             // scrubber via onChange(showControls)) and starts a
                             // scrub preview. No seek fires until commit, so the
                             // video keeps playing with no per-press buffer stall.
-                            if !isLive, isScrubberActive {
+                            if !isLive || isLiveRewindMode, isScrubberActive {
                                 if direction == .left { scrubStep(-1) }
                                 else if direction == .right { scrubStep(+1) }
                             }
@@ -995,7 +998,7 @@ private struct PlayerRootView: View {
             // right away; live (no seekable timeline) and the mini player
             // fall back to the Options pill.
             if visible {
-                tvFocus = (!isLive && isScrubberActive) ? .scrubber : .gearIcon
+                tvFocus = ((!isLive || isLiveRewindMode) && isScrubberActive) ? .scrubber : .gearIcon
             } else {
                 tvFocus = .background
                 cancelScrub()
@@ -1057,7 +1060,7 @@ private struct PlayerRootView: View {
                 resetFocus(in: playerFocusScope)
             }
         }
-        .onAppear { tvFocus = showControls ? ((!isLive && isScrubberActive) ? .scrubber : .gearIcon) : .background }
+        .onAppear { tvFocus = showControls ? (((!isLive || isLiveRewindMode) && isScrubberActive) ? .scrubber : .gearIcon) : .background }
         // Handle Menu/Back and Play/Pause at the player level so they
         // work regardless of which element currently has focus.
         // GH #11: Back from fullscreen should always **reveal** the
@@ -1287,12 +1290,23 @@ private struct PlayerRootView: View {
     ///   which only grows; flooring it at `currentMs` keeps the bar from
     ///   ever sitting left of the playhead during a playlist-refresh
     ///   wobble. The right edge therefore represents "live".
+    /// Live Rewind: this player is live with a rolling buffer session,
+    /// so the timeline spans the rewind window instead of a programme.
+    private var isLiveRewindMode: Bool {
+        isLive && catchup == nil && liveRewind.buffering
+    }
+
     private var timelineEndMs: Int32 {
         // Catch-up: the timeline is ALWAYS the programme's real length.
         // The bounded timeshift TS reports an unreliable (estimated)
         // duration, and each re-tune resets mpv's clock, so neither is
         // allowed to drive the scrubber's right edge.
         if let cu = catchup { return cu.programDurationMs }
+        // Live Rewind: the window is [buffer tail .. live edge]; the
+        // right edge is "live" exactly like the DVR growing window.
+        if isLiveRewindMode {
+            return Int32(clamping: max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs))
+        }
         if isDVR { return max(progressStore.durationMs, progressStore.currentMs) }
         return progressStore.durationMs
     }
@@ -1632,8 +1646,10 @@ private struct PlayerRootView: View {
             } // if !isMinimized
             #endif
 
-            // Live streams: program progress bar. VOD: scrubber + skip buttons.
-            if isLive {
+            // Live streams: program progress bar. VOD: scrubber + skip
+            // buttons. Live Rewind: the scrubber transport over the
+            // buffer window (cable-DVR model), same as VOD/DVR.
+            if isLive && !isLiveRewindMode {
                 liveProgressSection
             } else {
                 vodControlsSection
@@ -1717,7 +1733,7 @@ private struct PlayerRootView: View {
                 tvPlayPauseIndicator
                 tvScrubberBar
             }
-            .focusable(showControls && !isLive && isScrubberActive)
+            .focusable(showControls && (!isLive || isLiveRewindMode) && isScrubberActive)
             .focused($tvFocus, equals: .scrubber)
             .onMoveCommand { direction in
                 switch direction {

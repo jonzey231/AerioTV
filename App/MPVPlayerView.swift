@@ -652,6 +652,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Catch-up (timeshift) context, or nil for every other playback.
         /// Set once by makeCoordinator before the view mounts.
         var catchup: CatchupPlayback? = nil
+        /// Live Rewind: this coordinator's live playback runs through
+        /// the aeriots:// buffer relay (fullscreen single live only).
+        /// Set in play(url:) when the engine session starts.
+        var liveRewindActive = false
         /// Programme-relative start (ms) of the currently tuned timeshift
         /// window: 0 on first tune, the floored seek target after each
         /// re-tune. Displayed position = this + mpv time-pos.
@@ -1461,6 +1465,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             withPlaybackStateLock { state in
                 guard !state.isShuttingDown else { return nil }
                 state.isShuttingDown = true
+                // Live Rewind: the buffer session dies with its player.
+                // Buffered segments stay on disk for the retention
+                // reaper (user spec: age-out, not session-scoped).
+                if liveRewindActive {
+                    liveRewindActive = false
+                    LiveRewindEngine.shared.stopSession()
+                }
                 return state.mpv
             }
         }
@@ -2210,9 +2221,37 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // the core is stalled; this also puts playbackEnded access on the
             // same queue as the EOF event handler that sets it.
             progressStore.seekAction = { [weak self] targetMs in
-                guard let self, !self.isLive else { return }
+                guard let self, !self.isLive || self.liveRewindActive else { return }
                 self.mpvQueue.async { [weak self] in
                     guard let self, let mpv = self.activeMPVHandle() else { return }
+                    if self.liveRewindActive {
+                        // Live Rewind: the scrubber spans the buffer window
+                        // [tail .. head]; a seek is a re-tune of the relay
+                        // at the requested wall time. Near the head, tune
+                        // the live head-follow stream instead (the "Go
+                        // Live" snap; anchored on FRESH buffer values, the
+                        // Android stale-anchor lesson).
+                        let engine = LiveRewindEngine.shared
+                        guard let buf = engine.bufferForReader else { return }
+                        let tail = buf.tailWallMs
+                        let head = buf.headWallMs
+                        let window = max(Int64(1), head - tail)
+                        let clamped = min(max(Int64(targetMs), 0), window)
+                        let targetWall = tail + clamped
+                        self.playbackEnded = false
+                        if targetWall >= head - 5_000 {
+                            engine.noteTimeshifting(false)
+                            self.mpvCommandAsync(mpv, ["loadfile", "aeriots://live", "replace"])
+                            debugLog("[REWIND] seek to live edge")
+                        } else {
+                            engine.noteTimeshifting(true)
+                            self.mpvCommandAsync(mpv, ["loadfile", "aeriots://at/\(targetWall)", "replace"])
+                            debugLog("[REWIND] re-tune \((head - targetWall) / 1000)s behind live")
+                        }
+                        let ps = self.progressStore
+                        DispatchQueue.main.async { ps.currentMs = Int32(clamped) }
+                        return
+                    }
                     if let cu = self.catchup {
                         // Catch-up: the bounded timeshift TS has no reliable
                         // in-stream random access (estimated Content-Length,
@@ -4713,6 +4752,40 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             let initMs = Date().timeIntervalSince(initStart) * 1000
             debugLog("[MPV-DIAG] setupMPV: mpv_initialize succeeded ✓ (\(String(format: "%.0f", initMs))ms)")
+
+            // Live Rewind: register the aeriots:// protocol so mpv can
+            // read the local timeshift buffer. "aeriots://live" tails
+            // the write head a few seconds behind; "aeriots://at/<ms>"
+            // starts at a wall-clock offset (re-tune seek model). No
+            // seek/size callbacks: the stream is deliberately
+            // unseekable and unsized, which also sidesteps ffmpeg's
+            // open-time end probe entirely.
+            mpv_stream_cb_add_ro(mpv, "aeriots", nil) { _, uriC, info in
+                guard let uriC, let info else { return Int32(MPV_ERROR_LOADING_FAILED.rawValue) }
+                let uri = String(cString: uriC)
+                let fromWall: Int64? = uri.hasPrefix("aeriots://at/")
+                    ? Int64(uri.dropFirst("aeriots://at/".count))
+                    : nil
+                guard let buffer = LiveRewindEngine.shared.bufferForReader,
+                      let reader = LiveRewindReader(buffer: buffer, fromWallMs: fromWall) else {
+                    debugLog("[REWIND] aeriots open failed (no buffer/reader) uri=\(uri)")
+                    return Int32(MPV_ERROR_LOADING_FAILED.rawValue)
+                }
+                LiveRewindEngine.shared.noteReaderStart(reader.startWallMs)
+                info.pointee.cookie = Unmanaged.passRetained(reader).toOpaque()
+                info.pointee.read_fn = { cookie, buf, nbytes in
+                    guard let cookie, let buf else { return -1 }
+                    let r = Unmanaged<LiveRewindReader>.fromOpaque(cookie).takeUnretainedValue()
+                    return Int64(r.read(into: UnsafeMutableRawPointer(buf), max: Int(nbytes)))
+                }
+                info.pointee.close_fn = { cookie in
+                    guard let cookie else { return }
+                    let unmanaged = Unmanaged<LiveRewindReader>.fromOpaque(cookie)
+                    unmanaged.takeUnretainedValue().close()
+                    unmanaged.release()
+                }
+                return 0
+            }
             markPhase("mpv_initialize")
             #endif
 
@@ -5035,6 +5108,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         private func play(url: URL) {
             guard let mpv = activeMPVHandle() else { return }
+
+            // Live Rewind: route fullscreen single live playback through
+            // the app-owned buffer connection. The engine opens the ONE
+            // provider stream and mpv consumes the buffer via aeriots://,
+            // so pausing never stops the buffer from filling and rewind
+            // has runway by construction.
+            var url = url
+            // "Fullscreen single live" includes the unified N=1 path,
+            // where the sole stream is a multiview tile with a non-nil
+            // tileID (PlayerSession routes everything through
+            // MultiviewStore by default). Same solo-tile predicate the
+            // PiP eligibility gate uses.
+            let isSoloLive = tileID == nil ||
+                (initialIsAudioActive && initialTileCount <= 1)
+            if isLive, isSoloLive, catchup == nil,
+               url.scheme?.hasPrefix("http") == true,
+               LiveRewindEngine.shared.isEnabled {
+                let started = LiveRewindEngine.shared.startSession(
+                    channelID: url.absoluteString,
+                    channelName: nowPlayingTitle,
+                    streamURL: url,
+                    headers: headers)
+                if started {
+                    liveRewindActive = true
+                    url = URL(string: "aeriots://live")!
+                    debugLog("[REWIND] live playback via buffer relay")
+                }
+            } else if url.scheme != "aeriots" {
+                liveRewindActive = false
+            }
 
             hasStarted = false
             playbackStartTime = nil
@@ -6047,7 +6150,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // Catch-up: mpv's clock restarts at ~0 after every
                         // re-tune; the programme-relative position adds the
                         // tuned window's base offset.
-                        let display = catchup != nil ? catchupBaseOffsetMs + ms : ms
+                        var display = catchup != nil ? catchupBaseOffsetMs + ms : ms
+                        if liveRewindActive, let buf = LiveRewindEngine.shared.bufferForReader {
+                            // Scrubber position = wall position - window tail.
+                            let wall = LiveRewindEngine.shared.readerBaseWallMs + Int64(ms)
+                            display = Int32(clamping: max(0, wall - buf.tailWallMs))
+                        }
                         DispatchQueue.main.async { ps.currentMs = display }
                     }
 

@@ -31,6 +31,12 @@ struct AppBehaviorsSettingsView: View {
     @AppStorage("defaultTab") private var defaultTabRaw = AppTab.liveTV.rawValue
     @AppStorage("defaultLiveTVView") private var defaultLiveTVView = "guide"
 
+    // Live Rewind (task #144 P1): interim surface until the P2
+    // dedicated page (onboarding prompt, storage budget, retention,
+    // external targets) lands. Same keys the engine reads.
+    @AppStorage("liveRewindEnabled") private var liveRewindEnabled = false
+    @AppStorage("liveRewindDepthMinutes") private var liveRewindDepthMinutes = 30
+
     @AppStorage("appBehaviorsSkipLoadingScreen")
     private var skipLoadingScreen = false
 
@@ -195,6 +201,35 @@ struct AppBehaviorsSettingsView: View {
                 Text(UIDevice.current.userInterfaceIdiom == .pad
                      ? "Skipping the loading screen may cause brief UI stutter while data loads. Resume picks up the last channel you watched in the corner mini-player; press Play/Pause to expand."
                      : "Skipping the loading screen may cause brief UI stutter while data loads.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+            .listSectionSeparator(.hidden)
+
+            // MARK: Live Rewind
+            Section {
+                Toggle(isOn: $liveRewindEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Pause & rewind live TV")
+                            .font(.bodyMedium).foregroundColor(.textPrimary)
+                        Text("Buffer fullscreen live playback on this device")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+                if liveRewindEnabled {
+                    Picker("Rewind depth", selection: $liveRewindDepthMinutes) {
+                        Text("15 minutes").tag(15)
+                        Text("30 minutes (default)").tag(30)
+                        Text("1 hour").tag(60)
+                        Text("2 hours").tag(120)
+                    }
+                    .listRowBackground(Color.cardBackground)
+                }
+            } header: {
+                Text("Live Rewind").sectionHeaderStyle()
+            } footer: {
+                Text("Buffers the channel you are watching so you can pause and rewind live TV. Uses device storage while you watch; buffered video is removed automatically.")
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
@@ -447,6 +482,31 @@ struct AppBehaviorsSettingsView: View {
                             action: { defaultLiveTVView = option }
                         )
                     }
+                }
+
+                tvSection("Live Rewind") {
+                    TVSettingsToggleRow(
+                        icon: "gobackward.30",
+                        iconColor: theme.accent,
+                        title: "Pause & Rewind Live TV",
+                        subtitle: "Buffer fullscreen live playback on this Apple TV",
+                        isOn: $liveRewindEnabled
+                    ) { _ in }
+                    if liveRewindEnabled {
+                        ForEach([15, 30, 60, 120], id: \.self) { mins in
+                            TVSettingsSelectionRow(
+                                label: mins < 60 ? "\(mins) minutes" : (mins == 60 ? "1 hour" : "2 hours"),
+                                subtitle: mins == 30 ? "Default" : nil,
+                                isSelected: liveRewindDepthMinutes == mins,
+                                action: { liveRewindDepthMinutes = mins }
+                            )
+                        }
+                    }
+                    Text("Buffers the channel you are watching so you can pause and rewind live TV. Uses device storage while you watch; buffered video is removed automatically.")
+                        .font(.system(size: 22))
+                        .foregroundColor(.textTertiary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
                 }
 
                 tvSection("Channel Flip Gesture") {
