@@ -6142,9 +6142,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         #endif
                     }
 
-                    // Throttle UI updates
+                    // Throttle UI updates. Live channels have no timeline
+                    // EXCEPT in Live Rewind, where currentMs anchors the
+                    // transport: without this pump the store stays 0 until
+                    // the first seek writes it, so the first Rewind press
+                    // computed max(0, 0 - 30s) and re-tuned to the buffer
+                    // TAIL (ATV field report: "first RW went back to the
+                    // very beginning"), and the timeline never ticked
+                    // while rewound.
                     let now = Date()
-                    if !isLive, now.timeIntervalSince(lastProgressUpdate) >= 1.0 {
+                    if !isLive || liveRewindActive, now.timeIntervalSince(lastProgressUpdate) >= 1.0 {
                         lastProgressUpdate = now
                         let ps = progressStore
                         // Catch-up: mpv's clock restarts at ~0 after every
