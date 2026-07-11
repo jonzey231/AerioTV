@@ -860,7 +860,9 @@ struct ChannelListView: View {
             // GH #20 (Android parity): the same scroll state also tucks the
             // tab bar away so the list reclaims its height. Phone-only by
             // construction: the observer above never sets the flag on iPad.
-            .toolbar(isChromeCollapsed ? .hidden : .visible, for: .tabBar)
+            // iOS 26+ ignores the manual toggle - the system minimize
+            // behavior owns the bar there (aerioTabBarAutoMinimize).
+            .toolbar(legacyScrollAwayTabBarVisibility(collapsed: isChromeCollapsed), for: .tabBar)
             #endif
         }
         // v1.6.13: same mini push-down as the Guide branch above.

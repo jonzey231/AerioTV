@@ -2578,7 +2578,7 @@ struct EPGGuideView: View {
                         }
                     }
                 }
-                .toolbar(guideTabBarHidden ? .hidden : .visible, for: .tabBar)
+                .toolbar(legacyScrollAwayTabBarVisibility(collapsed: guideTabBarHidden), for: .tabBar)
                 #endif
             .clipped()
             .onAppear {

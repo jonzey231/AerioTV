@@ -467,7 +467,7 @@ struct MoviesView: View {
                         }
                     }
                 }
-                .toolbar(gridTabBarHidden ? .hidden : .visible, for: .tabBar)
+                .toolbar(legacyScrollAwayTabBarVisibility(collapsed: gridTabBarHidden), for: .tabBar)
                 #endif
             }
         }
