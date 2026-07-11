@@ -493,15 +493,47 @@ final class LiveRewindReader: @unchecked Sendable {
 final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     static let shared = LiveRewindEngine()
 
-    /// P2 settings-backed bounds (Android liveRewindRetentionHours /
-    /// liveRewindBudgetGB parity). Defaults: 24 hours, 10 GB.
+    /// P2 settings-backed retention (Android liveRewindRetentionHours
+    /// parity). Default: 24 hours.
     var retentionMs: Int64 {
         let hours = UserDefaults.standard.integer(forKey: "liveRewindRetentionHours")
         return Int64(hours > 0 ? hours : 24) * 60 * 60 * 1000
     }
+
+    /// The Storage Limit SETTING was removed (user directive
+    /// 2026-07-11: retention is the only user-facing knob, with storage
+    /// estimates shown under it). This is the invisible seatbelt that
+    /// replaced it: the buffer may use its current footprint plus
+    /// whatever free space the volume has above a 2 GB floor, so a long
+    /// retention on a full disk evicts oldest video instead of filling
+    /// the device. Recomputed on every enforcement pass. The old
+    /// liveRewindBudgetGB default stays as the fallback if free space
+    /// can't be read.
     var budgetBytes: Int64 {
-        let gb = UserDefaults.standard.integer(forKey: "liveRewindBudgetGB")
-        return Int64(gb > 0 ? gb : 10) * 1024 * 1024 * 1024
+        // Plain volumeAvailableCapacityKey: the "ImportantUsage" variant
+        // is unavailable on tvOS. Slightly conservative (doesn't count
+        // OS-purgeable space) - fine for a seatbelt.
+        let values = try? rootDir.resourceValues(forKeys: [.volumeAvailableCapacityKey])
+        guard let free = values?.volumeAvailableCapacity.map({ Int64($0) }) else {
+            // Free space unreadable: fall back to the old default cap.
+            return 10 * 1024 * 1024 * 1024
+        }
+        let floor: Int64 = 2 * 1024 * 1024 * 1024
+        return currentUsageBytes() + max(0, free - floor)
+    }
+
+    /// Total bytes of buffered .ts across all session dirs (rewind
+    /// segments AND AVPlayer spill files), for the free-space budget.
+    private func currentUsageBytes() -> Int64 {
+        let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: nil)) ?? []
+        var total: Int64 = 0
+        for dir in dirs where dir.hasDirectoryPath {
+            let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
+            for f in files where f.pathExtension == "ts" {
+                total += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            }
+        }
+        return total
     }
 
     /// UI-facing state (mirrors Android's TimeshiftController.State).
@@ -721,9 +753,13 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
                 segs.append((f, vals?.contentModificationDate ?? .distantPast, Int64(vals?.fileSize ?? 0)))
             }
         }
+        // Hoist: budgetBytes now enumerates the disk (free-space
+        // seatbelt), so reading it per loop iteration would be
+        // quadratic in segment count.
+        let budget = budgetBytes
         var total = segs.reduce(0) { $0 + $1.size }
         for seg in segs.sorted(by: { $0.mtime < $1.mtime }) {
-            if total <= budgetBytes { break }
+            if total <= budget { break }
             total -= seg.size
             try? FileManager.default.removeItem(at: seg.url)
         }

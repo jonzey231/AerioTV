@@ -31,25 +31,43 @@ struct AppBehaviorsSettingsView: View {
     @AppStorage("defaultTab") private var defaultTabRaw = AppTab.liveTV.rawValue
     @AppStorage("defaultLiveTVView") private var defaultLiveTVView = "guide"
 
-    // Live Rewind (task #144 P1): interim surface until the P2
-    // dedicated page (onboarding prompt, storage budget, retention,
-    // external targets) lands. Same keys the engine reads.
+    // Live Rewind settings (redesigned 2026-07-11 per user directive
+    // from the Z Fold field pass): depth + retention are SLIDER
+    // ladders (segments on tvOS - no native Slider, and segments are
+    // this app's established tvOS idiom, see Display Scale); the
+    // Storage Limit setting was REMOVED in favor of storage estimates
+    // under the retention control, with an invisible free-disk-space
+    // floor in LiveRewindEngine as the seatbelt. The custom-retention
+    // alert died with the redesign (the ladder covers the range;
+    // legacy custom values snap to the nearest stop for display).
     @AppStorage("liveRewindEnabled") private var liveRewindEnabled = false
     @AppStorage("liveRewindDepthMinutes") private var liveRewindDepthMinutes = 30
     @AppStorage("liveRewindRetentionHours") private var liveRewindRetentionHours = 24
-    @AppStorage("liveRewindBudgetGB") private var liveRewindBudgetGB = 10
-    @State private var showCustomRetention = false
-    @State private var customRetentionText = ""
 
-    private static let retentionPresets: [(hours: Int, label: String)] = [
-        (1, "1 hour"), (6, "6 hours"), (12, "12 hours"),
-        (24, "24 hours"), (72, "3 days"), (168, "1 week"),
-    ]
+    private static let rewindDepthSteps = [15, 30, 60, 120]
+    private static let retentionSteps = [1, 6, 12, 24, 72, 168]
 
     private func retentionLabel(_ hours: Int) -> String {
-        if hours % 24 == 0 && hours >= 48 { return "\(hours / 24) days" }
-        if hours == 24 { return "1 day" }
+        if hours % 24 == 0 && hours >= 48 { return hours == 168 ? "1 week" : "\(hours / 24) days" }
+        if hours == 24 { return "24 hours" }
         return hours == 1 ? "1 hour" : "\(hours) hours"
+    }
+
+    private func depthLabel(_ mins: Int) -> String {
+        mins < 60 ? "\(mins) minutes" : (mins == 60 ? "1 hour" : "\(mins / 60) hours")
+    }
+
+    /// Storage estimate under the retention control (replacing the
+    /// removed Storage Limit setting): scales with the choice at
+    /// typical stream bitrates - HD ~4 Mbps, FHD ~8, UHD ~20 - so the
+    /// user can pick what fits their streams and disk. Worst case
+    /// (continuous watching); only watched video is buffered.
+    private func retentionEstimate(_ hours: Int) -> String {
+        func gb(_ mbps: Double) -> String {
+            let v = mbps * 450.0 * Double(hours) / 1024.0
+            return v < 10 ? String(format: "~%.1f GB", v) : "~\(Int(v.rounded())) GB"
+        }
+        return "Keeping \(retentionLabel(hours)) can use up to \(gb(4)) in HD, \(gb(8)) in FHD, or \(gb(20)) in UHD if you watch continuously."
     }
 
     @AppStorage("appBehaviorsSkipLoadingScreen")
@@ -130,21 +148,6 @@ struct AppBehaviorsSettingsView: View {
         #else
         .toolbar(.hidden, for: .navigationBar)
         #endif
-        .alert("Custom Retention", isPresented: $showCustomRetention) {
-            TextField("Hours", text: $customRetentionText)
-            #if os(iOS)
-                .keyboardType(.numberPad)
-            #endif
-            Button("Set") {
-                if let hours = Int(customRetentionText.trimmingCharacters(in: .whitespaces)),
-                   (1...720).contains(hours) {
-                    liveRewindRetentionHours = hours
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("How long buffered video is kept, in hours (1 to 720).")
-        }
         .toolbarBackground(Color.appBackground, for: .navigationBar)
         .onAppear {
             tmdbKeyDraft = TMDBPosters.loadAPIKey()
@@ -257,13 +260,12 @@ struct AppBehaviorsSettingsView: View {
 
             if liveRewindEnabled {
                 Section {
-                    Picker("Depth", selection: $liveRewindDepthMinutes) {
-                        Text("15 minutes").tag(15)
-                        Text("30 minutes (default)").tag(30)
-                        Text("1 hour").tag(60)
-                        Text("2 hours").tag(120)
-                    }
-                    .listRowBackground(Color.cardBackground)
+                    steppedSliderRow_iOS(
+                        title: "Depth",
+                        values: Self.rewindDepthSteps,
+                        selection: $liveRewindDepthMinutes,
+                        label: depthLabel
+                    )
                 } header: {
                     Text("Rewind Depth").sectionHeaderStyle()
                 } footer: {
@@ -273,46 +275,16 @@ struct AppBehaviorsSettingsView: View {
                 .listSectionSeparator(.hidden)
 
                 Section {
-                    Picker("Keep for", selection: $liveRewindRetentionHours) {
-                        ForEach(Self.retentionPresets, id: \.hours) { preset in
-                            Text(preset.hours == 24 ? "24 hours (default)" : preset.label)
-                                .tag(preset.hours)
-                        }
-                        if !Self.retentionPresets.contains(where: { $0.hours == liveRewindRetentionHours }) {
-                            Text("Custom (\(retentionLabel(liveRewindRetentionHours)))")
-                                .tag(liveRewindRetentionHours)
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-                    Button {
-                        customRetentionText = String(liveRewindRetentionHours)
-                        showCustomRetention = true
-                    } label: {
-                        Text("Custom Retention…")
-                            .font(.bodyMedium).foregroundColor(theme.accent)
-                    }
-                    .listRowBackground(Color.cardBackground)
+                    steppedSliderRow_iOS(
+                        title: "Keep for",
+                        values: Self.retentionSteps,
+                        selection: $liveRewindRetentionHours,
+                        label: retentionLabel
+                    )
                 } header: {
                     Text("Keep Buffered Video").sectionHeaderStyle()
                 } footer: {
-                    Text("Buffered video stays on this device after you stop watching and is deleted once it reaches this age.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-                .listSectionSeparator(.hidden)
-
-                Section {
-                    Picker("Limit", selection: $liveRewindBudgetGB) {
-                        Text("2 GB").tag(2)
-                        Text("5 GB").tag(5)
-                        Text("10 GB (default)").tag(10)
-                        Text("20 GB").tag(20)
-                        Text("50 GB").tag(50)
-                    }
-                    .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("Storage Limit").sectionHeaderStyle()
-                } footer: {
-                    Text("Total space buffered video may use across all sessions. The oldest video is removed first when the limit is reached.")
+                    Text("Buffered video stays on this device after you stop watching and is deleted once it reaches this age. \(retentionEstimate(liveRewindRetentionHours))")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
@@ -516,6 +488,46 @@ struct AppBehaviorsSettingsView: View {
         .scrollContentBackground(.hidden)
         .listStyle(.insetGrouped)
     }
+
+    /// Discrete-stop slider row over an Int ladder (2026-07-11 settings
+    /// redesign): label left, current value right, stepped Slider below.
+    /// Legacy/custom persisted values snap to the nearest stop for
+    /// display; the pref is only rewritten when the user moves it.
+    private func steppedSliderRow_iOS(
+        title: String,
+        values: [Int],
+        selection: Binding<Int>,
+        label: @escaping (Int) -> String
+    ) -> some View {
+        let idx = values.indices.min(by: {
+            abs(values[$0] - selection.wrappedValue) < abs(values[$1] - selection.wrappedValue)
+        }) ?? 0
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(title)
+                    .font(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Spacer()
+                Text(label(values[idx]))
+                    .font(.labelSmall)
+                    .foregroundColor(.textTertiary)
+            }
+            Slider(
+                value: Binding(
+                    get: { Double(idx) },
+                    set: { raw in
+                        let i = min(max(Int(raw.rounded()), 0), values.count - 1)
+                        if values[i] != selection.wrappedValue { selection.wrappedValue = values[i] }
+                    }
+                ),
+                in: 0...Double(values.count - 1),
+                step: 1
+            )
+            .tint(theme.accent)
+        }
+        .padding(.vertical, 4)
+        .listRowBackground(Color.cardBackground)
+    }
     #endif
 
     // MARK: - tvOS Body
@@ -585,14 +597,12 @@ struct AppBehaviorsSettingsView: View {
 
                 if liveRewindEnabled {
                     tvSection("Rewind Depth") {
-                        ForEach([15, 30, 60, 120], id: \.self) { mins in
-                            TVSettingsSelectionRow(
-                                label: mins < 60 ? "\(mins) minutes" : (mins == 60 ? "1 hour" : "2 hours"),
-                                subtitle: mins == 30 ? "Default" : nil,
-                                isSelected: liveRewindDepthMinutes == mins,
-                                action: { liveRewindDepthMinutes = mins }
-                            )
-                        }
+                        tvSteppedSegmentsRow(
+                            title: "Depth",
+                            values: Self.rewindDepthSteps,
+                            selection: $liveRewindDepthMinutes,
+                            segmentLabel: { $0 < 60 ? "\($0)m" : "\($0 / 60)h" }
+                        )
                         Text("How far back you can rewind while watching. Deeper buffers use more storage while you watch.")
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
@@ -601,41 +611,17 @@ struct AppBehaviorsSettingsView: View {
                     }
 
                     tvSection("Keep Buffered Video") {
-                        ForEach(Self.retentionPresets, id: \.hours) { preset in
-                            TVSettingsSelectionRow(
-                                label: preset.label,
-                                subtitle: preset.hours == 24 ? "Default" : nil,
-                                isSelected: liveRewindRetentionHours == preset.hours,
-                                action: { liveRewindRetentionHours = preset.hours }
-                            )
-                        }
-                        TVSettingsSelectionRow(
-                            label: "Custom",
-                            subtitle: Self.retentionPresets.contains(where: { $0.hours == liveRewindRetentionHours })
-                                ? nil : retentionLabel(liveRewindRetentionHours),
-                            isSelected: !Self.retentionPresets.contains(where: { $0.hours == liveRewindRetentionHours }),
-                            action: {
-                                customRetentionText = String(liveRewindRetentionHours)
-                                showCustomRetention = true
+                        tvSteppedSegmentsRow(
+                            title: "Keep for",
+                            values: Self.retentionSteps,
+                            selection: $liveRewindRetentionHours,
+                            segmentLabel: { h in
+                                if h < 24 { return "\(h)h" }
+                                if h == 24 { return "24h" }
+                                return h == 168 ? "1w" : "\(h / 24)d"
                             }
                         )
-                        Text("Buffered video stays on this Apple TV after you stop watching and is deleted once it reaches this age.")
-                            .font(.system(size: 22))
-                            .foregroundColor(.textTertiary)
-                            .padding(.horizontal, 20)
-                            .padding(.top, 4)
-                    }
-
-                    tvSection("Storage Limit") {
-                        ForEach([2, 5, 10, 20, 50], id: \.self) { gb in
-                            TVSettingsSelectionRow(
-                                label: "\(gb) GB",
-                                subtitle: gb == 10 ? "Default" : nil,
-                                isSelected: liveRewindBudgetGB == gb,
-                                action: { liveRewindBudgetGB = gb }
-                            )
-                        }
-                        Text("Total space buffered video may use across all sessions. The oldest video is removed first when the limit is reached.")
+                        Text("Buffered video stays on this Apple TV after you stop watching and is deleted once it reaches this age. \(retentionEstimate(liveRewindRetentionHours))")
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.horizontal, 20)
@@ -758,6 +744,53 @@ struct AppBehaviorsSettingsView: View {
                     .fill(Color.cardBackground)
             )
         }
+    }
+
+    /// tvOS discrete ladder row (2026-07-11 settings redesign): title
+    /// left, one focusable segment per stop (the app's established tvOS
+    /// slider idiom - see Appearance's Display Scale; tvOS has no
+    /// native Slider and a custom focus-track slider risks the focus
+    /// traps this codebase keeps re-learning). Snaps legacy/custom
+    /// persisted values to the nearest stop for highlight.
+    private func tvSteppedSegmentsRow(
+        title: String,
+        values: [Int],
+        selection: Binding<Int>,
+        segmentLabel: @escaping (Int) -> String
+    ) -> some View {
+        let current = values.min(by: {
+            abs($0 - selection.wrappedValue) < abs($1 - selection.wrappedValue)
+        }) ?? selection.wrappedValue
+        return HStack(spacing: 24) {
+            Text(title)
+                .font(.system(size: 26, weight: .medium))
+                .foregroundColor(.textPrimary)
+            Spacer()
+            ForEach(values, id: \.self) { value in
+                Button {
+                    selection.wrappedValue = value
+                } label: {
+                    Text(segmentLabel(value))
+                        .font(.system(size: 22, weight: .medium))
+                        .foregroundColor(value == current ? theme.accent : .textSecondary)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(value == current
+                                      ? theme.accent.opacity(0.18)
+                                      : Color.clear)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.cardBackground)
+        )
     }
     #endif
 }
