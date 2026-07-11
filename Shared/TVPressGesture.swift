@@ -548,4 +548,118 @@ final class RightHoldHostView: UIView, UIGestureRecognizerDelegate {
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
 }
 
+/// Window-level LEFT + RIGHT hold detector for the player's timeline
+/// scrub (task #147 follow-up). SwiftUI's `.onMoveCommand` fires once
+/// per d-pad CLICK and never autorepeats on a hold (confirmed in the
+/// 2026-07-10 ATV field log: consecutive scrub steps only ever arrived
+/// as discrete presses), so hold-to-scrub needs UIKit: one
+/// `UILongPressGestureRecognizer` per arrow, 0.4s threshold, firing
+/// `onBegan(direction)` (+1 right / -1 left) then `onEnded` on
+/// release. The caller runs the repeat loop between the two. Short
+/// presses never recognize and keep flowing to the focus engine /
+/// `.onMoveCommand` untouched. Same window-attachment + mid-hold
+/// keep-alive rules as `RightHoldHostView` above, with a longer 30s
+/// safety (a legitimate scrub across a 2h programme holds for ~10s).
+struct ScrubHoldDetector: UIViewRepresentable {
+    let isEnabled: Bool
+    let onBegan: (Int) -> Void
+    let onEnded: () -> Void
+
+    func makeUIView(context: Context) -> ScrubHoldHostView {
+        let v = ScrubHoldHostView()
+        v.onHoldBegan = onBegan
+        v.onHoldEnded = onEnded
+        v.isEnabled = isEnabled
+        v.isUserInteractionEnabled = false
+        return v
+    }
+    func updateUIView(_ uiView: ScrubHoldHostView, context: Context) {
+        uiView.onHoldBegan = onBegan
+        uiView.onHoldEnded = onEnded
+        uiView.isEnabled = isEnabled
+        uiView.syncRecognizers()
+    }
+    static func dismantleUIView(_ uiView: ScrubHoldHostView, coordinator: ()) {
+        uiView.detachRecognizers()
+    }
+}
+
+final class ScrubHoldHostView: UIView, UIGestureRecognizerDelegate {
+    var onHoldBegan: ((Int) -> Void)?
+    var onHoldEnded: (() -> Void)?
+    var isEnabled: Bool = false
+    private weak var attachedWindow: UIWindow?
+    private var leftRecognizer: UILongPressGestureRecognizer?
+    private var rightRecognizer: UILongPressGestureRecognizer?
+    private var holdInProgress = false
+    private var holdSafety: DispatchWorkItem?
+
+    override var canBecomeFocused: Bool { false }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window !== attachedWindow { detachRecognizers() }
+        syncRecognizers()
+    }
+
+    func syncRecognizers() {
+        if isEnabled, let window, leftRecognizer == nil {
+            leftRecognizer = makeRecognizer(.leftArrow, in: window)
+            rightRecognizer = makeRecognizer(.rightArrow, in: window)
+            attachedWindow = window
+        } else if !isEnabled && !holdInProgress {
+            detachRecognizers()
+        }
+    }
+
+    private func makeRecognizer(_ type: UIPress.PressType, in window: UIWindow) -> UILongPressGestureRecognizer {
+        let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleHold(_:)))
+        lp.allowedPressTypes = [NSNumber(value: type.rawValue)]
+        lp.minimumPressDuration = 0.4
+        lp.cancelsTouchesInView = true
+        lp.delaysTouchesBegan = false
+        lp.delegate = self
+        window.addGestureRecognizer(lp)
+        return lp
+    }
+
+    func detachRecognizers() {
+        holdSafety?.cancel(); holdSafety = nil
+        holdInProgress = false
+        if let l = leftRecognizer { attachedWindow?.removeGestureRecognizer(l) }
+        if let r = rightRecognizer { attachedWindow?.removeGestureRecognizer(r) }
+        leftRecognizer = nil
+        rightRecognizer = nil
+        attachedWindow = nil
+    }
+
+    @objc private func handleHold(_ gr: UILongPressGestureRecognizer) {
+        switch gr.state {
+        case .began:
+            holdInProgress = true
+            holdSafety?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.endHold() }
+            holdSafety = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30.0, execute: work)
+            onHoldBegan?(gr === leftRecognizer ? -1 : +1)
+        case .ended, .cancelled, .failed:
+            endHold()
+        default:
+            break
+        }
+    }
+
+    private func endHold() {
+        holdSafety?.cancel(); holdSafety = nil
+        guard holdInProgress else { return }
+        holdInProgress = false
+        onHoldEnded?()
+        detachRecognizers()
+        syncRecognizers()
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+}
+
 #endif

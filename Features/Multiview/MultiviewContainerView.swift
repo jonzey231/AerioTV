@@ -82,6 +82,12 @@ struct MultiviewContainerView: View {
     /// through the audio tile's per-mode `seekAction`; `active` mounts
     /// the band-only scrub HUD over the video.
     @StateObject private var dpadScrub = DpadScrubController()
+
+    /// tvOS ONLY: repeat loop driven by `ScrubHoldDetector` — SwiftUI
+    /// move commands never autorepeat on a held d-pad edge, so holds
+    /// are recognized in UIKit and this task steps the scrub every
+    /// 150ms until release.
+    @State private var scrubHoldTask: Task<Void, Never>? = nil
     #endif
 
     /// In-session Switch Stream selection, kept here (not in the picker,
@@ -856,6 +862,7 @@ struct MultiviewContainerView: View {
             if store.tiles.count == 1,
                !nowPlaying.isMinimized,
                !chromeState.isVisible,
+               !dpadScrub.holdActive,   // hold loop already stepping
                direction == .left || direction == .right,
                dpadScrub.step(direction == .left ? -1 : +1, store: store) {
                 return
@@ -863,6 +870,24 @@ struct MultiviewContainerView: View {
             // Normal navigation: just wake the focus indicator.
             chromeState.reportFocusActivity()
         }
+        // Hold-to-scrub: move commands never autorepeat on a held
+        // d-pad edge, so a window-level UIKit recognizer detects the
+        // hold (0.4s) and a repeat task steps the shared scrub until
+        // release. Enabled only for the sole-tile player with no
+        // sheet/panel up; per-press eligibility (chrome hidden OR the
+        // timeline band focused, scrubbable mode active) is checked in
+        // startScrubHold, so short presses everywhere else and all
+        // other holds pass through untouched.
+        .background(
+            ScrubHoldDetector(
+                isEnabled: store.tiles.count == 1
+                    && !nowPlaying.isMinimized
+                    && !showAddSheet && !showTVOptions
+                    && !showRecordSheet && !showExitConfirmation,
+                onBegan: { dir in startScrubHold(dir) },
+                onEnded: { stopScrubHold() }
+            )
+        )
         .onChange(of: chromeState.isVisible) { _, visible in
             if visible {
                 // v1.7.x: when chrome appears, programmatically move
@@ -1310,6 +1335,34 @@ struct MultiviewContainerView: View {
     ///                            Guard against accidental Menu-
     ///                            spams that would otherwise tear
     ///                            down a carefully arranged grid.
+    /// A left/right hold crossed the 0.4s threshold: start the scrub
+    /// repeat loop. Eligibility mirrors the discrete-press paths —
+    /// chrome hidden (HUD scrub) or the timeline band focused. The
+    /// press-down already delivered one discrete step via
+    /// `.onMoveCommand` before recognition (can't be prevented; same
+    /// story as the guide's hold-Right), which simply becomes the
+    /// first step of the hold. `holdActive` stops any move events
+    /// delivered during the hold from double-stepping.
+    private func startScrubHold(_ dir: Int) {
+        guard store.tiles.count == 1, !nowPlaying.isMinimized,
+              !chromeState.isVisible || focusedChrome == .timeline else { return }
+        scrubHoldTask?.cancel()
+        dpadScrub.holdActive = true
+        scrubHoldTask = Task { @MainActor in
+            while !Task.isCancelled {
+                if chromeState.isVisible { chromeState.reportInteraction() }
+                guard dpadScrub.step(dir, store: store) else { break }
+                try? await Task.sleep(nanoseconds: 150_000_000)
+            }
+        }
+    }
+
+    private func stopScrubHold() {
+        scrubHoldTask?.cancel()
+        scrubHoldTask = nil
+        dpadScrub.holdActive = false
+    }
+
     private func handleMenuPress(source: String) {
         DebugLogger.shared.log(
             "[MV-Cmd] tvOS Menu source=\(source) | showTVOptions=\(showTVOptions) showStreamInfo=\(showStreamInfo) isMinimized=\(nowPlaying.isMinimized) chromeVisible=\(chromeState.isVisible) tiles=\(store.tiles.count) fullscreenTile=\(store.fullscreenTileID ?? "nil") relocating=\(store.relocatingTileID ?? "nil")",

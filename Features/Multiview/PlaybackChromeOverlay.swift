@@ -971,10 +971,10 @@ struct PlaybackBottomChrome_tvOS: View {
             switch direction {
             case .left:
                 chromeState.reportInteraction()
-                dpadScrub.step(-1, store: store)
+                if !dpadScrub.holdActive { dpadScrub.step(-1, store: store) }
             case .right:
                 chromeState.reportInteraction()
-                dpadScrub.step(+1, store: store)
+                if !dpadScrub.holdActive { dpadScrub.step(+1, store: store) }
             case .down:
                 focusedChrome = .playPause
             case .up:
@@ -1472,7 +1472,11 @@ struct LiveRewindTimelineBand: View {
                                      : Color.accentColor)
             }
         }
-        .focusable(false)
+        // NO .focusable(false) here: the chrome wraps this band in a
+        // .focusable(true) `.timeline` focus target, and an inner
+        // focusable(false) silently wins over the outer wrapper (the
+        // band could never take focus - user report 2026-07-10). The
+        // HUD mount stays non-focusable via its own modifier.
     }
 }
 
@@ -1527,7 +1531,7 @@ struct CatchupTimelineBand: View {
                     .monospacedDigit()
             }
         }
-        .focusable(false)
+        // NO .focusable(false) here - see LiveRewindTimelineBand.
     }
 
     private static func clock(_ ms: Int32) -> String {
@@ -1556,6 +1560,12 @@ final class DpadScrubController: ObservableObject {
     /// Preview position within the mode's timeline (buffer window for
     /// live rewind, programme duration for catch-up).
     @Published var targetMs: Int32 = 0
+
+    /// True while a UIKit hold-repeat loop (ScrubHoldDetector) is
+    /// driving steps. Discrete `.onMoveCommand` step call sites check
+    /// this so a press that both starts a hold AND delivers move
+    /// events can't double-step.
+    var holdActive = false
 
     private var accelCount = 0
     private var lastDirection = 0
