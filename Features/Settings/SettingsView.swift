@@ -2162,11 +2162,18 @@ struct ServerDetailView: View {
                                               auth: .apiKey(server.effectiveApiKey),
                                               userAgent: server.effectiveUserAgent,
                                               authMode: info.discoveredAuthMode ?? server.dispatcharrHeaderMode)
-                if let user = try? await levelAPI.fetchCurrentUser(),
-                   user.userLevel != server.dispatcharrUserLevel {
-                    server.dispatcharrUserLevel = user.userLevel
-                    debugLog("SettingsView Test Connection: persisting user_level \(user.userLevel) for \(server.name)")
-                    SyncManager.shared.pushServers(servers, immediate: true)
+                if let user = try? await levelAPI.fetchCurrentUser() {
+                    // effectiveUserLevel folds in is_superuser/is_staff
+                    // (legacy superusers carry level 0); the probe
+                    // settles OLD servers whose /me/ predates those
+                    // fields - see DispatcharrUser.effectiveUserLevel.
+                    var level = user.effectiveUserLevel
+                    if level < 10, await levelAPI.probeAdminAccess() { level = 10 }
+                    if level != server.dispatcharrUserLevel {
+                        server.dispatcharrUserLevel = level
+                        debugLog("SettingsView Test Connection: persisting user_level \(level) for \(server.name)")
+                        SyncManager.shared.pushServers(servers, immediate: true)
+                    }
                 }
             case .m3uPlaylist:
                 guard let url = URL(string: server.baseURL) else { throw APIError.invalidURL }

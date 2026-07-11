@@ -339,7 +339,14 @@ final class ServerConnectionViewModel {
                         authMode: info.discoveredAuthMode ?? .xapikey
                     )
                     if let user = try? await userAPI.fetchCurrentUser() {
-                        self.discoveredUserLevel = user.userLevel
+                        // effectiveUserLevel folds in is_superuser /
+                        // is_staff (legacy superusers carry level 0);
+                        // the probe settles OLD servers whose /me/
+                        // predates those fields entirely - see
+                        // DispatcharrUser.effectiveUserLevel.
+                        var level = user.effectiveUserLevel
+                        if level < 10, await userAPI.probeAdminAccess() { level = 10 }
+                        self.discoveredUserLevel = level
                         // Capture the assigned Channel Profile id(s) so
                         // Save can persist them and the Dispatcharr
                         // channel-load path can filter to the allowed
@@ -391,7 +398,13 @@ final class ServerConnectionViewModel {
                     // Capture the permission tier so Save can persist it
                     // and the server-side Record / DVR affordances can be
                     // gated. Streamer = 0, Standard = 1, Admin = 10.
-                    self.discoveredUserLevel = user.userLevel
+                    // effectiveUserLevel folds in is_superuser/is_staff
+                    // (legacy superusers carry level 0); the probe
+                    // settles OLD servers whose /me/ predates those
+                    // fields - see DispatcharrUser.effectiveUserLevel.
+                    var level = user.effectiveUserLevel
+                    if level < 10, await bearerAPI.probeAdminAccess() { level = 10 }
+                    self.discoveredUserLevel = level
                     // Capture the assigned Channel Profile id(s) so Save
                     // can persist them and the Dispatcharr channel-load
                     // path can filter to the allowed channels (a

@@ -93,6 +93,18 @@ struct DispatcharrUser: Decodable {
     /// configured; catch-up then surfaces an explanatory error.
     let xcPassword: String?
 
+    /// The permission tier the app should GATE on. A Django superuser /
+    /// staff account is a functional admin even when its custom
+    /// user_level is still 0 (STREAMER) or 1 (STANDARD) - legacy
+    /// superusers never had the level defaulted to 10, and Dispatcharr
+    /// fixed the same detection server-side in #954. Raw `userLevel`
+    /// alone silently demoted such admins (Discord field report
+    /// 2026-07-11: only "This device" offered as DVR destination).
+    /// Matches Android DispatcharrClient.fetchUserLevel.
+    var effectiveUserLevel: Int {
+        (isSuperuser || isStaff) ? 10 : userLevel
+    }
+
     private enum CodingKeys: String, CodingKey {
         case id
         case username
@@ -114,8 +126,12 @@ struct DispatcharrUser: Decodable {
         id = try c.decode(Int.self, forKey: .id)
         username = try c.decode(String.self, forKey: .username)
         apiKey = try c.decode(String.self, forKey: .apiKey)
-        isStaff = try c.decode(Bool.self, forKey: .isStaff)
-        isSuperuser = try c.decode(Bool.self, forKey: .isSuperuser)
+        // Lenient: is_staff / is_superuser only joined Dispatcharr's
+        // /users/me/ payload in 2025-06 (serializer commit 1e91dd75);
+        // a strict decode failed the WHOLE user object against older
+        // servers, killing Direct Connect verify outright.
+        isStaff = (try? c.decodeIfPresent(Bool.self, forKey: .isStaff)) ?? false
+        isSuperuser = (try? c.decodeIfPresent(Bool.self, forKey: .isSuperuser)) ?? false
         // Default to 0 (lowest privilege) when absent so older
         // Dispatcharr builds that predate the field still decode.
         userLevel = (try? c.decodeIfPresent(Int.self, forKey: .userLevel)) ?? 0
@@ -490,6 +506,28 @@ extension DispatcharrAPI {
             throw DispatcharrDirectConnectError.transport("HTTP \(status) on users/me")
         }
         return try JSONDecoder().decode(DispatcharrUser.self, from: data)
+    }
+
+    /// Capability probe for admin status. Dispatcharr only added
+    /// is_superuser / is_staff to the /users/me/ payload in 2025-06, so
+    /// against older servers a legacy superuser reads as plain
+    /// user_level 0 and `effectiveUserLevel` still under-reports. The
+    /// users LIST endpoint is IsAdmin-gated server-side on every
+    /// Dispatcharr version, so a 2xx here proves admin regardless of
+    /// what /me/ claims. Callers use this to settle levels below 10;
+    /// any failure means "not provably admin" (returns false, never
+    /// throws). Matches Android DispatcharrClient.fetchUserLevel.
+    func probeAdminAccess() async -> Bool {
+        guard let url = URL(string: "\(Self.normalizedBase(baseURL))/api/accounts/users/") else {
+            return false
+        }
+        var request = URLRequest(url: url)
+        for (key, value) in headersForUserDetail() {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        guard let (_, response) = try? await HTTPRouter.data(for: request) else { return false }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        return (200...299).contains(status)
     }
 
     /// Headers for `/api/accounts/users/me/`. Pulled out so the
