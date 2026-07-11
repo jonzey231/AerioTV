@@ -892,6 +892,12 @@ private struct AudioOnlyForegroundOverlay: View {
 struct PlaybackBottomChrome_tvOS: View {
     @ObservedObject var store: MultiviewStore
 
+    /// The container's shared D-pad scrub controller. The timeline
+    /// band is a focus target (D-pad UP from the transport cells);
+    /// left/right while it's focused step this controller so the
+    /// user watches the preview move on the band itself.
+    @ObservedObject var dpadScrub: DpadScrubController
+
     /// Flag-gated by the container. Tapping Add Stream sets this
     /// true; container presents the channel-picker fullScreenCover.
     @Binding var showAddSheet: Bool
@@ -934,22 +940,69 @@ struct PlaybackBottomChrome_tvOS: View {
         return audio.item.streamURL != nil
     }
 
+    /// The timeline band as a FOCUS TARGET (user request 2026-07-10:
+    /// "navigate up from the buttons to the timeline and watch the
+    /// scrubbing"). Left/right while focused steps the container's
+    /// shared scrub controller - the same one the chrome-hidden HUD
+    /// path uses - so the preview moves on this band live and the
+    /// seek still commits ONCE after the presses stop. DOWN returns
+    /// to the Pause cell (`.onMoveCommand` consumes moves while a
+    /// focusable view holds focus, so the hop is explicit); UP is
+    /// swallowed so it can never fall out to the container's
+    /// channel-flip handler.
+    @ViewBuilder
+    private var scrubbableTimelineBand: some View {
+        let preview = dpadScrub.active ? dpadScrub.targetMs : nil
+        Group {
+            if let cu = store.catchupTile?.catchup,
+               let ps = store.audioProgressStore {
+                CatchupTimelineBand(progress: ps, playback: cu,
+                                    previewMs: preview,
+                                    focused: focusedChrome == .timeline)
+            } else {
+                LiveRewindTimelineBand(store: store,
+                                       previewMs: preview,
+                                       focused: focusedChrome == .timeline)
+            }
+        }
+        .focusable(true)
+        .focused($focusedChrome, equals: .timeline)
+        .onMoveCommand { direction in
+            switch direction {
+            case .left:
+                chromeState.reportInteraction()
+                dpadScrub.step(-1, store: store)
+            case .right:
+                chromeState.reportInteraction()
+                dpadScrub.step(+1, store: store)
+            case .down:
+                focusedChrome = .playPause
+            case .up:
+                break
+            @unknown default:
+                break
+            }
+        }
+        .accessibilityLabel("Timeline")
+        .accessibilityHint("Move left or right to scrub, then wait to jump there")
+    }
+
     var body: some View {
         VStack(spacing: 18) {
             // Live program progress band — program name + progress
             // bar + time remaining. Non-focusable; informational.
             // With a Live Rewind session rolling, the band becomes the
             // rewind timeline over [buffer tail .. live edge] instead.
-            if let cu = store.catchupTile?.catchup,
-               let ps = store.audioProgressStore {
-                // Catch-up replay (task #147): position over the pinned
-                // programme duration. Observes the progress store
-                // directly - there is no rewind engine ticking to drive
-                // re-renders in this mode.
-                CatchupTimelineBand(progress: ps, playback: cu)
-                    .padding(.horizontal, 80)
-            } else if liveRewind.buffering {
-                LiveRewindTimelineBand(store: store)
+            if store.catchupTile != nil || liveRewind.buffering {
+                // Scrubbable timeline (catch-up over the pinned
+                // programme duration / live rewind over the buffer
+                // window). A focus target: D-pad UP from the cells
+                // lands here, left/right steps the shared scrub with
+                // the preview moving on the band, DOWN returns to the
+                // Pause cell. The catch-up band observes the progress
+                // store directly - no rewind engine ticks to drive
+                // re-renders in that mode.
+                scrubbableTimelineBand
                     .padding(.horizontal, 80)
             } else {
                 PlaybackLiveProgressBand(store: store)
@@ -1357,6 +1410,9 @@ struct LiveRewindTimelineBand: View {
     /// scrub PREVIEW position instead of the playhead (no seek happens
     /// until the scrub commits - a seek is a whole re-tune here).
     var previewMs: Int32? = nil
+    /// True while the band itself holds chrome focus (the `.timeline`
+    /// target): brightens the track and shows a playhead thumb.
+    var focused: Bool = false
 
     var body: some View {
         let window = max(Int64(1), liveRewind.headWallMs - liveRewind.tailWallMs)
@@ -1379,10 +1435,17 @@ struct LiveRewindTimelineBand: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(Color.white.opacity(0.2))
+                        .fill(Color.white.opacity(focused ? 0.35 : 0.2))
                     RoundedRectangle(cornerRadius: 3, style: .continuous)
                         .fill(Color.accentColor)
                         .frame(width: geo.size.width * CGFloat(max(0, min(1, fraction))))
+                    if focused {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 16, height: 16)
+                            .shadow(color: .black.opacity(0.5), radius: 3)
+                            .offset(x: geo.size.width * CGFloat(max(0, min(1, fraction))) - 8)
+                    }
                 }
             }
             .frame(height: 6)
@@ -1424,6 +1487,9 @@ struct CatchupTimelineBand: View {
     /// Non-nil while a D-pad scrub is in flight: show the scrub
     /// PREVIEW position instead of the playhead.
     var previewMs: Int32? = nil
+    /// True while the band itself holds chrome focus (the `.timeline`
+    /// target): brightens the track and shows a playhead thumb.
+    var focused: Bool = false
 
     var body: some View {
         let duration = max(Int32(1), playback.programDurationMs)
@@ -1434,10 +1500,17 @@ struct CatchupTimelineBand: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(Color.white.opacity(0.2))
+                        .fill(Color.white.opacity(focused ? 0.35 : 0.2))
                     RoundedRectangle(cornerRadius: 3, style: .continuous)
                         .fill(Color.accentColor)
                         .frame(width: geo.size.width * CGFloat(max(0, min(1, fraction))))
+                    if focused {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 16, height: 16)
+                            .shadow(color: .black.opacity(0.5), radius: 3)
+                            .offset(x: geo.size.width * CGFloat(max(0, min(1, fraction))) - 8)
+                    }
                 }
             }
             .frame(height: 6)

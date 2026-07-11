@@ -129,6 +129,10 @@ struct MultiviewContainerView: View {
         case options, addStream, record
         // Live Rewind transport (task #144)
         case rewind30, playPause, forward30, goLive
+        // The timeline band itself (task #147 follow-up): D-pad UP
+        // from the transport cells focuses it; left/right there
+        // scrubs with the preview visible on the band.
+        case timeline
     }
     @FocusState private var focusedChrome: ChromeFocusTarget?
 
@@ -276,6 +280,7 @@ struct MultiviewContainerView: View {
                         if isSoleTile && !nowPlaying.isMinimized {
                             PlaybackBottomChrome_tvOS(
                                 store: store,
+                                dpadScrub: dpadScrub,
                                 showAddSheet: $showAddSheet,
                                 showTVOptions: $showTVOptions,
                                 showRecordSheet: $showRecordSheet,
@@ -828,7 +833,12 @@ struct MultiviewContainerView: View {
                store.tiles.count == 1,
                store.catchupTile == nil,   // no channel-flip in a replay
                !nowPlaying.isMinimized,
-               !chromeState.isVisible {
+               !chromeState.isVisible,
+               // A scrub HUD on screen reads as "player controls" even
+               // though chromeState is hidden - up/down while the user
+               // is mid-scrub must not yank the channel out from under
+               // them (user report 2026-07-10).
+               !dpadScrub.active {
                 if direction == .up {
                     nowPlaying.changeChannel(direction: +1)
                     return
