@@ -493,12 +493,13 @@ final class LiveRewindReader: @unchecked Sendable {
 final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     static let shared = LiveRewindEngine()
 
-    /// P2 settings-backed retention (Android liveRewindRetentionHours
-    /// parity). Default: 24 hours.
-    var retentionMs: Int64 {
-        let hours = UserDefaults.standard.integer(forKey: "liveRewindRetentionHours")
-        return Int64(hours > 0 ? hours : 24) * 60 * 60 * 1000
-    }
+    /// Retention as a USER concept died in the 2026-07-11 settings
+    /// rework ("we don't really care how long the files are stored ...
+    /// just delete the buffered video after an hour"): buffered video
+    /// is removed this long after its session goes quiet. Fixed;
+    /// liveRewindRetentionHours is dormant (Android
+    /// TimeshiftController.FIXED_RETENTION_MS parity).
+    var retentionMs: Int64 { 60 * 60 * 1000 }
 
     /// The Storage Limit SETTING was removed (user directive
     /// 2026-07-11: retention is the only user-facing knob, with storage

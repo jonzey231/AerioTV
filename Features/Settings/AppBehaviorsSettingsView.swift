@@ -42,32 +42,29 @@ struct AppBehaviorsSettingsView: View {
     // legacy custom values snap to the nearest stop for display).
     @AppStorage("liveRewindEnabled") private var liveRewindEnabled = false
     @AppStorage("liveRewindDepthMinutes") private var liveRewindDepthMinutes = 30
-    @AppStorage("liveRewindRetentionHours") private var liveRewindRetentionHours = 24
 
-    private static let rewindDepthSteps = [15, 30, 60, 120]
-    private static let retentionSteps = [1, 6, 12, 24, 72, 168]
-
-    private func retentionLabel(_ hours: Int) -> String {
-        if hours % 24 == 0 && hours >= 48 { return hours == 168 ? "1 week" : "\(hours / 24) days" }
-        if hours == 24 { return "24 hours" }
-        return hours == 1 ? "1 hour" : "\(hours) hours"
-    }
+    /// Keep Available ladder (2026-07-11 rework, user directive round
+    /// 2: the user-meaningful knob is HOW FAR BACK you can rewind, not
+    /// how long files persist - retention is now a fixed internal 1
+    /// hour in LiveRewindEngine; liveRewindRetentionHours is dormant).
+    private static let rewindDepthSteps = [15, 30, 60, 90, 120, 180]
 
     private func depthLabel(_ mins: Int) -> String {
-        mins < 60 ? "\(mins) minutes" : (mins == 60 ? "1 hour" : "\(mins / 60) hours")
+        if mins < 60 { return "\(mins) minutes" }
+        if mins == 60 { return "1 hour" }
+        return mins % 60 == 0 ? "\(mins / 60) hours" : "\(mins / 60)h \(mins % 60)m"
     }
 
-    /// Storage estimate under the retention control (replacing the
-    /// removed Storage Limit setting): scales with the choice at
-    /// typical stream bitrates - HD ~4 Mbps, FHD ~8, UHD ~20 - so the
-    /// user can pick what fits their streams and disk. Worst case
-    /// (continuous watching); only watched video is buffered.
-    private func retentionEstimate(_ hours: Int) -> String {
+    /// Storage estimate under the Keep Available slider: scales with
+    /// the depth choice (which bounds live disk usage now that
+    /// retention is a fixed short window) at typical stream bitrates -
+    /// HD ~4 Mbps, FHD ~8, UHD ~20.
+    private func depthEstimate(_ mins: Int) -> String {
         func gb(_ mbps: Double) -> String {
-            let v = mbps * 450.0 * Double(hours) / 1024.0
+            let v = mbps * 7.5 * Double(mins) / 1024.0
             return v < 10 ? String(format: "~%.1f GB", v) : "~\(Int(v.rounded())) GB"
         }
-        return "Keeping \(retentionLabel(hours)) can use up to \(gb(4)) in HD, \(gb(8)) in FHD, or \(gb(20)) in UHD if you watch continuously."
+        return "Uses up to \(gb(4)) in HD, \(gb(8)) in FHD, or \(gb(20)) in UHD while you watch."
     }
 
     @AppStorage("appBehaviorsSkipLoadingScreen")
@@ -261,30 +258,15 @@ struct AppBehaviorsSettingsView: View {
             if liveRewindEnabled {
                 Section {
                     steppedSliderRow_iOS(
-                        title: "Depth",
+                        title: "Rewind up to",
                         values: Self.rewindDepthSteps,
                         selection: $liveRewindDepthMinutes,
                         label: depthLabel
                     )
                 } header: {
-                    Text("Rewind Depth").sectionHeaderStyle()
+                    Text("Keep Available").sectionHeaderStyle()
                 } footer: {
-                    Text("How far back you can rewind while watching. Deeper buffers use more storage while you watch.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-                .listSectionSeparator(.hidden)
-
-                Section {
-                    steppedSliderRow_iOS(
-                        title: "Keep for",
-                        values: Self.retentionSteps,
-                        selection: $liveRewindRetentionHours,
-                        label: retentionLabel
-                    )
-                } header: {
-                    Text("Keep Buffered Video").sectionHeaderStyle()
-                } footer: {
-                    Text("Buffered video stays on this device after you stop watching and is deleted once it reaches this age. \(retentionEstimate(liveRewindRetentionHours))")
+                    Text("How far back you can rewind the channel you are watching. Buffered video is removed about an hour after you leave a channel. \(depthEstimate(liveRewindDepthMinutes))")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
@@ -596,32 +578,17 @@ struct AppBehaviorsSettingsView: View {
                 }
 
                 if liveRewindEnabled {
-                    tvSection("Rewind Depth") {
+                    tvSection("Keep Available") {
                         tvSteppedSegmentsRow(
-                            title: "Depth",
+                            title: "Rewind up to",
                             values: Self.rewindDepthSteps,
                             selection: $liveRewindDepthMinutes,
-                            segmentLabel: { $0 < 60 ? "\($0)m" : "\($0 / 60)h" }
-                        )
-                        Text("How far back you can rewind while watching. Deeper buffers use more storage while you watch.")
-                            .font(.system(size: 22))
-                            .foregroundColor(.textTertiary)
-                            .padding(.horizontal, 20)
-                            .padding(.top, 4)
-                    }
-
-                    tvSection("Keep Buffered Video") {
-                        tvSteppedSegmentsRow(
-                            title: "Keep for",
-                            values: Self.retentionSteps,
-                            selection: $liveRewindRetentionHours,
-                            segmentLabel: { h in
-                                if h < 24 { return "\(h)h" }
-                                if h == 24 { return "24h" }
-                                return h == 168 ? "1w" : "\(h / 24)d"
+                            segmentLabel: { m in
+                                if m < 60 { return "\(m)m" }
+                                return m % 60 == 0 ? "\(m / 60)h" : "\(m)m"
                             }
                         )
-                        Text("Buffered video stays on this Apple TV after you stop watching and is deleted once it reaches this age. \(retentionEstimate(liveRewindRetentionHours))")
+                        Text("How far back you can rewind the channel you are watching. Buffered video is removed about an hour after you leave a channel. \(depthEstimate(liveRewindDepthMinutes))")
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.horizontal, 20)
