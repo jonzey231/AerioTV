@@ -738,6 +738,26 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         DispatchQueue.global(qos: .utility).async {
             self.pruneExpired()
             self.enforceBudget()
+            // Catch-up spool leftovers: CatchupHTTPReader deletes its
+            // spool on close and sweeps stale files when a NEW catch-up
+            // session starts - but a killed app leaks multi-GB .ts
+            // files that then sit in Caches until the user happens to
+            // replay something. On tvOS that bloat invites the system
+            // to purge the ENTIRE app data container under storage
+            // pressure (observed 2026-07-11: the field ATV came up
+            // hasCompletedOnboarding=false after a day of leaked
+            // spools). Sweep anything over an hour old here too.
+            let spoolDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("CatchupSpool", isDirectory: true)
+            let cutoff = Date().addingTimeInterval(-3600)
+            let files = (try? FileManager.default.contentsOfDirectory(
+                at: spoolDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+            for f in files {
+                let m = (try? f.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+                if (m ?? .distantPast) < cutoff {
+                    try? FileManager.default.removeItem(at: f)
+                }
+            }
         }
     }
 
