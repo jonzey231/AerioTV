@@ -290,6 +290,12 @@ struct AerioApp: App {
             let elapsed = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
             debugLog("🗄️ SwiftData warmup fetch: \(elapsed)ms (off-main)")
         }
+
+        // Live Rewind launch sweep: buffered video dies an hour after
+        // its session ends, which usually elapses while the app isn't
+        // running - so the reaper must run at launch, not only during
+        // sessions (user clarification 2026-07-11).
+        LiveRewindEngine.shared.startupSweep()
     }
 
     var body: some Scene {

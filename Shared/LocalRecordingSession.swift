@@ -729,6 +729,18 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
 
     // MARK: retention + budget
 
+    /// Launch-time reaper (user clarification 2026-07-11: buffered video
+    /// dies an hour after the SESSION ends - practically, often at the
+    /// NEXT app launch, since the app usually isn't running to see the
+    /// hour pass). The in-session timer only sweeps while a session is
+    /// rolling, so AerioApp calls this once at startup.
+    func startupSweep() {
+        DispatchQueue.global(qos: .utility).async {
+            self.pruneExpired()
+            self.enforceBudget()
+        }
+    }
+
     private func pruneExpired() {
         let cutoff = Date().addingTimeInterval(-Double(retentionMs) / 1000)
         let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
