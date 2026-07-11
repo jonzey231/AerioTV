@@ -3668,8 +3668,10 @@ struct DispatcharrChannel: Decodable, Identifiable {
         } else {
             effectiveEpgDataID = nil
         }
-        // Absent on pre-catch-up servers: default to not-capable.
-        isCatchup = (try? container.decodeIfPresent(Bool.self, forKey: .isCatchup)) ?? false ?? false
+        // Absent on pre-catch-up servers: default to not-capable. One
+        // coalesce covers both throw and key-absent (try? flattens the
+        // double optional).
+        isCatchup = (try? container.decodeIfPresent(Bool.self, forKey: .isCatchup)) ?? false
         if let intVal = try? container.decodeIfPresent(Int.self, forKey: .catchupDays) {
             catchupDays = intVal
         } else if let strVal = try? container.decodeIfPresent(String.self, forKey: .catchupDays) {

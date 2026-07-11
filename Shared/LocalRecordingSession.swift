@@ -700,10 +700,16 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         t.resume()
     }
 
+    /// Tick counter for the ~5-minute in-session sweep below. Instance
+    /// property (not a captured local) so strict concurrency checking
+    /// doesn't flag the mutation inside the timer closure; only the
+    /// main-runloop timer touches it.
+    private var windowTicks = 0
+
     @MainActor
     private func startWindowTimer() {
         windowTimer?.invalidate()
-        var ticks = 0
+        windowTicks = 0
         windowTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self, let b = self.bufferForReader else { return }
             Task { @MainActor in
@@ -717,8 +723,8 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
             // single marathon session (120-min depth on a UHD channel
             // can outgrow the budget) converges without waiting for the
             // next channel tune.
-            ticks += 1
-            if ticks % 600 == 0 {
+            self.windowTicks += 1
+            if self.windowTicks % 600 == 0 {
                 DispatchQueue.global(qos: .utility).async {
                     self.pruneExpired()
                     self.enforceBudget()

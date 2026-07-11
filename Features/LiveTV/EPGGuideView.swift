@@ -460,10 +460,9 @@ final class GuideStore: ObservableObject {
         let container = modelContext.container
         // Snapshot the programs dictionary on the main actor before detaching
         let snapshot = programs
-        let epgWindowHours = UserDefaults.standard.integer(forKey: "epgWindowHours")
-        let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
         // Catch-up: retained-history horizon (read on the main actor; the
-        // detached save below must not touch ChannelStore).
+        // detached save below must not touch ChannelStore). The retention
+        // horizon superseded the old epgWindowHours trim in this save.
         let retentionSecs = GuideStore.activeRetentionSeconds()
 
         // Invalidate the loadFromCache idempotency cache — a fresh

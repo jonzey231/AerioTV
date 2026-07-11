@@ -561,7 +561,6 @@ final class MultiviewStore: ObservableObject {
     /// The synthetic item's `streamURL` is deliberately left nil so the
     /// Record affordance (which gates on `item.streamURL != nil`) stays
     /// hidden for VOD tiles; playback uses the tile's own `streamURL`.
-    @discardableResult
     /// Catch-up unification (task #147): replace whatever is playing
     /// with a single catch-up tile. Catch-up is always a solo, full
     /// teardown-and-reseed session — no mixing with live tiles in v1.
@@ -604,6 +603,7 @@ final class MultiviewStore: ObservableObject {
         tiles.count == 1 ? tiles.first(where: { $0.kind == .catchup }) : nil
     }
 
+    @discardableResult
     func addVOD(
         title: String,
         streamURL: URL,
