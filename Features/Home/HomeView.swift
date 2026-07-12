@@ -5269,6 +5269,14 @@ struct MainTabView: View {
     private func configureTabBarAppearance() {
         debugLog("🔶 MainTabView.configureTabBarAppearance: thread=\(Thread.current)")
 #if os(iOS)
+        // iOS 26: the system Liquid Glass bar owns its own backdrop. The
+        // opaque pre-26 appearance below keeps PAINTING the bar's strip
+        // after the system minimize shrinks the bar (user report
+        // 2026-07-12: solid band left behind when scrolling), so never
+        // install it there - content shows through / under the floating
+        // bar exactly like the Android pill. TabView's .tint keeps the
+        // selected item on the theme accent.
+        if #available(iOS 26.0, *) { return }
         guard theme.liquidGlassStyle == .disabled else { return }
         let appearance = UITabBarAppearance()
         appearance.configureWithOpaqueBackground()

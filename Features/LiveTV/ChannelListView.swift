@@ -1258,7 +1258,12 @@ struct ChannelListView: View {
         let current = cycle.firstIndex(of: selectedGroup) ?? 0
         let target = min(max(forward ? current + 1 : current - 1, 0), cycle.count - 1)
         guard cycle[target] != selectedGroup else { return }
-        withAnimation { selectedGroup = cycle[target] }
+        // NO withAnimation: this only runs mid swipe-commit, where the list
+        // is already animating the page transition. Animating the content
+        // diff at the same time made the slide-in visibly stutter (user
+        // report vs the Android build); the pill row's follow-scroll is
+        // animated separately by groupFilterBar's onChange.
+        selectedGroup = cycle[target]
     }
 
     /// True when a swipe in that direction has a group to land on (the
