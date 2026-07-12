@@ -487,6 +487,9 @@ struct MoviesView: View {
                 // shows behind/below it instead of a dead band; the spacer
                 // inside the ScrollView is the bottom content padding.
                 .ignoresSafeArea(.container, edges: .bottom)
+                // ...and keep the iOS 26 bottom scroll-edge effect from
+                // painting an opaque platter over that region.
+                .aerioContentUnderTabBar()
                 #endif
             }
         }

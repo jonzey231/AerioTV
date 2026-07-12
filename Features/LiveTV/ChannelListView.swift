@@ -500,6 +500,17 @@ struct ChannelListView: View {
             VStack(spacing: 0) {
                 bodyContent
             }
+            // GH #20 follow-up (user report 2026-07-12): this VStack consumed
+            // the bottom safe area BEFORE the List inside could reach it, so
+            // the scroll frame ended at the tab bar line - rows hard-clipped
+            // there (the ignoresSafeArea on the List only stretched its
+            // BACKGROUND, proven by the red-background debug build). Extend
+            // the CONTAINER so the scroll view owns the full height; the
+            // trailing spacer row provides the bottom content padding.
+            // iOS-only: tvOS has no bottom bar.
+            #if os(iOS)
+            .ignoresSafeArea(.container, edges: .bottom)
+            #endif
         }
     }
 
@@ -940,6 +951,10 @@ struct ChannelListView: View {
             // floating bar) and give the CONTENT a bottom margin so the last
             // row can scroll clear of the bar + home indicator.
             .ignoresSafeArea(.container, edges: .bottom)
+            // ...and stop the iOS 26 bottom scroll-edge effect from painting
+            // an opaque platter over the rows in the bar region (the actual
+            // "dead band" - see aerioContentUnderTabBar).
+            .aerioContentUnderTabBar()
             #endif
         }
         // v1.6.13: same mini push-down as the Guide branch above.

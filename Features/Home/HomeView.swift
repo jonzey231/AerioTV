@@ -6047,4 +6047,27 @@ extension View {
             self.toolbar(collapsed ? .hidden : .visible, for: .tabBar)
         }
     }
+
+    /// iOS 26: keep scroll content visible all the way to the display's
+    /// bottom edge under the floating tab bar. The system's automatic
+    /// bottom scroll-edge effect resolves to the HARD style on these
+    /// screens (an opaque platter in the scroll background color), which
+    /// paints OVER the rows in the bar region - UIKit lays the cells out
+    /// (verified on device: visible cell maxY past the window bottom) but
+    /// the effect covers them, reading as a dead band above the home
+    /// indicator (GH #20 follow-up, user report 2026-07-12). Hiding the
+    /// bottom effect lets rows show through, matching the Android pill.
+    /// No-op pre-26 and on tvOS.
+    @ViewBuilder
+    func aerioContentUnderTabBar() -> some View {
+        #if os(iOS)
+        if #available(iOS 26.0, *) {
+            self.scrollEdgeEffectHidden(true, for: .bottom)
+        } else {
+            self
+        }
+        #else
+        self
+        #endif
+    }
 }
