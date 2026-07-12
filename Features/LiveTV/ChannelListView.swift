@@ -2205,30 +2205,11 @@ struct ChannelRow: View {
 
             Spacer()
 
-            // v1.6.23 (Codex UX P1) + issue #35: visible secondary-
-            // actions affordance. The only path to favorites / program
-            // info used to be a long-press, which most users never
-            // discover, so a small ellipsis button opens the same
-            // confirmation dialog. This was iPhone-only originally (iPad
-            // was meant to rely on long-press), but issues #18 and #35
-            // proved iPad users genuinely could not find how to add a
-            // favorite: the iPad row had no visible affordance at all.
-            // So the ellipsis shows on every idiom now. The long-press
-            // shortcut is preserved; tap-to-play stays the primary action.
-            Button {
-                let generator = UIImpactFeedbackGenerator(style: .light)
-                generator.impactOccurred()
-                showCardMenu = true
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.system(size: 18, weight: .regular))
-                    .foregroundColor(.textTertiary)
-                    .frame(width: 36, height: 36)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("More actions for \(item.name)")
-            .accessibilityHint("Open favorites, program info, and other actions")
+            // 2026-07-12 (user): the per-row ellipsis "More" button was
+            // removed as redundant - long-pressing the row opens the same
+            // menu. (History: the button was added in v1.6.23 for issues
+            // #18/#35 long-press discoverability; the guide's tappable
+            // favorite star now covers that affordance.)
 
             // -- Expand chevron --
             if item.currentProgram != nil || fetchUpcoming != nil {
