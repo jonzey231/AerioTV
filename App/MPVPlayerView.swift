@@ -652,6 +652,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Catch-up (timeshift) context, or nil for every other playback.
         /// Set once by makeCoordinator before the view mounts.
         var catchup: CatchupPlayback? = nil
+        /// Task #149: the native session URL the player is CURRENTLY
+        /// tuned to. Every seek re-mint replaces it (new session_id);
+        /// teardown revokes it so the server's per-session provider slot
+        /// frees ahead of the 10-minute idle TTL. nil on the XC paths.
+        var catchupCurrentURL: URL? = nil
         /// Live Rewind: this coordinator's live playback runs through
         /// the aeriots:// buffer relay (fullscreen single live only).
         /// Set in play(url:) when the engine session starts. Backed by
@@ -2305,6 +2310,42 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         let clamped = min(max(targetMs, 0), max(0, durMs - 5_000))
                         let offsetSecs = Double(clamped) / 1000.0
                         let flooredSecs = (offsetSecs / 60.0).rounded(.down) * 60.0
+                        if cu.nativeChannelUUID != nil {
+                            // Task #149 native sessions: the seek keeps the
+                            // honest floored-minute model, but the window is
+                            // a NEW session minted at programmeStart+offset
+                            // (async network call) instead of a rebuilt XC
+                            // wall-clock URL. The old session is revoked so
+                            // its provider slot frees immediately rather
+                            // than waiting out the 10-minute idle TTL.
+                            self.playbackEnded = false
+                            let previousURL = self.catchupCurrentURL ?? cu.url
+                            Task { [weak self] in
+                                guard let self else { return }
+                                guard let newURL = await CatchupSupport.remintNative(
+                                    playback: cu,
+                                    currentURL: previousURL,
+                                    offsetSeconds: flooredSecs) else {
+                                    debugLog("[CATCHUP] native re-mint failed; keeping current window")
+                                    return
+                                }
+                                CatchupSupport.revokeNative(playback: cu, currentURL: previousURL)
+                                self.mpvQueue.async { [weak self] in
+                                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                                    self.catchupBaseOffsetMs = Int32(flooredSecs * 1000)
+                                    self.catchupPendingSeekSecs = nil
+                                    self.catchupCurrentURL = newURL
+                                    CatchupRelay.currentHeaders = self.headers
+                                    let relayURL = CatchupRelay.wrap(newURL)
+                                    self.mpvCommandAsync(mpv, ["loadfile", relayURL.absoluteString, "replace"])
+                                }
+                                let ps = self.progressStore
+                                let honest = Int32(flooredSecs * 1000)
+                                DispatchQueue.main.async { ps.currentMs = honest }
+                                debugLog("[CATCHUP] native re-tune to window \(Int(flooredSecs))s (requested \(clamped / 1000)s)")
+                            }
+                            return
+                        }
                         guard let newURL = CatchupSupport.rebuildForOffset(
                             url: cu.url,
                             panelTimeZoneID: cu.panelTimeZoneID,
@@ -4105,6 +4146,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             stopStreamInfoTimer()
             DebugLogger.shared.logPlayback(event: "Stop",
                                            url: urls[safe: currentIndex]?.absoluteString)
+            // Task #149: free the native catch-up session's provider slot
+            // ahead of its idle TTL. Best-effort, fire-and-forget (the
+            // helper spawns its own Task).
+            if let cu = catchup, cu.nativeChannelUUID != nil {
+                CatchupSupport.revokeNative(playback: cu,
+                                            currentURL: catchupCurrentURL ?? cu.url)
+            }
 
             if let mpv = mpvToStop {
                 // Kill the wakeup callback immediately so no further readEvents()
@@ -5333,7 +5381,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             url = routeThroughLiveRewind(url)
             // Catch-up plays through the aeriocu relay (single-session
             // Dispatcharr timeshift; see the protocol registration).
-            if catchup != nil, url.scheme?.hasPrefix("http") == true {
+            if let cu = catchup, url.scheme?.hasPrefix("http") == true {
+                // Task #149: remember the live session URL for seek
+                // re-mints and the teardown revoke (native path only).
+                if cu.nativeChannelUUID != nil { catchupCurrentURL = url }
                 CatchupRelay.currentHeaders = headers
                 url = CatchupRelay.wrap(url)
                 debugLog("[CATCHUP] playing via aeriocu relay")

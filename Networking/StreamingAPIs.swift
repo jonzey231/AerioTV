@@ -4389,6 +4389,15 @@ struct CatchupPlayback: Identifiable, Equatable, Sendable {
     let programEnd: Date
     let title: String
     let headers: [String: String]
+    /// Task #149: non-nil only on the NATIVE Dispatcharr sessions path
+    /// (dev PR #1432). Seeks then re-mint a session at
+    /// programmeStart+offset instead of rebuilding an XC wall-clock URL,
+    /// and teardown revokes the session (frees the per-session provider
+    /// slot ahead of its 10-minute idle TTL).
+    var nativeChannelUUID: String? = nil
+    /// API auth headers for native session mint/revoke calls (the
+    /// playback URL itself needs none). Empty on the XC paths.
+    var nativeAuthHeaders: [String: String] = [:]
 
     var programDurationMs: Int32 {
         Int32(max(0, programEnd.timeIntervalSince(programStart)) * 1000)
@@ -4437,6 +4446,105 @@ enum CatchupSupport {
     private static var xcCredsCache: [UUID: (String, String)] = [:]
     /// Per-server-id memo of the XC panel's advertised timezone.
     private static var panelTzCache: [UUID: String] = [:]
+    /// Task #149: whether a Dispatcharr base supports the native catch-up
+    /// sessions API (POST /api/catchup/sessions/, dev PR #1432). false is
+    /// cached after a 404 so stable-tag servers pay the probe once per
+    /// process; absent = not probed yet.
+    private static var nativeSupportCache: [String: Bool] = [:]
+
+    /// Native session mint outcome. `.unsupported` = the endpoint 404ed
+    /// (stable-tag server or unknown channel uuid) - fall back to XC.
+    enum NativeMintResult: Sendable {
+        case created(URL)
+        case unsupported
+        case error
+    }
+
+    /// Task #149: POST /api/catchup/sessions/ {channel_uuid, start}. The
+    /// response's playback_url is server-relative and header-free (the
+    /// session rides its query string); this returns it absolutized
+    /// against `base`. `start` renders as ISO-8601 UTC seconds - one of
+    /// the server's accepted shapes - and selects WHICH archived show
+    /// (or programmeStart+offset for the floored-minute seek model).
+    nonisolated static func mintNativeSession(base: String,
+                                              authHeaders: [String: String],
+                                              channelUUID: String,
+                                              start: Date) async -> NativeMintResult {
+        let trimmedBase = base.hasSuffix("/") ? String(base.dropLast()) : base
+        guard let url = URL(string: "\(trimmedBase)/api/catchup/sessions/") else { return .error }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        for (k, v) in authHeaders { request.setValue(v, forHTTPHeaderField: k) }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "channel_uuid": channelUUID,
+            "start": iso.string(from: start),
+        ])
+        guard let (data, response) = try? await HTTPRouter.data(for: request),
+              let status = (response as? HTTPURLResponse)?.statusCode else { return .error }
+        if status == 404 { return .unsupported }
+        guard (200...299).contains(status),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let playbackPath = obj["playback_url"] as? String,
+              let playbackURL = URL(string: trimmedBase + playbackPath) else {
+            return .error
+        }
+        debugLog("[CATCHUP] native session minted host=\(playbackURL.host ?? "?") start=\(iso.string(from: start))")
+        return .created(playbackURL)
+    }
+
+    /// Task #149: mint a fresh native session for a seek re-tune at
+    /// programmeStart+offset. Base host is taken from the playback's
+    /// CURRENT URL so LAN/WAN routing follows the original mint. nil on
+    /// any failure (the caller keeps the current window playing).
+    nonisolated static func remintNative(playback: CatchupPlayback,
+                                         currentURL: URL,
+                                         offsetSeconds: Double) async -> URL? {
+        guard let uuid = playback.nativeChannelUUID,
+              let scheme = currentURL.scheme, let host = currentURL.host else { return nil }
+        let port = currentURL.port.map { ":\($0)" } ?? ""
+        let base = "\(scheme)://\(host)\(port)"
+        let start = playback.programStart.addingTimeInterval(max(0, offsetSeconds))
+        if case .created(let url) = await mintNativeSession(base: base,
+                                                            authHeaders: playback.nativeAuthHeaders,
+                                                            channelUUID: uuid,
+                                                            start: start) {
+            return url
+        }
+        return nil
+    }
+
+    /// Task #149: best-effort revoke of the session embedded in a native
+    /// playback URL (frees the per-session provider slot ahead of the
+    /// idle TTL). The route needs the TRAILING SLASH - Django
+    /// redirects/404s without it. No-op on XC-shaped URLs.
+    nonisolated static func revokeNative(playback: CatchupPlayback, currentURL: URL) {
+        guard playback.nativeChannelUUID != nil,
+              let scheme = currentURL.scheme, let host = currentURL.host,
+              let comps = URLComponents(url: currentURL, resolvingAgainstBaseURL: false),
+              let sessionID = comps.queryItems?.first(where: { $0.name == "session_id" })?.value,
+              !sessionID.isEmpty else { return }
+        let port = currentURL.port.map { ":\($0)" } ?? ""
+        guard let url = URL(string: "\(scheme)://\(host)\(port)/api/catchup/sessions/\(sessionID)/") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        for (k, v) in playback.nativeAuthHeaders { request.setValue(v, forHTTPHeaderField: k) }
+        Task { _ = try? await HTTPRouter.data(for: request) }
+    }
+
+    /// Channel UUID from a Dispatcharr live proxy URL
+    /// (/proxy/ts/stream/<uuid>); nil for any other shape.
+    nonisolated static func dispatcharrChannelUUID(fromStreamURL url: URL?) -> String? {
+        guard let str = url?.absoluteString,
+              let r = str.range(of: "/proxy/ts/stream/") else { return nil }
+        let tail = String(str[r.upperBound...])
+        let uuid = tail.split(separator: "?").first.map(String.init)?
+            .split(separator: "/").first.map(String.init)
+        return (uuid?.isEmpty == false) ? uuid : nil
+    }
 
     /// Render an epoch date in the panel's zone as the canonical XC start
     /// shape `YYYY-MM-DD:HH-MM` (iPlayTV / TiviMate colon-dash form).
@@ -4509,6 +4617,47 @@ enum CatchupSupport {
         guard channel.hasCatchup else { throw CatchupError.notCatchup }
         switch server.type {
         case .dispatcharrAPI:
+            // Task #149: prefer the native sessions API (normal auth on
+            // the mint, header-free playback URL, per-session provider
+            // slot, no xc_password dependency). One 404 marks the base
+            // legacy for the process and we fall through to the XC
+            // /timeshift/ path below - which also remains THE protocol
+            // for genuine Xtream Codes servers (next case), forever.
+            let nativeBase = dispatcharrBase(fromStreamURL: channel.streamURL) ?? server.effectiveBaseURL
+            if let channelUUID = dispatcharrChannelUUID(fromStreamURL: channel.streamURL),
+               nativeSupportCache[nativeBase] != false {
+                let key = server.effectiveApiKey
+                var authHeaders: [String: String] = [:]
+                if !key.isEmpty {
+                    authHeaders["X-API-Key"] = key
+                    authHeaders["Authorization"] = "ApiKey \(key)"
+                }
+                let ua = server.effectiveUserAgent
+                if !ua.isEmpty { authHeaders["User-Agent"] = ua }
+                switch await mintNativeSession(base: nativeBase,
+                                               authHeaders: authHeaders,
+                                               channelUUID: channelUUID,
+                                               start: programStart) {
+                case .created(let playbackURL):
+                    nativeSupportCache[nativeBase] = true
+                    var headers: [String: String] = [:]
+                    if !ua.isEmpty { headers["User-Agent"] = ua }
+                    return CatchupPlayback(url: playbackURL,
+                                           panelTimeZoneID: "UTC",
+                                           programStart: programStart,
+                                           programEnd: programEnd,
+                                           title: programTitle,
+                                           headers: headers,
+                                           nativeChannelUUID: channelUUID,
+                                           nativeAuthHeaders: authHeaders)
+                case .unsupported:
+                    nativeSupportCache[nativeBase] = false
+                case .error:
+                    // Transient (5xx/transport): fall back to XC for THIS
+                    // attempt without caching a verdict.
+                    break
+                }
+            }
             // The /timeshift/ endpoint takes PATH-embedded XC creds only
             // (no JWT/ApiKey), readable by the authenticated user from
             // /api/accounts/users/me/. Memoized per server.
