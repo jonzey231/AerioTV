@@ -938,6 +938,12 @@ struct ChannelListView: View {
     // MARK: - Group Filter Bar
 
     private var groupFilterBar: some View {
+        // ScrollViewReader so a group swipe on the list (GH #55) can glide
+        // the pill row to the newly selected pill - the pills visibly follow
+        // the swipe. iOS-only in effect: only the iOS pills carry the
+        // "pill_" ids, so the tvOS scrollTo is a no-op and its focus-driven
+        // scrolling stays untouched.
+        ScrollViewReader { pillProxy in
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 // Guide toggle button (tvOS only — iOS uses the nav bar toolbar button)
@@ -1112,6 +1118,7 @@ struct ChannelListView: View {
                             )
                     }
                     .buttonStyle(.plain)
+                    .id("pill_\(group)")
                     #endif
                 }
 
@@ -1145,6 +1152,12 @@ struct ChannelListView: View {
             Button("Cancel", role: .cancel) { }
         }
         #endif
+        .onChange(of: selectedGroup) { _, newValue in
+            withAnimation(.spring(response: 0.3)) {
+                pillProxy.scrollTo("pill_\(newValue)", anchor: .center)
+            }
+        }
+        }
     }
 
     /// #45: one collection filter pill, matching the group-pill look. Selecting
@@ -1177,6 +1190,7 @@ struct ChannelListView: View {
                 )
         }
         .buttonStyle(.plain)
+        .id("pill_\(token)")
         .contextMenu { collectionManageActions(c) }
         #endif
     }
