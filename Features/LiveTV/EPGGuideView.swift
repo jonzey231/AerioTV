@@ -2224,9 +2224,10 @@ struct EPGGuideView: View {
     @State private var catchupErrorMessage: String? = nil
     #if os(iOS)
     /// GH #20 (Android parity): hide the iPhone tab bar while the guide
-    /// scrolls down, reveal near the top. Same 80/20 hysteresis and phone
-    /// gate as ChannelListView.isChromeCollapsed; iPad keeps its bar.
+    /// scrolls down; any upward scroll reveals it (TabBarScrollTracker).
+    /// Same phone gate as ChannelListView; iPad keeps its bar.
     @State private var guideTabBarHidden = false
+    @State private var tabBarTracker = TabBarScrollTracker()
     #endif
     #if os(tvOS)
     /// Programmatic focus target for a channel row's left-hand cell.
@@ -2561,24 +2562,22 @@ struct EPGGuideView: View {
                 }
                 #if os(iOS)
                 // GH #20 (Android parity): auto-hide the iPhone tab bar on
-                // vertical guide scroll. Same 80/20 hysteresis + phone gate
-                // as ChannelListView's chrome collapse; only vertical offset
+                // vertical guide scroll. Direction-based (2026-07-12): hide
+                // on a deliberate downward scroll, full bar back on any
+                // upward scroll (TabBarScrollTracker); only vertical offset
                 // is observed so timeline scrubbing can't toggle the bar.
                 .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
                     scrollGeo.contentOffset.y
-                } action: { _, y in
+                } action: { oldY, y in
                     guard UIDevice.current.userInterfaceIdiom == .phone else { return }
-                    if y > 80 && !guideTabBarHidden {
+                    if let hidden = tabBarTracker.update(oldY: oldY, newY: y,
+                                                         hidden: guideTabBarHidden) {
                         withAnimation(.easeInOut(duration: 0.2)) {
-                            guideTabBarHidden = true
-                        }
-                    } else if y < 20 && guideTabBarHidden {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            guideTabBarHidden = false
+                            guideTabBarHidden = hidden
                         }
                     }
                 }
-                .legacyScrollAwayTabBar(collapsed: guideTabBarHidden)
+                .scrollAwayTabBar(collapsed: guideTabBarHidden)
                 #endif
             .clipped()
             .onAppear {

@@ -53,6 +53,14 @@ struct ChannelListView: View {
     /// scrolls down in the channel list. Hysteresis (80 / 20) on the
     /// scroll-y trigger prevents jitter near the edges.
     @State private var isChromeCollapsed: Bool = false
+    #if os(iOS)
+    // Tab bar scroll-away (2026-07-12): its own flag, separate from
+    // isChromeCollapsed. The pills stay position-based (only shown near
+    // the top, like Android's chip row); the BAR is direction-based via
+    // TabBarScrollTracker so any upward scroll brings it back mid-list.
+    @State private var isTabBarScrolledAway: Bool = false
+    @State private var tabBarTracker = TabBarScrollTracker()
+    #endif
     /// GH #55 interactive group swipe: live horizontal offset the list
     /// renders at while a group drag is in flight, and the per-gesture
     /// dominance latch (nil until the first onChanged decides).
@@ -923,9 +931,12 @@ struct ChannelListView: View {
             // list scrolls past 80pt; expand again near the top (< 20pt).
             // Hysteresis prevents jitter at the boundary. iPad keeps the
             // chrome visible — it has plenty of vertical space.
+            // The tab bar rides the same observer but with DIRECTION
+            // tracking (2026-07-12, Android parity): hide on a deliberate
+            // downward scroll, full bar back on any upward scroll.
             .onScrollGeometryChange(for: CGFloat.self) { geo in
                 geo.contentOffset.y
-            } action: { _, y in
+            } action: { oldY, y in
                 guard UIDevice.current.userInterfaceIdiom == .phone else { return }
                 if y > 80 && !isChromeCollapsed {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -936,13 +947,17 @@ struct ChannelListView: View {
                         isChromeCollapsed = false
                     }
                 }
+                if let hidden = tabBarTracker.update(oldY: oldY, newY: y,
+                                                     hidden: isTabBarScrolledAway) {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isTabBarScrolledAway = hidden
+                    }
+                }
             }
-            // GH #20 (Android parity): the same scroll state also tucks the
-            // tab bar away so the list reclaims its height. Phone-only by
-            // construction: the observer above never sets the flag on iPad.
-            // iOS 26+ ignores the manual toggle - the system minimize
-            // behavior owns the bar there (aerioTabBarAutoMinimize).
-            .legacyScrollAwayTabBar(collapsed: isChromeCollapsed)
+            // GH #20 (Android parity): tuck the tab bar away on scroll so
+            // the list reclaims its height. Phone-only by construction:
+            // the observer above never sets the flag on iPad.
+            .scrollAwayTabBar(collapsed: isTabBarScrolledAway)
             // GH #20 follow-up (user report 2026-07-12): on iOS 26 the list's
             // frame stopped at the safe-area line above the tab bar, leaving
             // a dead band that stayed behind when the system minimized the

@@ -4284,14 +4284,16 @@ struct MainTabView: View {
             #endif
         }
         .tint(theme.accent)
-        // GH #20 auto-hide, iOS 26+ path: the system's Liquid Glass
-        // minimize-on-scroll replaces the manual per-view
-        // .toolbar(.hidden, for: .tabBar) toggle, which iOS 26 broke -
-        // hiding worked but flipping back to .visible never restored
-        // the bar (field report 2026-07-11: "tab bar doesn't come back
-        // after fading out the first time"). The four scroll-driven
-        // sites keep the manual toggle for iOS 18-25 via
-        // legacyScrollAwayTabBar(collapsed:).
+        // GH #20 auto-hide, iOS 26+ path (reworked 2026-07-12): minimize
+        // is set to .never so there is no minimized pill and no system
+        // minimize state machine competing with the manual toggle - that
+        // competition is what made .visible unable to restore the bar
+        // (field report 2026-07-11: "tab bar doesn't come back after
+        // fading out the first time"). The four scroll-driven sites drive
+        // full hide/show on every iOS version via
+        // scrollAwayTabBar(collapsed:), Android-style: hide on a
+        // deliberate scroll down, full bar back on any scroll up
+        // (TabBarScrollTracker).
         .aerioTabBarAutoMinimize()
         // If the user removes their last favorite while on the Favorites tab, redirect home.
         .onChange(of: hasFavorites) { _, nowHasFavorites in
@@ -6010,18 +6012,22 @@ struct MiniPlayerBar: View {
 // MARK: - Tab bar auto-hide (GH #20) platform split
 
 extension View {
-    /// iOS 26+: adopt the system's Liquid Glass minimize-on-scroll for
-    /// the tab bar. The manual `.toolbar(.hidden, for: .tabBar)` toggle
-    /// the scroll views used stopped UN-hiding on iOS 26 (the bar never
-    /// returned after its first fade), so on 26+ the native behavior
-    /// owns the tab bar and the manual toggle is disabled - see
-    /// `legacyScrollAwayTabBar(collapsed:)`. No-op on tvOS
-    /// and on iOS 18-25.
+    /// iOS 26+: turn the system's Liquid Glass minimize-on-scroll OFF for
+    /// the tab bar so the manual scroll-away toggle can own it - see
+    /// `scrollAwayTabBar(collapsed:)`. No-op on tvOS and on iOS 18-25.
     @ViewBuilder
     func aerioTabBarAutoMinimize() -> some View {
         #if os(iOS)
         if #available(iOS 26.0, *) {
-            self.tabBarMinimizeBehavior(.onScrollDown)
+            // .never (2026-07-12, user request): no minimized pill at all.
+            // This also disengages the system minimize state machine, which
+            // was the second owner of the bar that made the manual
+            // hidden/visible toggle stick at hidden (field report
+            // 2026-07-11). With minimize off, the toolbarVisibility toggle
+            // in scrollAwayTabBar is the bar's sole authority and restores
+            // reliably - full Android behavior: bar hides on scroll down,
+            // full bar returns on any scroll up.
+            self.tabBarMinimizeBehavior(.never)
         } else {
             self
         }
@@ -6033,19 +6039,31 @@ extension View {
 
 extension View {
     /// Scroll-driven tab bar hide used by ChannelListView / EPGGuideView /
-    /// MoviesView / TVShowsView. On iOS 26+ this applies NOTHING: the system
-    /// minimize behavior (see `aerioTabBarAutoMinimize`) owns the bar there,
-    /// and even an explicit `.toolbar(.visible, for: .tabBar)` pins the bar's
-    /// LAYOUT slot - the bar minimizes visually but the freed space stays
-    /// reserved as a blank band under the scroll content (user report
-    /// 2026-07-12). Pre-26 keeps the original manual collapse.
+    /// MoviesView / TVShowsView. Two states only, like the Android bottom
+    /// nav: full bar or no bar.
+    ///
+    /// History: on iOS 26 this used to be a no-op because the manual toggle
+    /// fought the system minimize behavior - with `.onScrollDown` active,
+    /// `.hidden` collapsed the bar into the minimize machinery and the
+    /// subsequent `.visible` could never re-expand it (field report
+    /// 2026-07-11), while `.visible` also pinned a blank layout band
+    /// (2026-07-12). Since `aerioTabBarAutoMinimize` now sets
+    /// `.tabBarMinimizeBehavior(.never)`, that second owner is gone and
+    /// this toggle is the bar's SOLE authority on 26+, so it hides and
+    /// restores reliably. `toolbarVisibility` is the sanctioned iOS 26
+    /// spelling; 18-25 keep the original `toolbar` call. No-op on tvOS
+    /// (no call sites; the tvOS tab bar is system-managed at the top).
     @ViewBuilder
-    func legacyScrollAwayTabBar(collapsed: Bool) -> some View {
+    func scrollAwayTabBar(collapsed: Bool) -> some View {
+        #if os(iOS)
         if #available(iOS 26.0, *) {
-            self
+            self.toolbarVisibility(collapsed ? .hidden : .visible, for: .tabBar)
         } else {
             self.toolbar(collapsed ? .hidden : .visible, for: .tabBar)
         }
+        #else
+        self
+        #endif
     }
 
     /// iOS 26: keep scroll content visible all the way to the display's
@@ -6071,3 +6089,40 @@ extension View {
         #endif
     }
 }
+
+#if os(iOS)
+/// Direction tracker for the scroll-away tab bar (2026-07-12, Android
+/// parity): the bar hides after ~48pt of deliberate downward scrolling and
+/// the FULL bar returns after ~12pt of ANY upward scrolling, mirroring the
+/// Android MainScaffold NestedScrollConnection thresholds. This replaces
+/// the old position-based 80/20 rule for the BAR (the group pills keep it),
+/// which only restored the bar near the top of the list instead of on any
+/// upward scroll. A direction flip resets the opposite accumulator so slow
+/// jittery drags near a threshold can't oscillate the bar. Guards: a hide
+/// only triggers past 48pt of content offset so the settle-back from a
+/// rubber-band overscroll (pull-to-refresh) can't count as a hide, and
+/// resting near the top always reveals. Reference type on purpose: the
+/// accumulators are gesture bookkeeping, not display state, so mutating
+/// them must not re-render the view.
+final class TabBarScrollTracker {
+    private var hideDistance: CGFloat = 0
+    private var showDistance: CGFloat = 0
+
+    /// Feed consecutive scroll offsets from onScrollGeometryChange.
+    /// Returns the new hidden state when it should change, nil otherwise.
+    func update(oldY: CGFloat, newY: CGFloat, hidden: Bool) -> Bool? {
+        let dy = newY - oldY
+        if dy > 0.5 {
+            hideDistance += dy
+            showDistance = 0
+            if !hidden && hideDistance > 48 && newY > 48 { return true }
+        } else if dy < -0.5 {
+            showDistance += -dy
+            hideDistance = 0
+            if hidden && showDistance > 12 { return false }
+        }
+        if hidden && newY < 20 { return false }
+        return nil
+    }
+}
+#endif
