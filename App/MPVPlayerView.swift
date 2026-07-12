@@ -657,6 +657,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// teardown revokes it so the server's per-session provider slot
         /// frees ahead of the 10-minute idle TTL. nil on the XC paths.
         var catchupCurrentURL: URL? = nil
+        /// Task #149: native re-mints are SERIALIZED. Rapid +/-30s
+        /// presses used to fire overlapping mint/revoke/loadfile cycles;
+        /// the server 503'd playback opens whose just-revoked sibling
+        /// still held the provider slot, and the resulting retry storm
+        /// ended on the red error card (ATV log 2026-07-11 20:46). While
+        /// a mint is in flight, later seek targets coalesce into
+        /// `nativeRemintPendingMs` and only the LATEST runs when the
+        /// in-flight one lands. Both are mpvQueue-confined.
+        var nativeRemintInFlight = false
+        var nativeRemintPendingMs: Int32? = nil
         /// Live Rewind: this coordinator's live playback runs through
         /// the aeriots:// buffer relay (fullscreen single live only).
         /// Set in play(url:) when the engine session starts. Backed by
@@ -2313,40 +2323,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         if cu.nativeChannelUUID != nil {
                             // Task #149 native sessions: a NEW session minted
                             // at programmeStart+offset (async network call)
-                            // instead of a rebuilt XC wall-clock URL. The old
-                            // session is revoked so its provider slot frees
-                            // immediately rather than waiting out the
-                            // 10-minute idle TTL. NO minute flooring here:
-                            // the sessions API takes full ISO-8601 seconds,
-                            // and flooring broke the +/-30s skips (a +30
-                            // press from mid-minute floored BACKWARD and then
-                            // pinned every following press to the same
-                            // window).
+                            // instead of a rebuilt XC wall-clock URL. NO
+                            // minute flooring here: the sessions API takes
+                            // full ISO-8601 seconds, and flooring broke the
+                            // +/-30s skips (a +30 press from mid-minute
+                            // floored BACKWARD and then pinned every
+                            // following press to the same window). Mints are
+                            // serialized; see startNativeRetune.
                             self.playbackEnded = false
-                            let previousURL = self.catchupCurrentURL ?? cu.url
-                            Task { [weak self] in
-                                guard let self else { return }
-                                guard let newURL = await CatchupSupport.remintNative(
-                                    playback: cu,
-                                    currentURL: previousURL,
-                                    offsetSeconds: offsetSecs) else {
-                                    debugLog("[CATCHUP] native re-mint failed; keeping current window")
-                                    return
-                                }
-                                CatchupSupport.revokeNative(playback: cu, currentURL: previousURL)
-                                self.mpvQueue.async { [weak self] in
-                                    guard let self, let mpv = self.activeMPVHandle() else { return }
-                                    self.catchupBaseOffsetMs = clamped
-                                    self.catchupPendingSeekSecs = nil
-                                    self.catchupCurrentURL = newURL
-                                    CatchupRelay.currentHeaders = self.headers
-                                    let relayURL = CatchupRelay.wrap(newURL)
-                                    self.mpvCommandAsync(mpv, ["loadfile", relayURL.absoluteString, "replace"])
-                                }
+                            if self.nativeRemintInFlight {
+                                self.nativeRemintPendingMs = clamped
                                 let ps = self.progressStore
                                 DispatchQueue.main.async { ps.currentMs = clamped }
-                                debugLog("[CATCHUP] native re-tune to \(clamped / 1000)s")
+                                return
                             }
+                            self.startNativeRetune(cu: cu, clampedMs: clamped)
                             return
                         }
                         guard let newURL = CatchupSupport.rebuildForOffset(
@@ -4142,6 +4133,62 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
 
             lastEnqueueTime = enqueueTime
+        }
+
+        /// Task #149: the ONE native catch-up re-tune implementation
+        /// (seek commits, +/-30s skips, and the transient-load-error
+        /// retry all funnel here). Must be called on mpvQueue. Mints a
+        /// session at programmeStart+clampedMs, revokes the outgoing
+        /// one, and loads the new window. Serialized: while a mint is
+        /// in flight, callers park the newest target in
+        /// `nativeRemintPendingMs` and this method chases it (revoking
+        /// the never-played intermediate session) when the mint lands.
+        func startNativeRetune(cu: CatchupPlayback, clampedMs: Int32) {
+            nativeRemintInFlight = true
+            let previousURL = catchupCurrentURL ?? cu.url
+            let offsetSecs = Double(clampedMs) / 1000.0
+            Task { [weak self] in
+                guard let self else { return }
+                let newURL = await CatchupSupport.remintNative(
+                    playback: cu,
+                    currentURL: previousURL,
+                    offsetSeconds: offsetSecs)
+                self.mpvQueue.async { [weak self] in
+                    guard let self else { return }
+                    self.nativeRemintInFlight = false
+                    if let pending = self.nativeRemintPendingMs {
+                        // A newer target arrived while minting: the
+                        // session we just minted was never played, so
+                        // free its provider slot and chase the newest
+                        // target instead of loading a stale window.
+                        self.nativeRemintPendingMs = nil
+                        if let newURL {
+                            CatchupSupport.revokeNative(playback: cu, currentURL: newURL)
+                        }
+                        self.startNativeRetune(cu: cu, clampedMs: pending)
+                        return
+                    }
+                    guard let newURL else {
+                        debugLog("[CATCHUP] native re-mint failed; keeping current window")
+                        return
+                    }
+                    guard let mpv = self.activeMPVHandle() else {
+                        // Player tore down while minting: don't leak the slot.
+                        CatchupSupport.revokeNative(playback: cu, currentURL: newURL)
+                        return
+                    }
+                    CatchupSupport.revokeNative(playback: cu, currentURL: previousURL)
+                    self.catchupBaseOffsetMs = clampedMs
+                    self.catchupPendingSeekSecs = nil
+                    self.catchupCurrentURL = newURL
+                    CatchupRelay.currentHeaders = self.headers
+                    let relayURL = CatchupRelay.wrap(newURL)
+                    self.mpvCommandAsync(mpv, ["loadfile", relayURL.absoluteString, "replace"])
+                    let ps = self.progressStore
+                    DispatchQueue.main.async { ps.currentMs = clampedMs }
+                    debugLog("[CATCHUP] native re-tune to \(clampedMs / 1000)s")
+                }
+            }
         }
 
         func stop() {
@@ -6269,6 +6316,26 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     #if DEBUG
                     debugLog("[MPV-DIAG] \(streamTag) \(errLabel) — retry \(retryNum)/\(maxR) in \(String(format: "%.2f", delay))s (\(retryKind))")
                     #endif
+                    // Task #149: native catch-up retries must NOT replay
+                    // urls[currentIndex] — that URL is session-bound and
+                    // the first seek already revoked its session, so every
+                    // replay 401s straight back into this branch until the
+                    // budget burns out and the red card paints (ATV log
+                    // 2026-07-11 20:46). Mint a FRESH session at the
+                    // current window instead.
+                    if let cu = catchup, cu.nativeChannelUUID != nil {
+                        let resumeMs = catchupBaseOffsetMs
+                        cachedRenderer?.flush(removingDisplayedImage: false)
+                        mpvQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                            guard let self else { return }
+                            if self.nativeRemintInFlight {
+                                self.nativeRemintPendingMs = resumeMs
+                            } else {
+                                self.startNativeRetune(cu: cu, clampedMs: resumeMs)
+                            }
+                        }
+                        return
+                    }
                     let retryURL = urls[currentIndex]
                     // MEMORY-LEAK FIX (pairs with the black-frame reload above):
                     // clear the display-layer renderer's stale enqueued buffers
