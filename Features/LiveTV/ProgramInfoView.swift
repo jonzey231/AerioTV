@@ -98,6 +98,17 @@ struct ProgramInfoView: View {
     /// from TMDB-by-title when that opt-in is enabled and the server
     /// has no artwork. nil = no poster, render nothing.
     @State private var posterURL: URL? = nil
+    /// GH #53: width/height ratio of the loaded poster, defaulting to the
+    /// 2:3 portrait the TMDB fallback ships. XMLTV `<icon>` art is usually
+    /// landscape (EPG Guru sends 16:9); hard-cropping it into the portrait
+    /// frame chopped the sides off. Clamped so a pathological banner can't
+    /// stretch the sheet.
+    @State private var posterRatio: CGFloat = 2.0 / 3.0
+
+    private func updatePosterRatio(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        posterRatio = min(max(size.width / size.height, 0.55), 1.9)
+    }
 
     /// Auth headers for the active Dispatcharr server, in case a
     /// program icon is a protected `/media/` URL. The Schedules-Direct
@@ -388,9 +399,14 @@ struct ProgramInfoView: View {
                 Section {
                     HStack {
                         Spacer()
-                        AuthPosterImage(url: posterURL, headers: posterAuthHeaders)
+                        // GH #53: frame follows the REAL image ratio (width
+                        // fixed, height derived) so landscape EPG art is no
+                        // longer hard-cropped into a portrait 2:3 frame.
+                        // TMDB posters (genuinely 2:3) render as before.
+                        AuthPosterImage(url: posterURL, headers: posterAuthHeaders,
+                                        onImageLoaded: { updatePosterRatio($0) })
                             .aspectRatio(contentMode: .fill)
-                            .frame(width: 130, height: 195)
+                            .frame(width: 130, height: 130 / posterRatio)
                             .clipped()
                             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                         Spacer()
@@ -466,9 +482,12 @@ struct ProgramInfoView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 36) {
                     if let posterURL {
-                        AuthPosterImage(url: posterURL, headers: posterAuthHeaders)
+                        // GH #53: frame follows the REAL image ratio (see
+                        // the iOS twin above).
+                        AuthPosterImage(url: posterURL, headers: posterAuthHeaders,
+                                        onImageLoaded: { updatePosterRatio($0) })
                             .aspectRatio(contentMode: .fill)
-                            .frame(width: 220, height: 330)
+                            .frame(width: 220, height: 220 / posterRatio)
                             .clipped()
                             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }

@@ -19,6 +19,11 @@ private final class AuthImageCache: @unchecked Sendable {
 struct AuthPosterImage: View {
     let url: URL?
     var headers: [String: String] = [:]
+    /// GH #53: reports the loaded image's pixel size so callers that
+    /// frame the poster (Program Info) can follow the REAL aspect ratio
+    /// instead of hard-cropping landscape EPG art into a 2:3 portrait
+    /// frame. nil callers (grids with uniform poster cells) are unchanged.
+    var onImageLoaded: ((CGSize) -> Void)? = nil
 
     @State private var uiImage: UIImage? = nil
 
@@ -35,6 +40,7 @@ struct AuthPosterImage: View {
             let key = url.absoluteString
             if let cached = AuthImageCache.shared.image(for: key) {
                 uiImage = cached
+                onImageLoaded?(cached.size)
                 return
             }
             var req = URLRequest(url: url, timeoutInterval: 20)
@@ -56,6 +62,7 @@ struct AuthPosterImage: View {
             AuthImageCache.shared.store(img, for: key)
             guard !Task.isCancelled else { return }
             uiImage = img
+            onImageLoaded?(img.size)
         }
     }
 }
