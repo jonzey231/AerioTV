@@ -813,6 +813,16 @@ struct ChannelListView: View {
                     ))
                     .listRowSeparator(.hidden)
                 }
+                // GH #20 follow-up: with the list frame extended under the
+                // floating tab bar (ignoresSafeArea below), this spacer is
+                // the bottom content padding that lets the last channel row
+                // scroll clear of the bar + home indicator (the Android
+                // LazyColumn's 104dp contentPadding analog; .contentMargins
+                // leaked the margin to the top edge on iOS 26).
+                Color.clear
+                    .frame(height: 96)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
             }
             .listStyle(.plain)
             .background(Color.appBackground)
@@ -922,6 +932,14 @@ struct ChannelListView: View {
             // iOS 26+ ignores the manual toggle - the system minimize
             // behavior owns the bar there (aerioTabBarAutoMinimize).
             .legacyScrollAwayTabBar(collapsed: isChromeCollapsed)
+            // GH #20 follow-up (user report 2026-07-12): on iOS 26 the list's
+            // frame stopped at the safe-area line above the tab bar, leaving
+            // a dead band that stayed behind when the system minimized the
+            // bar. Mirror the Android solution outright: extend the list's
+            // frame to the physical bottom edge (rows show under/behind the
+            // floating bar) and give the CONTENT a bottom margin so the last
+            // row can scroll clear of the bar + home indicator.
+            .ignoresSafeArea(.container, edges: .bottom)
             #endif
         }
         // v1.6.13: same mini push-down as the Guide branch above.

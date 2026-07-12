@@ -455,6 +455,13 @@ struct MoviesView: View {
                     // returns to the rail, rather than geometric jumps.
                     .focusSection()
                     #endif
+
+                    #if os(iOS)
+                    // Bottom content padding for the under-bar extension
+                    // (ignoresSafeArea below) - last poster row scrolls
+                    // clear of the floating tab bar + home indicator.
+                    Color.clear.frame(height: 96)
+                    #endif
                 }
                 #if os(iOS)
                 // GH #20 (Android parity): auto-hide the iPhone tab bar on
@@ -475,6 +482,11 @@ struct MoviesView: View {
                     }
                 }
                 .legacyScrollAwayTabBar(collapsed: gridTabBarHidden)
+                // GH #20 follow-up (see ChannelListView's twin): extend the
+                // grid's frame under the floating iOS 26 tab bar so content
+                // shows behind/below it instead of a dead band; the spacer
+                // inside the ScrollView is the bottom content padding.
+                .ignoresSafeArea(.container, edges: .bottom)
                 #endif
             }
         }
