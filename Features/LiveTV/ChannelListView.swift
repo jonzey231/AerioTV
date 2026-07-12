@@ -812,6 +812,21 @@ struct ChannelListView: View {
             .listStyle(.plain)
             .background(Color.appBackground)
             .scrollContentBackground(.hidden)
+            // Apple GH #55 (jayegles): swiping left/right on the list cycles
+            // the selected group pill (left = next, right = previous, clamped
+            // at the ends). simultaneousGesture plus the horizontal-dominance
+            // check keeps vertical scrolling, pull-to-refresh, and row taps
+            // untouched. A collection filter isn't part of the cycle; the
+            // first swipe from one lands on All. Mirrored on Android.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 40)
+                    .onEnded { value in
+                        let dx = value.translation.width
+                        let dy = value.translation.height
+                        guard abs(dx) > 70, abs(dx) > abs(dy) * 1.5 else { return }
+                        cycleGroup(forward: dx < 0)
+                    }
+            )
             // v1.6.18 — iPhone pills moved here from the VStack
             // sibling above. When the user scrolls past 80pt the
             // pills tuck away to reclaim ~40% of vertical chrome;
@@ -1174,6 +1189,18 @@ struct ChannelListView: View {
     private var visibleGroups: [String] {
         GroupOrderStore.displayOrder(channelStore.orderedGroups, mode: groupSortMode, order: groupOrder)
             .filter { !hiddenGroups.contains($0) }
+    }
+
+    /// Apple GH #55: step the selected group pill from a horizontal list
+    /// swipe. The cycle matches the pill row (All first, then the visible
+    /// groups in display order) and clamps at both ends.
+    private func cycleGroup(forward: Bool) {
+        let cycle = ["All"] + visibleGroups
+        guard cycle.count > 1 else { return }
+        let current = cycle.firstIndex(of: selectedGroup) ?? 0
+        let target = min(max(forward ? current + 1 : current - 1, 0), cycle.count - 1)
+        guard cycle[target] != selectedGroup else { return }
+        withAnimation { selectedGroup = cycle[target] }
     }
 
     private func filterChannels() {
