@@ -438,6 +438,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
     var progressStore: PlayerProgressStore
     var logStore: AttemptLogStore
     let onFatalError: @MainActor @Sendable (String) -> Void
+    /// Called once when playback reaches steady state again AFTER an
+    /// `onFatalError` was reported (a Retry/auto-reconnect succeeded).
+    /// The error-overlay owner uses it to dismiss the card. nil callers
+    /// keep the old behavior (error state is terminal).
+    var onRecovered: (@MainActor @Sendable () -> Void)? = nil
     /// Identity of this coordinator when used as a multiview tile.
     /// `nil` means single-stream mode (the default) — the Coordinator
     /// behaves exactly like it did before multiview existed and
@@ -502,6 +507,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         c.nowPlayingTitle = nowPlayingTitle
         c.nowPlayingSubtitle = nowPlayingSubtitle
         c.nowPlayingArtworkURL = nowPlayingArtworkURL
+        c.onRecovered = onRecovered
         // Catch-up: hand the playback context to the Coordinator and pin
         // the store's duration to the programme's real length up front
         // (the timeshift TS reports an estimated duration that must never
@@ -667,6 +673,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// in-flight one lands. Both are mpvQueue-confined.
         var nativeRemintInFlight = false
         var nativeRemintPendingMs: Int32? = nil
+        /// Recovery signal for the playback-error overlay: non-nil when
+        /// the host view wants to dismiss its error card on a successful
+        /// Retry/auto-reconnect. Fired from PLAYBACK_RESTART when
+        /// `fatalErrorReported` is latched.
+        var onRecovered: (@MainActor @Sendable () -> Void)? = nil
+        /// Latched when `onFatalError` fires so the NEXT successful
+        /// playback-restart is recognized as a recovery (and reported
+        /// exactly once). mpvQueue-confined.
+        var fatalErrorReported = false
         /// Live Rewind: this coordinator's live playback runs through
         /// the aeriots:// buffer relay (fullscreen single live only).
         /// Set in play(url:) when the engine session starts. Backed by
@@ -2268,6 +2283,36 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &flag)
                     var newFlag: Int32 = flag == 0 ? 1 : 0
                     mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &newFlag)
+                }
+            }
+
+            // Retry closure for the playback-error overlay (manual Retry
+            // button + its auto-reconnect loop). Resets the exhausted
+            // retry budgets and starts a fresh attempt. Native catch-up
+            // mints a NEW session (the tuned URL is session-bound and
+            // usually already revoked, so replaying it can only 401).
+            progressStore.retryAction = { [weak self] in
+                guard let self else { return }
+                self.mpvQueue.async { [weak self] in
+                    guard let self, !self.isShuttingDown, !self.urls.isEmpty else { return }
+                    self.loadFailureRetryCount = 0
+                    self.sameURLRetryCount = 0
+                    self.hasPerformedWarmupRetry = false
+                    self.playbackEnded = false
+                    debugLog("[MPV-DIAG] user/auto retry after fatal error")
+                    if let cu = self.catchup, cu.nativeChannelUUID != nil {
+                        if self.nativeRemintInFlight {
+                            self.nativeRemintPendingMs = self.catchupBaseOffsetMs
+                        } else {
+                            self.startNativeRetune(cu: cu, clampedMs: self.catchupBaseOffsetMs)
+                        }
+                        return
+                    }
+                    self.currentIndex = 0
+                    let url = self.urls[0]
+                    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                        self?.play(url: url)
+                    }
                 }
             }
 
@@ -5738,6 +5783,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // slow startup probe is never mistaken for a
                         // wedge). See hasReachedPlaybackRestartForStream.
                         self.hasReachedPlaybackRestartForStream = true
+                        // A restart after a reported fatal error means a
+                        // Retry/auto-reconnect succeeded: let the host
+                        // view dismiss its error card.
+                        if self.fatalErrorReported {
+                            self.fatalErrorReported = false
+                            if let recovered = self.onRecovered {
+                                Task { await recovered() }
+                            }
+                        }
                         // Now that initial buffer is filled, disable cache-pause for live
                         // so playback doesn't stall on brief network dips.
                         if self.isLive, let mpv = self.activeMPVHandle() {
@@ -6864,6 +6918,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     self.play(url: self.urls[0])
                 }
             } else {
+                fatalErrorReported = true
                 let callback = onFatalError
                 Task { await callback(reason) }
             }

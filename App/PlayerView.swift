@@ -235,6 +235,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// 0, and unpauses. Used by the multiview "Finished" overlay's Replay
     /// button. Nil / unused on the legacy single PlayerView path.
     var replayFromStartAction: (() -> Void)?
+    /// Closure set by the Coordinator; resets the exhausted retry
+    /// budgets and starts a fresh connection attempt after a fatal
+    /// error (native catch-up mints a new session instead of replaying
+    /// its session-bound URL). Driven by the playback-error overlay's
+    /// Retry button and auto-reconnect loop; success is reported back
+    /// through the representable's `onRecovered`.
+    var retryAction: (() -> Void)?
     /// Closure set by the Coordinator; toggles play/pause.
     var togglePauseAction: (() -> Void)?
     /// Closure set by the Coordinator; sets playback speed.
@@ -279,6 +286,14 @@ private struct StreamErrorView: View {
     @ObservedObject var logStore: AttemptLogStore
     @Binding var didCopyErrorDetails: Bool
     let onClose: () -> Void
+    /// Non-nil enables the Retry button AND a 10s auto-retry countdown
+    /// (the error state remounts the player, so each failed retry lands
+    /// back here with a fresh countdown). nil keeps the old terminal
+    /// behavior.
+    var onRetry: (() -> Void)? = nil
+
+    @State private var retryCountdown = 0
+    @State private var autoRetryTask: Task<Void, Never>? = nil
 
     var body: some View {
         ZStack {
@@ -332,7 +347,21 @@ private struct StreamErrorView: View {
                     .cornerRadius(8)
                     .padding(.horizontal, 20)
 
+                    if onRetry != nil, retryCountdown > 0 {
+                        Text("Retrying in \(retryCountdown)s")
+                            .font(.system(size: 12))
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+
                     HStack(spacing: 14) {
+                        if let onRetry {
+                            Button("Retry Now") {
+                                autoRetryTask?.cancel()
+                                onRetry()
+                            }
+                            .foregroundColor(.accentColor)
+                        }
+
                         Button("Copy to Clipboard") {
                             let text = "ATTEMPTS\n" + logStore.lines.joined(separator: "\n") +
                                        "\n\nERROR\n" + message
@@ -347,8 +376,11 @@ private struct StreamErrorView: View {
                         }
                         .foregroundColor(.accentColor)
 
-                        Button("Close") { onClose() }
-                            .foregroundColor(.accentColor)
+                        Button("Close") {
+                            autoRetryTask?.cancel()
+                            onClose()
+                        }
+                        .foregroundColor(.accentColor)
                     }
                     .padding(.top, 8)
 
@@ -367,6 +399,27 @@ private struct StreamErrorView: View {
         #if os(iOS)
         .statusBarHidden(true)
         #endif
+        .onAppear {
+            // Auto-retry: this view is freshly mounted per error (the
+            // .error case removes the player from the hierarchy), so a
+            // plain 10s countdown per appearance gives a steady retry
+            // cadence without extra state plumbing.
+            guard let onRetry else { return }
+            autoRetryTask = Task { @MainActor in
+                var remaining = 10
+                while remaining > 0 {
+                    retryCountdown = remaining
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    if Task.isCancelled { return }
+                    remaining -= 1
+                }
+                onRetry()
+            }
+        }
+        .onDisappear {
+            autoRetryTask?.cancel()
+            autoRetryTask = nil
+        }
     }
 }
 
@@ -814,7 +867,17 @@ private struct PlayerRootView: View {
                 StreamErrorView(
                     title: title, message: lastError.isEmpty ? "Playback failed." : lastError,
                     logStore: logStore, didCopyErrorDetails: $didCopyErrorDetails,
-                    onClose: onDismiss
+                    onClose: onDismiss,
+                    // Retry remounts the player (the .error case removed
+                    // it from the hierarchy, so flipping back to .playing
+                    // stands up a fresh coordinator that starts from the
+                    // URL list's top). Re-arming the one-shot LAN/WAN
+                    // failover gives the retry the full recovery ladder.
+                    onRetry: {
+                        didAttemptPlayFailover = false
+                        lastError = ""
+                        state = .playing
+                    }
                 )
                 .onAppear { logStore.flush() }
             }

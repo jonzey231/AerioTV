@@ -89,10 +89,19 @@ struct MultiviewTileView: View {
     #endif
 
     /// Non-nil when the underlying mpv coordinator reported a fatal
-    /// decode error. Drives the red error overlay. Tapping "Remove"
-    /// on the overlay calls `store.remove(id:)`, which takes the
-    /// tile out of the grid entirely.
+    /// decode error. Drives the playback-error overlay. Its Remove
+    /// button calls `store.remove(id:)`, which takes the tile out of
+    /// the grid entirely.
     @State private var decodeErrorMessage: String? = nil
+    /// Auto-reconnect state for the playback-error overlay. Each fatal
+    /// error schedules a retry through the coordinator's
+    /// `progressStore.retryAction` on an escalating delay (5s doubling
+    /// to a 30s cap); `onRecovered` clears everything the moment a
+    /// retry reaches steady playback.
+    @State private var reconnectAttempt = 0
+    @State private var reconnectCountdown = 0
+    @State private var isReconnecting = false
+    @State private var autoReconnectTask: Task<Void, Never>? = nil
 
     #if os(tvOS)
     /// Timestamp of the most recent Select press, used to detect
@@ -327,12 +336,11 @@ struct MultiviewTileView: View {
             } else {
                 chromeState.reportFocusActivity()
             }
-            // Error state takes priority — if the tile is showing
-            // the red "Decoder unavailable" card, Select removes
-            // the tile. The inner Button in that card can't be
-            // focused (nested inside this outer Button's label),
-            // so the instructional text says "Press Select to
-            // Remove" and this is how we honour it.
+            // Error state: the playback-error overlay's own Retry /
+            // Remove buttons are the primary targets (sibling
+            // overlay, so they focus normally). If Select still
+            // lands on the tile button itself, treat it as Remove —
+            // the tile has no meaningful audio to take.
             if decodeErrorMessage != nil {
                 DebugLogger.shared.log(
                     "[MV-Cmd] tvOS tile remove via error-overlay (Select) tile=\(tile.id)",
@@ -460,6 +468,14 @@ struct MultiviewTileView: View {
         .overlay {
             if tile.kind == .vod, progressStore.reachedEOF {
                 finishedOverlay
+            }
+        }
+        // Playback-error overlay, also a SIBLING so its Retry / Remove
+        // buttons are real focus targets on tvOS (same reasoning as the
+        // Finished overlay above).
+        .overlay {
+            if let decodeErrorMessage {
+                playbackErrorOverlay(decodeErrorMessage)
             }
         }
         // Move audio off a tile the moment it finishes (before the user
@@ -617,11 +633,14 @@ struct MultiviewTileView: View {
                         logStore: logStore,
                         onFatalError: { message in
                             decodeErrorMessage = message
+                            isReconnecting = false
+                            scheduleAutoReconnect()
                             DebugLogger.shared.log(
                                 "[MV-Tile] decode error: channel=\(tile.item.name) msg=\(Self.sanitizedErrorMessage(message))",
                                 category: "Playback", level: .warning
                             )
                         },
+                        onRecovered: { clearPlaybackError() },
                         tileID: tile.id,
                         isAudioActive: isAudioActive,
                         shouldPause: shouldPause,
@@ -701,9 +720,6 @@ struct MultiviewTileView: View {
                 TileFocusBorder(tileID: tile.id,
                                 isRelocating: store.relocatingTileID == tile.id)
             }
-            if let decodeErrorMessage {
-                decodeErrorOverlay(decodeErrorMessage)
-            }
         }
         .background(Color.black)
     }
@@ -747,6 +763,13 @@ struct MultiviewTileView: View {
             .overlay {
                 if tile.kind == .vod, progressStore.reachedEOF {
                     finishedOverlay
+                }
+            }
+            // Playback-error overlay, also OUTSIDE `tappableRegion` so
+            // its Retry / Remove buttons receive taps directly.
+            .overlay {
+                if let decodeErrorMessage {
+                    playbackErrorOverlay(decodeErrorMessage)
                 }
             }
             // Hand audio off the instant a VOD tile finishes (mirrors
@@ -861,8 +884,10 @@ struct MultiviewTileView: View {
                         logStore: logStore,
                         onFatalError: { message in
                             // Surface on the tile instead of killing the
-                            // whole app. The overlay exposes a Remove button.
+                            // whole app. The overlay exposes Retry + Remove.
                             decodeErrorMessage = message
+                            isReconnecting = false
+                            scheduleAutoReconnect()
                             // Log the sanitized message. The raw message can
                             // echo server-controlled bytes (HLS errors, HTTP
                             // response bodies), so `sanitizedErrorMessage`
@@ -872,6 +897,7 @@ struct MultiviewTileView: View {
                                 category: "Playback", level: .warning
                             )
                         },
+                        onRecovered: { clearPlaybackError() },
                         tileID: tile.id,
                         isAudioActive: isAudioActive,
                         shouldPause: shouldPause,
@@ -931,22 +957,19 @@ struct MultiviewTileView: View {
                 }
             }
 
-            // Red decode-error overlay. Only shown when mpv's failover
-            // has exhausted its retries. Remove button calls the
-            // store — tearing down the MPVPlayerView via the tile
-            // removal is cleaner than trying to re-init the mpv
-            // handle in place.
-            if let decodeErrorMessage {
-                decodeErrorOverlay(decodeErrorMessage)
-            }
+            // Playback-error overlay now attaches as a sibling overlay
+            // on the tile content (see the `.overlay` next to the VOD
+            // Finished overlay) so its Retry / Remove buttons receive
+            // taps directly.
         }
         // Explicit hit shape so taps on the letterbox black (where
         // there's no video) still count.
         .contentShape(Rectangle())
         .onTapGesture {
             chromeState.reportInteraction()
-            // Error state: tap removes (see decodeErrorOverlay
-            // docstring for why the inner Button doesn't work).
+            // Error state: the overlay's own Retry / Remove buttons
+            // are the primary targets; a tap that lands outside them
+            // (letterbox black) still removes.
             if decodeErrorMessage != nil {
                 DebugLogger.shared.log(
                     "[MV-Cmd] iPad tile remove via error-overlay (tap) tile=\(tile.id)",
@@ -1205,38 +1228,27 @@ struct MultiviewTileView: View {
         .opacity(chromeState.isVisible ? 1 : 0)
     }
 
-    // MARK: - Decode-error overlay
+    // MARK: - Playback-error overlay
 
-    /// Red error card shown when the tile's mpv coordinator reports
-    /// a fatal decode/load failure.
+    /// Error card shown when the tile's mpv coordinator reports a
+    /// fatal decode/load failure. Attached as a SIBLING overlay of
+    /// the tile's tap target (same pattern as `finishedOverlay`) so
+    /// its Retry / Remove buttons are real focus/tap targets.
     ///
-    /// The overlay is drawn INSIDE the tile's primary tap target
-    /// (the outer `Button` on tvOS, the `.onTapGesture`-wrapped
-    /// `tappableRegion` on iPad). Nesting a SwiftUI `Button` inside
-    /// either of those doesn't work:
-    ///
-    /// - **tvOS**: a `Button`'s label is static content — inner
-    ///   Buttons can't receive focus. User reported the "Remove"
-    ///   button did nothing because only the outer tile Button was
-    ///   ever focusable.
-    /// - **iPad**: the parent `.onTapGesture` swallows taps that
-    ///   would otherwise reach the inner Button (same quirk that
-    ///   broke the close-X before we moved it outside tappableRegion).
-    ///
-    /// Fix: drop the nested Button entirely. The tile's own tap /
-    /// Select action (see `tvOSBody` / `tappableRegion`) routes to
-    /// `store.remove(id:)` instead of `setAudio` whenever
-    /// `decodeErrorMessage != nil`. The overlay shows instructional
-    /// text telling the user which gesture removes the tile on each
-    /// platform.
-    private func decodeErrorOverlay(_ message: String) -> some View {
+    /// The card is deliberately calmer than the old red one: the
+    /// actual error message is the star (users asked for it), the
+    /// status line shows the auto-reconnect countdown, and the error
+    /// state is no longer terminal — `scheduleAutoReconnect` keeps
+    /// retrying on an escalating delay and `onRecovered` dismisses
+    /// the card the moment a retry reaches steady playback.
+    private func playbackErrorOverlay(_ message: String) -> some View {
         ZStack {
-            Color.red.opacity(0.85)
+            Color.black.opacity(0.85)
             VStack(spacing: 12) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.largeTitle)
-                    .foregroundStyle(.white)
-                Text("Decoder unavailable")
+                    .foregroundStyle(.orange)
+                Text("Playback Problem")
                     .font(.headline)
                     .foregroundStyle(.white)
                 // SECURITY: mpv error strings can echo server-controlled
@@ -1250,27 +1262,103 @@ struct MultiviewTileView: View {
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
                     .padding(.horizontal, 10)
-                // Instructional pill — what the user should do to
-                // remove the errored tile. NOT a real Button; the
-                // action is handled by the parent tile's existing
-                // tap/Select target.
-                Text(removeHintText)
-                    .font(.footnote.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(
-                        Capsule().fill(Color.white.opacity(0.22))
-                    )
+                Text(reconnectStatusText)
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.7))
+                HStack(spacing: 12) {
+                    Button {
+                        retryNow()
+                    } label: {
+                        Label("Retry", systemImage: "arrow.clockwise")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Color.accentPrimary))
+                    }
+                    .buttonStyle(.plain)
+
+                    Button(role: .destructive) {
+                        DebugLogger.shared.log(
+                            "[MV-Cmd] error overlay Remove tile=\(tile.id)",
+                            category: "Playback", level: .info
+                        )
+                        autoReconnectTask?.cancel()
+                        store.remove(id: tile.id)
+                    } label: {
+                        Label("Remove", systemImage: "xmark.circle")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Color.white.opacity(0.22)))
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             .padding(12)
         }
+        .onDisappear {
+            autoReconnectTask?.cancel()
+            autoReconnectTask = nil
+        }
+    }
+
+    private var reconnectStatusText: String {
+        if isReconnecting { return "Reconnecting…" }
+        if reconnectCountdown > 0 { return "Retrying in \(reconnectCountdown)s" }
+        return " "
+    }
+
+    /// Kick the coordinator's retry immediately (Retry button).
+    private func retryNow() {
+        DebugLogger.shared.log(
+            "[MV-Cmd] error overlay Retry tile=\(tile.id)",
+            category: "Playback", level: .info
+        )
+        autoReconnectTask?.cancel()
+        reconnectCountdown = 0
+        isReconnecting = true
+        progressStore.retryAction?()
+    }
+
+    /// Countdown-then-retry loop. Each fatal error re-arms this with an
+    /// escalating delay (5s doubling to a 30s cap): if the retry fails,
+    /// `onFatalError` fires again and re-schedules; if it succeeds,
+    /// `onRecovered` -> `clearPlaybackError` tears the loop down.
+    private func scheduleAutoReconnect() {
+        autoReconnectTask?.cancel()
+        reconnectAttempt += 1
+        let delay = min(30, 5 << min(reconnectAttempt - 1, 3))
+        autoReconnectTask = Task { @MainActor in
+            var remaining = delay
+            while remaining > 0 {
+                reconnectCountdown = remaining
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+                remaining -= 1
+            }
+            reconnectCountdown = 0
+            isReconnecting = true
+            progressStore.retryAction?()
+        }
+    }
+
+    /// A Retry/auto-reconnect reached steady playback: dismiss the card
+    /// and reset the escalation so the NEXT incident starts at 5s again.
+    private func clearPlaybackError() {
+        autoReconnectTask?.cancel()
+        autoReconnectTask = nil
+        decodeErrorMessage = nil
+        isReconnecting = false
+        reconnectCountdown = 0
+        reconnectAttempt = 0
     }
 
     // MARK: - VOD finished overlay (Phase 2)
 
     /// Shown over a `.vod` tile that has played to its end
-    /// (`progressStore.reachedEOF`). Mirrors `decodeErrorOverlay`'s
+    /// (`progressStore.reachedEOF`). Mirrors `playbackErrorOverlay`'s
     /// visual language (full-tile scrim + centered VStack with a title)
     /// but uses real `Button`s for Replay / Remove. Unlike the decode-
     /// error card (which lives INSIDE the tile's tap target and so can't
@@ -1347,16 +1435,6 @@ struct MultiviewTileView: View {
         )
         progressStore.reachedEOF = false
         progressStore.replayFromStartAction?()
-    }
-
-    /// Per-platform text telling the user how to remove the tile
-    /// when the decode-error card is showing.
-    private var removeHintText: String {
-        #if os(tvOS)
-        return "Press Select to Remove"
-        #else
-        return "Tap to Remove"
-        #endif
     }
 
     /// Strip control chars, bidi overrides, and truncate to a display-
