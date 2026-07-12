@@ -691,6 +691,12 @@ struct SettingsView: View {
     // MARK: - Active Server
 
     private func setActiveServer(_ server: ServerConnection) {
+        // GH #22 (Android parity): switching sources stops whatever the OLD
+        // source is still playing (corner mini on tvOS, minimized/PiP on
+        // iOS). Playing stale content from a server the user just switched
+        // away from was wrong on its own, and on Android the equivalent
+        // leftover session latch caused dead tunes after the switch.
+        PlayerSession.shared.stop()
         for s in servers { s.isActive = false }
         server.isActive = true
         try? modelContext.save()

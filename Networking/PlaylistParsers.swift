@@ -75,29 +75,90 @@ struct M3UParser {
                 }
 
                 if !urlLine.isEmpty {
-                    // v1.7.x: preserve the raw `tvg-chno` string so
-                    // decimal channel numbers survive. See
-                    // `M3UChannel.channelNumber` doc comment.
-                    let chno: String? = {
-                        guard let raw = attrs["tvg-chno"] else { return nil }
-                        let trimmed = raw.trimmingCharacters(in: .whitespaces)
-                        return trimmed.isEmpty ? nil : trimmed
-                    }()
-                    let channel = M3UChannel(
-                        name: attrs["name"] ?? "Unknown Channel",
-                        url: urlLine,
-                        groupTitle: attrs["group-title"] ?? "",
-                        tvgID: attrs["tvg-id"] ?? "",
-                        tvgName: attrs["tvg-name"] ?? "",
-                        tvgLogo: attrs["tvg-logo"] ?? "",
-                        channelNumber: chno,
-                        rawAttributes: attrs
-                    )
-                    channels.append(channel)
+                    channels.append(makeChannel(attrs: attrs, urlLine: urlLine))
                 }
             }
             i += 1
         }
+        return channels
+    }
+
+    private static func makeChannel(attrs: [String: String], urlLine: String) -> M3UChannel {
+        // v1.7.x: preserve the raw `tvg-chno` string so
+        // decimal channel numbers survive. See
+        // `M3UChannel.channelNumber` doc comment.
+        let chno: String? = {
+            guard let raw = attrs["tvg-chno"] else { return nil }
+            let trimmed = raw.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty ? nil : trimmed
+        }()
+        return M3UChannel(
+            name: attrs["name"] ?? "Unknown Channel",
+            url: urlLine,
+            groupTitle: attrs["group-title"] ?? "",
+            tvgID: attrs["tvg-id"] ?? "",
+            tvgName: attrs["tvg-name"] ?? "",
+            tvgLogo: attrs["tvg-logo"] ?? "",
+            channelNumber: chno,
+            rawAttributes: attrs
+        )
+    }
+
+    /// GH #26 (Android parity): parse a downloaded playlist FILE line-by-line
+    /// in constant memory. The whole-payload path held the raw Data, a UTF-16
+    /// String of it, AND the split line array resident at once -- a full
+    /// XC-panel M3U (live + VOD) runs 100-200MB, which is jetsam bait on
+    /// tvOS. One 64KB read buffer plus the current line stay resident here.
+    /// Encoding matches the old fallback per LINE: UTF-8 first, ISO-8859-1
+    /// when the bytes aren't valid UTF-8 (also copes with mixed encodings).
+    static func parseFile(at fileURL: URL) throws -> [M3UChannel] {
+        guard let stream = InputStream(url: fileURL) else {
+            throw APIError.invalidResponse
+        }
+        stream.open()
+        defer { stream.close() }
+
+        var channels: [M3UChannel] = []
+        // Same lookahead semantics as parse(content:): the URL binds to the
+        // FIRST pending #EXTINF; blanks/#-comments in between are skipped;
+        // an #EXTINF with no URL is dropped; a bare URL is ignored.
+        var pendingAttrs: [String: String]? = nil
+        func handle(line rawLine: String) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("#EXTINF:") {
+                if pendingAttrs == nil { pendingAttrs = parseExtINF(line) }
+            } else if line.isEmpty || line.hasPrefix("#") {
+                // skip
+            } else {
+                if let attrs = pendingAttrs {
+                    channels.append(makeChannel(attrs: attrs, urlLine: line))
+                }
+                pendingAttrs = nil
+            }
+        }
+
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        var lineBytes: [UInt8] = []
+        func flushLine() {
+            guard !lineBytes.isEmpty else { return }
+            let s = String(bytes: lineBytes, encoding: .utf8)
+                ?? String(bytes: lineBytes, encoding: .isoLatin1)
+            lineBytes.removeAll(keepingCapacity: true)
+            if let s { handle(line: s) }
+        }
+        while stream.hasBytesAvailable {
+            let n = stream.read(&buffer, maxLength: buffer.count)
+            if n <= 0 { break }
+            for k in 0..<n {
+                let b = buffer[k]
+                if b == 0x0A || b == 0x0D {
+                    flushLine()
+                } else {
+                    lineBytes.append(b)
+                }
+            }
+        }
+        flushLine()
         return channels
     }
 
@@ -132,20 +193,16 @@ struct M3UParser {
     }()
 
     static func fetchAndParse(url: URL) async throws -> [M3UChannel] {
-        let (data, response) = try await session.data(from: url)
+        // GH #26: download to disk + line-stream the parse (see parseFile).
+        let (tempURL, response) = try await session.download(from: url)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         guard let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode) else {
             throw APIError.invalidResponse
         }
-        guard let content = String(data: data, encoding: .utf8) ??
-                            String(data: data, encoding: .isoLatin1) else {
-            throw APIError.decodingError(
-                NSError(domain: "M3U", code: 0,
-                        userInfo: [NSLocalizedDescriptionKey: "Could not decode playlist"])
-            )
-        }
-        return parse(content: content)
+        return try parseFile(at: tempURL)
     }
+
 }
 
 // MARK: - Parsed EPG Program
@@ -298,11 +355,17 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
         let magicLooksGzipped = fileStartsWithGzipMagic(tempURL)
 
         guard extLooksGzipped || ctLooksGzipped || magicLooksGzipped else {
-            // Plain XMLTV. Preserve the existing whole-document parse.
-            // (knownChannelIDs filtering is a gzip-path optimization;
-            // uncompressed feeds are small enough to parse whole.)
-            let data = try Data(contentsOf: tempURL)
-            return parse(data: data)
+            // Plain XMLTV: parse straight off the downloaded file too
+            // (GH #26, Android parity). "Uncompressed feeds are small
+            // enough to parse whole" stopped being a safe assumption --
+            // providers ship multi-hundred-MB uncompressed guides, and
+            // the whole-Data copy was jetsam bait on tvOS. The stream
+            // path also brings the knownChannelIDs during-parse filter
+            // to uncompressed feeds for free.
+            guard let stream = InputStream(url: tempURL) else {
+                throw APIError.invalidResponse
+            }
+            return parse(stream: stream, knownChannelIDs: knownChannelIDs)
         }
 
         // Gzip path. Stream-decompress the temp file to a second

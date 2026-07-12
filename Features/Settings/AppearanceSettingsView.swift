@@ -249,12 +249,13 @@ struct AppearanceSettingsView: View {
     }
 
     /// tvOS scale-slider row. Apple TV users don't have a touch
-    /// `Slider` equivalent for the remote, so we expose five
-    /// discrete steps via left/right D-pad buttons. 85 / 92 / 100 /
-    /// 115 / 125% matches the iOS slider's range and keeps the user
-    /// in sync across platforms via iCloud KVS when enabled.
+    /// `Slider` equivalent for the remote, so we expose discrete
+    /// steps via left/right D-pad buttons, matching the iOS slider's
+    /// range (iCloud KVS keeps them in sync when enabled). 150/175%
+    /// are the GH #25 readability steps ("even at 125% the guide is
+    /// hard to see" from across the room): fewer, larger items.
     private func scaleSliderRow_tvOS(title: String, binding: Binding<Double>) -> some View {
-        let steps: [Double] = [0.85, 0.92, 1.0, 1.15, 1.25]
+        let steps: [Double] = [0.85, 0.92, 1.0, 1.15, 1.25, 1.5, 1.75]
         // Snap the current value to the nearest known step so the
         // row's selection state stays coherent even if the user
         // edited UserDefaults directly.
@@ -665,7 +666,9 @@ struct AppearanceSettingsView: View {
                 Image(systemName: "textformat.size.smaller")
                     .foregroundColor(.textTertiary)
                     .font(.system(size: 12))
-                Slider(value: binding, in: 0.85...1.25, step: 0.05)
+                // GH #25: range extended past 125% for TV-across-the-room
+                // readability (fewer, larger items at 150%+).
+                Slider(value: binding, in: 0.85...1.75, step: 0.05)
                     .tint(theme.accent)
                 Image(systemName: "textformat.size.larger")
                     .foregroundColor(.textTertiary)
