@@ -2311,13 +2311,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         let offsetSecs = Double(clamped) / 1000.0
                         let flooredSecs = (offsetSecs / 60.0).rounded(.down) * 60.0
                         if cu.nativeChannelUUID != nil {
-                            // Task #149 native sessions: the seek keeps the
-                            // honest floored-minute model, but the window is
-                            // a NEW session minted at programmeStart+offset
-                            // (async network call) instead of a rebuilt XC
-                            // wall-clock URL. The old session is revoked so
-                            // its provider slot frees immediately rather
-                            // than waiting out the 10-minute idle TTL.
+                            // Task #149 native sessions: a NEW session minted
+                            // at programmeStart+offset (async network call)
+                            // instead of a rebuilt XC wall-clock URL. The old
+                            // session is revoked so its provider slot frees
+                            // immediately rather than waiting out the
+                            // 10-minute idle TTL. NO minute flooring here:
+                            // the sessions API takes full ISO-8601 seconds,
+                            // and flooring broke the +/-30s skips (a +30
+                            // press from mid-minute floored BACKWARD and then
+                            // pinned every following press to the same
+                            // window).
                             self.playbackEnded = false
                             let previousURL = self.catchupCurrentURL ?? cu.url
                             Task { [weak self] in
@@ -2325,14 +2329,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                 guard let newURL = await CatchupSupport.remintNative(
                                     playback: cu,
                                     currentURL: previousURL,
-                                    offsetSeconds: flooredSecs) else {
+                                    offsetSeconds: offsetSecs) else {
                                     debugLog("[CATCHUP] native re-mint failed; keeping current window")
                                     return
                                 }
                                 CatchupSupport.revokeNative(playback: cu, currentURL: previousURL)
                                 self.mpvQueue.async { [weak self] in
                                     guard let self, let mpv = self.activeMPVHandle() else { return }
-                                    self.catchupBaseOffsetMs = Int32(flooredSecs * 1000)
+                                    self.catchupBaseOffsetMs = clamped
                                     self.catchupPendingSeekSecs = nil
                                     self.catchupCurrentURL = newURL
                                     CatchupRelay.currentHeaders = self.headers
@@ -2340,9 +2344,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                     self.mpvCommandAsync(mpv, ["loadfile", relayURL.absoluteString, "replace"])
                                 }
                                 let ps = self.progressStore
-                                let honest = Int32(flooredSecs * 1000)
-                                DispatchQueue.main.async { ps.currentMs = honest }
-                                debugLog("[CATCHUP] native re-tune to window \(Int(flooredSecs))s (requested \(clamped / 1000)s)")
+                                DispatchQueue.main.async { ps.currentMs = clamped }
+                                debugLog("[CATCHUP] native re-tune to \(clamped / 1000)s")
                             }
                             return
                         }
