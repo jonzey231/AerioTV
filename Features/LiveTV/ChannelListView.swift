@@ -53,6 +53,11 @@ struct ChannelListView: View {
     /// scrolls down in the channel list. Hysteresis (80 / 20) on the
     /// scroll-y trigger prevents jitter near the edges.
     @State private var isChromeCollapsed: Bool = false
+    /// GH #55 interactive group swipe: live horizontal offset the list
+    /// renders at while a group drag is in flight, and the per-gesture
+    /// dominance latch (nil until the first onChanged decides).
+    @State private var groupDragOffset: CGFloat = 0
+    @State private var groupDragIsHorizontal: Bool? = nil
     /// Experimental "compact chrome" layout flag, owned by Developer
     /// Settings. When on (iPhone only), the Manage Groups button moves
     /// to the nav-bar trailing edge and the filter/search bars become
@@ -818,13 +823,52 @@ struct ChannelListView: View {
             // check keeps vertical scrolling, pull-to-refresh, and row taps
             // untouched. A collection filter isn't part of the cycle; the
             // first swipe from one lands on All. Mirrored on Android.
+            //
+            // 2026-07-12: interactive drag - the list follows the finger
+            // (rubber-banded when there's no group on that side), and a
+            // committed swipe pages the old list off-screen before the new
+            // group's list slides in from the opposite edge, so it reads as
+            // dragging between pages instead of an instant filter change.
+            .offset(x: groupDragOffset)
             .simultaneousGesture(
                 DragGesture(minimumDistance: 40)
-                    .onEnded { value in
+                    .onChanged { value in
                         let dx = value.translation.width
                         let dy = value.translation.height
-                        guard abs(dx) > 70, abs(dx) > abs(dy) * 1.5 else { return }
-                        cycleGroup(forward: dx < 0)
+                        // Latch dominance once per gesture so a drag that
+                        // starts vertical can never morph into a group drag
+                        // mid-flight (and vice versa).
+                        if groupDragIsHorizontal == nil {
+                            groupDragIsHorizontal = abs(dx) > abs(dy) * 1.5
+                        }
+                        guard groupDragIsHorizontal == true else { return }
+                        groupDragOffset = canCycleGroup(forward: dx < 0) ? dx : dx / 3
+                    }
+                    .onEnded { value in
+                        let wasHorizontal = groupDragIsHorizontal == true
+                        groupDragIsHorizontal = nil
+                        let dx = value.translation.width
+                        let dy = value.translation.height
+                        guard wasHorizontal, abs(dx) > 70, abs(dx) > abs(dy) * 1.5,
+                              canCycleGroup(forward: dx < 0) else {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+                                groupDragOffset = 0
+                            }
+                            return
+                        }
+                        let forward = dx < 0
+                        let width = UIScreen.main.bounds.width
+                        withAnimation(.easeIn(duration: 0.12)) {
+                            groupDragOffset = forward ? -width : width
+                        }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                            cycleGroup(forward: forward)
+                            // Re-enter from the opposite edge with the new group.
+                            groupDragOffset = forward ? width : -width
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                                groupDragOffset = 0
+                            }
+                        }
                     }
             )
             // v1.6.18 — iPhone pills moved here from the VStack
@@ -877,7 +921,7 @@ struct ChannelListView: View {
             // construction: the observer above never sets the flag on iPad.
             // iOS 26+ ignores the manual toggle - the system minimize
             // behavior owns the bar there (aerioTabBarAutoMinimize).
-            .toolbar(legacyScrollAwayTabBarVisibility(collapsed: isChromeCollapsed), for: .tabBar)
+            .legacyScrollAwayTabBar(collapsed: isChromeCollapsed)
             #endif
         }
         // v1.6.13: same mini push-down as the Guide branch above.
@@ -1201,6 +1245,16 @@ struct ChannelListView: View {
         let target = min(max(forward ? current + 1 : current - 1, 0), cycle.count - 1)
         guard cycle[target] != selectedGroup else { return }
         withAnimation { selectedGroup = cycle[target] }
+    }
+
+    /// True when a swipe in that direction has a group to land on (the
+    /// interactive drag rubber-bands instead of following at the ends).
+    private func canCycleGroup(forward: Bool) -> Bool {
+        let cycle = ["All"] + visibleGroups
+        guard cycle.count > 1 else { return false }
+        let current = cycle.firstIndex(of: selectedGroup) ?? 0
+        let target = forward ? current + 1 : current - 1
+        return target >= 0 && target < cycle.count
     }
 
     private func filterChannels() {

@@ -4291,7 +4291,7 @@ struct MainTabView: View {
         // the bar (field report 2026-07-11: "tab bar doesn't come back
         // after fading out the first time"). The four scroll-driven
         // sites keep the manual toggle for iOS 18-25 via
-        // legacyScrollAwayTabBarVisibility(collapsed:).
+        // legacyScrollAwayTabBar(collapsed:).
         .aerioTabBarAutoMinimize()
         // If the user removes their last favorite while on the Favorites tab, redirect home.
         .onChange(of: hasFavorites) { _, nowHasFavorites in
@@ -6007,7 +6007,7 @@ extension View {
     /// the scroll views used stopped UN-hiding on iOS 26 (the bar never
     /// returned after its first fade), so on 26+ the native behavior
     /// owns the tab bar and the manual toggle is disabled - see
-    /// `legacyScrollAwayTabBarVisibility(collapsed:)`. No-op on tvOS
+    /// `legacyScrollAwayTabBar(collapsed:)`. No-op on tvOS
     /// and on iOS 18-25.
     @ViewBuilder
     func aerioTabBarAutoMinimize() -> some View {
@@ -6023,15 +6023,20 @@ extension View {
     }
 }
 
-/// Visibility for the scroll-driven tab bar hide used by
-/// ChannelListView / EPGGuideView / MoviesView / TVShowsView. On iOS
-/// 26+ this always reports `.visible`: the system minimize behavior
-/// (see `aerioTabBarAutoMinimize`) owns hiding there, and the manual
-/// toggle both fights it and never restores the bar. Pre-26 keeps the
-/// original manual collapse.
-func legacyScrollAwayTabBarVisibility(collapsed: Bool) -> Visibility {
-    if #available(iOS 26.0, *) {
-        return .visible
+extension View {
+    /// Scroll-driven tab bar hide used by ChannelListView / EPGGuideView /
+    /// MoviesView / TVShowsView. On iOS 26+ this applies NOTHING: the system
+    /// minimize behavior (see `aerioTabBarAutoMinimize`) owns the bar there,
+    /// and even an explicit `.toolbar(.visible, for: .tabBar)` pins the bar's
+    /// LAYOUT slot - the bar minimizes visually but the freed space stays
+    /// reserved as a blank band under the scroll content (user report
+    /// 2026-07-12). Pre-26 keeps the original manual collapse.
+    @ViewBuilder
+    func legacyScrollAwayTabBar(collapsed: Bool) -> some View {
+        if #available(iOS 26.0, *) {
+            self
+        } else {
+            self.toolbar(collapsed ? .hidden : .visible, for: .tabBar)
+        }
     }
-    return collapsed ? .hidden : .visible
 }
