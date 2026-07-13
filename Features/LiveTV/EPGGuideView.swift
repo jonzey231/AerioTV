@@ -2228,6 +2228,12 @@ struct EPGGuideView: View {
     /// Same phone gate as ChannelListView; iPad keeps its bar.
     @State private var guideTabBarHidden = false
     @State private var tabBarTracker = TabBarScrollTracker()
+    /// Drives the width-adaptive channel-rail width: compact width (iPhone
+    /// portrait, folded foldable) uses a narrower rail so it doesn't eat the
+    /// small screen; regular width (iPad, unfolded foldable) keeps the wider
+    /// rail. Matches the Android guide, which narrowed its rail for the same
+    /// reason.
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
     #if os(tvOS)
     /// Programmatic focus target for a channel row's left-hand cell.
@@ -2315,7 +2321,10 @@ struct EPGGuideView: View {
     /// `GuideProgramButton.cellContent`) scales together. tvOS uses fixed
     /// constants because the slider isn't exposed there.
     @AppStorage("guideScale") private var guideScale: Double = 1.0
-    private var channelColumnWidth: CGFloat { 100 * guideScale }
+    /// Width-adaptive: a 100pt rail eats roughly a quarter of a 375pt phone,
+    /// so compact width narrows it to 78pt. Regular width (iPad, unfolded
+    /// foldable) keeps 100pt. Both still scale with guideScale.
+    private var channelColumnWidth: CGFloat { (horizontalSizeClass == .compact ? 78 : 100) * guideScale }
     private var rowHeight: CGFloat { 72 * guideScale }
     private var timeHeaderHeight: CGFloat { 32 * guideScale }
     private var pixelsPerHour: CGFloat { 360 * guideScale }

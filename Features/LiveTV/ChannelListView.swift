@@ -54,6 +54,11 @@ struct ChannelListView: View {
     @AppStorage("defaultLiveTVView") private var defaultLiveTVView = ""
     @AppStorage("channelSortMode") private var sortModeRaw = "number"
     @State private var showGuideView = false
+    /// True once the user flips the in-screen List / Guide toggle this
+    /// session. Width-based re-seeds (fold / unfold, Split View resize,
+    /// Plus / Max rotation, servers arriving) skip while this is set so a
+    /// manual choice is not stomped. Reset when the Settings default changes.
+    @State private var userDidToggleView = false
     #if os(iOS)
     /// Collapses the iPhone-only chrome (filter pills) when the user
     /// scrolls down in the channel list. Hysteresis (80 / 20) on the
@@ -178,6 +183,23 @@ struct ChannelListView: View {
         return max(0, miniBottomAbs + gap - naturalTopAbsolute)
     }
 
+    #if os(iOS)
+    /// Resolves the width-adaptive List / Guide default for the current
+    /// horizontal size class. Single source of truth so every dispatch site
+    /// (onAppear, servers-arrived, and fold / unfold) agrees.
+    ///
+    /// Compact (iPhone portrait, folded foldable): default List; only an
+    /// explicit "guide" opts in. Regular (iPad, unfolded foldable, Plus / Max
+    /// landscape): default Guide; only an explicit "list" opts out. A nil size
+    /// class is treated as regular. Guide always needs EPG data to render, so a
+    /// server without EPG stays on List regardless of the preference.
+    private func resolvedGuideDefault(hasEPG: Bool) -> Bool {
+        guard hasEPG else { return false }
+        if sizeClass == .compact { return defaultLiveTVView == "guide" }
+        return defaultLiveTVView != "list"
+    }
+    #endif
+
     // #42 Part 1: true while a guide Left is held past threshold; pins focus on
     // the "All" pill so the still-held press cannot overshoot the leading
     // controls. Unconditional (ChannelListView member) because the shared
@@ -280,17 +302,18 @@ struct ChannelListView: View {
                         }
                     }
                     #if os(iOS)
-                    // Guide view toggle — iPad only (iPhone always uses list)
+                    // Guide view toggle: shown on all iOS width classes now
+                    // that iPhone (and the folded foldable) can open the Guide.
+                    // Session-only: toggling never writes defaultLiveTVView.
                     // (iPad search button moved into the chip row, see
                     // groupFilterBar's iPad branch.)
-                    if UIDevice.current.userInterfaceIdiom == .pad {
-                        ToolbarItem(placement: .navigationBarTrailing) {
-                            Button {
-                                withAnimation(.spring(response: 0.25)) { showGuideView.toggle() }
-                            } label: {
-                                Image(systemName: showGuideView ? "list.bullet" : "calendar")
-                                    .foregroundColor(.accentPrimary)
-                            }
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button {
+                            userDidToggleView = true
+                            withAnimation(.spring(response: 0.25)) { showGuideView.toggle() }
+                        } label: {
+                            Image(systemName: showGuideView ? "list.bullet" : "calendar")
+                                .foregroundColor(.accentPrimary)
                         }
                     }
                     // Compact-chrome mode: surface the Manage Groups button in
@@ -413,18 +436,12 @@ struct ChannelListView: View {
                     // tvOS always uses Guide view — list view is not offered.
                     showGuideView = true
                     #else
-                    if UIDevice.current.userInterfaceIdiom == .pad {
-                        // iPad honors the resolved Default Live TV View: an
-                        // explicit "list" wins; "guide" and "" (Automatic) both
-                        // resolve to the iPad form-factor default of Guide.
-                        // Guide still needs EPG data to render.
-                        showGuideView = hasEPG && defaultLiveTVView != "list"
-                    } else {
-                        // iPhone / compact always uses List view. Guide is not
-                        // offered (no in-screen toggle), so an explicit "guide"
-                        // or Automatic resolves to List here.
-                        showGuideView = false
-                    }
+                    // Width-adaptive default: compact (iPhone portrait, folded
+                    // foldable) opens List unless the user explicitly chose
+                    // Guide; regular (iPad, unfolded foldable, Plus / Max
+                    // landscape) opens Guide unless the user explicitly chose
+                    // List. See resolvedGuideDefault.
+                    showGuideView = resolvedGuideDefault(hasEPG: hasEPG)
                     #endif
                     // EPG-search jump (cold path): if SearchView stashed a
                     // pending guide target, force guide mode so EPGGuideView
@@ -485,13 +502,52 @@ struct ChannelListView: View {
                     // tvOS always uses Guide view.
                     if !showGuideView { showGuideView = true }
                     #else
-                    // iPad Automatic / "guide" both default to Guide once EPG
-                    // is known; only an explicit "list" stays on List.
-                    if UIDevice.current.userInterfaceIdiom == .pad && hasEPG && defaultLiveTVView != "list" && !showGuideView {
+                    // Upgrade-only: once EPG arrives, move to Guide if the
+                    // width-adaptive default wants it, but ONLY if the user has
+                    // not manually toggled the view this session. A manual List
+                    // choice must survive a server arriving.
+                    if !userDidToggleView && resolvedGuideDefault(hasEPG: hasEPG) && !showGuideView {
                         showGuideView = true
                     }
                     #endif
                 }
+                #if os(iOS)
+                // Foldables flip the horizontal size class on fold / unfold
+                // (also iPad Split View resize and Plus / Max rotation). Re-seed
+                // the List / Guide default to the new width so a folded foldable
+                // lands on List and an unfolded one lands on Guide, mirroring
+                // Android re-seeding to the width default on a width-class
+                // change. Skipped while a guide-jump is pending (so this does
+                // not fight the EPG-search jump, which forces Guide and consumes
+                // its own pending target) and skipped once the user has manually
+                // toggled the view this session, so an explicit choice survives
+                // fold / unfold, Split View resize, and rotation.
+                .onChange(of: sizeClass) { _, _ in
+                    guard UserDefaults.standard.object(forKey: "guideJumpChannelID") == nil else { return }
+                    guard !userDidToggleView else { return }
+                    let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+                    let hasEPG: Bool = {
+                        guard let s = activeServer else { return false }
+                        if s.type == .m3uPlaylist { return !s.epgURL.isEmpty }
+                        return true
+                    }()
+                    showGuideView = resolvedGuideDefault(hasEPG: hasEPG)
+                }
+                // Changing the Settings default is an explicit, deliberate
+                // choice, so it wins over a stale session toggle: clear the
+                // toggle flag and re-seed the view immediately from the new
+                // default.
+                .onChange(of: defaultLiveTVView) { _, _ in
+                    userDidToggleView = false
+                    let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
+                    let hasEPG: Bool = {
+                        guard let s = activeServer else { return false }
+                        if s.type == .m3uPlaylist { return !s.epgURL.isEmpty }
+                        return true
+                    }()
+                    showGuideView = resolvedGuideDefault(hasEPG: hasEPG)
+                }
+                #endif
                 .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidApplyPreferences)) { _ in
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)

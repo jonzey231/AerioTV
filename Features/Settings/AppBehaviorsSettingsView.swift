@@ -335,42 +335,40 @@ struct AppBehaviorsSettingsView: View {
             .listSectionSeparator(.hidden)
 
             // MARK: Default Live TV View
-            // Shown on iPad, where both layouts are reachable. iPhone is
-            // intentionally omitted: it always uses List (there is no
-            // in-screen Guide toggle), mirroring how Apple TV always uses
-            // Guide. Automatic keeps each form factor on its own default.
-            if UIDevice.current.userInterfaceIdiom == .pad {
-                Section {
-                    ForEach(Self.liveTVViewOptions, id: \.self) { option in
-                        Button {
-                            defaultLiveTVView = option
-                        } label: {
-                            HStack {
-                                Image(systemName: liveTVViewIcon(option))
-                                    .font(.system(size: 15))
+            // Shown on all iOS form factors now that iPhone (and the folded
+            // foldable) can open the Guide. Automatic is width-adaptive, so
+            // each device / posture keeps a sensible default; an explicit
+            // choice here overrides it. Apple TV always uses Guide.
+            Section {
+                ForEach(Self.liveTVViewOptions, id: \.self) { option in
+                    Button {
+                        defaultLiveTVView = option
+                    } label: {
+                        HStack {
+                            Image(systemName: liveTVViewIcon(option))
+                                .font(.system(size: 15))
+                                .foregroundColor(theme.accent)
+                                .frame(width: 24)
+                            Text(liveTVViewLabel(option))
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Spacer()
+                            if defaultLiveTVView == option {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 14, weight: .semibold))
                                     .foregroundColor(theme.accent)
-                                    .frame(width: 24)
-                                Text(liveTVViewLabel(option))
-                                    .font(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Spacer()
-                                if defaultLiveTVView == option {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
                             }
                         }
-                        .listRowBackground(Color.cardBackground)
                     }
-                } header: {
-                    Text("Default Live TV View").sectionHeaderStyle()
-                } footer: {
-                    Text("The layout Live TV opens in. Automatic uses List on iPhone and Guide on iPad and Apple TV. You can still switch anytime with the List / Guide button; that switch lasts for the current session and does not change this default.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                    .listRowBackground(Color.cardBackground)
                 }
-                .listSectionSeparator(.hidden)
+            } header: {
+                Text("Default Live TV View").sectionHeaderStyle()
+            } footer: {
+                Text("The layout Live TV opens in. Automatic uses List on compact, portrait phones and Guide on regular width (unfolded foldable, iPad, Apple TV). You can still switch anytime with the List / Guide button; that switch lasts for the current session and does not change this default.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
             }
+            .listSectionSeparator(.hidden)
 
             // MARK: Channel Flip Gesture
             //
