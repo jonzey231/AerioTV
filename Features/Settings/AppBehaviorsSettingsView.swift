@@ -29,7 +29,13 @@ struct AppBehaviorsSettingsView: View {
     // landing tab and default Live TV layout are launch behavior, and
     // Android has always kept Default Tab on this page.
     @AppStorage("defaultTab") private var defaultTabRaw = AppTab.liveTV.rawValue
-    @AppStorage("defaultLiveTVView") private var defaultLiveTVView = "guide"
+    // Default Live TV View. "" = Automatic (form-factor default: List on
+    // iPhone, Guide on iPad and Apple TV); "list" / "guide" are explicit
+    // overrides. This Settings row is the ONLY writer of the key. The
+    // in-screen List / Guide button switches the current view for the
+    // session only and never persists here, so an explicit choice on one
+    // device no longer clobbers another form factor's default.
+    @AppStorage("defaultLiveTVView") private var defaultLiveTVView = ""
 
     // Live Rewind settings (redesigned 2026-07-11 per user directive
     // from the Z Fold field pass): depth + retention are SLIDER
@@ -53,6 +59,30 @@ struct AppBehaviorsSettingsView: View {
         if mins < 60 { return "\(mins) minutes" }
         if mins == 60 { return "1 hour" }
         return mins % 60 == 0 ? "\(mins / 60) hours" : "\(mins / 60)h \(mins % 60)m"
+    }
+
+    // MARK: - Default Live TV View options
+
+    /// Default Live TV View choices, in display order. "" = Automatic
+    /// (form-factor default: List on iPhone, Guide on iPad and Apple TV);
+    /// "list" / "guide" are explicit overrides written to the shared
+    /// `defaultLiveTVView` key.
+    private static let liveTVViewOptions: [String] = ["", "list", "guide"]
+
+    private func liveTVViewLabel(_ value: String) -> String {
+        switch value {
+        case "list": return "List"
+        case "guide": return "Guide"
+        default: return "Automatic"
+        }
+    }
+
+    private func liveTVViewIcon(_ value: String) -> String {
+        switch value {
+        case "list": return "list.bullet"
+        case "guide": return "calendar"
+        default: return "wand.and.stars"
+        }
     }
 
     /// Storage estimate under the Keep Available slider: scales with
@@ -304,19 +334,23 @@ struct AppBehaviorsSettingsView: View {
             }
             .listSectionSeparator(.hidden)
 
-            // MARK: Default Live TV View (iPad only — iPhone always uses list)
+            // MARK: Default Live TV View
+            // Shown on iPad, where both layouts are reachable. iPhone is
+            // intentionally omitted: it always uses List (there is no
+            // in-screen Guide toggle), mirroring how Apple TV always uses
+            // Guide. Automatic keeps each form factor on its own default.
             if UIDevice.current.userInterfaceIdiom == .pad {
                 Section {
-                    ForEach(["list", "guide"], id: \.self) { option in
+                    ForEach(Self.liveTVViewOptions, id: \.self) { option in
                         Button {
                             defaultLiveTVView = option
                         } label: {
                             HStack {
-                                Image(systemName: option == "list" ? "list.bullet" : "calendar")
+                                Image(systemName: liveTVViewIcon(option))
                                     .font(.system(size: 15))
                                     .foregroundColor(theme.accent)
                                     .frame(width: 24)
-                                Text(option == "list" ? "List" : "Guide")
+                                Text(liveTVViewLabel(option))
                                     .font(.bodyMedium)
                                     .foregroundColor(.textPrimary)
                                 Spacer()
@@ -332,7 +366,7 @@ struct AppBehaviorsSettingsView: View {
                 } header: {
                     Text("Default Live TV View").sectionHeaderStyle()
                 } footer: {
-                    Text("The layout shown when you open the Live TV tab.")
+                    Text("The layout Live TV opens in. Automatic uses List on iPhone and Guide on iPad and Apple TV. You can still switch anytime with the List / Guide button; that switch lasts for the current session and does not change this default.")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
@@ -549,13 +583,17 @@ struct AppBehaviorsSettingsView: View {
                     }
                 }
 
-                // Default Live TV View
+                // Default Live TV View. Apple TV always renders Guide, so
+                // this control sets the shared cross-device default (which
+                // iPad honors) via the same key; Automatic keeps each form
+                // factor on its own default. The in-screen List / Guide pill
+                // stays session-only and never writes here.
                 tvSection("Default Live TV View") {
-                    ForEach(["list", "guide"], id: \.self) { option in
+                    ForEach(Self.liveTVViewOptions, id: \.self) { option in
                         TVSettingsSelectionRow(
-                            icon: option == "list" ? "list.bullet" : "calendar",
+                            icon: liveTVViewIcon(option),
                             iconColor: theme.accent,
-                            label: option == "list" ? "List" : "Guide",
+                            label: liveTVViewLabel(option),
                             isSelected: defaultLiveTVView == option,
                             action: { defaultLiveTVView = option }
                         )

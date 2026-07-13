@@ -45,7 +45,13 @@ struct ChannelListView: View {
     @State private var prefetchTask: Task<Void, Never>? = nil
     @State private var hiddenGroups: Set<String> = []
     @State private var showManageGroups = false
-    @AppStorage("defaultLiveTVView") private var defaultLiveTVView = "guide"
+    // "" = Automatic (form-factor default: List on iPhone, Guide on
+    // iPad and Apple TV); "list" / "guide" are explicit overrides set
+    // ONLY by Settings → App Behaviors → Default Live TV View. The
+    // in-screen List / Guide toggle is session-only (showGuideView) and
+    // never writes this key, so an explicit choice on one device no
+    // longer clobbers another form factor's default.
+    @AppStorage("defaultLiveTVView") private var defaultLiveTVView = ""
     @AppStorage("channelSortMode") private var sortModeRaw = "number"
     @State private var showGuideView = false
     #if os(iOS)
@@ -408,8 +414,15 @@ struct ChannelListView: View {
                     showGuideView = true
                     #else
                     if UIDevice.current.userInterfaceIdiom == .pad {
-                        showGuideView = hasEPG && defaultLiveTVView == "guide"
+                        // iPad honors the resolved Default Live TV View: an
+                        // explicit "list" wins; "guide" and "" (Automatic) both
+                        // resolve to the iPad form-factor default of Guide.
+                        // Guide still needs EPG data to render.
+                        showGuideView = hasEPG && defaultLiveTVView != "list"
                     } else {
+                        // iPhone / compact always uses List view. Guide is not
+                        // offered (no in-screen toggle), so an explicit "guide"
+                        // or Automatic resolves to List here.
                         showGuideView = false
                     }
                     #endif
@@ -472,7 +485,9 @@ struct ChannelListView: View {
                     // tvOS always uses Guide view.
                     if !showGuideView { showGuideView = true }
                     #else
-                    if UIDevice.current.userInterfaceIdiom == .pad && hasEPG && defaultLiveTVView == "guide" && !showGuideView {
+                    // iPad Automatic / "guide" both default to Guide once EPG
+                    // is known; only an explicit "list" stays on List.
+                    if UIDevice.current.userInterfaceIdiom == .pad && hasEPG && defaultLiveTVView != "list" && !showGuideView {
                         showGuideView = true
                     }
                     #endif
