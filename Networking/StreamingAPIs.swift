@@ -361,9 +361,14 @@ struct XtreamCodesAPI {
         var params: [String: String] = ["action": "get_vod_streams"]
         if let id = categoryID { params["category_id"] = id }
         let url = try buildURL(path: "/player_api.php", params: params)
-        // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
-        let (data, response) = try await HTTPRouter.data(from: url, using: Self.largeLibrarySession)
+        // A full VOD library runs to tens of MB. Stream it to a temp file and
+        // decode from a memory-mapped read so the whole body is never resident
+        // in RAM at once (Android GH #26/#31 parity). v1.6.10: HTTPRouter so
+        // HSTS-preloaded TLD HTTP URLs work.
+        let (tempURL, response) = try await HTTPRouter.download(from: url, using: Self.largeLibrarySession)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         try validate(response: response)
+        let data = try Data(contentsOf: tempURL, options: .mappedIfSafe)
         // Some panels return false/null/object for empty or unavailable VOD — treat as empty
         if let items = try? decode([XtreamVODItem].self, from: data) { return items }
         DebugLogger.shared.log("XC get_vod_streams: non-array response (\(data.count) bytes) — treating as empty",
@@ -393,9 +398,14 @@ struct XtreamCodesAPI {
         var params: [String: String] = ["action": "get_series"]
         if let id = categoryID { params["category_id"] = id }
         let url = try buildURL(path: "/player_api.php", params: params)
-        // v1.6.10: HTTPRouter.data so HSTS-preloaded TLD HTTP URLs work.
-        let (data, response) = try await HTTPRouter.data(from: url, using: Self.largeLibrarySession)
+        // A full series library runs to tens of MB. Stream it to a temp file
+        // and decode from a memory-mapped read so the whole body is never
+        // resident in RAM at once (Android GH #26/#31 parity). v1.6.10:
+        // HTTPRouter so HSTS-preloaded TLD HTTP URLs work.
+        let (tempURL, response) = try await HTTPRouter.download(from: url, using: Self.largeLibrarySession)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
         try validate(response: response)
+        let data = try Data(contentsOf: tempURL, options: .mappedIfSafe)
         // Some panels return false/null/object for empty or unavailable series — treat as empty
         if let items = try? decode([XtreamSeriesItem].self, from: data) { return items }
         DebugLogger.shared.log("XC get_series: non-array response (\(data.count) bytes) — treating as empty",
@@ -433,33 +443,11 @@ struct XtreamCodesAPI {
         try? buildURL(path: "/xmltv.php", params: [:])
     }
 
-    /// Fetch the M3U and return a dict of [streamName: streamURL] for URL lookup.
-    /// Also keyed by tvg-id for EPG matching.
-    func fetchM3UStreamURLs() async throws -> [String: URL] {
-        guard let url = m3uURL() else { throw APIError.invalidURL }
-        let (data, response) = try await loggedData(from: url)
-        try validate(response: response)
-        guard let content = String(data: data, encoding: .utf8) else {
-            throw APIError.decodingError(NSError(domain: "M3U", code: -1,
-                userInfo: [NSLocalizedDescriptionKey: "Could not decode M3U as UTF-8"]))
-        }
-        let channels = M3UParser.parse(content: content)
-        var dict: [String: URL] = [:]
-        for ch in channels {
-            guard let streamURL = URL(string: ch.url) else { continue }
-            // Key by name (lowercased for matching)
-            dict[ch.name.lowercased()] = streamURL
-            // Also key by tvg-id if present
-            if !ch.tvgID.isEmpty {
-                dict["tvgid:\(ch.tvgID.lowercased())"] = streamURL
-            }
-            // Also key by tvg-name if present
-            if !ch.tvgName.isEmpty {
-                dict["tvgname:\(ch.tvgName.lowercased())"] = streamURL
-            }
-        }
-        return dict
-    }
+    // Removed the unused `fetchM3UStreamURLs()` (2026-07-13): it had zero
+    // callers and was the one XC path that buffered the whole m3u_plus body
+    // into a String before parsing (the Android GH #31 shape). The live-channel
+    // list is served by `getLiveStreams()` (JSON); the raw m3u_plus is only
+    // parsed via the streaming `M3UParser.fetchAndParse` disk path.
 
     /// Build ordered stream URL attempts for a channel.
     /// Xtream standard: /live/user/pass/stream_id.ext

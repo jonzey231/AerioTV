@@ -104,6 +104,45 @@ enum HTTPRouter {
         }
     }
 
+    /// Streaming analog of `data(from:)` for large responses. An Xtream Codes
+    /// VOD / series library runs to tens of MB; buffering the whole body into a
+    /// RAM `Data` before decode pressured constrained devices (Android GH
+    /// #26/#31 parity). The URLSession route streams straight to a temp file in
+    /// constant memory. The NWConnection route (rare HSTS-preloaded-TLD plain
+    /// HTTP) still buffers, but is capped by `NWHTTPClient` and spilled to a
+    /// file so callers get one uniform shape. The CALLER owns the returned file
+    /// and must delete it (decode it memory-mapped, then remove it).
+    static func download(from url: URL,
+                         using session: URLSession = .shared) async throws -> (URL, URLResponse) {
+        if shouldUseNWConnection(for: url) {
+            let (data, response) = try await NWHTTPClient.data(from: url,
+                                                               timeout: effectiveNWTimeout(using: session))
+            return (try spillToTempFile(data), response)
+        }
+        do {
+            return try await session.download(from: url)
+        } catch let error as NSError where shouldFallbackToNWConnection(error: error) {
+            debugLog("HTTPRouter: URLSession download failed for \(DebugLogger.sanitize(url.absoluteString)) (code=\(error.code) \(error.localizedDescription)) → NWConnection fallback")
+            do {
+                let (data, response) = try await NWHTTPClient.data(from: url,
+                                                                   timeout: effectiveNWTimeout(using: session))
+                return (try spillToTempFile(data), response)
+            } catch {
+                debugLog("HTTPRouter: NWConnection download fallback ALSO failed: \(error)")
+                throw error
+            }
+        }
+    }
+
+    /// Spill an already-buffered body (the NWConnection fallback path) to a temp
+    /// file so `download(from:)` returns a uniform `(URL, URLResponse)`.
+    private static func spillToTempFile(_ data: Data) throws -> URL {
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aerio_xc_\(UUID().uuidString).json")
+        try data.write(to: dest, options: .atomic)
+        return dest
+    }
+
     private static func effectiveNWTimeout(using session: URLSession) -> TimeInterval {
         effectiveNWTimeout(for: nil, using: session)
     }
