@@ -113,6 +113,22 @@ struct MultiviewCommands: Commands {
 extension Notification.Name {
     static let multiviewRequestOpenAddSheet = Notification.Name("MultiviewRequestOpenAddSheet")
 
+    /// Posted by MultiviewTileView when a live stream's connection issue
+    /// starts (object = true, fired from scheduleAutoReconnect) or clears
+    /// (object = false, from clearPlaybackError). The container listens to
+    /// auto-summon + pin the chrome with the Retry cell focused on tvOS,
+    /// so a re-tune is one Select away during an outage (Android parity,
+    /// 2026-07-12).
+    static let connectionIssueChanged = Notification.Name("ConnectionIssueChanged")
+
+    /// Posted by the chrome's Retry cell (object = the audio tile id). The
+    /// matching tile runs its own `retryNow()` so a chrome-driven retry is
+    /// byte-for-byte the card's Retry: cancel the pending countdown, zero it,
+    /// flip to "Reconnecting…", then fire retryAction. Calling retryAction
+    /// straight from the chrome reconnected silently with no visible feedback
+    /// (ATV field test 2026-07-12).
+    static let connectionIssueRetryRequested = Notification.Name("ConnectionIssueRetryRequested")
+
     /// Posted by `SwitchStreamView` after a confirmed Dispatcharr Switch
     /// Stream. The live player coordinator whose proxy URL matches
     /// `userInfo["uuid"]` reloads libmpv onto the same proxy URL so it

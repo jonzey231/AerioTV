@@ -102,6 +102,20 @@ struct MultiviewTileView: View {
     @State private var reconnectCountdown = 0
     @State private var isReconnecting = false
     @State private var autoReconnectTask: Task<Void, Never>? = nil
+    /// True while THIS tile's error card was raised by the pre-terminal
+    /// stall signal (`progressStore.streamStalled`) rather than a real
+    /// terminal `onFatalError`. Tracked so that when frames resume
+    /// (streamStalled -> false) we only tear down a soft card, never a
+    /// live terminal-error reconnect loop, which owns its own teardown via
+    /// `onRecovered`. Cleared the moment a real fatal error upgrades it.
+    @State private var softStall = false
+    /// Backstop for a soft stall that neither recovers nor produces a terminal
+    /// error (a silent frame-stop with healthy network, e.g. Auto-Recover off).
+    /// After a grace period it actively drives `retryAction` so "Reconnecting…"
+    /// is truthful: the stream either re-primes (frames resume -> soft card
+    /// clears) or the re-tune surfaces a real error (-> onFatalError upgrades to
+    /// the terminal card). Either way the soft card can never lie forever.
+    @State private var softStallEscalationTask: Task<Void, Never>? = nil
 
     #if os(tvOS)
     /// Timestamp of the most recent Select press, used to detect
@@ -486,6 +500,19 @@ struct MultiviewTileView: View {
                 reassignAudioIfFinishedTileWasAudio()
             }
         }
+        // Chrome Retry cell -> this tile's own retryNow() (identical to the
+        // card button), so the countdown resets and "Reconnecting…" shows.
+        .onReceive(NotificationCenter.default.publisher(for: .connectionIssueRetryRequested)) { note in
+            if (note.object as? String) == tile.id, decodeErrorMessage != nil {
+                retryNow()
+            }
+        }
+        // Pre-terminal stall -> raise a soft "Reconnecting…" card ~45s before
+        // the terminal-error path would, so a killed source shows feedback fast
+        // instead of a frozen frame (2026-07-13).
+        .onChange(of: progressStore.streamStalled) { _, stalled in
+            handleStreamStall(stalled)
+        }
         .accessibilityLabel(a11yLabel)
     }
 
@@ -634,6 +661,14 @@ struct MultiviewTileView: View {
                         onFatalError: { message in
                             decodeErrorMessage = message
                             isReconnecting = false
+                            // A real terminal error owns the card now: drop the
+                            // soft-stall flag (and its escalation backstop) so a
+                            // later streamStalled->false (frames resuming into the
+                            // reconnect loop) can't tear this real card down.
+                            // onRecovered handles the terminal teardown.
+                            softStall = false
+                            softStallEscalationTask?.cancel()
+                            softStallEscalationTask = nil
                             scheduleAutoReconnect()
                             DebugLogger.shared.log(
                                 "[MV-Tile] decode error: channel=\(tile.item.name) msg=\(Self.sanitizedErrorMessage(message))",
@@ -779,6 +814,11 @@ struct MultiviewTileView: View {
                     reassignAudioIfFinishedTileWasAudio()
                 }
             }
+            // Pre-terminal stall -> soft "Reconnecting…" card (mirrors the
+            // tvOS body); here the card's own Retry button is the affordance.
+            .onChange(of: progressStore.streamStalled) { _, stalled in
+                handleStreamStall(stalled)
+            }
     }
     #endif
 
@@ -887,6 +927,14 @@ struct MultiviewTileView: View {
                             // whole app. The overlay exposes Retry + Remove.
                             decodeErrorMessage = message
                             isReconnecting = false
+                            // A real terminal error owns the card now: drop the
+                            // soft-stall flag (and its escalation backstop) so a
+                            // later streamStalled->false (frames resuming into the
+                            // reconnect loop) can't tear this real card down.
+                            // onRecovered handles the terminal teardown.
+                            softStall = false
+                            softStallEscalationTask?.cancel()
+                            softStallEscalationTask = nil
                             scheduleAutoReconnect()
                             // Log the sanitized message. The raw message can
                             // echo server-controlled bytes (HLS errors, HTTP
@@ -1243,57 +1291,98 @@ struct MultiviewTileView: View {
     /// the card the moment a retry reaches steady playback.
     private func playbackErrorOverlay(_ message: String) -> some View {
         ZStack {
-            Color.black.opacity(0.85)
+            // Soft stall is a "we're on it" state, not a failure: lighter
+            // scrim than the terminal error card.
+            Color.black.opacity(softStall ? 0.72 : 0.85)
             VStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.largeTitle)
-                    .foregroundStyle(.orange)
-                Text("Playback Problem")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                // SECURITY: mpv error strings can echo server-controlled
-                // bytes (HTTP error bodies, HLS parse errors, remote URL
-                // fragments). `verbatim:` disables Markdown interpretation;
-                // `sanitizedErrorMessage` strips control/bidi chars +
-                // caps length.
-                Text(verbatim: Self.sanitizedErrorMessage(message))
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.9))
-                    .multilineTextAlignment(.center)
-                    .lineLimit(3)
-                    .padding(.horizontal, 10)
-                Text(reconnectStatusText)
-                    .font(.footnote)
-                    .foregroundStyle(.white.opacity(0.7))
+                if softStall {
+                    // Pre-terminal: a spinner + "Reconnecting…", NOT the orange
+                    // alarm. If the stream is truly dead this upgrades to the
+                    // terminal card below (softStall flips false); if it
+                    // recovers, it dismisses itself. No server-echoed message
+                    // line (there's no error yet) and no status footnote (the
+                    // headline already says "Reconnecting…").
+                    ProgressView()
+                        #if os(tvOS)
+                        .scaleEffect(1.5)
+                        #endif
+                        .tint(.white)
+                    Text("Reconnecting…")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.largeTitle)
+                        .foregroundStyle(.orange)
+                    // Sole tile = the regular full-screen player: title it like
+                    // one (Android "Channel Unavailable" parity). The multiview
+                    // grid keeps the per-tile "Playback Problem" wording.
+                    Text(isSoleTile ? "Channel Unavailable" : "Playback Problem")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                    // SECURITY: mpv error strings can echo server-controlled
+                    // bytes (HTTP error bodies, HLS parse errors, remote URL
+                    // fragments). `verbatim:` disables Markdown interpretation;
+                    // `sanitizedErrorMessage` strips control/bidi chars +
+                    // caps length.
+                    Text(verbatim: Self.sanitizedErrorMessage(message))
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.9))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .padding(.horizontal, 10)
+                    Text(reconnectStatusText)
+                        .font(.footnote)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
                 HStack(spacing: 12) {
-                    Button {
-                        retryNow()
-                    } label: {
-                        Label("Retry", systemImage: "arrow.clockwise")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(Capsule().fill(Color.accentPrimary))
+                    // tvOS sole tile (the regular full-screen player): Retry
+                    // lives in the standard player controls, auto-summoned +
+                    // focused (Android parity) - the card stays informational
+                    // because a center button can't reliably take Siri-remote
+                    // focus over the playback surface. Grid tiles and iOS
+                    // keep the card button as the direct tap/click affordance.
+                    #if os(tvOS)
+                    let showCardRetry = !isSoleTile
+                    #else
+                    let showCardRetry = true
+                    #endif
+                    if showCardRetry {
+                        Button {
+                            retryNow()
+                        } label: {
+                            Label("Retry", systemImage: "arrow.clockwise")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Capsule().fill(Color.accentPrimary))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
 
-                    Button(role: .destructive) {
-                        DebugLogger.shared.log(
-                            "[MV-Cmd] error overlay Remove tile=\(tile.id)",
-                            category: "Playback", level: .info
-                        )
-                        autoReconnectTask?.cancel()
-                        store.remove(id: tile.id)
-                    } label: {
-                        Label("Remove", systemImage: "xmark.circle")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(Capsule().fill(Color.white.opacity(0.22)))
+                    // Remove is multiview idiom: on the sole full-screen
+                    // channel it read as the wrong player's controls AND
+                    // removing the only tile exits playback outright (ATV
+                    // field report 2026-07-12). Grid tiles keep it.
+                    if !isSoleTile {
+                        Button(role: .destructive) {
+                            DebugLogger.shared.log(
+                                "[MV-Cmd] error overlay Remove tile=\(tile.id)",
+                                category: "Playback", level: .info
+                            )
+                            autoReconnectTask?.cancel()
+                            store.remove(id: tile.id)
+                        } label: {
+                            Label("Remove", systemImage: "xmark.circle")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 8)
+                                .background(Capsule().fill(Color.white.opacity(0.22)))
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
             }
             .padding(12)
@@ -1301,6 +1390,8 @@ struct MultiviewTileView: View {
         .onDisappear {
             autoReconnectTask?.cancel()
             autoReconnectTask = nil
+            softStallEscalationTask?.cancel()
+            softStallEscalationTask = nil
         }
     }
 
@@ -1310,6 +1401,78 @@ struct MultiviewTileView: View {
         return " "
     }
 
+    /// Pre-terminal stall handler, driven by `progressStore.streamStalled`
+    /// (raised by the coordinator's stale-frame watchdog once the picture has
+    /// been wedged ~15s and the forced reload has NOT recovered it). Puts up a
+    /// SOFT "Reconnecting…" card so a killed source shows feedback fast instead
+    /// of a frozen frame — the terminal buffer-relay + LAN/WAN failover +
+    /// direct-fallback ladder can take ~60s to surface its own error.
+    ///
+    /// For the first grace window it stays passive (the relay / watchdog /
+    /// failover keep working underneath; if they recover, frames resume,
+    /// `streamStalled` drops, and this dismisses itself). If it is STILL soft-
+    /// stalled after the grace, it actively drives `retryAction` so the card is
+    /// never "Reconnecting…" while nothing reconnects — the re-tune either
+    /// re-primes the stream or surfaces a real error that upgrades to the
+    /// terminal card. It never disturbs a real terminal-error card (that path
+    /// clears via `onRecovered`).
+    private func handleStreamStall(_ stalled: Bool) {
+        if stalled {
+            // Never paint over a real terminal-error card / reconnect loop
+            // that's already up; that owns the display until onRecovered.
+            guard decodeErrorMessage == nil else { return }
+            softStall = true
+            decodeErrorMessage = "Reconnecting…"   // non-nil => overlay shows
+            isReconnecting = true
+            reconnectCountdown = 0
+            // Light the chrome Retry + auto-summon controls (tvOS), identical
+            // to the terminal path, so a manual re-tune is one Select away.
+            progressStore.connectionIssueActive = true
+            NotificationCenter.default.post(name: .connectionIssueChanged, object: true)
+            DebugLogger.shared.log(
+                "[MV-Tile] soft stall -> reconnecting card channel=\(tile.item.name)",
+                category: "Playback", level: .info
+            )
+            // Escape hatch so the soft card can never lie forever. The grace
+            // (20s) sits past the common self-recovery window (the passive
+            // machinery usually recovers or errors first, cancelling this via
+            // handleStreamStall(false) / onFatalError). If we're still stalled
+            // after it, actively re-tune every 8s: a live source that's truly
+            // dead surfaces a real error -> onFatalError upgrades to the
+            // terminal auto-reconnect card; a recoverable one re-primes ->
+            // frames resume -> the soft card clears. Staying in softStall (we
+            // do NOT flip it here) keeps frame-resume teardown working.
+            softStallEscalationTask?.cancel()
+            softStallEscalationTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 20_000_000_000)
+                while !Task.isCancelled, softStall {
+                    DebugLogger.shared.log(
+                        "[MV-Tile] soft stall escalation: active re-tune channel=\(tile.item.name)",
+                        category: "Playback", level: .info
+                    )
+                    progressStore.retryAction?()
+                    try? await Task.sleep(nanoseconds: 8_000_000_000)
+                }
+            }
+        } else {
+            // Frames resumed. Only tear down if THIS was the soft stall; a real
+            // terminal reconnect loop clears itself via onRecovered instead.
+            guard softStall else { return }
+            softStallEscalationTask?.cancel()
+            softStallEscalationTask = nil
+            softStall = false
+            decodeErrorMessage = nil
+            isReconnecting = false
+            reconnectCountdown = 0
+            progressStore.connectionIssueActive = false
+            NotificationCenter.default.post(name: .connectionIssueChanged, object: false)
+            DebugLogger.shared.log(
+                "[MV-Tile] soft stall cleared (frames resumed) channel=\(tile.item.name)",
+                category: "Playback", level: .info
+            )
+        }
+    }
+
     /// Kick the coordinator's retry immediately (Retry button).
     private func retryNow() {
         DebugLogger.shared.log(
@@ -1317,6 +1480,10 @@ struct MultiviewTileView: View {
             category: "Playback", level: .info
         )
         autoReconnectTask?.cancel()
+        // Manual Retry takes over from the soft-stall backstop (if running) so
+        // the two don't fire re-tunes on top of each other.
+        softStallEscalationTask?.cancel()
+        softStallEscalationTask = nil
         reconnectCountdown = 0
         isReconnecting = true
         progressStore.retryAction?()
@@ -1329,6 +1496,13 @@ struct MultiviewTileView: View {
     private func scheduleAutoReconnect() {
         autoReconnectTask?.cancel()
         reconnectAttempt += 1
+        // Connection-issue flag lives HERE - the same choke point that shows
+        // the error card - so the chrome's Retry cell can never desync from
+        // the card (an earlier coordinator-level latch missed the path that
+        // fired on the ATV field test). The container observes this via the
+        // notification to auto-summon + pin the controls with Retry focused.
+        progressStore.connectionIssueActive = true
+        NotificationCenter.default.post(name: .connectionIssueChanged, object: true)
         // Flat 5s between every auto-retry (Archie, 2026-07-12; Android parity).
         let delay = 5
         autoReconnectTask = Task { @MainActor in
@@ -1350,10 +1524,15 @@ struct MultiviewTileView: View {
     private func clearPlaybackError() {
         autoReconnectTask?.cancel()
         autoReconnectTask = nil
+        softStallEscalationTask?.cancel()
+        softStallEscalationTask = nil
         decodeErrorMessage = nil
         isReconnecting = false
         reconnectCountdown = 0
         reconnectAttempt = 0
+        softStall = false
+        progressStore.connectionIssueActive = false
+        NotificationCenter.default.post(name: .connectionIssueChanged, object: false)
     }
 
     // MARK: - VOD finished overlay (Phase 2)

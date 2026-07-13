@@ -1051,7 +1051,14 @@ struct PlaybackBottomChrome_tvOS: View {
                         a11yHint: "Reconnect the stream"
                     ) {
                         chromeState.reportInteraction()
-                        store.audioProgressStore?.retryAction?()
+                        // Route through the tile's retryNow() (same as the card
+                        // button) so the countdown resets + "Reconnecting…"
+                        // shows; a bare retryAction() call reconnected with no
+                        // visible feedback.
+                        NotificationCenter.default.post(
+                            name: .connectionIssueRetryRequested,
+                            object: store.audioTileID
+                        )
                     }
                 }
 

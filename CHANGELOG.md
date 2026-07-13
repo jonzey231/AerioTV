@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.7.11 - 2026-07-12
+
+### Added
+
+- **Live Rewind.** Pause and rewind live TV, with a "Keep Available" setting
+  for how far back you can go.
+- **Catch-up TV.** Replay already-aired programs straight from the guide on
+  supported servers (Dispatcharr and Xtream Codes with archive), with a
+  scrubbable timeline and native Dispatcharr catch-up sessions.
+- **Unified Apple TV player.** One player for live, rewind, and catch-up -
+  hold left/right on the remote to scrub with smooth acceleration.
+- **Retry in the player controls.** When a stream drops, the controls appear
+  with a focusable Retry, auto-reconnect runs every 5 seconds, and the error
+  card shows what actually went wrong.
+
+### Changed
+
+- iPhone: swipe between channel groups with a fluid drag animation, the group
+  pills follow along, and the channel list fills the whole screen beneath the
+  tab bar (iOS 26).
+- Settings pages unified across iPhone, iPad, and Apple TV.
+- Faster dead-stream detection on live TV (seconds instead of a minute).
+
+### Fixed
+
+- No audio on some Dolby Atmos receivers (32-channel spatial HDMI layouts).
+- Silent audio when the receiver negotiated 44.1kHz.
+- Catch-up playback reliability on Apple TV (connection handling reworked).
+- Recorded playback stability improvements.
+
+
 ## v1.7.10 - 2026-06-30
 
 ### Added

@@ -57,6 +57,19 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.11",
+            title: "What's new in 1.7.11",
+            bullets: [
+                "Live Rewind: pause and rewind live TV, with a Keep Available setting for how far back you can go",
+                "Catch-up TV: replay already-aired programs straight from the guide on supported servers, with a scrubbable timeline",
+                "Apple TV: one unified player for live, rewind, and catch-up - hold left/right to scrub with smooth acceleration",
+                "iPhone: swipe between channel groups with a fluid drag animation, and the list now fills the whole screen under the tab bar",
+                "Better playback errors: see what actually went wrong, auto-reconnect every 5 seconds, and a Retry control in the player",
+                "Fixed no-audio on some Dolby Atmos receivers and other audio reliability improvements"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.11")
+        ),
+        WhatsNewRelease(
             version: "1.7.10",
             title: "What's new in 1.7.10",
             bullets: [

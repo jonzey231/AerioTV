@@ -1003,6 +1003,16 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             lastForcedBlackReloadAt = 0
             forcedReloadWindowStart = 0
             forcedReloadWindowCount = 0
+            // Stall report belongs to the OUTGOING stream: reset the anchor to 0
+            // (restoring the fresh-coordinator invariant so the SET guard's
+            // `lastEnq > 0` again protects the new stream's pre-first-frame
+            // window) and drop any soft card. Setting streamStalled=false when a
+            // soft card was up fires the tile's onChange(false) -> clean teardown
+            // (card + connectionIssueActive + chrome pin). swapStream is
+            // @MainActor so this @Published write is safe here (2026-07-13 review).
+            lastEnqueueTime = 0
+            streamStalledReported = false
+            progressStore.streamStalled = false
             // #37: re-read the kill-switch on every re-arm. Channel-flip and
             // multiview tile swaps reuse this coordinator and skip setupMPV,
             // so re-reading here makes "Auto-Recover Frozen Streams" apply to
@@ -1320,6 +1330,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // measure dwell and skip the reload for brief pauses.
             if paused {
                 pauseStartedAt = Date()
+            } else {
+                // Resuming: restart the stale-frame clock from now. During a
+                // pause `lastEnqueueTime` freezes at the pre-pause frame, so
+                // without this a pause longer than the stall/reload thresholds
+                // would make the resume re-prime gap look like a 15s+ wedge and
+                // flash the soft "Reconnecting…" card (and spuriously trip the
+                // forced-reload sibling). The real first post-resume frame
+                // overwrites this within a tick or two.
+                lastEnqueueTime = CACurrentMediaTime()
             }
             DebugLogger.shared.log(
                 "[MV-PiP] mpv pause=\(paused) tile=\(tileID ?? "single")",
@@ -2154,6 +2173,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // per-stream reload backoff, and by the user Auto-Recover toggle.
         private let staleFrameStormThresholdSec: CFTimeInterval = 12.0
 
+        // Live "stream stalled" REPORT thresholds (2026-07-13). When the
+        // stale-frame reload above fires at 12s and does NOT recover, the
+        // picture stays frozen while the buffer relay + LAN/WAN failover +
+        // direct-fallback ladder grinds toward a terminal error (~60s in the
+        // kill-the-container capture). These raise a pre-terminal
+        // `progressStore.streamStalled` flag so the tile can show a soft
+        // "Reconnecting…" card at ~15s instead. Report at 15s (3s past the
+        // first 12s reload, so a reload that DOES recover never trips it) and
+        // clear the instant real frames resume (staleAge collapses to ~0). The
+        // 3s clear floor sits well above any normal VSync skip so a single
+        // late frame can't flap the flag.
+        private let staleStallReportThresholdSec: CFTimeInterval = 15.0
+        private let staleStallClearThresholdSec: CFTimeInterval = 3.0
+        private var streamStalledReported = false
+
         // v1.7.x black-frame-storm reload watchdog.
         //
         // Archie 2026-06-06 field test on Apple TV (Sky Sports Action HD,
@@ -2917,6 +2951,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             }
             mpv_free(vid)
 
+            // Restart the stale-frame clock on foreground. While backgrounded
+            // with video disabled (vid=no), no frames enqueue, so lastEnqueueTime
+            // freezes at the pre-background frame; on foreground staleAge would
+            // equal the whole background duration and — because the background
+            // pause/unpause bypasses applyPauseIfChanged so lastAppliedPause is
+            // never set — falsely trip the 15s soft "Reconnecting…" report and
+            // the forced-reload watchdog. Repriming here mirrors the resume
+            // branch of applyPauseIfChanged (2026-07-13 review). Repriming the
+            // anchor alone is enough: if a soft card was already up when we
+            // backgrounded, the next watchdog tick sees staleAge < 3s with the
+            // report latch still set and runs the CLEAR arm, dropping the card.
+            lastEnqueueTime = CACurrentMediaTime()
+
             // Undo the defensive pause applied in branch (4), but only if
             // we applied it — never clobber a user-initiated pause. Goes
             // through mpvQueue to match the background-entry write.
@@ -3389,6 +3436,38 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let now = CACurrentMediaTime()
             let lastEnq = lastEnqueueTime
             let staleAge = now - lastEnq
+            // Pre-terminal "stream stalled" report, kept deliberately at the
+            // TOP of the tick so it's driven purely by staleAge + isLive/pause
+            // and does NOT depend on the renderer-ready / cached-buffer guards
+            // that gate the re-enqueue + reload below. Raise at 15s (3s past
+            // the first 12s forced reload, so a reload that recovers never
+            // trips it); clear the instant real frames resume (staleAge
+            // collapses under the 3s floor). The tile turns `streamStalled`
+            // into a soft "Reconnecting…" card ~45s before the buffer-relay +
+            // LAN/WAN failover + direct-fallback ladder would surface its own
+            // terminal error. Not gated on the auto-recover toggle: feedback
+            // is owed even when the user disabled forced reloads.
+            if streamStalledReported, staleAge < staleStallClearThresholdSec {
+                streamStalledReported = false
+                progressStore.streamStalled = false
+            } else if !streamStalledReported,
+                      staleAge >= staleStallReportThresholdSec,
+                      isLive,
+                      lastAppliedPause != true,
+                      // Only report a WEDGE of an actively-playing stream. At a
+                      // fresh open / channel swap, `lastEnqueueTime` is still 0
+                      // (never enqueued a frame) so `staleAge` = seconds-since-
+                      // boot and would fire instantly; and `hasReached…` is the
+                      // "playback genuinely started" latch the forced-reload
+                      // sibling already uses. Both gates keep the soft card off
+                      // the pre-first-frame window (ATV field test 2026-07-13
+                      // caught a ~1.8s flash at every channel start).
+                      hasReachedPlaybackRestartForStream,
+                      lastEnq > 0 {
+                streamStalledReported = true
+                progressStore.streamStalled = true
+                debugLog("[STALL-REPORT] \(streamTag) stale=\(String(format: "%.0f", staleAge * 1000))ms >= \(String(format: "%.0f", staleStallReportThresholdSec * 1000))ms; raising soft reconnecting card")
+            }
             // Effective threshold: floor at 30ms (original safety net),
             // scaled to 1.5x the natural frame interval for streams whose
             // container fps puts a real frame more than the floor apart.
@@ -5211,6 +5290,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // Live: small demuxer buffer prevents A-V desync from runaway video queues.
                 // 50MiB was far too large — video piled up 4000+ packets while audio starved.
                 mpv_set_property_string(mpv, "demuxer-max-bytes", "8MiB")
+                // Dead-server detection (ATV field test 2026-07-12): with the
+                // default network timeout (~60s) a killed Dispatcharr left the
+                // picture FROZEN 30-60s before the error card appeared. 10s
+                // without a single byte on a LIVE feed is already terminal
+                // (Android surfaces at ~6s of stale position), so fail the read
+                // fast and let the reload ladder -> error card -> auto-retry
+                // take over. Live-only: VOD/recordings keep the tolerant default.
+                mpv_set_property_string(mpv, "network-timeout", "8")
                 // cache-pause stays "yes" initially — switched to "no" after playback-restart
                 // so mpv builds an initial 2s buffer before starting playback.
                 mpv_set_property_string(mpv, "cache-secs", String(format: "%.1f", cachingSecs))
@@ -5562,6 +5649,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // playback-restart, so its startup probe is never treated as
             // a wedge.
             hasReachedPlaybackRestartForStream = false
+            // Reset the stall report for the new stream: anchor back to 0 (so the
+            // SET guard's `lastEnq > 0` re-protects the pre-first-frame window)
+            // and drop any soft card carried over from the outgoing stream. Unlike
+            // swapStream, play(url:) can run off a background queue, so the
+            // @Published streamStalled write is hopped to the main actor
+            // (2026-07-13 review).
+            lastEnqueueTime = 0
+            streamStalledReported = false
+            DispatchQueue.main.async { [weak self] in
+                self?.progressStore.streamStalled = false
+            }
             // v1.6.23: route URL strings through DebugLogger.sanitize
             // before any console / file output so Xtream credentials
             // (`/live/<u>/<p>/<id>` and `?username=&password=` query
@@ -5788,8 +5886,6 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // view dismiss its error card.
                         if self.fatalErrorReported {
                             self.fatalErrorReported = false
-                            let store = self.progressStore
-                            Task { @MainActor in store.connectionIssueActive = false }
                             if let recovered = self.onRecovered {
                                 Task { await recovered() }
                             }
@@ -6922,11 +7018,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             } else {
                 fatalErrorReported = true
                 let callback = onFatalError
-                let store = progressStore
-                Task { @MainActor in
-                    store.connectionIssueActive = true
-                    callback(reason)
-                }
+                Task { await callback(reason) }
             }
         }
 

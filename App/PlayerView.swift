@@ -225,6 +225,17 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// with the Android connection-issue Retry). Set by the MPV coordinator
     /// on terminal error, cleared on PLAYBACK_RESTART recovery.
     @Published var connectionIssueActive: Bool = false
+    /// True once the live pipeline has confirmed the picture is wedged: mpv
+    /// has stopped delivering real frames for longer than the stall-report
+    /// threshold and the forced reload has NOT recovered it. Set by the MPV
+    /// coordinator's stale-frame watchdog and cleared the instant real frames
+    /// resume. The tile observes this to raise a soft "Reconnecting…" card
+    /// EARLY (~15s) instead of waiting the full ~60s for the buffer relay +
+    /// LAN/WAN failover + direct-fallback ladder to exhaust into a terminal
+    /// error. Distinct from `connectionIssueActive` (which the terminal-error
+    /// reconnect loop owns): this is the pre-terminal "we noticed, we're on it"
+    /// signal (2026-07-13, kill-the-container freeze fix).
+    @Published var streamStalled: Bool = false
     /// VOD resume tracking — set before playback starts, nil for live
     var vodID: String?
     var vodTitle: String?

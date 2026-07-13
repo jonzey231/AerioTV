@@ -802,6 +802,16 @@ final class MultiviewStore: ObservableObject {
         if relocatingTileID == id {
             relocatingTileID = nil
         }
+        // Become-sole-during-outage: if the removal leaves a single tile that
+        // still has a live connection issue, re-post so the now-sole container
+        // summons the outage chrome + focuses Retry. A plain audio promotion
+        // never re-fires the tile's own connectionIssueChanged flag, so without
+        // this the Retry cell wouldn't auto-appear. The container reads soleness
+        // fresh inside its handler, so this synchronous post is evaluated
+        // against the just-shrunk tile list (2026-07-13 review #162).
+        if tiles.count == 1, audioProgressStore?.connectionIssueActive == true {
+            NotificationCenter.default.post(name: .connectionIssueChanged, object: true)
+        }
     }
 
     /// Explicit audio-focus move. Used by the tap-to-take-audio

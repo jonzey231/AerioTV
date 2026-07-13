@@ -605,6 +605,34 @@ struct MultiviewContainerView: View {
             guard newToken != nil else { return }
             chromeState.reportInteraction()
         }
+        // Connection issue (2026-07-12, Android parity): when the sole live
+        // tile's stream drops, summon + PIN the chrome so the Retry cell is
+        // on screen for the whole outage, and land focus on it - a re-tune is
+        // one Select away. Unpin on recovery; the normal 5s fade takes over.
+        // tvOS-only behavior in effect: the pin + focus targets exist for the
+        // sole-tile chrome, and phones use the tappable card instead.
+        .onReceive(NotificationCenter.default.publisher(for: .connectionIssueChanged)) { note in
+            #if os(tvOS)
+            let active = (note.object as? Bool) ?? false
+            // Soleness is read FRESH here (not the body-captured `isSoleTile`)
+            // so a re-post from `MultiviewStore.remove` — fired after the tile
+            // array already shrank to one — is evaluated against the current
+            // count. That's how the become-sole-via-removal case summons the
+            // outage chrome for the promoted tile (2026-07-13 review #162).
+            let sole = PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1
+            if active {
+                guard sole else { return }
+                summonConnectionIssueChrome()
+            } else {
+                // Release the connection-issue pin on recovery REGARDLESS of
+                // tile count. The recovering tile may no longer be sole (the
+                // user added a tile mid-outage), and the old isSoleTile guard
+                // dropped that false-post, stranding the grid transport bar
+                // permanently pinned-visible (2026-07-13 review #161).
+                chromeState.setPinned(false, reason: .connectionIssue)
+            }
+            #endif
+        }
         // v1.6.15.x: bridge `showStreamInfo` → audio tile's
         // `isStreamInfoVisible`. The audio tile's coordinator only
         // runs the volatile stats timer (codec, bitrate, sync,
@@ -1298,6 +1326,23 @@ struct MultiviewContainerView: View {
     }
 
     #if os(tvOS)
+    /// Summon + pin the sole-tile chrome for a live connection issue and land
+    /// focus on the Retry cell, so a re-tune is one Select away for the whole
+    /// outage. Shared by the `.connectionIssueChanged` notification handler and
+    /// the become-sole `.onChange(of: tiles.count)` path so both raise the
+    /// identical outage chrome (2026-07-13 review).
+    private func summonConnectionIssueChrome() {
+        chromeState.setPinned(true, reason: .connectionIssue)
+        chromeState.reportInteraction()
+        focusedTileID = nil
+        Task { @MainActor in
+            await Task.yield()
+            if chromeState.isVisible && !showTVOptions {
+                focusedChrome = .retry
+            }
+        }
+    }
+
     /// Shared Menu/Back handler for the multiview container. Called
     /// from both the container's own `.onExitCommand` (when focus is
     /// inside the focusSection) and `.onReceive(.playerBackPress)`
@@ -1835,6 +1880,16 @@ final class MultiviewChromeState: ObservableObject {
     /// atomically with the flag change.
     @Published private(set) var isPinned: Bool = false
 
+    /// Distinct reasons the chrome may be pinned. The pin is reference-counted
+    /// over these so two independent owners can't clobber each other: closing
+    /// the Options panel must NOT unpin a chrome that a live connection issue is
+    /// still holding, and a recovering connection issue must NOT unpin a chrome
+    /// the Options panel is still holding. `isPinned` is true while ANY reason
+    /// is active (2026-07-13 review — the pre-existing single-Bool pin leaked
+    /// across these owners and stranded the transport bar visible at N>=2).
+    enum PinReason { case options, connectionIssue }
+    private var pinReasons: Set<PinReason> = []
+
     /// Cancellable auto-hide task for the full chrome.
     private var hideTask: Task<Void, Never>?
 
@@ -1939,11 +1994,13 @@ final class MultiviewChromeState: ObservableObject {
     /// coalesce away. Callers may still follow with `reportInteraction()`
     /// to also refresh the focus ring; it is a harmless no-op for the
     /// fade clock.
-    func setPinned(_ pinned: Bool) {
-        guard isPinned != pinned else { return }
-        debugLog("[MV-Chrome] setPinned(\(pinned)) isVisible=\(isVisible)")
-        isPinned = pinned
-        if pinned {
+    func setPinned(_ pinned: Bool, reason: PinReason = .options) {
+        if pinned { pinReasons.insert(reason) } else { pinReasons.remove(reason) }
+        let shouldPin = !pinReasons.isEmpty
+        guard isPinned != shouldPin else { return }
+        debugLog("[MV-Chrome] setPinned(\(pinned) reason=\(reason)) -> isPinned=\(shouldPin) isVisible=\(isVisible)")
+        isPinned = shouldPin
+        if shouldPin {
             hideTask?.cancel()
             if !isVisible {
                 withAnimation(.easeInOut(duration: 0.25)) {
