@@ -2558,6 +2558,13 @@ struct EPGGuideView: View {
                         let focusTargetID: String? = guideFocusTargetChannelID.flatMap { id in
                             channels.first(where: { $0.id == id })?.id
                         } ?? channels.first?.id
+                        // Keyed by the channel id (Identifiable), not the
+                        // stream URL, because the guide's focus + scroll
+                        // restore targets rows by id (focusedChannelID,
+                        // proxy.scrollTo(channelID)). The channel list is
+                        // deduped by stream URL at load time, so these ids
+                        // are unique even when a provider reuses a tvg-id
+                        // across distinct channels.
                         ForEach(channels) { channel in
                             guideRow(for: channel, screenWidth: geo.size.width, focusTargetID: focusTargetID)
                         }

@@ -769,6 +769,12 @@ struct ChannelListView: View {
                             .frame(height: 0)
                             .id("guide.top")
 
+                        // Keyed by the channel id (Identifiable), not rowKey,
+                        // because the tvOS focus + scroll-restore below targets
+                        // rows by id (`focusedGuideRowID`, prefersDefaultFocus,
+                        // proxy.scrollTo(valid)). The load-time dedup by stream
+                        // URL keeps these ids unique, so no duplicate identity
+                        // can reach this list.
                         ForEach(filteredChannels) { item in
                             ChannelRow(
                                 item: item,
@@ -888,7 +894,10 @@ struct ChannelListView: View {
             }
             #else
             List {
-                ForEach(filteredChannels) { item in
+                // Key rows by the unique stream URL, not the channel id,
+                // so a provider that reuses one tvg-id across distinct
+                // channels can't produce duplicate SwiftUI identities.
+                ForEach(filteredChannels, id: \.rowKey) { item in
                     ChannelRow(
                         item: item,
                         onTap: { startPlayback(item) },
@@ -1730,6 +1739,23 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     /// (`is_catchup`/`catchup_days` on /api/channels/channels/). Xtream
     /// Codes: get_live_streams `tv_archive`/`tv_archive_duration`.
     var catchupDays: Int = 0
+
+    /// Stable SwiftUI list identity keyed by the channel's UNIQUE stream
+    /// URL rather than `id`. A messy provider (large IPTV panels do this)
+    /// can assign the SAME tvg-id to multiple DISTINCT channels, and any
+    /// derived `id` that collapses onto tvg-id would then repeat across
+    /// rows. SwiftUI's `ForEach`/`List` require unique identities; a
+    /// duplicate drops rows, mis-animates, and logs "ID occurs multiple
+    /// times" (the same messy-playlist case hard-crashes the equivalent
+    /// LazyColumn on Android). The stream URL is unique per distinct
+    /// channel, so it disambiguates channels that merely share a tvg-id.
+    /// Falls back to `id` when a channel has no stream URL (Dispatcharr
+    /// channels with a nil server UUID), keeping the key total and
+    /// non-optional. Do NOT use this to replace `id` where scroll-to /
+    /// focus / selection is keyed on the channel id (tvOS guide list, EPG
+    /// guide grid): those stay on `id`, which the load-time dedup below
+    /// keeps unique anyway.
+    var rowKey: String { streamURL?.absoluteString ?? id }
 
     /// True when this channel has any catch-up archive at all.
     var hasCatchup: Bool { catchupDays > 0 }
@@ -3352,7 +3378,9 @@ struct FavoritesView: View {
                     )
                 } else {
                     List {
-                        ForEach(favoritesStore.favoriteItems) { item in
+                        // Keyed by the unique stream URL (see rowKey) so two
+                        // favorited channels sharing a tvg-id stay distinct rows.
+                        ForEach(favoritesStore.favoriteItems, id: \.rowKey) { item in
                             ChannelRow(item: item) {
                                 startPlayback(item)
                             }

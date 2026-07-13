@@ -799,7 +799,9 @@ struct AddToMultiviewSheet: View {
     #else
     private func section(title: String, items: [ChannelDisplayItem]) -> some View {
         Section(title) {
-            ForEach(items) { item in
+            // Keyed by the unique stream URL (rowKey) so two channels
+            // sharing a tvg-id stay distinct within the section.
+            ForEach(items, id: \.rowKey) { item in
                 CompactChannelRow(
                     item: item,
                     isAlreadyAdded: alreadyAdded(item),
@@ -1732,9 +1734,12 @@ private extension ChannelDisplayItem {
     /// `func namespacedID(_:)`) because `ForEach(_:id:)` requires a
     /// `KeyPath<Element, ID>`, and Swift key paths can reference
     /// computed properties but not functions with arguments.
-    var favSectionID: String { "fav:\(id)" }
-    var recentSectionID: String { "recent:\(id)" }
-    var allSectionID: String { "all:\(id)" }
+    /// Namespaced off `rowKey` (the unique stream URL), not `id`, so a
+    /// provider that reuses one tvg-id across distinct channels can't make
+    /// two rows collide within a section.
+    var favSectionID: String { "fav:\(rowKey)" }
+    var recentSectionID: String { "recent:\(rowKey)" }
+    var allSectionID: String { "all:\(rowKey)" }
 }
 
 // MARK: - Shared sheet modifiers

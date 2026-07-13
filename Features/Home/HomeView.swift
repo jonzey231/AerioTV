@@ -2007,6 +2007,19 @@ final class ChannelStore: ObservableObject {
     }
 
     private func sortChannels(_ items: [ChannelDisplayItem], groupOrder: [String]) -> [ChannelDisplayItem] {
+        // Belt-and-suspenders dedup: drop EXACT-duplicate streams before
+        // sorting. A messy provider can return two rows that resolve to
+        // the same stream URL (a repeated M3U entry, or a reseller Xtream
+        // panel that lists a stream_id twice). Collapsing them here keeps
+        // every downstream channel list free of duplicate SwiftUI
+        // identities, which otherwise drop rows / mis-animate on iOS and
+        // hard-crash the equivalent LazyColumn on Android. Keyed by the
+        // unique stream URL (rowKey falls back to id when a channel has no
+        // URL), so DISTINCT channels that merely share a tvg-id are all
+        // kept: they carry different stream URLs. First occurrence wins.
+        var seenRowKeys = Set<String>()
+        let deduped = items.filter { seenRowKeys.insert($0.rowKey).inserted }
+
         // `uniquingKeysWith: { first, _ in first }` so duplicate
         // group names in `groupOrder` (some IPTV resellers ship
         // multiple categories with identical display names) don't
@@ -2015,7 +2028,7 @@ final class ChannelStore: ObservableObject {
         // the same display position.
         let idx = Dictionary(groupOrder.enumerated().map { ($1, $0) },
                              uniquingKeysWith: { first, _ in first })
-        return items.sorted {
+        return deduped.sorted {
             let n0 = numericChannelValue($0.number), n1 = numericChannelValue($1.number)
             if n0 != n1 { return n0 < n1 }
             let g0 = idx[$0.group] ?? Int.max, g1 = idx[$1.group] ?? Int.max
