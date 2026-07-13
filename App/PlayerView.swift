@@ -218,6 +218,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// ignores it (it has its own end handling), so adding it here is a
     /// no-op for that path. Never set for live or DVR live-edge EOF.
     @Published var reachedEOF: Bool = false
+    /// True while a live stream is unavailable (terminal error, awaiting
+    /// auto-reconnect). The container-level chrome reads this off the audio
+    /// tile's store to show a focusable Retry cell in the standard controls
+    /// while the "Channel Unavailable" card is up (2026-07-12, tvOS parity
+    /// with the Android connection-issue Retry). Set by the MPV coordinator
+    /// on terminal error, cleared on PLAYBACK_RESTART recovery.
+    @Published var connectionIssueActive: Bool = false
     /// VOD resume tracking — set before playback starts, nil for live
     var vodID: String?
     var vodTitle: String?

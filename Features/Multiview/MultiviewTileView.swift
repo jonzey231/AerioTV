@@ -1329,7 +1329,8 @@ struct MultiviewTileView: View {
     private func scheduleAutoReconnect() {
         autoReconnectTask?.cancel()
         reconnectAttempt += 1
-        let delay = min(30, 5 << min(reconnectAttempt - 1, 3))
+        // Flat 5s between every auto-retry (Archie, 2026-07-12; Android parity).
+        let delay = 5
         autoReconnectTask = Task { @MainActor in
             var remaining = delay
             while remaining > 0 {

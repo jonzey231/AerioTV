@@ -133,6 +133,9 @@ struct MultiviewContainerView: View {
     /// the chrome fades back out.
     enum ChromeFocusTarget: Hashable {
         case options, addStream, record
+        // Connection-issue Retry (2026-07-12): focusable re-tune in the
+        // standard controls while a live stream is unavailable.
+        case retry
         // Live Rewind transport (task #144)
         case rewind30, playPause, forward30, goLive
         // The timeline band itself (task #147 follow-up): D-pad UP
@@ -926,9 +929,16 @@ struct MultiviewContainerView: View {
                     // Re-check: the user may have dismissed chrome or opened
                     // the Options panel during the hop.
                     if chromeState.isVisible && !showTVOptions {
-                        // Catch-up hides Add Stream, so land on the
-                        // pause cell instead.
-                        focusedChrome = store.catchupTile != nil ? .playPause : .addStream
+                        // Connection issue: the Retry cell leads the row and
+                        // is the action the user wants, so land there.
+                        // Catch-up hides Add Stream, so land on the pause cell.
+                        focusedChrome = if store.audioProgressStore?.connectionIssueActive == true {
+                            .retry
+                        } else if store.catchupTile != nil {
+                            .playPause
+                        } else {
+                            .addStream
+                        }
                     }
                 }
             } else {

@@ -5788,6 +5788,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // view dismiss its error card.
                         if self.fatalErrorReported {
                             self.fatalErrorReported = false
+                            let store = self.progressStore
+                            Task { @MainActor in store.connectionIssueActive = false }
                             if let recovered = self.onRecovered {
                                 Task { await recovered() }
                             }
@@ -6920,7 +6922,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             } else {
                 fatalErrorReported = true
                 let callback = onFatalError
-                Task { await callback(reason) }
+                let store = progressStore
+                Task { @MainActor in
+                    store.connectionIssueActive = true
+                    callback(reason)
+                }
             }
         }
 

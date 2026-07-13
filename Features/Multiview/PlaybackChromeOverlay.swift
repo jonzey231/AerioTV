@@ -1036,6 +1036,25 @@ struct PlaybackBottomChrome_tvOS: View {
 
                 Spacer()
 
+                // Connection-issue Retry: leads the row (auto-focused via the
+                // container's chrome focus default) while the live stream is
+                // unavailable, so the Siri remote has a reachable re-tune - the
+                // in-tile "Playback Problem" card's Retry competes with the
+                // tile's own focus and is fragile to reach (2026-07-12, Android
+                // parity). Fires the same retryAction the card's Retry does.
+                if store.audioProgressStore?.connectionIssueActive == true {
+                    nativeToolButton(
+                        .retry,
+                        icon: "arrow.clockwise",
+                        title: "Retry",
+                        a11yLabel: "Retry",
+                        a11yHint: "Reconnect the stream"
+                    ) {
+                        chromeState.reportInteraction()
+                        store.audioProgressStore?.retryAction?()
+                    }
+                }
+
                 // Live Rewind transport, leading the row so D-pad LEFT
                 // from the existing cells reaches it (same relative
                 // placement the Android TV pill row uses).
