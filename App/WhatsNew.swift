@@ -57,6 +57,17 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.7.12",
+            title: "What's new in 1.7.12",
+            bullets: [
+                "iPhone: view Live TV as a full program Guide, not just a list. Toggle from the top bar, and pick your default in Settings, App Behaviors",
+                "The Guide now adapts to your screen width, so it is ready for the larger and folding iPhones on the way",
+                "Fixed a rare crash while scrolling or searching very large channel lists",
+                "iPhone: removed a solid bar that could appear behind the tab bar underneath the Guide"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.7.12")
+        ),
+        WhatsNewRelease(
             version: "1.7.11",
             title: "What's new in 1.7.11",
             bullets: [
