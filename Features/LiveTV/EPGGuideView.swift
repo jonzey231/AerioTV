@@ -2596,6 +2596,16 @@ struct EPGGuideView: View {
                 .scrollAwayTabBar(collapsed: guideTabBarHidden)
                 #endif
             .clipped()
+            #if os(iOS)
+            // iOS 26: the Guide is now shown on iPhone too, and it was missing
+            // the tab-bar treatment the List already has. Without it the hard
+            // bottom scroll-edge effect paints an opaque platter behind the
+            // floating tab bar (the "solid bar" regression). Same fix as
+            // ChannelListView: hide the bottom scroll-edge effect so guide rows
+            // sit cleanly under the floating bar. The container already extends
+            // under the bar via .ignoresSafeArea(.bottom) above.
+            .aerioContentUnderTabBar()
+            #endif
             .onAppear {
                 visibleProgramWidth = geo.size.width - channelColumnWidth
                 // Catch-up: the grid now extends `hoursBack` (up to 24h)
