@@ -396,11 +396,13 @@ extension DispatcharrAPI {
                       userAgent: String = DeviceInfo.defaultUserAgent) async throws -> DispatcharrJWTPair {
         // v1.7.x diagnostic: log every login attempt + outcome so a
         // user with "can't sign in" reports can capture the exact
-        // failure mode in Console.app. Does NOT log the password
-        // value — that would be a privacy regression. Username is
-        // logged because it's useful for "wrong account picked"
-        // self-diagnosis and isn't a secret.
-        debugLog("📺 Direct Connect login: attempting POST /api/accounts/token/ baseURL=\(baseURL.prefix(60)) username='\(username)' usernameLen=\(username.count) passwordLen=\(password.count)")
+        // failure mode in Console.app. Neither the password nor the
+        // full username is logged (both are half of a credential pair
+        // and these logs get shared in bug reports). The masked form
+        // (first character + length) still supports "wrong account
+        // picked" self-diagnosis without leaking the account name.
+        let usernameMasked = username.isEmpty ? "" : "\(username.prefix(1))***"
+        debugLog("📺 Direct Connect login: attempting POST /api/accounts/token/ baseURL=\(baseURL.prefix(60)) username='\(usernameMasked)' usernameLen=\(username.count) passwordLen=\(password.count)")
         guard let url = URL(string: "\(normalizedBase(baseURL))/api/accounts/token/") else {
             debugLog("📺 Direct Connect login FAIL: malformed URL after normalization")
             throw DispatcharrDirectConnectError.transport("Malformed login URL")

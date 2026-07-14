@@ -52,6 +52,25 @@ class ContentProvider: TVTopShelfContentProvider {
 
     // MARK: - Load content
 
+    /// Minimal SSRF gate for top-shelf image URLs, which come from untrusted
+    /// feed data (channel `logoURL`). This extension has no access to the
+    /// configured server host, so it cannot allow-list a LAN Dispatcharr the
+    /// way the main app's LogoFetcher does; instead it blocks the highest-value
+    /// SSRF targets that are never a legitimate logo host: non-http(s) schemes,
+    /// loopback (127/8, ::1, localhost), and link-local (169.254/16 incl. the
+    /// cloud-metadata endpoint, fe80::). Private LAN ranges are permitted so a
+    /// self-hosted Dispatcharr's own logos still render on the Home screen.
+    private static func isSafeTopShelfImageURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host?.lowercased() else { return false }
+        if host == "localhost" || host == "::1" || host.hasPrefix("127.") { return false }
+        if host.hasPrefix("169.254.") || host.hasPrefix("fe80:") || host.hasPrefix("[fe80:") {
+            return false
+        }
+        return true
+    }
+
     override func loadTopShelfContent() async -> TVTopShelfContent? {
         os_log("loadTopShelfContent called", log: log, type: .default)
 
@@ -70,7 +89,8 @@ class ContentProvider: TVTopShelfContentProvider {
             let items = channelEntries.compactMap { entry -> TVTopShelfSectionedItem? in
                 guard let id = entry["id"], let name = entry["name"] else { return nil }
                 guard let logoStr = entry["logoURL"],
-                      let logoURL = URL(string: logoStr) else { return nil }
+                      let logoURL = URL(string: logoStr),
+                      Self.isSafeTopShelfImageURL(logoURL) else { return nil }
 
                 let item = TVTopShelfSectionedItem(identifier: "channel-\(id)")
                 if let program = entry["currentProgram"], !program.isEmpty {

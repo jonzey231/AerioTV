@@ -3772,6 +3772,28 @@ enum LogoFetcher {
         return nil
     }
 
+    /// SSRF gate for logo fetches. Channel logos come from untrusted feed
+    /// data (M3U `tvg-logo`, Xtream `stream_icon`, Dispatcharr logo JSON),
+    /// so a malicious playlist could point them at `127.0.0.1`, link-local
+    /// `169.254.x`, or a LAN IP to probe the user's network. Allow the
+    /// active server's own host(s) (LAN or WAN, the trust boundary) and
+    /// otherwise defer to `VODService.validateAbsoluteURL` with no server
+    /// host, which permits public hosts but rejects loopback / link-local
+    /// / RFC-1918 targets. Mirrors the gate VOD posters already use.
+    @MainActor
+    static func isAllowedTarget(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        if let server = ChannelStore.shared.activeServer {
+            let candidates = [server.effectiveBaseURL, server.normalizedBaseURL, server.normalizedLocalURL]
+            for raw in candidates {
+                if let candidateHost = URL(string: raw)?.host?.lowercased(), candidateHost == host {
+                    return true
+                }
+            }
+        }
+        return VODService.validateAbsoluteURL(url, serverHost: nil) != nil
+    }
+
     /// Fetch logo bytes with the right auth headers (if any).
     ///
     /// Uses `HTTPRouter` (not bare URLSession) so plain-HTTP servers
@@ -3782,7 +3804,13 @@ enum LogoFetcher {
     /// non-IP-literal HTTP host (HSTS-preloaded TLDs, custom domains
     /// without TLS).
     static func fetch(_ url: URL) async throws -> Data {
-        let headers = await MainActor.run { Self.headers(for: url) }
+        let (allowed, headers) = await MainActor.run {
+            (Self.isAllowedTarget(url), Self.headers(for: url))
+        }
+        // Reject SSRF targets (loopback / link-local / non-server LAN IPs).
+        // CachedLogoImage's catch shows the placeholder, same as any fetch
+        // failure.
+        guard allowed else { throw URLError(.unsupportedURL) }
         var request = URLRequest(url: url)
         if let headers = headers {
             for (key, value) in headers {

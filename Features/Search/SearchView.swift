@@ -182,6 +182,27 @@ struct SearchView: View {
         #endif
     }
 
+    /// SSRF gate for the search-result thumbnail. VOD posters are already
+    /// validated by VODService when the item is built, so they pass through.
+    /// EPG poster URLs are untrusted feed data: allow any configured server's
+    /// host (LAN or WAN) and otherwise block loopback / link-local / private
+    /// SSRF targets via VODService.validateAbsoluteURL.
+    private func validatedPosterURL(_ result: SearchResult) -> URL? {
+        switch result {
+        case .vod:
+            return result.posterURL
+        case .epg(let prog):
+            guard let url = URL(string: prog.posterURL),
+                  let host = url.host?.lowercased() else { return nil }
+            let serverHosts: Set<String> = Set(servers.flatMap { s in
+                [s.effectiveBaseURL, s.normalizedBaseURL, s.normalizedLocalURL]
+                    .compactMap { URL(string: $0)?.host?.lowercased() }
+            })
+            if serverHosts.contains(host) { return url }
+            return VODService.validateAbsoluteURL(url, serverHost: nil)
+        }
+    }
+
     private func resultRow(_ result: SearchResult) -> some View {
         Button {
             switch result {
@@ -191,7 +212,7 @@ struct SearchView: View {
         } label: {
             HStack(spacing: 12) {
                 // Thumbnail
-                AsyncImage(url: result.posterURL) { phase in
+                AsyncImage(url: validatedPosterURL(result)) { phase in
                     if case .success(let img) = phase {
                         img.resizable().aspectRatio(contentMode: .fill)
                             .frame(width: 50, height: 70)

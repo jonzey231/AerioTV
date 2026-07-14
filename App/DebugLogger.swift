@@ -399,9 +399,13 @@ final class DebugLogger: @unchecked Sendable {
     }
 
     /// Log an app lifecycle event (foreground, background, launch, terminate).
+    /// Sanitised like every other structured sink: callers pass static
+    /// strings today, but routing through `sanitize` keeps this from
+    /// becoming an unredacted hole if a future caller includes dynamic data.
     func logLifecycle(_ event: String) {
         guard isEnabled else { return }
-        let entry = formatEntry(level: .lifecycle, category: "Lifecycle", message: event)
+        let entry = formatEntry(level: .lifecycle, category: "Lifecycle",
+                                message: DebugLogger.sanitize(event))
         queue.async { [weak self] in self?.appendToFile(entry) }
     }
 

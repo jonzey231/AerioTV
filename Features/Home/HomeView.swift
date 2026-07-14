@@ -82,7 +82,13 @@ final class VODStore: ObservableObject {
     private func resolveURL(_ raw: String, base: String) -> URL? {
         guard !raw.isEmpty else { return nil }
         if raw.hasPrefix("http://") || raw.hasPrefix("https://") {
-            return URL(string: raw)
+            // SSRF gate: a malicious VOD source could emit poster URLs that
+            // point at localhost / link-local / a LAN IP to probe the user's
+            // network. Validate against the configured server host, matching
+            // VODService.resolveURL (this used to trust the raw URL blindly).
+            guard let url = URL(string: raw) else { return nil }
+            let serverHost = URL(string: base)?.host
+            return VODService.validateAbsoluteURL(url, serverHost: serverHost)
         }
         // Relative path — prepend server base URL.
         let separator = raw.hasPrefix("/") ? "" : "/"
