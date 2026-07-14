@@ -124,6 +124,26 @@ struct AppearanceSettingsView: View {
                         )
                     }
 
+                    // Appearance mode (Dark / Light / System). No segmented
+                    // idiom on the remote, so three selection rows mirroring
+                    // the theme rows above. Orthogonal to the theme choice.
+                    ForEach(AppearanceMode.allCases, id: \.self) { mode in
+                        TVSettingsSelectionRow(
+                            label: mode.displayName,
+                            subtitle: appearanceModeSubtitle(mode),
+                            isSelected: theme.appearanceMode == mode,
+                            action: { theme.setAppearanceMode(mode) },
+                            leading: {
+                                Image(systemName: mode == .dark ? "moon.fill"
+                                      : mode == .light ? "sun.max.fill"
+                                      : "circle.lefthalf.filled")
+                                    .font(.system(size: 24))
+                                    .foregroundColor(theme.accent)
+                                    .frame(width: 28, height: 28)
+                            }
+                        )
+                    }
+
                     // Custom accent toggle
                     TVSettingsToggleRow(
                         icon: "paintpalette.fill", iconColor: theme.accent,
@@ -303,6 +323,17 @@ struct AppearanceSettingsView: View {
         case .forest:     return "Green on near-black"
         case .lavender:   return "Purple on near-black"
         case .monochrome: return "Greyscale on near-black"
+        case .light:      return "Neutral teal-grey that reads on white"
+        }
+    }
+
+    /// One-line description per appearance mode, shown under the
+    /// Dark / Light / System selection rows on tvOS.
+    private func appearanceModeSubtitle(_ mode: AppearanceMode) -> String {
+        switch mode {
+        case .dark:   return "Dark surfaces (default)"
+        case .light:  return "Light surfaces"
+        case .system: return "Follow the system setting"
         }
     }
 
@@ -345,6 +376,29 @@ struct AppearanceSettingsView: View {
                         }
                         .listRowBackground(Color.cardBackground)
                     }
+
+                    // Appearance mode (Dark / Light / System) — a surface
+                    // luminance axis orthogonal to the hue/identity themes
+                    // above. Defaults to Dark; selecting a theme never
+                    // changes the mode, and vice versa.
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Appearance")
+                            .font(.bodyMedium).foregroundColor(.textPrimary)
+                        Picker("Appearance", selection: Binding(
+                            get: { theme.appearanceMode },
+                            set: { theme.setAppearanceMode($0) }
+                        )) {
+                            ForEach(AppearanceMode.allCases, id: \.self) { mode in
+                                Text(mode.displayName).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .onChange(of: theme.appearanceMode) { _, _ in
+                            SyncManager.shared.pushPreferencesImmediate()
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
 
                     // Custom accent color toggle
                     Toggle(isOn: $theme.useCustomAccent) {
@@ -644,7 +698,7 @@ struct AppearanceSettingsView: View {
             // (.textSecondary, .textTertiary) and section header
             // tints stuck on the previous theme. Keying the List
             // identity to the active theme forces a clean rebuild.
-            .id("appearance-list-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
+            .id("appearance-list-\(theme.selectedTheme.rawValue)-\(theme.appearanceMode.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
     }
 
     /// iOS scale-slider row. Single horizontal HStack shared by the

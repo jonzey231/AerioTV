@@ -413,6 +413,10 @@ private struct StreamErrorView: View {
                 }
             }
         }
+        // Player chrome floats over video and stays dark in every appearance
+        // mode (light frosted-glass controls would be low-contrast on video).
+        // Pinning the player root dark also makes every .ultraThinMaterial
+        // control in this subtree resolve dark without per-site overrides.
         .preferredColorScheme(.dark)
         #if os(iOS)
         .statusBarHidden(true)
@@ -997,6 +1001,10 @@ private struct PlayerRootView: View {
                 try? await Task.sleep(nanoseconds: 30_000_000_000) // 30s
             }
         }
+        // Player chrome floats over video and stays dark in every appearance
+        // mode (light frosted-glass controls would be low-contrast on video).
+        // Pinning the player root dark also makes every .ultraThinMaterial
+        // control in this subtree resolve dark without per-site overrides.
         .preferredColorScheme(.dark)
         #if os(iOS)
         .statusBarHidden(!showControls)

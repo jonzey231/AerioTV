@@ -868,6 +868,9 @@ struct AppEntryView: View {
     #endif
     @State private var splashFinished = false
     @Environment(\.modelContext) private var modelContext
+    // Observes appearance mode so `.preferredColorScheme` re-resolves live
+    // when the user flips Dark / Light / System (or an iCloud sync applies it).
+    @ObservedObject private var theme = ThemeManager.shared
 
     var body: some View {
         ZStack {
@@ -911,7 +914,10 @@ struct AppEntryView: View {
             #endif
         }
         .animation(.easeIn(duration: 0.3), value: splashFinished)
-        .preferredColorScheme(.dark)
+        // Resolved appearance mode: .dark / .light, or nil for System (follow OS).
+        // Player chrome and video scrims stay dark independently via their own
+        // `.environment(\.colorScheme, .dark)` overrides.
+        .preferredColorScheme(theme.resolvedColorScheme)
         .onAppear {
             kickoffSplashTimePreload()
         }
@@ -962,6 +968,9 @@ struct RootView: View {
     @Environment(\.modelContext) private var modelContext
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
+    // Observes appearance mode so the app re-resolves its color scheme live
+    // when the user changes Dark / Light / System in Settings.
+    @ObservedObject private var theme = ThemeManager.shared
 
     /// Guards against the re-entrant loop: merge → save → servers.count onChange → push → bounce → merge.
     @State private var isMergingRemote = false
@@ -995,12 +1004,12 @@ struct RootView: View {
 
     var body: some View {
         MainTabView()
-            .preferredColorScheme(.dark)
+            .preferredColorScheme(theme.resolvedColorScheme)
             .fullScreenCover(isPresented: $showOnboarding) {
                 NavigationStack {
                     WelcomeView(hasCompletedOnboarding: $hasCompletedOnboarding)
                 }
-                .preferredColorScheme(.dark)
+                .preferredColorScheme(theme.resolvedColorScheme)
             }
             .whatsNewSheet(isPresented: $showWhatsNew)
             .alert("New: Live Rewind", isPresented: $showLiveRewindPrompt) {

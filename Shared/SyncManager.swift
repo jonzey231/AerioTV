@@ -68,6 +68,11 @@ final class SyncManager: ObservableObject {
 
     private let syncStringKeys = [
         "selectedTheme", "liquidGlassStyle", "customAccentHex",
+        // Appearance mode (dark / light / system). Rides the same prefs lane
+        // as the accent hex so it syncs across ALL of the user's devices (not
+        // per-device-type). Absent on older clients / fresh installs resolves
+        // to .dark in ThemeManager, preserving the dark default.
+        "appearanceMode",
         // NOTE: "defaultLiveTVView" is intentionally NOT synced. The correct
         // default is form-factor specific (Apple TV / iPad -> Guide, iPhone ->
         // List), so a single synced value let an iPhone's "list" clobber the

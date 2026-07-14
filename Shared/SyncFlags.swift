@@ -56,7 +56,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
         case .reminders:
             return "Upcoming-program reminders you scheduled from the EPG."
         case .preferences:
-            return "Theme, accent color, default tab, refresh schedule, hidden groups, and Guide Display settings."
+            return "Theme, appearance mode, accent color, default tab, refresh schedule, hidden groups, and Guide Display settings."
         case .credentials:
             return "Server passwords and API keys, stored in iCloud Keychain."
         }

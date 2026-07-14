@@ -523,7 +523,7 @@ struct WhatsNewSheet: View {
         .frame(maxWidth: .infinity)
         .background(Color(.systemBackground))
         #endif
-        .preferredColorScheme(.dark)
+        .preferredColorScheme(ThemeManager.shared.resolvedColorScheme)
     }
 
     // MARK: Subviews

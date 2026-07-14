@@ -23,25 +23,52 @@ extension Color {
     /// Dim accent — low-opacity fill, e.g. icon badge backgrounds.
     static var accentDim:       Color { ThemeManager.shared.accent.opacity(0.22) }
 
-    // MARK: Text — derived from accent so they complement any theme
-    /// Primary text — near-white, works on all dark backgrounds.
-    static let textPrimary = Color(hex: "E8F4F8")
-    /// Secondary text — accent-tinted at medium opacity (≈ muted teal on default theme).
+    // MARK: Text — mode-aware for legibility on both dark and light grounds
+    /// Dark-mode ink for secondary/tertiary text and borders in light mode.
+    /// A near-black slate (`#0F1B24`) so accent-tinted greys don't wash out
+    /// on white; the near-white `E8F4F8` is invisible on a light ground.
+    private static let lightInk = Color(hex: "0F1B24")
+
+    /// Primary text — near-white on dark grounds, near-black slate on light.
+    static var textPrimary: Color {
+        ThemeManager.resolve(dark: Color(hex: "E8F4F8"), light: lightInk)
+    }
+    /// Secondary text — accent-tinted on dark; darker, higher-alpha ink on
+    /// light (accent-alpha greys wash out on white).
     #if os(tvOS)
-    static var textSecondary: Color { ThemeManager.shared.accent.opacity(0.75) }
+    static var textSecondary: Color {
+        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.75),
+                             light: lightInk.opacity(0.64))
+    }
     #else
-    static var textSecondary: Color { ThemeManager.shared.accent.opacity(0.65) }
+    static var textSecondary: Color {
+        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.65),
+                             light: lightInk.opacity(0.60))
+    }
     #endif
-    /// Tertiary text — accent-tinted at low opacity for hints, labels, etc.
+    /// Tertiary text — accent-tinted at low opacity on dark; ink for hints on light.
     #if os(tvOS)
-    static var textTertiary:  Color { ThemeManager.shared.accent.opacity(0.45) }
+    static var textTertiary:  Color {
+        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.45),
+                             light: lightInk.opacity(0.46))
+    }
     #else
-    static var textTertiary:  Color { ThemeManager.shared.accent.opacity(0.28) }
+    static var textTertiary:  Color {
+        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.28),
+                             light: lightInk.opacity(0.42))
+    }
     #endif
 
-    // Borders — accent-tinted so dividers stay visually coherent with the theme
-    static var borderSubtle: Color { ThemeManager.shared.accent.opacity(0.10) }
-    static var borderMedium: Color { ThemeManager.shared.accent.opacity(0.18) }
+    // Borders — accent-tinted on dark; on light, blend toward ink at a higher
+    // alpha so dividers stay visible on white without the accent washing out.
+    static var borderSubtle: Color {
+        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.10),
+                             light: lightInk.opacity(0.12))
+    }
+    static var borderMedium: Color {
+        ThemeManager.resolve(dark: ThemeManager.shared.darkAccent.opacity(0.18),
+                             light: lightInk.opacity(0.20))
+    }
 
     // Status
     static let statusLive    = Color(hex: "FF4757")
