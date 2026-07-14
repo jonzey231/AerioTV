@@ -2743,17 +2743,21 @@ struct EPGGuideView: View {
                 }
             }
             .onChange(of: geo.size.width) { _, w in visibleProgramWidth = w - channelColumnWidth }
+            #if os(iOS)
+            // iOS-only: `guideScale` (the Settings -> Appearance -> Display
+            // Scale -> Guide slider) exists only on iOS; the tvOS guide uses
+            // fixed sizing and has no scale slider, so there is nothing to
+            // re-anchor there. When the scale changes, pixelsPerHour changes but
+            // horizontalOffset (points) does NOT, so the same offset now maps to
+            // a different wall-clock time and the grid can jump into an empty
+            // window and blank (the Android TV report, same code shape here).
+            // Re-anchor to "now" at the new scale, clamped to the valid range.
+            // This guide has no live pinch, so guideScale only changes from the
+            // discrete slider and this never fights a gesture.
             .onChange(of: guideScale) { _, _ in
-                // Guide Display Scale changed (Settings -> Appearance -> Display
-                // Scale -> Guide): pixelsPerHour changes but horizontalOffset
-                // (points) does NOT, so the same offset now maps to a different
-                // wall-clock time and the grid can jump into an empty window and
-                // blank -- the Android TV report, same code shape here. Re-anchor
-                // to "now" at the new scale, clamped to the valid range. This
-                // guide has no live pinch, so guideScale only changes from the
-                // discrete slider and this never fights a gesture.
                 horizontalOffset = min(0, max(maxHorizontalOffset, -CGFloat(hoursBack) * pixelsPerHour))
             }
+            #endif
             #if os(iOS)
             // Horizontal drag for scrubbing the guide timeline.
             // Uses `.simultaneousGesture` so it coexists with the
