@@ -3922,6 +3922,17 @@ private struct GuideProgramButton: View {
                         .foregroundColor(isFocused ? .white : .accentPrimary)
                 }
             }
+            // GH #34: the XMLTV <sub-title> (episode / sports-match name) is what
+            // distinguishes same-title back-to-back programmes. Guarded against
+            // the Dispatcharr paths that promote subTitle into description when
+            // <desc> is empty, so it never double-prints.
+            if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+                Text(sub)
+                    .font(.system(size: 18))
+                    .italic()
+                    .foregroundColor(isFocused ? .white.opacity(0.85) : .textSecondary)
+                    .lineLimit(1)
+            }
             if !prog.description.isEmpty {
                 Text(prog.description)
                     .font(.system(size: 18))
@@ -3959,6 +3970,15 @@ private struct GuideProgramButton: View {
                         .font(.system(size: 9 * guideScale))
                         .foregroundColor(.accentPrimary)
                 }
+            }
+            // GH #34: XMLTV <sub-title> (match/episode name), guarded against the
+            // Dispatcharr promote-into-description case so it never double-prints.
+            if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+                Text(sub)
+                    .font(.system(size: 10 * guideScale))
+                    .italic()
+                    .foregroundColor(.textSecondary)
+                    .lineLimit(1)
             }
             if !prog.description.isEmpty {
                 Text(prog.description)

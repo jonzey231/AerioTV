@@ -1897,22 +1897,23 @@ struct ChannelRow: View {
     /// subtitle stays empty in that case (no more group-name
     /// fallback). Both the inline "now playing" line in the row
     /// and the progress bar consult this single tuple.
-    private var liveProgram: (title: String, description: String?, start: Date, end: Date, flags: EPGFlags)? {
+    private var liveProgram: (title: String, subTitle: String?, description: String?, start: Date, end: Date, flags: EPGFlags)? {
         if let title = item.currentProgram, !title.isEmpty,
            let start = item.currentProgramStart,
            let end = item.currentProgramEnd {
-            // ChannelDisplayItem doesn't carry the feed badge flags; when
-            // GuideStore has the same now-airing program, borrow its flags
-            // so the collapsed row can still show LIVE/NEW/etc.
-            let flags = guideStore.programs[item.id]?
-                .first(where: { $0.isLive })
+            // ChannelDisplayItem doesn't carry the feed badge flags or the
+            // XMLTV <sub-title>; when GuideStore has the same now-airing
+            // program, borrow both so the collapsed row can show LIVE/NEW and
+            // the episode / sports-match name (GH #34).
+            let liveGuideProg = guideStore.programs[item.id]?.first(where: { $0.isLive })
+            let flags = liveGuideProg
                 .map { EPGFlags(isNew: $0.isNew, isLiveBroadcast: $0.isLiveBroadcast,
                                 isPremiere: $0.isPremiere, isFinale: $0.isFinale,
                                 isRepeat: $0.isRepeat) } ?? EPGFlags()
-            return (title, item.currentProgramDescription, start, end, flags)
+            return (title, liveGuideProg?.subTitle, item.currentProgramDescription, start, end, flags)
         }
         if let p = guideStore.programs[item.id]?.first(where: { $0.isLive }) {
-            return (p.title, p.description, p.start, p.end,
+            return (p.title, p.subTitle, p.description, p.start, p.end,
                     EPGFlags(isNew: p.isNew, isLiveBroadcast: p.isLiveBroadcast,
                              isPremiere: p.isPremiere, isFinale: p.isFinale,
                              isRepeat: p.isRepeat))
@@ -2269,6 +2270,16 @@ struct ChannelRow: View {
                                     EPGFlagsRow(flags: prog.flags.badges, compact: true)
                                 }
                             }
+                            // GH #34: XMLTV <sub-title> (match/episode name),
+                            // guarded so a Dispatcharr promote-into-description
+                            // program doesn't print it twice.
+                            if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+                                Text(sub)
+                                    .font(.system(size: 18))
+                                    .italic()
+                                    .foregroundColor(.textSecondary)
+                                    .lineLimit(1)
+                            }
                             if let desc = prog.description, !desc.isEmpty {
                                 Text(desc)
                                     .font(.system(size: 18))
@@ -2388,6 +2399,15 @@ struct ChannelRow: View {
                         if showEpgBadges {
                             EPGFlagsRow(flags: prog.flags.badges, compact: true)
                         }
+                    }
+                    // GH #34: XMLTV <sub-title> (match/episode name), guarded
+                    // against the Dispatcharr promote-into-description case.
+                    if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+                        Text(sub)
+                            .font(.system(size: (isWide ? 12 : 10) * s))
+                            .italic()
+                            .foregroundColor(.textSecondary)
+                            .lineLimit(1)
                     }
                     if let desc = prog.description, !desc.isEmpty {
                         Text(desc)
