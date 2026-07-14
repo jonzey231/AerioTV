@@ -187,6 +187,10 @@ struct ProgramInfoView: View {
     private var end: Date { target.end }
     private var isLive: Bool { start <= Date() && end > Date() }
 
+    /// User toggle: hide the LIVE/NEW/season-episode pills. Synced per
+    /// device type (tv vs mobile) via `epgBadgesVisibleKey`.
+    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+
     /// Feed-driven flag badges (LIVE / NEW / PREMIERE / FINALE / REPEAT).
     private var feedFlags: [EPGFlag] {
         epgFlagBadges(isLiveBroadcast: target.isLiveBroadcast, isNew: target.isNew,
@@ -198,12 +202,17 @@ struct ProgramInfoView: View {
     /// pill for a program airing right now that is NOT itself flagged a
     /// live broadcast. Suppressing "ON NOW" when `isLiveBroadcast` avoids
     /// a double LIVE-style pill (the feed LIVE badge already covers it).
+    /// When the user hides program badges, we keep the app-generated
+    /// "ON NOW" status pill but drop the feed-driven flags (parity with
+    /// the Android ProgramInfoSheet).
     private var titleBadges: [EPGFlag] {
         var out: [EPGFlag] = []
         if isLive && !target.isLiveBroadcast {
             out.append(EPGFlag(label: "ON NOW", color: .statusLive))
         }
-        out.append(contentsOf: feedFlags)
+        if showEpgBadges {
+            out.append(contentsOf: feedFlags)
+        }
         return out
     }
 

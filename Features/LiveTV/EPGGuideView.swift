@@ -3863,6 +3863,8 @@ private struct GuideProgramButton: View {
     @FocusState private var isFocused: Bool
     #endif
 
+    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+
     private var hasReminder: Bool {
         isFutureProgram && reminderManager.hasReminder(forKey: reminderKey)
     }
@@ -3877,7 +3879,7 @@ private struct GuideProgramButton: View {
         let flags = epgFlagBadges(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
                                   isPremiere: prog.isPremiere, isFinale: prog.isFinale,
                                   isRepeat: prog.isRepeat)
-        if seLabel != nil || !flags.isEmpty {
+        if showEpgBadges, seLabel != nil || !flags.isEmpty {
             HStack(spacing: 4) {
                 SeasonEpisodePill(label: seLabel, compact: true)
                 EPGFlagsRow(flags: flags, compact: true)
@@ -3918,10 +3920,12 @@ private struct GuideProgramButton: View {
                 Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
                     .font(.system(size: 17))
                     .foregroundColor(isFocused ? .white.opacity(0.6) : .textTertiary)
-                SeasonEpisodePill(season: prog.season, episode: prog.episode, compact: true)
-                EPGFlagsRow(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
-                            isPremiere: prog.isPremiere, isFinale: prog.isFinale,
-                            isRepeat: prog.isRepeat, compact: true)
+                if showEpgBadges {
+                    SeasonEpisodePill(season: prog.season, episode: prog.episode, compact: true)
+                    EPGFlagsRow(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
+                                isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                                isRepeat: prog.isRepeat, compact: true)
+                }
             }
             #else
             HStack(spacing: 4) {

@@ -1943,6 +1943,7 @@ struct ChannelRow: View {
     /// GH #19 (Android parity): when off, the channel-number column is
     /// hidden. Cross-platform; defaults on.
     @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
+    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
     @State private var reminderTarget: EPGEntry?
@@ -2264,7 +2265,9 @@ struct ChannelRow: View {
                                 nowPlayingTimeRemaining(end: prog.end)
                                 // Feed badges (LIVE/NEW/PREMIERE/...) for the
                                 // now-airing program; renders nothing when none.
-                                EPGFlagsRow(flags: prog.flags.badges, compact: true)
+                                if showEpgBadges {
+                                    EPGFlagsRow(flags: prog.flags.badges, compact: true)
+                                }
                             }
                             if let desc = prog.description, !desc.isEmpty {
                                 Text(desc)
@@ -2382,7 +2385,9 @@ struct ChannelRow: View {
                         nowPlayingTimeRemaining(end: prog.end)
                         // Feed badges (LIVE/NEW/PREMIERE/...) for the
                         // now-airing program; renders nothing when none.
-                        EPGFlagsRow(flags: prog.flags.badges, compact: true)
+                        if showEpgBadges {
+                            EPGFlagsRow(flags: prog.flags.badges, compact: true)
+                        }
                     }
                     if let desc = prog.description, !desc.isEmpty {
                         Text(desc)
@@ -3287,7 +3292,7 @@ struct ChannelRow: View {
         let flags = epgFlagBadges(isLiveBroadcast: entry.isLiveBroadcast,
                                   isNew: entry.isNew, isPremiere: entry.isPremiere,
                                   isFinale: entry.isFinale, isRepeat: entry.isRepeat)
-        if seLabel != nil || !flags.isEmpty {
+        if showEpgBadges, seLabel != nil || !flags.isEmpty {
             HStack(spacing: 6) {
                 SeasonEpisodePill(label: seLabel, compact: true)
                 EPGFlagsRow(flags: flags, compact: true)

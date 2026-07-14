@@ -757,6 +757,16 @@ struct EPGFlag {
 /// when nothing applies. FINALE shares the PREMIERE purple (Android
 /// parity). A simple free function so `GuideProgram`, `EPGProgram`,
 /// `EPGEntry`, and `ProgramInfoTarget` can all feed it their 5 Bools.
+/// @AppStorage key for the "Show program badges" preference on THIS device type.
+/// Per-device-type: tvOS and iOS store separately and both sync, so a TV's
+/// choice follows the user's Apple TVs and a phone/tablet's follows their
+/// iPhones/iPads, independently. Default true (badges shown).
+#if os(tvOS)
+let epgBadgesVisibleKey = "showEpgBadges.tv"
+#else
+let epgBadgesVisibleKey = "showEpgBadges.mobile"
+#endif
+
 func epgFlagBadges(isLiveBroadcast: Bool,
                    isNew: Bool,
                    isPremiere: Bool,

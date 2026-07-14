@@ -146,6 +146,13 @@ struct AppBehaviorsSettingsView: View {
     @AppStorage("appBehaviorsAutoRecoverFrozenStreams")
     private var autoRecoverFrozenStreams = true
 
+    /// Show the LIVE / NEW / season-episode pills on the guide, channel
+    /// list, and program info. Default ON. Synced per device type (tv vs
+    /// mobile) via `epgBadgesVisibleKey`, so an Apple TV preference and an
+    /// iPhone/iPad preference are remembered independently but each syncs
+    /// across that user's devices of the same kind.
+    @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+
     // MARK: - TMDB program posters (opt-in, off by default)
 
     /// Master toggle for the TMDB-by-title poster fallback.
@@ -366,6 +373,28 @@ struct AppBehaviorsSettingsView: View {
                 Text("Default Live TV View").sectionHeaderStyle()
             } footer: {
                 Text("The layout Live TV opens in. Automatic uses List on compact, portrait phones and Guide on regular width (unfolded foldable, iPad, Apple TV). You can still switch anytime with the List / Guide button; that switch lasts for the current session and does not change this default.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+            .listSectionSeparator(.hidden)
+
+            // MARK: Guide badges
+            Section {
+                Toggle(isOn: $showEpgBadges) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Show program badges")
+                            .font(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                        Text("LIVE, NEW, and season/episode pills on the guide")
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+            } header: {
+                Text("Guide").sectionHeaderStyle()
+            } footer: {
+                Text("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for iPhone/iPad and Apple TV, and synced across your devices of that kind.")
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)
@@ -596,6 +625,22 @@ struct AppBehaviorsSettingsView: View {
                             action: { defaultLiveTVView = option }
                         )
                     }
+                }
+
+                tvSection("Guide") {
+                    TVSettingsToggleRow(
+                        icon: "tag",
+                        iconColor: theme.accent,
+                        title: "Show Program Badges",
+                        subtitle: "LIVE, NEW, and season/episode pills on the guide",
+                        isOn: $showEpgBadges
+                    ) { _ in }
+
+                    Text("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for Apple TV and iPhone/iPad, and synced across your Apple TVs.")
+                        .font(.system(size: 22))
+                        .foregroundColor(.textTertiary)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 4)
                 }
 
                 tvSection("Live Rewind") {

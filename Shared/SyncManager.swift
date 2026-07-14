@@ -101,6 +101,11 @@ final class SyncManager: ObservableObject {
     ]
     private let syncBoolKeys = [
         "useCustomAccent", "preferAVPlayer", "bgRefreshEnabled",
+        // EPG program badges visibility, PER DEVICE TYPE: both keys sync so a
+        // TV's choice mirrors to the user's other Apple TVs and a phone/tablet's
+        // to their iPhones/iPads, independently. Each device reads its own via
+        // epgBadgesVisibleKey.
+        "showEpgBadges.tv", "showEpgBadges.mobile",
         // TMDB program-posters enable toggle. The API key already syncs via
         // the iCloud Keychain (TMDBPosters.saveAPIKey synchronizable), so the
         // enable state follows it across reinstalls/devices instead of needing
