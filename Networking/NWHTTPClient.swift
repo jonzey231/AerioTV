@@ -107,12 +107,33 @@ enum NWHTTPClient {
                                  timeout: timeout)
     }
 
+    /// Streaming variant of `data(for:)`. The FINAL 2xx response body is handed
+    /// to `onBody` chunk-by-chunk as it arrives (bypassing the maxBodyBytes RAM
+    /// buffer) instead of being accumulated; the returned `URLResponse` is the
+    /// head. Reuses the same connect / redirect (incl. http->https) / chunked /
+    /// content-length / until-close machinery as the buffered path. `timeout`
+    /// here is an IDLE deadline (reset on every received chunk), so a large body
+    /// streams fine while a stalled connection is still cut. Intended for the
+    /// catch-up timeshift relay, which must not buffer a multi-GB .ts in memory.
+    static func stream(for request: URLRequest,
+                       timeout: TimeInterval = defaultTimeout,
+                       onBody: @escaping @Sendable (Data) -> Void) async throws -> URLResponse {
+        guard let url = request.url else { throw NWHTTPError.invalidURL }
+        let (_, response) = try await perform(request: request,
+                                              currentURL: url,
+                                              redirectsLeft: maxRedirects,
+                                              timeout: timeout,
+                                              bodySink: onBody)
+        return response
+    }
+
     // MARK: - Core exchange
 
     private static func perform(request originalRequest: URLRequest,
                                 currentURL: URL,
                                 redirectsLeft: Int,
-                                timeout: TimeInterval) async throws -> (Data, URLResponse) {
+                                timeout: TimeInterval,
+                                bodySink: (@Sendable (Data) -> Void)? = nil) async throws -> (Data, URLResponse) {
         guard let scheme = currentURL.scheme?.lowercased(),
               scheme == "http" || scheme == "https",
               let host = currentURL.host, !host.isEmpty else {
@@ -171,7 +192,8 @@ enum NWHTTPClient {
                                   queue: queue,
                                   url: currentURL,
                                   requestBytes: requestBytes,
-                                  timeout: timeout)
+                                  timeout: timeout,
+                                  bodySink: bodySink)
         } onCancel: {
             connection.cancel()
         }
@@ -208,7 +230,8 @@ enum NWHTTPClient {
             return try await perform(request: nextRequest,
                                      currentURL: nextURL,
                                      redirectsLeft: redirectsLeft - 1,
-                                     timeout: timeout)
+                                     timeout: timeout,
+                                     bodySink: bodySink)
         }
 
         return (data, http)
@@ -221,18 +244,38 @@ enum NWHTTPClient {
                                     queue: DispatchQueue,
                                     url: URL,
                                     requestBytes: Data,
-                                    timeout: TimeInterval) async throws -> (Data, HTTPURLResponse) {
+                                    timeout: TimeInterval,
+                                    bodySink: (@Sendable (Data) -> Void)? = nil) async throws -> (Data, HTTPURLResponse) {
         let state = State()
+        state.bodySink = bodySink
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<(Data, HTTPURLResponse), Error>) in
             // Soft deadline. If the exchange doesn't complete within
             // `timeout` seconds, cancel — the receive loop sees the
             // cancellation and resumes with .timedOut.
             let timeoutTask = Task { [weak connection] in
-                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                if !Task.isCancelled {
-                    debugLog("NWHTTP \(url.host ?? "?") TIMEOUT → cancelling (state.statusLineParsed=\(state.statusLineParsed), bodyBuffer=\(state.bodyBuffer.count) bytes)")
-                    connection?.cancel()
+                if state.bodySink != nil {
+                    // Streaming: IDLE watchdog. A large body legitimately takes
+                    // far longer than one `timeout` to finish, but a stalled
+                    // connection (no bytes flowing) must still be cut. Wake every
+                    // `timeout` and cancel only when nothing arrived since the
+                    // last wake — the receive loop stamps `lastActivityAt`.
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                        if Task.isCancelled { return }
+                        let idle = Date().timeIntervalSince(state.lastActivityAt)
+                        if idle >= timeout {
+                            debugLog("NWHTTP \(url.host ?? "?") STREAM IDLE \(Int(idle))s → cancelling")
+                            connection?.cancel()
+                            return
+                        }
+                    }
+                } else {
+                    try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                    if !Task.isCancelled {
+                        debugLog("NWHTTP \(url.host ?? "?") TIMEOUT → cancelling (state.statusLineParsed=\(state.statusLineParsed), bodyBuffer=\(state.bodyBuffer.count) bytes)")
+                        connection?.cancel()
+                    }
                 }
             }
 
@@ -318,6 +361,7 @@ enum NWHTTPClient {
             }
 
             if let data, !data.isEmpty {
+                state.lastActivityAt = Date()
                 // Only log the very first chunk (pre-header-parse).
                 // Logging every 64 KB chunk on a 50 MB body produces
                 // ~800 lines of console spam per request. The DONE
@@ -501,6 +545,10 @@ enum NWHTTPClient {
             throw NWHTTPError.malformedResponse("bad status line: \(statusLine)")
         }
         state.statusCode = code
+        // A streaming caller sinks ONLY the final 2xx body. Redirect (3xx) and
+        // error (4xx/5xx) bodies stay buffered so `perform` can read the Location
+        // and the caller can still see the status without corrupting the sink.
+        state.sinkActive = (state.bodySink != nil) && (200...299).contains(code)
         state.statusReason = statusParts.count >= 3 ? String(statusParts[2]) : ""
 
         var headers: [String: String] = [:]
@@ -556,7 +604,8 @@ enum NWHTTPClient {
         switch state.framing {
         case .contentLength(let total):
             try appendBody(state: state, bytes: bytes)
-            return state.bodyBuffer.count >= total
+            let have = state.sinkActive ? state.sunkBytes : state.bodyBuffer.count
+            return have >= total
 
         case .untilClose:
             try appendBody(state: state, bytes: bytes)
@@ -578,6 +627,13 @@ enum NWHTTPClient {
     }
 
     private static func appendBody(state: State, bytes: Data) throws {
+        if state.sinkActive, let sink = state.bodySink {
+            // Streaming: hand bytes off and count them, never buffer — so the
+            // maxBodyBytes cap can't trip on an open-ended body.
+            sink(bytes)
+            state.sunkBytes += bytes.count
+            return
+        }
         if state.bodyBuffer.count + bytes.count > maxBodyBytes {
             throw NWHTTPError.bodyTooLarge(state.bodyBuffer.count + bytes.count)
         }
@@ -697,5 +753,17 @@ enum NWHTTPClient {
         var chunkBuffer = Data()
         var chunkedRemaining: Int = 0
         var inChunkSize = true
+        // Streaming sink. When set (a streaming request), the FINAL 2xx body is
+        // handed here chunk-by-chunk and bypasses `bodyBuffer` / the maxBodyBytes
+        // cap, so an open-ended body (e.g. a catch-up timeshift .ts) streams in
+        // constant memory. nil = buffer as usual. Redirect (3xx) and error
+        // (4xx/5xx) bodies are small and still buffer, so `perform` can read the
+        // Location and the caller can still see the status.
+        var bodySink: (@Sendable (Data) -> Void)?
+        var sinkActive = false
+        var sunkBytes = 0
+        // Wall-clock of the last received bytes; the streaming idle-watchdog
+        // reads it to distinguish "large body still flowing" from "stalled".
+        var lastActivityAt = Date()
     }
 }

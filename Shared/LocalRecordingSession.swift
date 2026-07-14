@@ -909,6 +909,7 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
     private var readOffset: Int64 = 0
     private var session: URLSession?
     private var task: URLSessionDataTask?
+    private var nwTask: Task<Void, Never>?
     private let spoolURL: URL
     private var writeHandle: FileHandle?
     private var readHandle: FileHandle?
@@ -943,6 +944,41 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
             failed = true
             return
         }
+        // Transport choice. Plain-HTTP to a DOMAIN can fail URLSession with ATS
+        // -1022 even under NSAllowsArbitraryLoads (the same iOS quirk HTTPRouter
+        // dodges for API calls), and the URLSession relay can't follow the
+        // reverse-proxy's http->https 301 either -- so remote catch-up over an
+        // NGINX/Cloudflare-fronted http URL died with "unrecognized file format"
+        // (spike9172 field report). Route those through NWHTTPClient's streaming
+        // NWConnection path (cleartext-capable + follows the redirect). https and
+        // http-to-IP (LAN) work fine on URLSession, so keep them there.
+        if Self.needsNWStreaming(url) {
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+            nwTask = Task.detached { [weak self] in
+                do {
+                    // 30s IDLE deadline (reset per chunk): a large archive streams
+                    // at line rate, a stalled connection is still cut.
+                    let resp = try await NWHTTPClient.stream(for: request, timeout: 30) { [weak self] chunk in
+                        self?.appendSpool(chunk)
+                    }
+                    if let http = resp as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                        debugLog("[CATCHUP-RELAY] NW HTTP \(http.statusCode)")
+                        self?.markFailed()
+                    } else {
+                        self?.markFinished()
+                    }
+                } catch {
+                    // Whatever spooled still plays, then EOF; the player's
+                    // catch-up EOF re-tune recovers the position (mirrors the
+                    // URLSession didCompleteWithError path).
+                    debugLog("[CATCHUP-RELAY] NW connection ended: \(error.localizedDescription)")
+                    self?.markFinished()
+                }
+            }
+            return
+        }
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
         config.timeoutIntervalForResource = 0
@@ -955,6 +991,43 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
         let t = s.dataTask(with: request)
         task = t
         t.resume()
+    }
+
+    /// http-to-DOMAIN needs the NWConnection path (URLSession -1022s under
+    /// ATS/HSTS and can't follow the http->https 301). https and http-to-IP
+    /// (LAN, allowed by NSAllowsLocalNetworking) stay on URLSession.
+    private static func needsNWStreaming(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "http", let host = url.host, !host.isEmpty else { return false }
+        return !isIPLiteral(host)
+    }
+
+    private static func isIPLiteral(_ host: String) -> Bool {
+        if host.contains(":") { return true }   // IPv6 literal (URL.host strips brackets)
+        let parts = host.split(separator: ".")
+        return parts.count == 4 && parts.allSatisfy { Int($0) != nil }   // IPv4 dotted quad
+    }
+
+    /// Append body bytes to the spool + wake the reader. Shared by the
+    /// URLSession delegate and the NWConnection stream sink.
+    private func appendSpool(_ data: Data) {
+        cond.lock()
+        do {
+            try writeHandle?.write(contentsOf: data)
+            bytesWritten += Int64(data.count)
+        } catch {
+            debugLog("[CATCHUP-RELAY] spool write failed: \(error)")
+            failed = true
+        }
+        cond.signal()
+        cond.unlock()
+    }
+
+    private func markFinished() {
+        cond.lock(); finished = true; cond.signal(); cond.unlock()
+    }
+
+    private func markFailed() {
+        cond.lock(); failed = true; cond.signal(); cond.unlock()
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
@@ -970,16 +1043,7 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
     }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        cond.lock()
-        do {
-            try writeHandle?.write(contentsOf: data)
-            bytesWritten += Int64(data.count)
-        } catch {
-            debugLog("[CATCHUP-RELAY] spool write failed: \(error)")
-            failed = true
-        }
-        cond.signal()
-        cond.unlock()
+        appendSpool(data)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -1020,6 +1084,7 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
         finished = true
         cond.signal()
         cond.unlock()
+        nwTask?.cancel()
         task?.cancel()
         session?.invalidateAndCancel()
         try? writeHandle?.close()
