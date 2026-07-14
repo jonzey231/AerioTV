@@ -68,7 +68,11 @@ final class SyncManager: ObservableObject {
 
     private let syncStringKeys = [
         "selectedTheme", "liquidGlassStyle", "customAccentHex",
-        "defaultTab", "defaultLiveTVView", "streamBufferSize",
+        // NOTE: "defaultLiveTVView" is intentionally NOT synced. The correct
+        // default is form-factor specific (Apple TV / iPad -> Guide, iPhone ->
+        // List), so a single synced value let an iPhone's "list" clobber the
+        // Apple TV's Guide default across devices. Kept per-device (@AppStorage).
+        "defaultTab", "streamBufferSize",
         "bgRefreshType",
         // Guide Display palette overrides — one hex string per
         // category bucket. Missing keys fall through to the defaults

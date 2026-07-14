@@ -1114,6 +1114,14 @@ struct RootView: View {
                 // `mergeRemoteServers` and `saveCredentialsSynced`
                 // both write to iCloud Keychain on every save going
                 // forward.
+                //
+                // Default Live TV View is now a PER-DEVICE preference. It used
+                // to ride the synced key set, so an iPhone's "list" could
+                // clobber the Apple TV's Guide default (the guide silently
+                // opened in List after a sync). Clear the possibly-clobbered
+                // value once so each device falls back to its form-factor
+                // default going forward.
+                clearLegacySyncedDefaultViewIfNeeded()
                 migrateCredentialsToICloudKeychainIfNeeded()
                 // v1.6.23: re-publish servers to iCloud KVS so the
                 // payload includes credentials again. v1.6.12 stopped
@@ -1289,6 +1297,19 @@ struct RootView: View {
     ///   available; the KVS carry is the reliable fallback where it is not.
     ///   (There is no purge task; an earlier revision referenced a
     ///   `purgeKVSPlaintextCredentialsIfNeeded` that no longer exists.)
+    /// One-time cleanup: `defaultLiveTVView` used to be in the synced key set,
+    /// so a phone's "list" default could overwrite an Apple TV's "guide" (the
+    /// guide would silently open in List after a sync). It is now a per-device
+    /// @AppStorage value; clear the possibly-clobbered value exactly once so
+    /// each device falls back to its form-factor default (Apple TV / iPad ->
+    /// Guide, iPhone -> List). The user can re-pick per device and it stays local.
+    private func clearLegacySyncedDefaultViewIfNeeded() {
+        let flagKey = "defaultLiveTVViewUnsyncedClearedV1"
+        guard !UserDefaults.standard.bool(forKey: flagKey) else { return }
+        UserDefaults.standard.removeObject(forKey: "defaultLiveTVView")
+        UserDefaults.standard.set(true, forKey: flagKey)
+    }
+
     private func migrateCredentialsToICloudKeychainIfNeeded() {
         let flagKey = "kvsToKeychainMigrationDoneV1"
         if UserDefaults.standard.bool(forKey: flagKey) { return }
