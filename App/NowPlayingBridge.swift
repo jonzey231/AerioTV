@@ -29,13 +29,63 @@ final class NowPlayingBridge {
     /// back from MPNowPlayingInfoCenter.
     private var infoDict: [String: Any] = [:]
 
+    /// Live/program state captured at `configure`, used by `updateElapsed`
+    /// so per-tick elapsed writes stay PROGRAM-relative on live channels
+    /// (see the program-timeline note in `configure`). For VOD these stay
+    /// nil and `updateElapsed` uses the raw stream clock.
+    private var currentIsLive = false
+    /// Explicit program bounds passed by the caller. When nil, `programBounds`
+    /// resolves them LIVE from `ChannelStore` (which carries EPG-merged
+    /// current-program windows) keyed by the playing channel id — so the
+    /// timeline fills in as EPG loads and rolls over to the next programme
+    /// without a reconfigure.
+    private var overrideProgramStart: Date?
+    private var overrideProgramEnd: Date?
+
+    /// Convenience for live channels: builds title / program subtitle /
+    /// channel-logo artwork / program-relative timeline straight from a
+    /// `ChannelDisplayItem`, so the foreground player AND the headless
+    /// CarPlay controller publish identical, complete Now Playing metadata.
+    func configure(
+        for item: ChannelDisplayItem,
+        isLive: Bool,
+        onPlay: @escaping () -> Void,
+        onPause: @escaping () -> Void,
+        onSeek: ((TimeInterval) -> Void)?
+    ) {
+        let subtitle = item.currentProgram?.trimmingCharacters(in: .whitespacesAndNewlines)
+        configure(
+            title: item.name,
+            subtitle: (subtitle?.isEmpty == false) ? subtitle : item.group,
+            artworkURL: item.logoURL,
+            duration: nil,
+            isLive: isLive,
+            programStart: item.currentProgramStart,
+            programEnd: item.currentProgramEnd,
+            onPlay: onPlay,
+            onPause: onPause,
+            onSeek: onSeek
+        )
+    }
+
     /// Call when playback begins or content changes.
+    ///
+    /// For a LIVE channel with a known current-program window
+    /// (`programStart`/`programEnd`), the item is presented as a BOUNDED
+    /// program (duration = program length, elapsed = now − programStart)
+    /// rather than `IsLiveStream = true`. The bare-live presentation is why
+    /// CarPlay / the lock screen showed only the channel name with a "LIVE"
+    /// chip and no progress bar, artwork, or subtitle; a bounded item makes
+    /// the OS draw the full Now Playing chrome with a filling timeline.
+    /// Falls back to `IsLiveStream = true` when no program bounds are known.
     func configure(
         title: String,
         subtitle: String?,
         artworkURL: URL?,
         duration: Double?,
         isLive: Bool,
+        programStart: Date? = nil,
+        programEnd: Date? = nil,
         onPlay: @escaping () -> Void,
         onPause: @escaping () -> Void,
         onSeek: ((TimeInterval) -> Void)?
@@ -43,6 +93,9 @@ final class NowPlayingBridge {
         self.onPlay = onPlay
         self.onPause = onPause
         self.onSeek = onSeek
+        self.currentIsLive = isLive
+        self.overrideProgramStart = programStart
+        self.overrideProgramEnd = programEnd
 
         #if DEBUG
         print("[NowPlaying] configure: title=\"\(title)\" subtitle=\"\(subtitle ?? "nil")\" isLive=\(isLive)")
@@ -95,11 +148,20 @@ final class NowPlayingBridge {
         // Build the info dict.
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: title,
-            MPNowPlayingInfoPropertyIsLiveStream: isLive,
             MPNowPlayingInfoPropertyPlaybackRate: 1.0
         ]
         if let subtitle { info[MPMediaItemPropertyArtist] = subtitle }
-        if let duration, !isLive {
+        if isLive {
+            if let bounds = programBounds() {
+                // Present the CURRENT PROGRAM as a bounded item so the OS draws
+                // a filling progress bar + full chrome instead of a bare "LIVE".
+                info[MPMediaItemPropertyPlaybackDuration] = bounds.duration
+                info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = bounds.elapsed
+                // Deliberately NOT setting IsLiveStream — that suppresses the timeline.
+            } else {
+                info[MPNowPlayingInfoPropertyIsLiveStream] = true
+            }
+        } else if let duration {
             info[MPMediaItemPropertyPlaybackDuration] = duration
             info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = 0.0
         }
@@ -127,14 +189,56 @@ final class NowPlayingBridge {
         loadArtwork(from: artworkURL)
     }
 
-    /// Update elapsed time and playback rate.
+    /// Update elapsed time and playback rate. For a live channel presented
+    /// as a bounded program, the elapsed value is PROGRAM-relative
+    /// (now − programStart), not the raw stream clock `time` — otherwise the
+    /// per-tick perf pump would overwrite the program timeline with the mpv
+    /// playback position (which resets to ~0 on every tune).
     func updateElapsed(_ time: Double, rate: Float) {
-        infoDict[MPNowPlayingInfoPropertyElapsedPlaybackTime] = time
+        if currentIsLive, let bounds = programBounds() {
+            // EPG is (now) available: upgrade to a bounded programme timeline,
+            // dropping the "LIVE" chip. This self-heals the common case where
+            // `configure` ran before EPG loaded (cold-car / resume) — the next
+            // tick flips the bare "LIVE" presentation into a filling progress
+            // bar with no reconfigure needed.
+            infoDict[MPMediaItemPropertyPlaybackDuration] = bounds.duration
+            infoDict[MPNowPlayingInfoPropertyElapsedPlaybackTime] = bounds.elapsed
+            infoDict.removeValue(forKey: MPNowPlayingInfoPropertyIsLiveStream)
+        } else if currentIsLive {
+            // Still no programme window — keep the live chip.
+            infoDict[MPNowPlayingInfoPropertyIsLiveStream] = true
+            infoDict.removeValue(forKey: MPMediaItemPropertyPlaybackDuration)
+            infoDict.removeValue(forKey: MPNowPlayingInfoPropertyElapsedPlaybackTime)
+        } else {
+            infoDict[MPNowPlayingInfoPropertyElapsedPlaybackTime] = time
+        }
         infoDict[MPNowPlayingInfoPropertyPlaybackRate] = Double(rate)
         publishInfo()
         // #43: keep tvOS's active-app signal in sync with play/pause so the
         // relayed widget reflects the right state and stays alive.
         setPlaybackState(rate > 0 ? .playing : .paused)
+    }
+
+    /// Duration + clamped elapsed for the current-program window, or nil when
+    /// no valid bounds are known (falls back to the live chip). Prefers the
+    /// explicit override; otherwise reads the LIVE current-program window from
+    /// `ChannelStore` keyed by the playing channel id — re-read on every call
+    /// so the timeline appears as EPG loads and advances to the next programme
+    /// on rollover without a reconfigure.
+    private func programBounds() -> (duration: Double, elapsed: Double)? {
+        var start = overrideProgramStart
+        var end = overrideProgramEnd
+        if start == nil || end == nil,
+           let id = NowPlayingManager.shared.playingItem?.id,
+           let channel = ChannelStore.shared.channels.first(where: { $0.id == id }) {
+            start = channel.currentProgramStart
+            end = channel.currentProgramEnd
+        }
+        guard let s = start, let e = end else { return nil }
+        let duration = e.timeIntervalSince(s)
+        guard duration > 0 else { return nil }
+        let elapsed = min(max(Date().timeIntervalSince(s), 0), duration)
+        return (duration, elapsed)
     }
 
 
@@ -143,6 +247,9 @@ final class NowPlayingBridge {
         artworkTask?.cancel()
         artworkTask = nil
         infoDict = [:]
+        currentIsLive = false
+        overrideProgramStart = nil
+        overrideProgramEnd = nil
         // #43: clear the active-app signal so the relayed widget dismisses.
         MPNowPlayingInfoCenter.default().playbackState = .stopped
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil

@@ -530,6 +530,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // odd backgrounding states and we let mpv try anyway).
         AudioSessionRefCount.increment()
 
+        #if os(iOS)
+        // A foreground player view is mounting: claim the coexistence registry
+        // and evict any headless CarPlay engine BEFORE this coordinator reaches
+        // loadfile, so the two never decode the same channel at once (double
+        // audio). The refcount increment above already holds the session active
+        // across the handoff, so yielding here causes no deactivation bounce.
+        // SwiftUI calls this on the main thread; assumeIsolated bridges to the
+        // @MainActor registry/controller regardless of the method's isolation.
+        MainActor.assumeIsolated {
+            PlaybackEngineRegistry.shared.coordinatorWillMount()
+            HeadlessPlaybackController.shared.yieldToViewEngine()
+        }
+        #endif
+
         let vc = MPVPlayerViewController()
         vc.coordinator = context.coordinator
 
@@ -636,6 +650,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
     static func dismantleUIViewController(_ uiViewController: MPVPlayerViewController, coordinator: Coordinator) {
         coordinator.stop()
+        #if os(iOS)
+        // Pair the coordinatorWillMount() claimed in makeUIViewController.
+        MainActor.assumeIsolated {
+            PlaybackEngineRegistry.shared.coordinatorDidUnmount()
+        }
+        #endif
     }
 
     // MARK: - Coordinator
@@ -6323,8 +6343,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                                 artworkURL: art,
                                 duration: capturedDur,
                                 isLive: live,
-                                onPlay:  { ps2.togglePauseAction?() },
-                                onPause: { ps2.togglePauseAction?() },
+                                // Distinct play vs pause intents: an explicit
+                                // play command must never pause an already-playing
+                                // stream (a head unit / BT stack can emit playCommand
+                                // on connect), and vice-versa. Toggle only when the
+                                // current state differs from the requested one.
+                                onPlay:  { if ps2.isPaused { ps2.togglePauseAction?() } },
+                                onPause: { if !ps2.isPaused { ps2.togglePauseAction?() } },
                                 onSeek: live ? nil : { [weak self] time in
                                     // Remote / lock-screen seek callbacks fire on
                                     // the main thread; hop to mpvQueue so a stalled

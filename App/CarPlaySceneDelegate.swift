@@ -66,6 +66,9 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         groupsTemplate = nil
         cancellables.removeAll()
         NowPlayingManager.shared.isCarPlayConnected = false
+        // Tear down any headless engine started for this car session (no-op if
+        // a foreground view coordinator was the live engine instead).
+        HeadlessPlaybackController.shared.stop()
     }
 
     // MARK: - Standalone hydration
@@ -317,6 +320,18 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             let headers = ChannelStore.shared.activeServer?.authHeaders ?? ["Accept": "*/*"]
             NowPlayingManager.shared.startPlaying(channel, headers: headers)
         }
+
+        // The calls above only mutate shared state; the real player + audio
+        // session live in the SwiftUI `MPVPlayerView`, which mounts only when a
+        // foreground window scene renders. In a cold car / locked phone that
+        // scene doesn't exist, so nothing would actually play. Drive a headless
+        // audio engine directly for that case; it no-ops (and lets the view
+        // engine take over) whenever the phone app is foreground.
+        HeadlessPlaybackController.shared.start(
+            item: channel,
+            server: ChannelStore.shared.activeServer,
+            isLive: true
+        )
 
         // Surface Now Playing (pushing it is allowed even though it cannot
         // be a tab).

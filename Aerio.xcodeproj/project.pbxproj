@@ -20,6 +20,7 @@
 		1868ADFE12C568F8FC5FED53 /* StreamingAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 693A71F4A4429F56337992E6 /* StreamingAPIs.swift */; };
 		19AE345D39FB441F217ABCE7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
 		1A29B8D23EC903A18C3B3E89 /* TVServices.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 628C021FBBB1C5C00F6640EA /* TVServices.framework */; };
+		1AA3C3EA66B1387B7A4D6DD4 /* HeadlessPlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8179E2560269773B4D5A0D3A /* HeadlessPlaybackController.swift */; };
 		1B56BE6F7111A4EF6DD7E11B /* DispatcharrDirectConnect.swift in Sources */ = {isa = PBXBuildFile; fileRef = 876ADA5C12D5B9BAC39C9F22 /* DispatcharrDirectConnect.swift */; };
 		1D11DF914E50BF1810089A1E /* XtreamSeriesAPI.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F9F2E0DF2867ED959950125 /* XtreamSeriesAPI.swift */; };
 		1EB4A645E88DDFE6F211ADA4 /* Pods-Aerio_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Aerio_iOS-acknowledgements.markdown */; };
@@ -188,6 +189,7 @@
 		FA1AC2C2B4E0577B5456A002 /* ManageGroupsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A1DD47CBF4B1FE912B0A001 /* ManageGroupsSheet.swift */; };
 		FA5005705700000000000002 /* FavoritesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA5005705700000000000001 /* FavoritesStore.swift */; };
 		FA5005705700000000000003 /* FavoritesStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA5005705700000000000001 /* FavoritesStore.swift */; };
+		FB91CFB478081EFA02CBC818 /* HeadlessPlaybackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8179E2560269773B4D5A0D3A /* HeadlessPlaybackController.swift */; };
 		FD1AC2C2B4E0577B5456999F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
 		FD65778E5A378FA718D5D0E2 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9C5D08BD1430E78C26390734 /* SettingsView.swift */; };
 		FF1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */; };
@@ -278,6 +280,7 @@
 		7D1DD47CBF4B1FE912B0AF08 /* Components.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Components.swift; sourceTree = "<group>"; };
 		7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecordProgramSheet.swift; sourceTree = "<group>"; };
 		8087BB36936B80A3234428C4 /* COPYING.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = COPYING.txt; sourceTree = "<group>"; };
+		8179E2560269773B4D5A0D3A /* HeadlessPlaybackController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = HeadlessPlaybackController.swift; sourceTree = "<group>"; };
 		828A599894F381F7A78BFDF8 /* MobileVLCKit.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = MobileVLCKit.xcframework; sourceTree = "<group>"; };
 		875B0901B53C33B024AF597F /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		876ADA5C12D5B9BAC39C9F22 /* DispatcharrDirectConnect.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DispatcharrDirectConnect.swift; sourceTree = "<group>"; };
@@ -766,6 +769,7 @@
 				CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */,
 				5044B9CD69C05A6836588548 /* SplashView.swift */,
 				WHATSNEW00000000000ACE000 /* WhatsNew.swift */,
+				8179E2560269773B4D5A0D3A /* HeadlessPlaybackController.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -1092,6 +1096,7 @@
 				D361421CBA05BF602FCEAE80 /* DispatcharrDirectConnect.swift in Sources */,
 				48336325ACADA131557D4C58 /* AppBehaviorsSettingsView.swift in Sources */,
 				B4874C9D2075467ED09F0552 /* SwitchStreamView.swift in Sources */,
+				FB91CFB478081EFA02CBC818 /* HeadlessPlaybackController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1180,6 +1185,7 @@
 				1B56BE6F7111A4EF6DD7E11B /* DispatcharrDirectConnect.swift in Sources */,
 				BEEFBC48135CF7E02F81D4D4 /* AppBehaviorsSettingsView.swift in Sources */,
 				7A11FAB6D3BD7B764BF99C59 /* SwitchStreamView.swift in Sources */,
+				1AA3C3EA66B1387B7A4D6DD4 /* HeadlessPlaybackController.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

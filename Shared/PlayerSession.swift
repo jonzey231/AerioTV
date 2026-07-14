@@ -238,6 +238,12 @@ final class PlayerSession: ObservableObject {
         // (mode just flipped to .idle, tileID != nil), so it won't
         // clear the center. Do it here so the lockscreen doesn't show
         // a ghost entry after "Exit Multiview".
+        #if os(iOS)
+        // A headless CarPlay engine (cold-car playback with no view mounted)
+        // isn't owned by any coordinator, so the store reset above won't stop
+        // it — kill it here so "Exit" from any surface silences audio.
+        HeadlessPlaybackController.shared.stop()
+        #endif
         NowPlayingBridge.shared.teardown()
         // Clear single-stream state too. HomeView's mode branch is
         // `if .multiview { … } else if nowPlaying.isActive { single
