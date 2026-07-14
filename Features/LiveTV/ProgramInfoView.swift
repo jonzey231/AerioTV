@@ -40,12 +40,26 @@ struct ProgramInfoTarget: Identifiable, Equatable {
     /// inline; lazy-load is a no-op in those cases.
     let programID: Int?
 
+    // EPG badge metadata (info-sheet badges + episode line). Defaults so
+    // the callers that lack the data compile unchanged.
+    let subTitle: String?
+    let season: Int?
+    let episode: Int?
+    let isNew: Bool
+    let isLiveBroadcast: Bool
+    let isPremiere: Bool
+    let isFinale: Bool
+    let isRepeat: Bool
+
     var id: String {
         "\(title)-\(start.timeIntervalSinceReferenceDate)-\(end.timeIntervalSinceReferenceDate)"
     }
 
     init(channelName: String, title: String, start: Date, end: Date,
-         description: String, category: String, programID: Int? = nil) {
+         description: String, category: String, programID: Int? = nil,
+         subTitle: String? = nil, season: Int? = nil, episode: Int? = nil,
+         isNew: Bool = false, isLiveBroadcast: Bool = false,
+         isPremiere: Bool = false, isFinale: Bool = false, isRepeat: Bool = false) {
         self.channelName = channelName
         self.title = title
         self.start = start
@@ -53,6 +67,14 @@ struct ProgramInfoTarget: Identifiable, Equatable {
         self.description = description
         self.category = category
         self.programID = programID
+        self.subTitle = subTitle
+        self.season = season
+        self.episode = episode
+        self.isNew = isNew
+        self.isLiveBroadcast = isLiveBroadcast
+        self.isPremiere = isPremiere
+        self.isFinale = isFinale
+        self.isRepeat = isRepeat
     }
 }
 
@@ -164,6 +186,31 @@ struct ProgramInfoView: View {
     private var start: Date { target.start }
     private var end: Date { target.end }
     private var isLive: Bool { start <= Date() && end > Date() }
+
+    /// Feed-driven flag badges (LIVE / NEW / PREMIERE / FINALE / REPEAT).
+    private var feedFlags: [EPGFlag] {
+        epgFlagBadges(isLiveBroadcast: target.isLiveBroadcast, isNew: target.isNew,
+                      isPremiere: target.isPremiere, isFinale: target.isFinale,
+                      isRepeat: target.isRepeat)
+    }
+
+    /// Badges shown next to the title: the feed flags plus an "ON NOW"
+    /// pill for a program airing right now that is NOT itself flagged a
+    /// live broadcast. Suppressing "ON NOW" when `isLiveBroadcast` avoids
+    /// a double LIVE-style pill (the feed LIVE badge already covers it).
+    private var titleBadges: [EPGFlag] {
+        var out: [EPGFlag] = []
+        if isLive && !target.isLiveBroadcast {
+            out.append(EPGFlag(label: "ON NOW", color: .statusLive))
+        }
+        out.append(contentsOf: feedFlags)
+        return out
+    }
+
+    /// "S3 E5" episode label from the feed season/episode numbers, or nil.
+    private var episodeLabel: String? {
+        seasonEpisodeLabel(season: target.season, episode: target.episode)
+    }
 
     /// Time range + date header. Collapses "same day" to just the
     /// time range; adds the date only when the program spans or
@@ -417,20 +464,26 @@ struct ProgramInfoView: View {
 
             Section {
                 LabeledContent("Channel", value: target.channelName)
-                LabeledContent("Program", value: target.title)
+                // Program row: title with the feed badges trailing, and the
+                // episode sub-title as a secondary italic line beneath.
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(target.title)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        EPGFlagsRow(flags: titleBadges)
+                    }
+                    if let sub = target.subTitle, !sub.isEmpty {
+                        Text(sub)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .italic()
+                    }
+                }
                 LabeledContent("Airs", value: timeRangeLabel)
                 LabeledContent("Date", value: dateLabel)
                 LabeledContent("Duration", value: durationLabel)
-                if isLive {
-                    HStack {
-                        Text("LIVE")
-                            .font(.caption.weight(.bold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Color.statusLive, in: Capsule())
-                        Spacer()
-                    }
+                if let episodeLabel {
+                    LabeledContent("Episode", value: episodeLabel)
                 }
             }
 
@@ -491,7 +544,7 @@ struct ProgramInfoView: View {
                             .clipped()
                             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
-                    // Header — channel + title + live badge
+                    // Header - channel + title + feed badges + episode sub-title
                     VStack(alignment: .leading, spacing: 12) {
                         Text(target.channelName.uppercased())
                             .font(.system(size: 24, weight: .semibold))
@@ -501,22 +554,25 @@ struct ProgramInfoView: View {
                             Text(target.title)
                                 .font(.system(size: 44, weight: .bold))
                                 .foregroundColor(.textPrimary)
-                            if isLive {
-                                Text("LIVE")
-                                    .font(.system(size: 20, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 4)
-                                    .background(Color.statusLive, in: Capsule())
-                            }
+                            // Feed flags + "ON NOW" (gated to avoid a double LIVE).
+                            EPGFlagsRow(flags: titleBadges)
+                        }
+                        if let sub = target.subTitle, !sub.isEmpty {
+                            Text(sub)
+                                .font(.system(size: 26))
+                                .foregroundColor(.textSecondary)
+                                .italic()
                         }
                     }
 
-                    // Time row — date + range + duration
+                    // Time row - date + range + duration + episode
                     HStack(spacing: 40) {
                         infoColumn(title: "Airs", value: timeRangeLabel)
                         infoColumn(title: "Date", value: dateLabel)
                         infoColumn(title: "Duration", value: durationLabel)
+                        if let episodeLabel {
+                            infoColumn(title: "Episode", value: episodeLabel)
+                        }
                     }
 
                     // Description

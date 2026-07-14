@@ -1608,7 +1608,11 @@ struct ChannelListView: View {
                                         description: desc,
                                         startTime: $0.startTime?.toDate(),
                                         endTime:   $0.endTime?.toDate(),
-                                        programID: $0.programID)
+                                        programID: $0.programID,
+                                        subTitle: $0.subTitle.isEmpty ? nil : $0.subTitle,
+                                        season: $0.season, episode: $0.episode,
+                                        isNew: $0.isNew, isLiveBroadcast: $0.isLiveBroadcast,
+                                        isPremiere: $0.isPremiere, isFinale: $0.isFinale)
                     }
                     await EPGCache.shared.set(entries, for: cacheKey)
                     return entries
@@ -1669,7 +1673,12 @@ struct ChannelListView: View {
                             // same as on Dispatcharr sources.
                             EPGEntry(title: $0.title, description: $0.description,
                                      startTime: $0.startTime, endTime: $0.endTime,
-                                     category: $0.category)
+                                     category: $0.category,
+                                     subTitle: $0.subTitle, season: $0.season,
+                                     episode: $0.episode, isNew: $0.isNew,
+                                     isLiveBroadcast: $0.isLiveBroadcast,
+                                     isPremiere: $0.isPremiere, isFinale: $0.isFinale,
+                                     isRepeat: $0.isRepeat)
                         }
                     if !upcoming.isEmpty {
                         await EPGCache.shared.set(upcoming, for: "m3u_\(channelID)")
@@ -1808,14 +1817,36 @@ struct EPGEntry: Identifiable, Equatable {
     /// sources whose feeds already include categories inline.
     let programID: Int?
 
+    // EPG badge metadata (list-row + info-sheet badges). Defaults keep
+    // the several call sites that don't carry this data compiling.
+    let subTitle: String?
+    let season: Int?
+    let episode: Int?
+    let isNew: Bool
+    let isLiveBroadcast: Bool
+    let isPremiere: Bool
+    let isFinale: Bool
+    let isRepeat: Bool
+
     init(title: String, description: String = "", startTime: Date?,
-         endTime: Date?, category: String = "", programID: Int? = nil) {
+         endTime: Date?, category: String = "", programID: Int? = nil,
+         subTitle: String? = nil, season: Int? = nil, episode: Int? = nil,
+         isNew: Bool = false, isLiveBroadcast: Bool = false,
+         isPremiere: Bool = false, isFinale: Bool = false, isRepeat: Bool = false) {
         self.title = title
         self.description = description
         self.startTime = startTime
         self.endTime = endTime
         self.category = category
         self.programID = programID
+        self.subTitle = subTitle
+        self.season = season
+        self.episode = episode
+        self.isNew = isNew
+        self.isLiveBroadcast = isLiveBroadcast
+        self.isPremiere = isPremiere
+        self.isFinale = isFinale
+        self.isRepeat = isRepeat
     }
 }
 
@@ -1866,14 +1897,25 @@ struct ChannelRow: View {
     /// subtitle stays empty in that case (no more group-name
     /// fallback). Both the inline "now playing" line in the row
     /// and the progress bar consult this single tuple.
-    private var liveProgram: (title: String, description: String?, start: Date, end: Date)? {
+    private var liveProgram: (title: String, description: String?, start: Date, end: Date, flags: EPGFlags)? {
         if let title = item.currentProgram, !title.isEmpty,
            let start = item.currentProgramStart,
            let end = item.currentProgramEnd {
-            return (title, item.currentProgramDescription, start, end)
+            // ChannelDisplayItem doesn't carry the feed badge flags; when
+            // GuideStore has the same now-airing program, borrow its flags
+            // so the collapsed row can still show LIVE/NEW/etc.
+            let flags = guideStore.programs[item.id]?
+                .first(where: { $0.isLive })
+                .map { EPGFlags(isNew: $0.isNew, isLiveBroadcast: $0.isLiveBroadcast,
+                                isPremiere: $0.isPremiere, isFinale: $0.isFinale,
+                                isRepeat: $0.isRepeat) } ?? EPGFlags()
+            return (title, item.currentProgramDescription, start, end, flags)
         }
         if let p = guideStore.programs[item.id]?.first(where: { $0.isLive }) {
-            return (p.title, p.description, p.start, p.end)
+            return (p.title, p.description, p.start, p.end,
+                    EPGFlags(isNew: p.isNew, isLiveBroadcast: p.isLiveBroadcast,
+                             isPremiere: p.isPremiere, isFinale: p.isFinale,
+                             isRepeat: p.isRepeat))
         }
         return nil
     }
@@ -2220,6 +2262,9 @@ struct ChannelRow: View {
                                             isActive: isCardFocused)
                                     .frame(height: 28)
                                 nowPlayingTimeRemaining(end: prog.end)
+                                // Feed badges (LIVE/NEW/PREMIERE/...) for the
+                                // now-airing program; renders nothing when none.
+                                EPGFlagsRow(flags: prog.flags.badges, compact: true)
                             }
                             if let desc = prog.description, !desc.isEmpty {
                                 Text(desc)
@@ -2335,6 +2380,9 @@ struct ChannelRow: View {
                                     isActive: false)  // Static during scroll — saves GPU
                             .frame(height: (isWide ? 20 : 16) * s)
                         nowPlayingTimeRemaining(end: prog.end)
+                        // Feed badges (LIVE/NEW/PREMIERE/...) for the
+                        // now-airing program; renders nothing when none.
+                        EPGFlagsRow(flags: prog.flags.badges, compact: true)
                     }
                     if let desc = prog.description, !desc.isEmpty {
                         Text(desc)
@@ -2478,9 +2526,12 @@ struct ChannelRow: View {
                 // have it cached — lets the modal lazy-load any
                 // category data the bulk enrichment hadn't reached
                 // yet (rare for now-airing, common for all others).
-                let pid = guideStore.programs[item.id]?
-                    .first(where: { $0.start <= Date() && $0.end > Date() })?
-                    .programID
+                // Grab the whole now-airing GuideProgram (not just its
+                // programID) so the modal carries the feed badges + episode
+                // metadata for the currently-airing show. ChannelDisplayItem
+                // itself doesn't carry these flags.
+                let nowAiring = guideStore.programs[item.id]?
+                    .first(where: { $0.start <= Date() && $0.end > Date() })
                 activeSheet = .programInfo(
                     ProgramInfoTarget(
                         channelName: item.name,
@@ -2489,7 +2540,15 @@ struct ChannelRow: View {
                         end: end,
                         description: item.currentProgramDescription ?? "",
                         category: item.currentProgramCategory ?? "",
-                        programID: pid
+                        programID: nowAiring?.programID,
+                        subTitle: nowAiring?.subTitle,
+                        season: nowAiring?.season,
+                        episode: nowAiring?.episode,
+                        isNew: nowAiring?.isNew ?? false,
+                        isLiveBroadcast: nowAiring?.isLiveBroadcast ?? false,
+                        isPremiere: nowAiring?.isPremiere ?? false,
+                        isFinale: nowAiring?.isFinale ?? false,
+                        isRepeat: nowAiring?.isRepeat ?? false
                     )
                 )
             }
@@ -2584,7 +2643,12 @@ struct ChannelRow: View {
             .map {
                 EPGEntry(title: $0.title, description: $0.description,
                          startTime: $0.start, endTime: $0.end,
-                         category: $0.category, programID: $0.programID)
+                         category: $0.category, programID: $0.programID,
+                         subTitle: $0.subTitle, season: $0.season,
+                         episode: $0.episode, isNew: $0.isNew,
+                         isLiveBroadcast: $0.isLiveBroadcast,
+                         isPremiere: $0.isPremiere, isFinale: $0.isFinale,
+                         isRepeat: $0.isRepeat)
             }
     }
 
@@ -2640,7 +2704,12 @@ struct ChannelRow: View {
                     // programs land here with category: "".
                     EPGEntry(title: $0.title, description: $0.description,
                              startTime: $0.start, endTime: $0.end,
-                             category: $0.category, programID: $0.programID)
+                             category: $0.category, programID: $0.programID,
+                             subTitle: $0.subTitle, season: $0.season,
+                             episode: $0.episode, isNew: $0.isNew,
+                             isLiveBroadcast: $0.isLiveBroadcast,
+                             isPremiere: $0.isPremiere, isFinale: $0.isFinale,
+                             isRepeat: $0.isRepeat)
                 }
         }
         return upcomingPrograms.filter { entry in
@@ -2719,7 +2788,15 @@ struct ChannelRow: View {
                                 end: end,
                                 description: entry.description,
                                 category: entry.category,
-                                programID: entry.programID
+                                programID: entry.programID,
+                                subTitle: entry.subTitle,
+                                season: entry.season,
+                                episode: entry.episode,
+                                isNew: entry.isNew,
+                                isLiveBroadcast: entry.isLiveBroadcast,
+                                isPremiere: entry.isPremiere,
+                                isFinale: entry.isFinale,
+                                isRepeat: entry.isRepeat
                             )
                         )
                     }
@@ -3076,7 +3153,15 @@ struct ChannelRow: View {
                                     end: end,
                                     description: entry.description,
                                     category: entry.category,
-                                    programID: entry.programID
+                                    programID: entry.programID,
+                                    subTitle: entry.subTitle,
+                                    season: entry.season,
+                                    episode: entry.episode,
+                                    isNew: entry.isNew,
+                                    isLiveBroadcast: entry.isLiveBroadcast,
+                                    isPremiere: entry.isPremiere,
+                                    isFinale: entry.isFinale,
+                                    isRepeat: entry.isRepeat
                                 )
                             )
                         }
@@ -3194,6 +3279,23 @@ struct ChannelRow: View {
         }
     }
 
+    /// Feed badges + season/episode line for an expanded-schedule row.
+    /// Renders nothing when the program carries neither.
+    @ViewBuilder
+    private func epgEntryMetaRow(_ entry: EPGEntry) -> some View {
+        let seLabel = seasonEpisodeLabel(season: entry.season, episode: entry.episode)
+        let flags = epgFlagBadges(isLiveBroadcast: entry.isLiveBroadcast,
+                                  isNew: entry.isNew, isPremiere: entry.isPremiere,
+                                  isFinale: entry.isFinale, isRepeat: entry.isRepeat)
+        if seLabel != nil || !flags.isEmpty {
+            HStack(spacing: 6) {
+                SeasonEpisodePill(label: seLabel, compact: true)
+                EPGFlagsRow(flags: flags, compact: true)
+            }
+            .padding(.top, 1)
+        }
+    }
+
     private func epgEntryRow(entry: EPGEntry, isLast: Bool) -> some View {
         VStack(spacing: 0) {
             HStack(spacing: 12) {
@@ -3240,6 +3342,7 @@ struct ChannelRow: View {
                         .foregroundColor(.textTertiary)
                         #endif
                     }
+                    epgEntryMetaRow(entry)
                 }
                 Spacer()
 

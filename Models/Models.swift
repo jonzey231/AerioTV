@@ -611,10 +611,28 @@ final class EPGProgram {
     /// grid fetch.
     var programID: Int? = nil
 
+    // MARK: EPG badge metadata (guide/list/info-sheet badges)
+    // Optional-or-defaulted stored properties so SwiftData lightweight
+    // migration carries pre-badge cached rows forward (mirrors the
+    // `programID` precedent above). `isLiveBroadcast` is the feed's
+    // XMLTV `<live/>` / Dispatcharr `is_live` flag, distinct from the
+    // clock-derived `isLive` computed below.
+    var subTitle: String? = nil
+    var season: Int? = nil
+    var episode: Int? = nil
+    var isNew: Bool = false
+    var isLiveBroadcast: Bool = false
+    var isPremiere: Bool = false
+    var isFinale: Bool = false
+    var isRepeat: Bool = false
+
     init(channelID: String, title: String, description: String = "",
          startTime: Date, endTime: Date, category: String = "", posterURL: String = "",
          serverID: String = "", fetchedAt: Date = Date(),
-         programID: Int? = nil) {
+         programID: Int? = nil,
+         subTitle: String? = nil, season: Int? = nil, episode: Int? = nil,
+         isNew: Bool = false, isLiveBroadcast: Bool = false,
+         isPremiere: Bool = false, isFinale: Bool = false, isRepeat: Bool = false) {
         self.id = UUID()
         self.channelID = channelID
         self.title = title
@@ -626,6 +644,14 @@ final class EPGProgram {
         self.serverID = serverID
         self.fetchedAt = fetchedAt
         self.programID = programID
+        self.subTitle = subTitle
+        self.season = season
+        self.episode = episode
+        self.isNew = isNew
+        self.isLiveBroadcast = isLiveBroadcast
+        self.isPremiere = isPremiere
+        self.isFinale = isFinale
+        self.isRepeat = isRepeat
     }
 
     var isLive: Bool {

@@ -3391,6 +3391,17 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
     let startTime: DispatcharrDateValue?
     let endTime: DispatcharrDateValue?
 
+    // EPG badge metadata. On the wire in `/api/epg/grid/` and the
+    // current/upcoming endpoints; older servers omit them, so all decode
+    // with `decodeIfPresent` + false/nil fallbacks. Dispatcharr has no
+    // repeat field, so REPEAT stays false on this path.
+    let season: Int?
+    let episode: Int?
+    let isNew: Bool
+    let isLiveBroadcast: Bool
+    let isPremiere: Bool
+    let isFinale: Bool
+
     enum CodingKeys: String, CodingKey {
         case programID = "id"
         case tvgID = "tvg_id"
@@ -3401,6 +3412,12 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
         case subTitle = "sub_title"
         case startTime = "start_time"
         case endTime = "end_time"
+        case season
+        case episode
+        case isNew = "is_new"
+        case isLiveBroadcast = "is_live"
+        case isPremiere = "is_premiere"
+        case isFinale = "is_finale"
     }
 
     init(from decoder: Decoder) throws {
@@ -3418,6 +3435,12 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
         subTitle = (try? c.decode(String.self, forKey: .subTitle)) ?? ""
         startTime = try? c.decode(DispatcharrDateValue.self, forKey: .startTime)
         endTime = try? c.decode(DispatcharrDateValue.self, forKey: .endTime)
+        season = try? c.decodeIfPresent(Int.self, forKey: .season)
+        episode = try? c.decodeIfPresent(Int.self, forKey: .episode)
+        isNew = (try? c.decodeIfPresent(Bool.self, forKey: .isNew)) ?? false
+        isLiveBroadcast = (try? c.decodeIfPresent(Bool.self, forKey: .isLiveBroadcast)) ?? false
+        isPremiere = (try? c.decodeIfPresent(Bool.self, forKey: .isPremiere)) ?? false
+        isFinale = (try? c.decodeIfPresent(Bool.self, forKey: .isFinale)) ?? false
     }
 }
 

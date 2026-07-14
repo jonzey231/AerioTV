@@ -213,6 +213,18 @@ struct ParsedEPGProgram {
     let startTime: Date
     let endTime: Date
     let category: String
+    // EPG badge metadata (guide/list/info-sheet badges). `var` with a
+    // default so the memberwise initializer keeps them optional at the
+    // few call sites that don't parse XMLTV. XMLTV has no finale tag, so
+    // `isFinale` stays false on this path (Dispatcharr supplies it).
+    var subTitle: String? = nil
+    var season: Int? = nil
+    var episode: Int? = nil
+    var isNew: Bool = false
+    var isLiveBroadcast: Bool = false
+    var isPremiere: Bool = false
+    var isFinale: Bool = false
+    var isRepeat: Bool = false
 }
 
 // MARK: - XMLTV Parser (class required for NSObject/XMLParserDelegate)
@@ -254,6 +266,20 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
     /// close time fixes it.
     private var currentText = ""
     private var insideProgramme = false
+
+    // EPG badge metadata for the programme currently being parsed. Reset
+    // in the `programme` branch of `didStartElement` alongside the
+    // title/desc/category state. Mirrors the Android XMLTVParser.
+    private var currentSubTitle = ""
+    private var currentSeason: Int?
+    private var currentEpisode: Int?
+    private var currentIsNew = false
+    private var currentIsLiveBroadcast = false
+    private var currentIsPremiere = false
+    private var currentIsRepeat = false
+    /// `system=` attribute of the currently-open `<episode-num>` element,
+    /// captured at start so `didEndElement` can decode the accumulated text.
+    private var currentEpNumSystem = ""
 
     /// v1.7.3: filter-during-parse channel allowlist. When non-nil,
     /// any `<programme>` whose `channel=` attribute (lowercased) is
@@ -511,6 +537,14 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
             currentTitle      = ""
             currentDesc       = ""
             currentCategories = []
+            currentSubTitle          = ""
+            currentSeason            = nil
+            currentEpisode           = nil
+            currentIsNew             = false
+            currentIsLiveBroadcast   = false
+            currentIsPremiere        = false
+            currentIsRepeat          = false
+            currentEpNumSystem       = ""
             // v1.7.3: decide up-front whether this programme survives
             // the channel filter. The `channel=` attribute is present
             // at start, so we can short-circuit before accumulating
@@ -519,6 +553,19 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
                 skippingProgramme = !known.contains(currentChannelID.lowercased())
             } else {
                 skippingProgramme = false
+            }
+        } else if insideProgramme && !skippingProgramme {
+            // Empty/self-closing marker elements: their PRESENCE is the
+            // signal (they carry no text), so detect them at START by
+            // element name. `episode-num` captures its `system=` attr
+            // here; its text is decoded at close.
+            switch elementName {
+            case "new":              currentIsNew = true
+            case "live":             currentIsLiveBroadcast = true
+            case "premiere":         currentIsPremiere = true
+            case "previously-shown": currentIsRepeat = true
+            case "episode-num":      currentEpNumSystem = attributeDict["system"] ?? ""
+            default: break
             }
         }
     }
@@ -561,6 +608,19 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
                 if !trimmed.isEmpty {
                     currentCategories.append(trimmed)
                 }
+            case "sub-title":
+                // First non-empty `<sub-title>` wins (same policy as
+                // title/desc) - this is the episode name.
+                if currentSubTitle.isEmpty && !trimmed.isEmpty {
+                    currentSubTitle = trimmed
+                }
+            case "episode-num":
+                // Decode into 1-based (season, episode); first non-nil wins
+                // so a later `dd_progid` line can't clobber a good xmltv_ns
+                // one already captured.
+                let (s, e) = Self.parseEpisodeNum(currentEpNumSystem, trimmed)
+                if let s, currentSeason == nil  { currentSeason = s }
+                if let e, currentEpisode == nil { currentEpisode = e }
             default: break
             }
         }
@@ -582,7 +642,17 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
                     description: currentDesc,
                     startTime:   start,
                     endTime:     stop,
-                    category:    currentCategories.joined(separator: ",")
+                    category:    currentCategories.joined(separator: ","),
+                    subTitle:    currentSubTitle.isEmpty ? nil : currentSubTitle,
+                    season:      currentSeason,
+                    episode:     currentEpisode,
+                    isNew:            currentIsNew,
+                    isLiveBroadcast:  currentIsLiveBroadcast,
+                    isPremiere:       currentIsPremiere,
+                    // XMLTV has no standard finale tag; only repeat
+                    // (`<previously-shown>`) is available.
+                    isFinale:         false,
+                    isRepeat:         currentIsRepeat
                 ))
             }
         }
@@ -606,5 +676,54 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
         let s = str.trimmingCharacters(in: .whitespaces)
         if let d = Self.xmltvFmtTZ.date(from: s) { return d }
         return Self.xmltvFmtUTC.date(from: s)
+    }
+
+    // MARK: - Episode-num decoding
+
+    /// `[Ss] N [Ee] M` - tolerates `S3E5` / `S03E05` (case-insensitive).
+    private static let seRegex = try! NSRegularExpression(
+        pattern: "[Ss]\\s*(\\d{1,4})\\s*[Ee]\\s*(\\d{1,4})")
+    /// `N x M` - e.g. `3x05`.
+    private static let sxeRegex = try! NSRegularExpression(
+        pattern: "(\\d{1,4})\\s*[xX]\\s*(\\d{1,4})")
+
+    /// Decode an XMLTV `<episode-num>` value into 1-based `(season, episode)`.
+    ///  - `system == "xmltv_ns"`: dot-separated ZERO-based
+    ///    `season.episode.part`, each part optionally `n/total`; empty
+    ///    parts mean unknown. `+1` converts to 1-based, e.g. `"2.4.0/2"`
+    ///    -> `(3, 5)`.
+    ///  - otherwise (onscreen / unknown / bare string): extract S/E digits
+    ///    tolerating `S3E5` / `S03E05` and `3x05` (these are already the
+    ///    displayed 1-based numbers, so no `+1`).
+    ///  - `dd_progid` and other id-only systems -> `(nil, nil)`.
+    private static func parseEpisodeNum(_ system: String, _ raw: String) -> (Int?, Int?) {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty { return (nil, nil) }
+
+        if system == "xmltv_ns" {
+            let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+                             .map(String.init)
+            func part(_ i: Int) -> Int? {
+                guard i < parts.count else { return nil }
+                // Take the number before an optional "/total", 0-based -> 1-based.
+                let token = parts[i].split(separator: "/", omittingEmptySubsequences: false)
+                                    .first.map(String.init) ?? ""
+                guard let n = Int(token.trimmingCharacters(in: .whitespaces)) else { return nil }
+                return n + 1
+            }
+            return (part(0), part(1))
+        }
+
+        let ns = value as NSString
+        let full = NSRange(location: 0, length: ns.length)
+        if let m = seRegex.firstMatch(in: value, range: full), m.numberOfRanges == 3 {
+            return (Int(ns.substring(with: m.range(at: 1))),
+                    Int(ns.substring(with: m.range(at: 2))))
+        }
+        if let m = sxeRegex.firstMatch(in: value, range: full), m.numberOfRanges == 3 {
+            return (Int(ns.substring(with: m.range(at: 1))),
+                    Int(ns.substring(with: m.range(at: 2))))
+        }
+        return (nil, nil)
     }
 }

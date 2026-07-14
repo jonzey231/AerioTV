@@ -1201,8 +1201,6 @@ struct PlaybackBottomChrome_tvOS: View {
     /// title underneath, exactly the AVPlayerViewController transport
     /// behavior. The fixed-height label slot keeps the circles from
     /// jumping when focus moves.
-    @ViewBuilder
-
     private var addButton: some View {
         // Own the focus ring so it follows the pill's Capsule shape. The
         // shared TVNoHighlightButtonStyle draws a RoundedRectangle(14) ring

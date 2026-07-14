@@ -724,3 +724,181 @@ struct TVCategoryPill: View {
     }
 }
 #endif
+
+// MARK: - EPG Program Flag Badges
+//
+// Shared LIVE / NEW / PREMIERE / FINALE / REPEAT badges and the
+// season/episode label, rendered in the guide grid cell, the channel
+// list rows, and the Program Info sheet. Ported from Android
+// `core/ui/EpgBadges.kt` (the semantic source of truth).
+//
+// These are driven by FEED metadata, not the wall clock: `LIVE` here is
+// the XMLTV `<live/>` / Dispatcharr `is_live` broadcast flag, distinct
+// from the guide's clock-derived "airing now" tint. Per the per-source
+// matrix, Dispatcharr cannot supply REPEAT (no previously-shown field).
+
+extension Color {
+    // LIVE reuses the existing `statusLive` (#FF4757). These three are
+    // the badge-specific additions, matching the Android palette
+    // (EpgNewGreen / EpgPremierePurple / EpgRepeatGray).
+    static let epgFlagNew      = Color(hex: "27AE60")
+    static let epgFlagPremiere = Color(hex: "9B59B6")
+    static let epgFlagRepeat   = Color(hex: "8A8F98")
+}
+
+/// One feed-flag badge: a label + its solid pill colour.
+struct EPGFlag {
+    let label: String
+    let color: Color
+}
+
+/// Ordered badge list for a program, most-salient first. REPEAT is
+/// suppressed when NEW is set (a program is one or the other). Empty
+/// when nothing applies. FINALE shares the PREMIERE purple (Android
+/// parity). A simple free function so `GuideProgram`, `EPGProgram`,
+/// `EPGEntry`, and `ProgramInfoTarget` can all feed it their 5 Bools.
+func epgFlagBadges(isLiveBroadcast: Bool,
+                   isNew: Bool,
+                   isPremiere: Bool,
+                   isFinale: Bool,
+                   isRepeat: Bool) -> [EPGFlag] {
+    var out: [EPGFlag] = []
+    if isLiveBroadcast { out.append(EPGFlag(label: "LIVE", color: .statusLive)) }
+    if isNew           { out.append(EPGFlag(label: "NEW", color: .epgFlagNew)) }
+    if isPremiere      { out.append(EPGFlag(label: "PREMIERE", color: .epgFlagPremiere)) }
+    if isFinale        { out.append(EPGFlag(label: "FINALE", color: .epgFlagPremiere)) }
+    if isRepeat && !isNew { out.append(EPGFlag(label: "REPEAT", color: .epgFlagRepeat)) }
+    return out
+}
+
+/// "S3 E5" / "S3" / "E5", or nil when neither number is known.
+func seasonEpisodeLabel(season: Int?, episode: Int?) -> String? {
+    switch (season, episode) {
+    case let (s?, e?): return "S\(s) E\(e)"
+    case let (s?, nil): return "S\(s)"
+    case let (nil, e?): return "E\(e)"
+    default: return nil
+    }
+}
+
+/// Small value type carrying the feed's per-program flag markers so a
+/// caller (e.g. `ChannelRow.liveProgram`) can pass them around in one
+/// bag. All default false so the no-metadata path is a plain `EPGFlags()`.
+struct EPGFlags: Equatable {
+    var isNew: Bool = false
+    var isLiveBroadcast: Bool = false
+    var isPremiere: Bool = false
+    var isFinale: Bool = false
+    var isRepeat: Bool = false
+
+    var badges: [EPGFlag] {
+        epgFlagBadges(isLiveBroadcast: isLiveBroadcast, isNew: isNew,
+                      isPremiere: isPremiere, isFinale: isFinale, isRepeat: isRepeat)
+    }
+    var isEmpty: Bool { badges.isEmpty }
+}
+
+/// A compact solid-colour badge pill. `compact` keeps guide-cell badges
+/// tight; the roomier list/info-sheet uses the larger (tvOS-bumped) size,
+/// matching the `LiveBadge` / `ServerTypeBadge` sizing idiom.
+struct EPGFlagBadge: View {
+    let flag: EPGFlag
+    var compact: Bool = false
+
+    #if os(tvOS)
+    private var fontSize: CGFloat { compact ? 11 : 18 }
+    private var hPad: CGFloat { compact ? 4 : 8 }
+    private var vPad: CGFloat { compact ? 1 : 3 }
+    #else
+    private var fontSize: CGFloat { compact ? 7 : 10 }
+    private var hPad: CGFloat { compact ? 3 : 6 }
+    private var vPad: CGFloat { compact ? 0.5 : 2 }
+    #endif
+    private var cornerRadius: CGFloat { compact ? 3 : 4 }
+
+    var body: some View {
+        Text(flag.label)
+            .font(.system(size: fontSize, weight: .bold))
+            .foregroundColor(.white)
+            .lineLimit(1)
+            .padding(.horizontal, hPad)
+            .padding(.vertical, vPad)
+            .background(flag.color)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+    }
+}
+
+/// A horizontal run of badges; renders nothing when there are no flags.
+struct EPGFlagsRow: View {
+    let flags: [EPGFlag]
+    var compact: Bool = false
+    var spacing: CGFloat = 4
+
+    init(flags: [EPGFlag], compact: Bool = false, spacing: CGFloat = 4) {
+        self.flags = flags
+        self.compact = compact
+        self.spacing = spacing
+    }
+
+    /// Convenience: build straight from the 5 feed Bools.
+    init(isLiveBroadcast: Bool, isNew: Bool, isPremiere: Bool,
+         isFinale: Bool, isRepeat: Bool, compact: Bool = false, spacing: CGFloat = 4) {
+        self.init(flags: epgFlagBadges(isLiveBroadcast: isLiveBroadcast, isNew: isNew,
+                                       isPremiere: isPremiere, isFinale: isFinale,
+                                       isRepeat: isRepeat),
+                  compact: compact, spacing: spacing)
+    }
+
+    var body: some View {
+        if !flags.isEmpty {
+            HStack(spacing: spacing) {
+                ForEach(flags.indices, id: \.self) { i in
+                    EPGFlagBadge(flag: flags[i], compact: compact)
+                }
+            }
+        }
+    }
+}
+
+/// A small neutral outlined "S3 E5" pill. Renders nothing when `label`
+/// (or the season/episode pair) is nil.
+struct SeasonEpisodePill: View {
+    let label: String?
+    var compact: Bool = false
+
+    init(label: String?, compact: Bool = false) {
+        self.label = label
+        self.compact = compact
+    }
+
+    init(season: Int?, episode: Int?, compact: Bool = false) {
+        self.label = seasonEpisodeLabel(season: season, episode: episode)
+        self.compact = compact
+    }
+
+    #if os(tvOS)
+    private var fontSize: CGFloat { compact ? 11 : 17 }
+    private var hPad: CGFloat { compact ? 4 : 8 }
+    private var vPad: CGFloat { compact ? 1 : 3 }
+    #else
+    private var fontSize: CGFloat { compact ? 7 : 10 }
+    private var hPad: CGFloat { compact ? 3 : 6 }
+    private var vPad: CGFloat { compact ? 0.5 : 2 }
+    #endif
+    private var cornerRadius: CGFloat { compact ? 3 : 4 }
+
+    var body: some View {
+        if let label {
+            Text(label)
+                .font(.system(size: fontSize, weight: .medium))
+                .foregroundColor(.textSecondary)
+                .lineLimit(1)
+                .padding(.horizontal, hPad)
+                .padding(.vertical, vPad)
+                .overlay(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .stroke(Color.borderMedium, lineWidth: 1)
+                )
+        }
+    }
+}

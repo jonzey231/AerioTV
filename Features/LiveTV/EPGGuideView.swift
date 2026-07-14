@@ -24,18 +24,33 @@ struct GuideProgram: Identifiable, Equatable {
     /// paths already carry categories inline, no detail call needed).
     let programID: Int?
 
+    // MARK: EPG badge metadata (guide/list/info-sheet badges)
+    // `isLiveBroadcast` is the feed's XMLTV `<live/>` / Dispatcharr
+    // `is_live` flag, distinct from the clock-derived `isLive` below.
+    let subTitle: String?
+    let season: Int?
+    let episode: Int?
+    let isNew: Bool
+    let isLiveBroadcast: Bool
+    let isPremiere: Bool
+    let isFinale: Bool
+    let isRepeat: Bool
+
     /// Computed: the program is currently airing.
     var isLive: Bool {
         let now = Date()
         return start <= now && end > now
     }
 
-    /// Convenience initializer that defaults `programID` to nil so the
-    /// dozen+ existing call sites (XMLTV merge, Xtream, dummy fillers,
-    /// etc.) don't need to change. Dispatcharr-specific construction
-    /// sites pass an explicit `programID:` to enable lazy category load.
+    /// Convenience initializer that defaults `programID` and the badge
+    /// metadata so the dozen+ existing call sites (XMLTV merge, Xtream,
+    /// dummy fillers, etc.) don't need to change. Data-bearing sites pass
+    /// explicit values.
     init(channelID: String, title: String, description: String,
-         start: Date, end: Date, category: String, programID: Int? = nil) {
+         start: Date, end: Date, category: String, programID: Int? = nil,
+         subTitle: String? = nil, season: Int? = nil, episode: Int? = nil,
+         isNew: Bool = false, isLiveBroadcast: Bool = false,
+         isPremiere: Bool = false, isFinale: Bool = false, isRepeat: Bool = false) {
         self.channelID = channelID
         self.title = title
         self.description = description
@@ -43,6 +58,14 @@ struct GuideProgram: Identifiable, Equatable {
         self.end = end
         self.category = category
         self.programID = programID
+        self.subTitle = subTitle
+        self.season = season
+        self.episode = episode
+        self.isNew = isNew
+        self.isLiveBroadcast = isLiveBroadcast
+        self.isPremiere = isPremiere
+        self.isFinale = isFinale
+        self.isRepeat = isRepeat
     }
 }
 
@@ -284,6 +307,14 @@ final class GuideStore: ObservableObject {
                 // a clean re-run on devices that participated in
                 // that race.
                 let migrationKey = "xmltvCategoryFixMigrationV2"
+                // v1.7.x one-shot: EPG rows cached before the badge fields
+                // (subTitle / season / episode / isNew / isLiveBroadcast /
+                // isPremiere / isFinale / isRepeat) shipped carry the
+                // defaults, so the guide would paint badge-less rows until the
+                // next EPG refresh. Purging once forces a fresh re-fetch that
+                // repopulates the flags. Gated by this single flag; see the
+                // dedicated block below the category-fix migration.
+                let badgeClearKey = "epg.badgeCacheClearedV1"
                 if !UserDefaults.standard.bool(forKey: migrationKey) {
                     if let allRows = try? bgContext.fetch(FetchDescriptor<EPGProgram>()) {
                         for ep in allRows { bgContext.delete(ep) }
@@ -291,6 +322,30 @@ final class GuideStore: ObservableObject {
                         debugLog("🗑️ v1.6.7 XMLTV category-fix migration: purged \(allRows.count) rows for fresh re-parse")
                     }
                     UserDefaults.standard.set(true, forKey: migrationKey)
+                    // This purge already dropped every cached row, so the badge
+                    // upgrade is satisfied in the same pass. Mark it done so the
+                    // next launch doesn't re-purge the freshly-badged re-fetch.
+                    UserDefaults.standard.set(true, forKey: badgeClearKey)
+                    return nil
+                }
+
+                // v1.7.x badge-metadata upgrade, for devices that already ran
+                // the category-fix migration above. The EPG cache is pure
+                // derived data (repopulates on the next fetch), and tvOS has no
+                // pull-to-refresh, so without this a TV user could sit with
+                // badge-less rows until the next scheduled refresh. Purge ALL
+                // EPGProgram rows once, before the guide paints from cache;
+                // returning nil makes the caller treat the cache as empty and
+                // triggers the fresh fetch. Only EPGProgram is touched. Same
+                // detached-task placement as the migration above means no race
+                // with a concurrent fetch.
+                if !UserDefaults.standard.bool(forKey: badgeClearKey) {
+                    if let allRows = try? bgContext.fetch(FetchDescriptor<EPGProgram>()) {
+                        for ep in allRows { bgContext.delete(ep) }
+                        try? bgContext.save()
+                        debugLog("🗑️ EPG badge upgrade: purged \(allRows.count) cached rows for fresh re-fetch")
+                    }
+                    UserDefaults.standard.set(true, forKey: badgeClearKey)
                     return nil
                 }
 
@@ -317,7 +372,12 @@ final class GuideStore: ObservableObject {
                                           description: ep.programDescription,
                                           start: ep.startTime, end: ep.endTime,
                                           category: ep.category,
-                                          programID: ep.programID)
+                                          programID: ep.programID,
+                                          subTitle: ep.subTitle, season: ep.season,
+                                          episode: ep.episode, isNew: ep.isNew,
+                                          isLiveBroadcast: ep.isLiveBroadcast,
+                                          isPremiere: ep.isPremiere, isFinale: ep.isFinale,
+                                          isRepeat: ep.isRepeat)
                     dict[ep.channelID, default: []].append(gp)
                 }
                 let newestFetch = cachedRows.map(\.fetchedAt).max() ?? .distantPast
@@ -538,7 +598,12 @@ final class GuideStore: ObservableObject {
                                         description: gp.description,
                                         startTime: gp.start, endTime: gp.end,
                                         category: gp.category, serverID: serverID,
-                                        programID: gp.programID)
+                                        programID: gp.programID,
+                                        subTitle: gp.subTitle, season: gp.season,
+                                        episode: gp.episode, isNew: gp.isNew,
+                                        isLiveBroadcast: gp.isLiveBroadcast,
+                                        isPremiere: gp.isPremiere, isFinale: gp.isFinale,
+                                        isRepeat: gp.isRepeat)
                     bgContext.insert(ep)
                     count += 1
                 }
@@ -946,7 +1011,11 @@ final class GuideStore: ObservableObject {
                         for cid in cids {
                             let gp = GuideProgram(channelID: cid, title: prog.title,
                                                   description: desc, start: start, end: end,
-                                                  category: "", programID: prog.programID)
+                                                  category: "", programID: prog.programID,
+                                                  subTitle: prog.subTitle.isEmpty ? nil : prog.subTitle,
+                                                  season: prog.season, episode: prog.episode,
+                                                  isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
+                                                  isPremiere: prog.isPremiere, isFinale: prog.isFinale)
                             GuideStore.mergeProgramInto(&dict, program: gp, for: cid, deferSort: true)
                             touched.insert(cid)
                         }
@@ -1025,7 +1094,11 @@ final class GuideStore: ObservableObject {
                 for cid in cids {
                     let gp = GuideProgram(channelID: cid, title: prog.title,
                                           description: desc, start: start, end: end,
-                                          category: "", programID: prog.programID)
+                                          category: "", programID: prog.programID,
+                                          subTitle: prog.subTitle.isEmpty ? nil : prog.subTitle,
+                                          season: prog.season, episode: prog.episode,
+                                          isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
+                                          isPremiere: prog.isPremiere, isFinale: prog.isFinale)
                     mergeProgram(gp, for: cid)
                 }
             }
@@ -1060,7 +1133,11 @@ final class GuideStore: ObservableObject {
                 for cid in cids {
                     let gp = GuideProgram(channelID: cid, title: prog.title,
                                           description: desc, start: start, end: end,
-                                          category: "", programID: prog.programID)
+                                          category: "", programID: prog.programID,
+                                          subTitle: prog.subTitle.isEmpty ? nil : prog.subTitle,
+                                          season: prog.season, episode: prog.episode,
+                                          isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
+                                          isPremiere: prog.isPremiere, isFinale: prog.isFinale)
                     mergeProgram(gp, for: cid)
                 }
             }
@@ -1277,7 +1354,12 @@ final class GuideStore: ObservableObject {
                                        start: old.start,
                                        end: old.end,
                                        category: cats,
-                                       programID: old.programID)
+                                       programID: old.programID,
+                                       subTitle: old.subTitle, season: old.season,
+                                       episode: old.episode, isNew: old.isNew,
+                                       isLiveBroadcast: old.isLiveBroadcast,
+                                       isPremiere: old.isPremiere, isFinale: old.isFinale,
+                                       isRepeat: old.isRepeat)
 
             // Title-matched propagation across the rest of the
             // channel's programs. Skip the now-airing index (just
@@ -1295,7 +1377,12 @@ final class GuideStore: ObservableObject {
                                              start: p.start,
                                              end: p.end,
                                              category: cats,
-                                             programID: p.programID)
+                                             programID: p.programID,
+                                             subTitle: p.subTitle, season: p.season,
+                                             episode: p.episode, isNew: p.isNew,
+                                             isLiveBroadcast: p.isLiveBroadcast,
+                                             isPremiere: p.isPremiere, isFinale: p.isFinale,
+                                             isRepeat: p.isRepeat)
                 }
             }
 
@@ -1574,7 +1661,12 @@ final class GuideStore: ObservableObject {
                     let gp = GuideProgram(channelID: cid, title: prog.title,
                                           description: prog.description,
                                           start: prog.startTime, end: prog.endTime,
-                                          category: prog.category)
+                                          category: prog.category, programID: nil,
+                                          subTitle: prog.subTitle, season: prog.season,
+                                          episode: prog.episode, isNew: prog.isNew,
+                                          isLiveBroadcast: prog.isLiveBroadcast,
+                                          isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                                          isRepeat: prog.isRepeat)
                     GuideStore.mergeProgramInto(&dict, program: gp, for: cid, deferSort: true)
                     touchedChannelIDs.insert(cid)
                     // Track currently-airing program category.
@@ -1876,7 +1968,11 @@ final class GuideStore: ObservableObject {
                                 let desc = prog.description.isEmpty ? prog.subTitle : prog.description
                                 return GuideProgram(channelID: channelID, title: prog.title,
                                                     description: desc, start: start, end: end,
-                                                    category: "", programID: prog.programID)
+                                                    category: "", programID: prog.programID,
+                                                    subTitle: prog.subTitle.isEmpty ? nil : prog.subTitle,
+                                                    season: prog.season, episode: prog.episode,
+                                                    isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
+                                                    isPremiere: prog.isPremiere, isFinale: prog.isFinale)
                             }
                             return (programs, false)
                         } catch {
@@ -2069,9 +2165,29 @@ final class GuideStore: ObservableObject {
                 : existing.description
             let mergedCategory = existing.category.isEmpty ? prog.category : existing.category
             let mergedProgramID = existing.programID ?? prog.programID
+            // Badge metadata: never drop it during a dedup merge. A
+            // seed/JSON entry may carry no flags while the XMLTV merge for
+            // the same slot does (or vice versa), so coalesce optionals
+            // and OR the Bools - whichever source has data wins.
+            let mergedSubTitle = existing.subTitle ?? prog.subTitle
+            let mergedSeason = existing.season ?? prog.season
+            let mergedEpisode = existing.episode ?? prog.episode
+            let mergedIsNew = existing.isNew || prog.isNew
+            let mergedIsLiveBroadcast = existing.isLiveBroadcast || prog.isLiveBroadcast
+            let mergedIsPremiere = existing.isPremiere || prog.isPremiere
+            let mergedIsFinale = existing.isFinale || prog.isFinale
+            let mergedIsRepeat = existing.isRepeat || prog.isRepeat
             let needsUpdate = mergedDescription != existing.description
                 || mergedCategory != existing.category
                 || mergedProgramID != existing.programID
+                || mergedSubTitle != existing.subTitle
+                || mergedSeason != existing.season
+                || mergedEpisode != existing.episode
+                || mergedIsNew != existing.isNew
+                || mergedIsLiveBroadcast != existing.isLiveBroadcast
+                || mergedIsPremiere != existing.isPremiere
+                || mergedIsFinale != existing.isFinale
+                || mergedIsRepeat != existing.isRepeat
             if needsUpdate {
                 list[idx] = GuideProgram(
                     channelID: existing.channelID,
@@ -2080,7 +2196,15 @@ final class GuideStore: ObservableObject {
                     start: existing.start,
                     end: existing.end,
                     category: mergedCategory,
-                    programID: mergedProgramID
+                    programID: mergedProgramID,
+                    subTitle: mergedSubTitle,
+                    season: mergedSeason,
+                    episode: mergedEpisode,
+                    isNew: mergedIsNew,
+                    isLiveBroadcast: mergedIsLiveBroadcast,
+                    isPremiere: mergedIsPremiere,
+                    isFinale: mergedIsFinale,
+                    isRepeat: mergedIsRepeat
                 )
                 dict[channelID] = list
             }
@@ -3743,6 +3867,24 @@ private struct GuideProgramButton: View {
         isFutureProgram && reminderManager.hasReminder(forKey: reminderKey)
     }
 
+    /// iPhone/compact guide cell: season/episode pill + feed badges on
+    /// their own row below the title and description. Renders nothing when
+    /// the program carries neither. (tvOS keeps them on the time-range
+    /// line, which reads fine at 10-foot distance.)
+    @ViewBuilder
+    private var compactBadgeRow: some View {
+        let seLabel = seasonEpisodeLabel(season: prog.season, episode: prog.episode)
+        let flags = epgFlagBadges(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
+                                  isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                                  isRepeat: prog.isRepeat)
+        if seLabel != nil || !flags.isEmpty {
+            HStack(spacing: 4) {
+                SeasonEpisodePill(label: seLabel, compact: true)
+                EPGFlagsRow(flags: flags, compact: true)
+            }
+        }
+    }
+
     private var cellContent: some View {
         VStack(alignment: .leading, spacing: 2) {
             #if os(tvOS)
@@ -3769,9 +3911,18 @@ private struct GuideProgramButton: View {
                     .foregroundColor(isFocused ? .white.opacity(0.8) : .textSecondary)
                     .lineLimit(nil)
             }
-            Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
-                .font(.system(size: 17))
-                .foregroundColor(isFocused ? .white.opacity(0.6) : .textTertiary)
+            // Time range + season/episode pill + feed badges, folded onto
+            // one line so the height-limited cell doesn't gain a row.
+            // Trailing badges clip first on narrow (short-duration) cells.
+            HStack(spacing: 4) {
+                Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
+                    .font(.system(size: 17))
+                    .foregroundColor(isFocused ? .white.opacity(0.6) : .textTertiary)
+                SeasonEpisodePill(season: prog.season, episode: prog.episode, compact: true)
+                EPGFlagsRow(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
+                            isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                            isRepeat: prog.isRepeat, compact: true)
+            }
             #else
             HStack(spacing: 4) {
                 // Catch-up badge: aired + replayable from the archive.
@@ -3799,6 +3950,11 @@ private struct GuideProgramButton: View {
             Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
                 .font(.system(size: 9 * guideScale))
                 .foregroundColor(.textTertiary)
+            // Season/episode pill + feed badges on their own row at the
+            // bottom of the cell content. On the narrow iPhone/compact cell
+            // they read too busy folded onto the time line, so the cell
+            // stacks title -> description -> badges top-down.
+            compactBadgeRow
             #endif
         }
         .padding(.leading, 8 + leadingClip)
@@ -4004,7 +4160,15 @@ private struct GuideProgramButton: View {
                             end: prog.end,
                             description: prog.description,
                             category: prog.category,
-                            programID: prog.programID
+                            programID: prog.programID,
+                            subTitle: prog.subTitle,
+                            season: prog.season,
+                            episode: prog.episode,
+                            isNew: prog.isNew,
+                            isLiveBroadcast: prog.isLiveBroadcast,
+                            isPremiere: prog.isPremiere,
+                            isFinale: prog.isFinale,
+                            isRepeat: prog.isRepeat
                         )
                     )
                 }
@@ -4239,7 +4403,15 @@ private struct GuideProgramButton: View {
                                 end: prog.end,
                                 description: prog.description,
                                 category: prog.category,
-                                programID: prog.programID
+                                programID: prog.programID,
+                                subTitle: prog.subTitle,
+                                season: prog.season,
+                                episode: prog.episode,
+                                isNew: prog.isNew,
+                                isLiveBroadcast: prog.isLiveBroadcast,
+                                isPremiere: prog.isPremiere,
+                                isFinale: prog.isFinale,
+                                isRepeat: prog.isRepeat
                             )
                         )
                     }
