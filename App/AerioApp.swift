@@ -161,7 +161,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
         // UIKit invokes delegate methods on the main thread, so it is safe to
         // assume the isolation and seed the at-rest mask for this idiom.
-        MainActor.assumeIsolated { AppOrientationLock.syncBase() }
+        MainActor.assumeIsolated {
+            AppOrientationLock.syncBase()
+            // Google Cast sender (GH #33): initialise GCKCastContext once at
+            // launch so GCKUICastButton can discover the Android TV receiver.
+            // iOS-only; the whole controller is #if os(iOS).
+            AerioCastController.shared.start()
+        }
         return true
     }
 
