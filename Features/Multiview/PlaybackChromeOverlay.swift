@@ -262,6 +262,22 @@ struct PlaybackChromeOverlay: View {
                                 .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
                         )
                 }
+                // GH #33 AirPlay: VIDEO AirPlay exists only on the AVPlayer
+                // engine (mpv frames never leave the GPU), so the route picker
+                // appears exactly when this session rides AVPlayer -- which,
+                // with engine auto-detect default-on, is every HLS-capable
+                // channel. mpv sessions keep the audio-only AirPlay entry in
+                // the overflow menu.
+                if store.sessionEngine.isAVPlayer {
+                    AirPlayButton()
+                        .frame(width: 30, height: 30)
+                        .padding(11)
+                        .background(
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                        )
+                }
                 #endif
                 if let audio = store.audioProgressStore {
                     iPadOverflowAdapter(
