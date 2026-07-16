@@ -341,9 +341,35 @@ final class CompanionClient: NSObject, ObservableObject {
         case connected(String?)
     }
 
+    /// One audio/subtitle track the phone's picker renders.
+    struct Track: Identifiable, Equatable {
+        let id: String
+        let label: String
+        let selected: Bool
+    }
+
+    /// Full option state pushed by the TV (CMD_STATE) -- powers the phone's
+    /// audio/subtitle/speed/aspect pickers + the rewind scrubber. Same shape as
+    /// the Android CastControl.RemoteState.
+    struct RemoteState: Equatable {
+        var audio: [Track] = []
+        var text: [Track] = []
+        var textOff = true
+        var speed: Double = 1
+        var aspect = "fit"
+        var streamInfo = ""
+        var canSeek = false
+        var isLive = true
+        var positionWallMs: Int64 = 0
+        var windowStartMs: Int64 = 0
+        var windowEndMs: Int64 = 0
+    }
+
     @Published private(set) var devices: [TV] = []
     @Published private(set) var conn: Conn = .idle
     @Published private(set) var remoteIsPlaying = true
+    /// Full options snapshot from the TV (tracks / speed / aspect / rewind).
+    @Published private(set) var remoteState = RemoteState()
     /// Best-effort title of what the TV plays (hello frame / what we sent).
     @Published private(set) var nowPlaying = ""
     /// Android-format channel id ("disp:<uuid>") this phone last sent.
@@ -499,6 +525,7 @@ final class CompanionClient: NSObject, ObservableObject {
                 if let token = json["token"] as? String, !token.isEmpty { storeToken(token) }
                 conn = .connected(currentTV?.name)
                 onControllingStarted()
+                requestState()
             case "authFail":
                 conn = .needsPairing(currentTV?.name)
             default:
@@ -507,11 +534,52 @@ final class CompanionClient: NSObject, ObservableObject {
             return
         }
         switch json["cmd"] as? String {
-        case "position", "state":
+        case "state":
+            remoteState = Self.decodeState(json)
             if let playing = json["isPlaying"] as? Bool { remoteIsPlaying = playing }
+        case "position":
+            if let playing = json["isPlaying"] as? Bool { remoteIsPlaying = playing }
+            // Live scrubber fields crawl via the ~1Hz tick.
+            var s = remoteState
+            if let v = json["canSeek"] as? Bool { s.canSeek = v }
+            if let v = json["isLive"] as? Bool { s.isLive = v }
+            if let v = Self.int64(json["positionWallMs"]) { s.positionWallMs = v }
+            if let v = Self.int64(json["windowStartMs"]) { s.windowStartMs = v }
+            if let v = Self.int64(json["windowEndMs"]) { s.windowEndMs = v }
+            remoteState = s
         default:
             break
         }
+    }
+
+    private static func decodeState(_ json: [String: Any]) -> RemoteState {
+        func tracks(_ key: String) -> [Track] {
+            (json[key] as? [[String: Any]] ?? []).map {
+                Track(id: $0["id"] as? String ?? "",
+                      label: $0["label"] as? String ?? "",
+                      selected: $0["selected"] as? Bool ?? false)
+            }
+        }
+        var s = RemoteState()
+        s.audio = tracks("audio")
+        s.text = tracks("text")
+        s.textOff = json["textOff"] as? Bool ?? true
+        s.speed = json["speed"] as? Double ?? 1
+        s.aspect = json["aspect"] as? String ?? "fit"
+        s.streamInfo = json["streamInfo"] as? String ?? ""
+        s.canSeek = json["canSeek"] as? Bool ?? false
+        s.isLive = json["isLive"] as? Bool ?? true
+        s.positionWallMs = int64(json["positionWallMs"]) ?? 0
+        s.windowStartMs = int64(json["windowStartMs"]) ?? 0
+        s.windowEndMs = int64(json["windowEndMs"]) ?? 0
+        return s
+    }
+
+    private static func int64(_ v: Any?) -> Int64? {
+        if let i = v as? Int64 { return i }
+        if let i = v as? Int { return Int64(i) }
+        if let d = v as? Double { return Int64(d) }
+        return nil
     }
 
     /// User typed the 6-digit code shown on the TV.
@@ -532,6 +600,7 @@ final class CompanionClient: NSObject, ObservableObject {
             conn = .idle
             controllingChannelID = nil
             nowPlaying = ""
+            remoteState = RemoteState()
         }
     }
 
@@ -554,6 +623,16 @@ final class CompanionClient: NSObject, ObservableObject {
     }
 
     func togglePlayPause() { sendJSON(["cmd": "toggle"]) }
+
+    // Full options surface (parity with the Android companion overlay).
+    func requestState() { sendJSON(["cmd": "getState"]) }
+    func setAudioTrack(_ id: String) { sendJSON(["cmd": "setAudio", "id": id]) }
+    func setTextTrack(_ id: String?) { sendJSON(["cmd": "setText", "id": id ?? ""]) }
+    func setSpeed(_ speed: Double) { sendJSON(["cmd": "setSpeed", "speed": speed]) }
+    func setAspect(_ key: String) { sendJSON(["cmd": "setAspect", "aspect": key]) }
+    func seekBy(_ deltaMs: Int64) { sendJSON(["cmd": "seekBy", "deltaMs": deltaMs]) }
+    func seekToWall(_ ms: Int64) { sendJSON(["cmd": "seekWall", "targetWallMs": ms]) }
+    func goLive() { sendJSON(["cmd": "goLive"]) }
 
     /// Channel up/down: walk ChannelStore for the next Dispatcharr channel
     /// (companion ids only translate for Dispatcharr sources).
@@ -633,6 +712,11 @@ struct RemoteControlScreen: View {
     var onChannelUp: () -> Void
     var onChannelDown: () -> Void
     var onStop: () -> Void
+    /// Non-nil for the companion transport (full options: scrubber + Options
+    /// sheet). nil for basic cast (web receiver has no control namespace).
+    var companion: CompanionClient? = nil
+
+    @State private var showOptions = false
 
     var body: some View {
         ZStack {
@@ -665,7 +749,10 @@ struct RemoteControlScreen: View {
                     .font(.callout)
                     .foregroundStyle(Color.accentColor)
                 Spacer()
-                HStack(spacing: 28) {
+                if let companion, companion.remoteState.canSeek {
+                    rewindBar(companion)
+                }
+                HStack(spacing: 24) {
                     transportButton("chevron.down", label: "Channel down", action: onChannelDown)
                     Button(action: onTogglePlayPause) {
                         ZStack {
@@ -677,12 +764,56 @@ struct RemoteControlScreen: View {
                     }
                     .accessibilityLabel(isPlaying ? "Pause" : "Play")
                     transportButton("chevron.up", label: "Channel up", action: onChannelUp)
+                    if companion != nil {
+                        transportButton("slider.horizontal.3", label: "Options") { showOptions = true }
+                    }
                     transportButton("xmark", label: stopLabel, action: onStop)
                 }
                 .padding(.bottom, 48)
             }
             .padding(.horizontal, 24)
         }
+        .sheet(isPresented: $showOptions) {
+            if let companion { RemoteOptionsSheet(companion: companion) }
+        }
+    }
+
+    /// Live-rewind scrubber + ±30s + Go Live (companion only, when a rewind
+    /// buffer is rolling on the TV).
+    @ViewBuilder
+    private func rewindBar(_ companion: CompanionClient) -> some View {
+        let s = companion.remoteState
+        let span = max(1, Double(s.windowEndMs - s.windowStartMs))
+        let frac = min(1, max(0, Double(s.positionWallMs - s.windowStartMs) / span))
+        VStack(spacing: 8) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.2)).frame(height: 5)
+                    Capsule().fill(Color.accentColor)
+                        .frame(width: geo.size.width * frac, height: 5)
+                }
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 0).onEnded { g in
+                    let f = min(1, max(0, g.location.x / geo.size.width))
+                    let target = s.windowStartMs + Int64(f * span)
+                    companion.seekToWall(target)
+                })
+            }
+            .frame(height: 24)
+            HStack {
+                Button("−30s") { companion.seekBy(-30_000) }
+                Spacer()
+                Text(s.isLive ? "LIVE" : "REWOUND")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(s.isLive ? Color.accentColor : .white.opacity(0.6))
+                Spacer()
+                Button("+30s") { companion.seekBy(30_000) }
+                Button("Go Live") { companion.goLive() }
+            }
+            .font(.callout)
+            .foregroundStyle(.white)
+        }
+        .padding(.bottom, 12)
     }
 
     private func transportButton(_ symbol: String, label: String,
@@ -696,6 +827,79 @@ struct RemoteControlScreen: View {
             }
         }
         .accessibilityLabel(label)
+    }
+}
+
+// MARK: - Companion options sheet (audio / subtitles / speed / aspect / info)
+
+/// Full options picker for the companion remote -- parity with the Android
+/// CastRemoteOverlay's Options menu. Drives the TV via CompanionClient.
+struct RemoteOptionsSheet: View {
+    @ObservedObject var companion: CompanionClient
+    @Environment(\.dismiss) private var dismiss
+
+    private let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+    private let aspects: [(key: String, label: String)] =
+        [("fit", "Fit"), ("fill", "Fill"), ("zoom", "Zoom")]
+
+    var body: some View {
+        NavigationStack {
+            List {
+                let s = companion.remoteState
+                if !s.audio.isEmpty {
+                    Section("Audio") {
+                        ForEach(s.audio) { t in
+                            row(t.label, checked: t.selected) { companion.setAudioTrack(t.id) }
+                        }
+                    }
+                }
+                Section("Subtitles") {
+                    row("Off", checked: s.textOff) { companion.setTextTrack(nil) }
+                    ForEach(s.text) { t in
+                        row(t.label, checked: t.selected) { companion.setTextTrack(t.id) }
+                    }
+                }
+                Section("Speed") {
+                    ForEach(speeds, id: \.self) { sp in
+                        row(sp == 1 ? "Normal" : "\(speedLabel(sp))×",
+                            checked: abs(s.speed - sp) < 0.01) { companion.setSpeed(sp) }
+                    }
+                }
+                Section("Aspect Ratio") {
+                    ForEach(aspects, id: \.key) { a in
+                        row(a.label, checked: s.aspect == a.key) { companion.setAspect(a.key) }
+                    }
+                }
+                if !s.streamInfo.isEmpty {
+                    Section("Stream Info") {
+                        Text(s.streamInfo).font(.footnote.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("Options")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func row(_ label: String, checked: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(label).foregroundStyle(.primary)
+                Spacer()
+                if checked { Image(systemName: "checkmark").foregroundStyle(Color.accentColor) }
+            }
+        }
+    }
+
+    private func speedLabel(_ s: Double) -> String {
+        s == s.rounded() ? String(Int(s)) : String(format: "%g", s)
     }
 }
 
@@ -913,7 +1117,8 @@ final class CompanionHost: NSObject, ObservableObject {
                 pairingCode = nil
                 send(authOk(token: issued), to: conn)
                 startTickerIfNeeded()
-                pushState(to: conn)   // immediate first paint
+                sendState(to: conn)   // full snapshot on connect
+                pushPosition(to: conn)
                 return
             }
             // Wrong code: count it AND rotate the code (can't be brute-swept).
@@ -933,19 +1138,83 @@ final class CompanionHost: NSObject, ObservableObject {
         }
 
         guard session.authed else { return } // control refused pre-auth
+        let ps = MultiviewStore.shared.audioProgressStore
         switch json["cmd"] as? String {
         case "setChannel":
             if let id = json["channelId"] as? String { openChannel(id) }
         case "toggle":
-            MultiviewStore.shared.audioProgressStore?.togglePauseAction?()
+            ps?.togglePauseAction?()
         case "play":
-            let store = MultiviewStore.shared.audioProgressStore
-            if store?.isPaused == true { store?.togglePauseAction?() }
+            if ps?.isPaused == true { ps?.togglePauseAction?() }
         case "pause":
-            let store = MultiviewStore.shared.audioProgressStore
-            if store?.isPaused == false { store?.togglePauseAction?() }
+            if ps?.isPaused == false { ps?.togglePauseAction?() }
+        // Full options parity with the Cast receiver / Android host: drive the
+        // live coordinator's programmatic surface off the audio tile's store.
+        case "setAudio":
+            if let id = intArg(json["id"]) { ps?.setAudioTrackAction?(id) }
+        case "setText":
+            // "" / absent id = Off (track 0). mpv sid=no.
+            ps?.setSubtitleTrackAction?(intArg(json["id"]) ?? 0)
+        case "setSpeed":
+            if let s = json["speed"] as? Double { ps?.setSpeedAction?(s) }
+        case "setAspect":
+            if let key = json["aspect"] as? String {
+                let mode = Self.aspectMode(fromKey: key)
+                ps?.aspectMode = mode
+                UserDefaults.standard.set(mode.rawValue, forKey: "player.aspectMode")
+            }
+        case "seekBy":
+            // window-relative: current playhead + signed delta (Live Rewind).
+            if let store = ps, let delta = intArg64(json["deltaMs"]) {
+                store.seekAction?(Int32(clamping: Int64(store.currentMs) + delta))
+            }
+        case "seekWall":
+            // absolute wall-clock -> window-relative (target - buffer tail).
+            if let target = intArg64(json["targetWallMs"]) {
+                let rel = target - LiveRewindEngine.shared.tailWallMs
+                ps?.seekAction?(Int32(clamping: rel))
+            }
+        case "goLive":
+            // Seek past the head (>= window length) routes to the live edge.
+            let window = LiveRewindEngine.shared.headWallMs - LiveRewindEngine.shared.tailWallMs
+            ps?.seekAction?(Int32(clamping: window))
+        case "getState":
+            break // the state reply below answers it
         default:
-            break // seek/track/aspect: not yet mapped on tvOS; clients degrade
+            break
+        }
+        // Mirror the Android host: after EVERY command push the full snapshot
+        // (so the phone's pickers/scrubber stay in sync) + the position tick.
+        sendState(to: conn)
+    }
+
+    private func intArg(_ v: Any?) -> Int? {
+        if let i = v as? Int { return i }
+        if let s = v as? String { return Int(s) }
+        return nil
+    }
+    private func intArg64(_ v: Any?) -> Int64? {
+        if let i = v as? Int64 { return i }
+        if let i = v as? Int { return Int64(i) }
+        if let d = v as? Double { return Int64(d) }
+        if let s = v as? String { return Int64(s) }
+        return nil
+    }
+
+    /// Android AspectMode keys (fit/fill/zoom) -> tvOS VideoAspectMode
+    /// (fit/fill/stretch). zoom maps to the nearest crop-ish mode.
+    private static func aspectMode(fromKey key: String) -> VideoAspectMode {
+        switch key {
+        case "fill": return .fill
+        case "zoom": return .stretch
+        default: return .fit
+        }
+    }
+    private static func aspectKey(_ mode: VideoAspectMode) -> String {
+        switch mode {
+        case .fill: return "fill"
+        case .stretch: return "zoom"
+        default: return "fit"
         }
     }
 
@@ -983,21 +1252,83 @@ final class CompanionHost: NSObject, ObservableObject {
         guard ticker == nil else { return }
         ticker = Task { @MainActor [weak self] in
             while !Task.isCancelled {
-                self?.broadcastState()
+                guard let self else { return }
+                for session in self.sessions.values where session.authed {
+                    self.pushPosition(to: session.conn)
+                }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
         }
     }
 
-    private func broadcastState() {
-        for session in sessions.values where session.authed {
-            pushState(to: session.conn)
+    /// Full snapshot (tracks / speed / aspect / stream-info / rewind window) the
+    /// phone's option pickers + scrubber render -- the tvOS twin of the Android
+    /// host's buildRemoteStateMessage. Built with JSONSerialization so arbitrary
+    /// track labels are escaped safely.
+    private func sendState(to conn: NWConnection) {
+        let ps = MultiviewStore.shared.audioProgressStore
+        let rewind = LiveRewindEngine.shared
+
+        func tracks(_ list: [MediaTrack], selectedID: Int) -> [[String: Any]] {
+            list.map { ["id": String($0.id), "label": $0.displayName, "selected": $0.id == selectedID] }
+        }
+        let subSelected = ps?.currentSubtitleTrackID ?? 0
+
+        var state: [String: Any] = [
+            "cmd": "state",
+            "audio": tracks(ps?.audioTracks ?? [], selectedID: ps?.currentAudioTrackID ?? 0),
+            // subtitleTracks are the real tracks; "Off" is the implicit id-0 row
+            // the phone always adds, so exclude any 0-id entry here.
+            "text": tracks((ps?.subtitleTracks ?? []).filter { $0.id != 0 }, selectedID: subSelected),
+            "textOff": subSelected == 0,
+            "speed": ps?.speed ?? 1.0,
+            "aspect": Self.aspectKey(ps?.aspectMode ?? .fit),
+            "audioOnly": false,
+            "streamInfo": Self.streamInfoLine(ps),
+            "canSeek": rewind.buffering,
+            "isLive": !rewind.timeshifting,
+            "positionWallMs": rewind.tailWallMs + Int64(ps?.currentMs ?? 0),
+            "windowStartMs": rewind.tailWallMs,
+            "windowEndMs": rewind.headWallMs,
+        ]
+        // Ensure isPlaying rides the state too (some clients read it off state).
+        state["isPlaying"] = ps.map { !$0.isPaused } ?? true
+        if let data = try? JSONSerialization.data(withJSONObject: state),
+           let text = String(data: data, encoding: .utf8) {
+            send(text, to: conn)
         }
     }
 
-    private func pushState(to conn: NWConnection) {
-        let playing = MultiviewStore.shared.audioProgressStore.map { !$0.isPaused } ?? true
-        send(#"{"cmd":"position","isPlaying":\#(playing),"isLive":true,"canSeek":false}"#, to: conn)
+    /// Lightweight ~1Hz tick: crawling playhead + window + transport state.
+    private func pushPosition(to conn: NWConnection) {
+        let ps = MultiviewStore.shared.audioProgressStore
+        let rewind = LiveRewindEngine.shared
+        let playing = ps.map { !$0.isPaused } ?? true
+        let pos: [String: Any] = [
+            "cmd": "position",
+            "isPlaying": playing,
+            "isLive": !rewind.timeshifting,
+            "canSeek": rewind.buffering,
+            "positionWallMs": rewind.tailWallMs + Int64(ps?.currentMs ?? 0),
+            "windowStartMs": rewind.tailWallMs,
+            "windowEndMs": rewind.headWallMs,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: pos),
+           let text = String(data: data, encoding: .utf8) {
+            send(text, to: conn)
+        }
+    }
+
+    /// One-line decode summary for the phone's Stream Info sheet.
+    private static func streamInfoLine(_ ps: PlayerProgressStore?) -> String {
+        guard let info = ps?.streamInfo else { return "" }
+        var parts: [String] = []
+        if info.width > 0, info.height > 0 { parts.append("\(info.width)x\(info.height)") }
+        if !info.videoCodec.isEmpty { parts.append(info.videoCodec.uppercased()) }
+        if !info.audioCodec.isEmpty { parts.append(info.audioCodec.uppercased()) }
+        if info.channels > 0 { parts.append("\(info.channels)ch") }
+        if info.bitrate > 0 { parts.append(String(format: "%.1f Mbps", Double(info.bitrate) * 8 / 1_000_000)) }
+        return parts.joined(separator: "  ·  ")
     }
 
     // MARK: Frame builders

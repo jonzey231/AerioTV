@@ -3934,7 +3934,8 @@ struct MainTabView: View {
                     onTogglePlayPause: { companionClient.togglePlayPause() },
                     onChannelUp: { companionClient.flipChannel(1) },
                     onChannelDown: { companionClient.flipChannel(-1) },
-                    onStop: { companionClient.disconnect() }
+                    onStop: { companionClient.disconnect() },
+                    companion: companionClient   // full options (scrubber + sheet)
                 )
                 .zIndex(3)
                 .transition(.opacity)
