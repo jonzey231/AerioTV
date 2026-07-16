@@ -3175,6 +3175,8 @@ struct MainTabView: View {
     /// tears down local playback; while connected it renders the cast-remote
     /// cover; on session end it resumes the last cast channel locally.
     @ObservedObject private var castController = AerioCastController.shared
+    /// GH #33 companion remote: same cover pattern for a paired Android TV.
+    @ObservedObject private var companionClient = CompanionClient.shared
     #endif
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
@@ -3901,17 +3903,38 @@ struct MainTabView: View {
             // still the single-stream fallback for when the user
             // exits multiview keeping the audio tile.
             #if os(iOS)
-            // GH #33 basic cast: while a web-receiver session is live, local
-            // playback is torn down (AerioCastController.onConnected stopped
-            // the PlayerSession) and this fullscreen remote drives the TV.
-            // Rendered ABOVE the guide; unmounts when the session ends, at
-            // which point the controller resumes the channel locally.
-            if castController.isCasting, castController.castingContent != nil {
-                CastRemoteScreen(
-                    deviceName: castController.connectedDeviceName,
+            // GH #33: while a REMOTE screen plays (cast web receiver, or a
+            // companion-controlled Android TV), local playback is torn down and
+            // this fullscreen remote drives the TV. Cast Stop resumes the
+            // channel locally; companion Disconnect leaves the TV playing and
+            // returns to the guide (device-verified Android semantics).
+            if castController.isCasting, let content = castController.castingContent {
+                RemoteControlScreen(
+                    title: content.title,
+                    subtitle: content.subtitle,
+                    artURL: content.artURL,
+                    statusText: "Casting to \(castController.connectedDeviceName ?? "TV")",
+                    isPlaying: castController.remoteIsPlaying,
+                    stopLabel: "Stop casting",
+                    onTogglePlayPause: { castController.remoteTogglePlayPause() },
                     onChannelUp: { castController.castChannel(1) },
                     onChannelDown: { castController.castChannel(-1) },
-                    onStopCasting: { castController.stopCasting() }
+                    onStop: { castController.stopCasting() }
+                )
+                .zIndex(3)
+                .transition(.opacity)
+            } else if companionClient.isControlling {
+                RemoteControlScreen(
+                    title: companionClient.nowPlaying,
+                    subtitle: nil,
+                    artURL: nil,
+                    statusText: "Controlling \(companionClient.connectedTVName ?? "TV")",
+                    isPlaying: companionClient.remoteIsPlaying,
+                    stopLabel: "Disconnect",
+                    onTogglePlayPause: { companionClient.togglePlayPause() },
+                    onChannelUp: { companionClient.flipChannel(1) },
+                    onChannelDown: { companionClient.flipChannel(-1) },
+                    onStop: { companionClient.disconnect() }
                 )
                 .zIndex(3)
                 .transition(.opacity)

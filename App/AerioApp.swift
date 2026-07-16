@@ -167,6 +167,11 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             // launch so GCKUICastButton can discover the Android TV receiver.
             // iOS-only; the whole controller is #if os(iOS).
             AerioCastController.shared.start()
+            // Companion remote (GH #33 second-screen): passive mDNS browse for
+            // open AerioTV Android TV apps, app-lifetime. Chrome-scoped
+            // discovery churned the browse on every chrome show (Android
+            // device test) -- app scope is the cheap, stable choice.
+            CompanionClient.shared.startDiscovery()
         }
         return true
     }

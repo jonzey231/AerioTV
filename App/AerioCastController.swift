@@ -20,6 +20,7 @@
 #if os(iOS)
 import Foundation
 import GoogleCast
+import Network
 import SwiftUI
 
 /// Receiver application id registered + published in the Google Cast SDK
@@ -296,6 +297,278 @@ extension AerioCastController: GCKRemoteMediaClientListener {
     }
 }
 
+// MARK: - Companion remote client (GH #33 second-screen)
+
+/// LAN remote for the AerioTV ANDROID TV app: the TV advertises `_aeriotv._tcp`
+/// and runs a WebSocket server; this client discovers it (NWBrowser), pairs
+/// with the TV's 6-digit code (token remembered per TV afterwards), and drives
+/// the TV's native player. The wire format is EXACTLY the Android
+/// CompanionProtocol + CastControl JSON: session frames carry "t"
+/// (hello/auth/authOk/authFail), control frames carry "cmd". Channel identity
+/// is the ANDROID id format -- "disp:<uuid>" for Dispatcharr channels -- so
+/// companion channel control is Dispatcharr-only (both platforms share the
+/// server uuid; XC/M3U ids don't translate across apps).
+///
+/// Unlike casting, Disconnect leaves the TV playing (it's the user's own
+/// device; Android device-verified UX 2026-07-15) and the phone just returns
+/// to the guide -- no local resume.
+@MainActor
+final class CompanionClient: NSObject, ObservableObject {
+
+    static let shared = CompanionClient()
+
+    struct TV: Identifiable, Equatable {
+        let id: String          // TXT "id" when present, else the service name
+        let name: String
+        let endpoint: NWEndpoint
+    }
+
+    enum Conn: Equatable {
+        case idle
+        case connecting(String?)
+        /// Connected but unauthenticated: the TV is showing a pairing code.
+        case needsPairing(String?)
+        case connected(String?)
+    }
+
+    @Published private(set) var devices: [TV] = []
+    @Published private(set) var conn: Conn = .idle
+    @Published private(set) var remoteIsPlaying = true
+    /// Best-effort title of what the TV plays (hello frame / what we sent).
+    @Published private(set) var nowPlaying = ""
+    /// Android-format channel id ("disp:<uuid>") this phone last sent.
+    @Published private(set) var controllingChannelID: String?
+
+    var isControlling: Bool { if case .connected = conn { return true } else { return false } }
+    var connectedTVName: String? { if case .connected(let n) = conn { return n } else { return nil } }
+
+    private var browser: NWBrowser?
+    private var socket: URLSessionWebSocketTask?
+    private var resolver: NWConnection?
+    private var currentTV: TV?
+    /// Monotonic attempt counter: a cancelled attempt's async tail must never
+    /// clobber its successor's state (Android adversarial-review lesson).
+    private var generation = 0
+
+    // MARK: Discovery
+
+    func startDiscovery() {
+        guard browser == nil else { return }
+        let b = NWBrowser(
+            for: .bonjourWithTXTRecord(type: "_aeriotv._tcp", domain: nil),
+            using: NWParameters()
+        )
+        b.browseResultsChangedHandler = { [weak self] results, _ in
+            let tvs: [TV] = results.compactMap { result in
+                guard case .service(let name, _, _, _) = result.endpoint else { return nil }
+                var stableID = name
+                if case .bonjour(let txt) = result.metadata,
+                   let id = txt.dictionary["id"], !id.isEmpty {
+                    stableID = id
+                }
+                return TV(id: stableID, name: name, endpoint: result.endpoint)
+            }.sorted { $0.name.lowercased() < $1.name.lowercased() }
+            Task { @MainActor [weak self] in self?.devices = tvs }
+        }
+        b.start(queue: .main)
+        browser = b
+    }
+
+    func stopDiscovery() {
+        browser?.cancel()
+        browser = nil
+        devices = []
+    }
+
+    // MARK: Connection
+
+    func connect(to tv: TV) {
+        disconnect(userInitiated: false)
+        currentTV = tv
+        generation += 1
+        let gen = generation
+        conn = .connecting(tv.name)
+        // The TV's WS server lives at ws://host:port/remote; a Bonjour endpoint
+        // carries neither, so resolve first: open a throwaway TCP connection to
+        // the service endpoint and read the remote host:port off its path.
+        let probe = NWConnection(to: tv.endpoint, using: .tcp)
+        resolver = probe
+        probe.stateUpdateHandler = { [weak self] state in
+            Task { @MainActor [weak self] in
+                guard let self, gen == self.generation else { return }
+                switch state {
+                case .ready:
+                    let remote = probe.currentPath?.remoteEndpoint
+                    probe.cancel()
+                    self.resolver = nil
+                    if case .hostPort(let host, let port)? = remote {
+                        self.openSocket(host: host, port: port, gen: gen)
+                    } else {
+                        self.conn = .idle
+                    }
+                case .failed, .cancelled:
+                    if case .connecting = self.conn, self.resolver != nil {
+                        self.resolver = nil
+                        self.conn = .idle
+                    }
+                default:
+                    break
+                }
+            }
+        }
+        probe.start(queue: .main)
+    }
+
+    private func openSocket(host: NWEndpoint.Host, port: NWEndpoint.Port, gen: Int) {
+        // IPv6 hosts need brackets and lose their %interface scope (link-local
+        // scoping doesn't survive URL form; the LAN address form works).
+        var h = "\(host)"
+        if let pct = h.firstIndex(of: "%") { h = String(h[..<pct]) }
+        if h.contains(":") { h = "[\(h)]" }
+        guard let url = URL(string: "ws://\(h):\(port)/remote") else {
+            conn = .idle
+            return
+        }
+        let task = URLSession.shared.webSocketTask(with: url)
+        socket = task
+        task.resume()
+        // Authenticate immediately: remembered token, or blank to make the TV
+        // show a pairing code (it answers authFail + needsPairing).
+        sendJSON(["t": "auth", "token": storedToken(), "code": ""])
+        receiveLoop(task: task, gen: gen)
+    }
+
+    private func receiveLoop(task: URLSessionWebSocketTask, gen: Int) {
+        task.receive { [weak self] result in
+            Task { @MainActor [weak self] in
+                guard let self, gen == self.generation else { return }
+                switch result {
+                case .success(let message):
+                    if case .string(let text) = message,
+                       let data = text.data(using: .utf8),
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                        self.handle(json)
+                    }
+                    self.receiveLoop(task: task, gen: gen)
+                case .failure:
+                    self.socket = nil
+                    self.conn = .idle
+                    self.controllingChannelID = nil
+                    self.nowPlaying = ""
+                }
+            }
+        }
+    }
+
+    private func handle(_ json: [String: Any]) {
+        if let t = json["t"] as? String, !t.isEmpty {
+            switch t {
+            case "hello":
+                if let np = json["nowPlaying"] as? String, !np.isEmpty { nowPlaying = np }
+            case "authOk":
+                if let token = json["token"] as? String, !token.isEmpty { storeToken(token) }
+                conn = .connected(currentTV?.name)
+                onControllingStarted()
+            case "authFail":
+                conn = .needsPairing(currentTV?.name)
+            default:
+                break
+            }
+            return
+        }
+        switch json["cmd"] as? String {
+        case "position", "state":
+            if let playing = json["isPlaying"] as? Bool { remoteIsPlaying = playing }
+        default:
+            break
+        }
+    }
+
+    /// User typed the 6-digit code shown on the TV.
+    func submitPairingCode(_ code: String) {
+        conn = .connecting(currentTV?.name)
+        sendJSON(["t": "auth", "token": "", "code": code.trimmingCharacters(in: .whitespaces)])
+    }
+
+    /// Stop controlling. The TV keeps playing; the phone does NOT resume local
+    /// playback (companion Disconnect semantics, device-verified on Android).
+    func disconnect(userInitiated: Bool = true) {
+        generation += 1
+        socket?.cancel(with: .normalClosure, reason: nil)
+        socket = nil
+        resolver?.cancel()
+        resolver = nil
+        if userInitiated || conn != .idle {
+            conn = .idle
+            controllingChannelID = nil
+            nowPlaying = ""
+        }
+    }
+
+    // MARK: Control surface
+
+    /// Fresh companion session: mirror the currently playing channel to the TV,
+    /// then tear down local playback (same swap as casting).
+    private func onControllingStarted() {
+        guard let item = NowPlayingManager.shared.playingItem,
+              let androidID = Self.androidChannelID(for: item) else { return }
+        setChannel(androidID, title: item.name)
+        AppOrientationLock.release()
+        PlayerSession.shared.stop()
+    }
+
+    func setChannel(_ androidChannelID: String, title: String?) {
+        controllingChannelID = androidChannelID
+        if let title, !title.isEmpty { nowPlaying = title }
+        sendJSON(["cmd": "setChannel", "channelId": androidChannelID])
+    }
+
+    func togglePlayPause() { sendJSON(["cmd": "toggle"]) }
+
+    /// Channel up/down: walk ChannelStore for the next Dispatcharr channel
+    /// (companion ids only translate for Dispatcharr sources).
+    func flipChannel(_ delta: Int) {
+        let channels = ChannelStore.shared.channels
+        guard let currentID = controllingChannelID,
+              var idx = channels.firstIndex(where: { Self.androidChannelID(for: $0) == currentID })
+        else { return }
+        for _ in 0..<channels.count {
+            idx += delta
+            guard channels.indices.contains(idx) else { return } // clamp at ends
+            let item = channels[idx]
+            if let androidID = Self.androidChannelID(for: item) {
+                setChannel(androidID, title: item.name)
+                return
+            }
+        }
+    }
+
+    /// The ANDROID app's channel id for a channel this iOS app knows:
+    /// Dispatcharr channels share the server uuid ("disp:<uuid>" on Android).
+    /// nil for XC/M3U (ids don't translate; companion control unavailable).
+    static func androidChannelID(for item: ChannelDisplayItem) -> String? {
+        guard let uuid = item.uuid, !uuid.isEmpty else { return nil }
+        return "disp:\(uuid)"
+    }
+
+    private func sendJSON(_ dict: [String: Any]) {
+        guard let socket,
+              let data = try? JSONSerialization.data(withJSONObject: dict),
+              let text = String(data: data, encoding: .utf8) else { return }
+        socket.send(.string(text)) { _ in }
+    }
+
+    // MARK: Token store (per TV)
+
+    private func tokenKey() -> String { "companion.token.\(currentTV?.id ?? "unknown")" }
+    private func storedToken() -> String {
+        UserDefaults.standard.string(forKey: tokenKey()) ?? ""
+    }
+    private func storeToken(_ token: String) {
+        UserDefaults.standard.set(token, forKey: tokenKey())
+    }
+}
+
 // MARK: - SwiftUI Cast button
 
 /// Wraps the SDK's GCKUICastButton (which owns discovery + the device chooser).
@@ -315,25 +588,28 @@ struct CastButton: UIViewRepresentable {
 
 // MARK: - Cast remote cover (GH #33 basic cast)
 
-/// Fullscreen "Casting to <device>" remote shown while a web-receiver session
-/// is live. Local playback is torn down underneath (HomeView owns that swap);
-/// this screen drives the TV: play/pause via RemoteMediaClient, channel
-/// up/down as fresh loads, X ends the session (HomeView then resumes local
-/// playback). Mirrors the Android CastRemoteOverlay's basic-cast tier.
+/// Fullscreen remote shown while a REMOTE screen plays (cast web receiver OR
+/// companion-controlled Android TV). Local playback is torn down underneath;
+/// this drives the TV. One layout, two transports -- the callbacks decide.
 /// Inlined here (not its own file) so no pbxproj target surgery is needed.
-struct CastRemoteScreen: View {
-    @ObservedObject private var cast = AerioCastController.shared
-    var deviceName: String?
+struct RemoteControlScreen: View {
+    var title: String
+    var subtitle: String?
+    var artURL: String?
+    var statusText: String       // "Casting to X" / "Controlling X"
+    var isPlaying: Bool
+    var stopLabel: String        // "Stop casting" / "Disconnect"
+    var onTogglePlayPause: () -> Void
     var onChannelUp: () -> Void
     var onChannelDown: () -> Void
-    var onStopCasting: () -> Void
+    var onStop: () -> Void
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             VStack(spacing: 18) {
                 Spacer()
-                if let art = cast.castingContent?.artURL, let url = URL(string: art) {
+                if let art = artURL, let url = URL(string: art) {
                     AsyncImage(url: url) { image in
                         image.resizable().scaledToFit()
                     } placeholder: {
@@ -345,33 +621,33 @@ struct CastRemoteScreen: View {
                     Image(systemName: "tv").font(.system(size: 56))
                         .foregroundStyle(.secondary)
                 }
-                Text(cast.castingContent?.title ?? "")
+                Text(title)
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.center)
-                if let sub = cast.castingContent?.subtitle, !sub.isEmpty {
-                    Text(sub)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
                         .font(.body)
                         .foregroundStyle(.white.opacity(0.7))
                         .multilineTextAlignment(.center)
                 }
-                Text("Casting to \(deviceName ?? "TV")")
+                Text(statusText)
                     .font(.callout)
                     .foregroundStyle(Color.accentColor)
                 Spacer()
                 HStack(spacing: 28) {
                     transportButton("chevron.down", label: "Channel down", action: onChannelDown)
-                    Button(action: { cast.remoteTogglePlayPause() }) {
+                    Button(action: onTogglePlayPause) {
                         ZStack {
                             Circle().fill(Color.accentColor).frame(width: 74, height: 74)
-                            Image(systemName: cast.remoteIsPlaying ? "pause.fill" : "play.fill")
+                            Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                                 .font(.system(size: 30, weight: .bold))
                                 .foregroundStyle(.black)
                         }
                     }
-                    .accessibilityLabel(cast.remoteIsPlaying ? "Pause" : "Play")
+                    .accessibilityLabel(isPlaying ? "Pause" : "Play")
                     transportButton("chevron.up", label: "Channel up", action: onChannelUp)
-                    transportButton("xmark", label: "Stop casting", action: onStopCasting)
+                    transportButton("xmark", label: stopLabel, action: onStop)
                 }
                 .padding(.bottom, 48)
             }
@@ -390,6 +666,68 @@ struct CastRemoteScreen: View {
             }
         }
         .accessibilityLabel(label)
+    }
+}
+
+// MARK: - Companion device picker sheet
+
+/// Lists discovered AerioTV Android TVs; pick one -> connect (remembered token
+/// auto-authenticates), or the TV shows a 6-digit code entered inline here.
+struct CompanionPickerSheet: View {
+    @ObservedObject private var companion = CompanionClient.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var code = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if case .needsPairing(let name) = companion.conn {
+                    Section("Enter the code shown on \(name ?? "the TV")") {
+                        TextField("6-digit code", text: $code)
+                            .keyboardType(.numberPad)
+                            .font(.title3.monospaced())
+                        Button("Pair") {
+                            companion.submitPairingCode(code)
+                            code = ""
+                        }
+                        .disabled(code.trimmingCharacters(in: .whitespaces).count < 6)
+                    }
+                } else if case .connecting(let name) = companion.conn {
+                    Section {
+                        HStack {
+                            ProgressView()
+                            Text("Connecting to \(name ?? "TV")…").padding(.leading, 8)
+                        }
+                    }
+                }
+                Section("AerioTV devices") {
+                    if companion.devices.isEmpty {
+                        Text("No AerioTV devices found. Open AerioTV on your TV, then check again.")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(companion.devices) { tv in
+                        Button {
+                            companion.connect(to: tv)
+                        } label: {
+                            Label(tv.name, systemImage: "tv")
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Control a TV")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        // Freshly connected -> the picker's job is done; the remote cover
+        // (HomeView) takes over. presentationDetents keep it compact.
+        .onChange(of: companion.isControlling) { _, controlling in
+            if controlling { dismiss() }
+        }
+        .presentationDetents([.medium])
     }
 }
 #endif
