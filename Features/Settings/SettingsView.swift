@@ -1697,6 +1697,27 @@ struct ServerDetailView: View {
     }
 
     var body: some View {
+        // The held `server` model can be deleted out from under this pushed
+        // detail view by an iCloud sync merge (SyncManager / AerioApp
+        // delete+recreate local ServerConnection rows on a remote merge). SwiftUI
+        // then re-renders this view and reading ANY @Persisted property
+        // (server.type, server.localURL, ...) traps in SwiftData with
+        // `_KKMDBackingData.getValue` assertion (TestFlight crash, 1.7.12). Guard
+        // on the detached model (modelContext goes nil after delete) BEFORE any
+        // persisted read, render an inert background, and pop.
+        Group {
+            if server.modelContext == nil {
+                Color.appBackground.ignoresSafeArea()
+            } else {
+                detailContent
+            }
+        }
+        .onChange(of: server.modelContext == nil) { _, deleted in
+            if deleted { dismiss() }
+        }
+    }
+
+    private var detailContent: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
             List {
@@ -2460,6 +2481,22 @@ struct EditServerSheet: View {
     }
 
     var body: some View {
+        // Guard against the server being deleted mid-edit by an iCloud sync merge
+        // (SwiftData detached-model crash; same root cause as ServerDetailView).
+        // Pop instead of reading @Persisted props off a detached model.
+        Group {
+            if server.modelContext == nil {
+                Color.appBackground.ignoresSafeArea()
+            } else {
+                editContent
+            }
+        }
+        .onChange(of: server.modelContext == nil) { _, deleted in
+            if deleted { dismiss() }
+        }
+    }
+
+    private var editContent: some View {
         NavigationStack {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
@@ -2976,6 +3013,22 @@ struct EditServerPage: View {
     }
 
     var body: some View {
+        // Guard against the server being deleted mid-edit by an iCloud sync merge
+        // (SwiftData detached-model crash; same root cause as ServerDetailView).
+        // Pop instead of reading @Persisted props off a detached model.
+        Group {
+            if server.modelContext == nil {
+                Color.appBackground.ignoresSafeArea()
+            } else {
+                editContent
+            }
+        }
+        .onChange(of: server.modelContext == nil) { _, deleted in
+            if deleted { dismiss() }
+        }
+    }
+
+    private var editContent: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
             ScrollView {
