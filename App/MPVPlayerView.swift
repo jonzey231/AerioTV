@@ -788,6 +788,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// `MultiviewStore` are both `@MainActor`-isolated.
         @MainActor
         fileprivate func shouldDriveNowPlayingBridge() -> Bool {
+            #if os(iOS)
+            // GH #33: while casting, the phone plays nothing -- a lingering
+            // mpv coordinator (teardown races the cast handoff) must not
+            // repopulate Now Playing. Android shipped the same fix after a
+            // stale media notification survived into remote mode.
+            if AerioCastController.shared.isCasting { return false }
+            #endif
             // Single-mode coordinator — always authoritative.
             guard let tileID else { return true }
             // Multiview coordinator — only the audio tile drives the

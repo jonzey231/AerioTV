@@ -3169,6 +3169,13 @@ struct MainTabView: View {
     /// `MultiviewContainerView` is the rendering surface now, but
     /// collapsing it behaves like a single stream at N=1.
     @ObservedObject private var multiviewStore = MultiviewStore.shared
+    #if os(iOS)
+    /// GH #33 basic cast: MainTabView owns the local<->remote swap. On
+    /// session connect it hands the playing channel to the web receiver and
+    /// tears down local playback; while connected it renders the cast-remote
+    /// cover; on session end it resumes the last cast channel locally.
+    @ObservedObject private var castController = AerioCastController.shared
+    #endif
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
     /// v1.6.23 — set to `true` when the user explicitly Skips the
@@ -3893,6 +3900,23 @@ struct MainTabView: View {
             // nil-ed during multiview — the seed channel metadata is
             // still the single-stream fallback for when the user
             // exits multiview keeping the audio tile.
+            #if os(iOS)
+            // GH #33 basic cast: while a web-receiver session is live, local
+            // playback is torn down (AerioCastController.onConnected stopped
+            // the PlayerSession) and this fullscreen remote drives the TV.
+            // Rendered ABOVE the guide; unmounts when the session ends, at
+            // which point the controller resumes the channel locally.
+            if castController.isCasting, castController.castingContent != nil {
+                CastRemoteScreen(
+                    deviceName: castController.connectedDeviceName,
+                    onChannelUp: { castController.castChannel(1) },
+                    onChannelDown: { castController.castChannel(-1) },
+                    onStopCasting: { castController.stopCasting() }
+                )
+                .zIndex(3)
+                .transition(.opacity)
+            }
+            #endif
             if playerSession.mode == .multiview {
                 #if os(tvOS)
                 // At N=1 under unified playback, restore the 1.6.0

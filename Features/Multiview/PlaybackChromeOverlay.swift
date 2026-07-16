@@ -79,6 +79,12 @@ struct PlaybackChromeOverlay: View {
     /// chrome is re-created for a new player session.
     @State private var forcedLandscape = false
 
+    #if os(iOS)
+    /// GH #33: gates the cast button on device availability. The session
+    /// lifecycle itself (local teardown + remote cover) is HomeView's job.
+    @ObservedObject private var castController = AerioCastController.shared
+    #endif
+
     // v1.6.15: removed `verticalSizeClass` + `isiPhonePortrait` —
     // they only existed to switch between the inline title layout
     // (iPad / iPhone landscape) and the three-line title row
@@ -237,6 +243,24 @@ struct PlaybackChromeOverlay: View {
                 // rotates with the device).
                 if UIDevice.current.userInterfaceIdiom == .phone {
                     landscapeButton_iOS
+                }
+                // GH #33 basic cast: GCKUICastButton (SDK owns discovery + the
+                // device picker). Shown only when cast devices exist AND the
+                // playing channel is basic-castable (Dispatcharr /proxy/ts/
+                // source -- webCastStreamURL returns nil otherwise; loading a
+                // non-castable channel black-screens the receiver, Android
+                // review 2026-07-15). Session start/teardown is handled at
+                // HomeView scope (it owns the local-player swap).
+                if castController.state != .unavailable,
+                   webCastStreamURL(store.tiles.first?.streamURL) != nil {
+                    CastButton()
+                        .frame(width: 30, height: 30)
+                        .padding(11)
+                        .background(
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                        )
                 }
                 #endif
                 if let audio = store.audioProgressStore {
