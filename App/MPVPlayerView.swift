@@ -4660,6 +4660,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // failure at worst. Leaving the intent here as a
             // reminder in case a future MPVKit bump brings it in.
             setOption(mpv, "initial-audio-sync", "no")
+            // GH #56 (OTA HDHR AC-3 black-screen): make an audio-output OPEN
+            // FAILURE non-fatal. On tvOS an AC-3 (ATSC A/52A) stream can hit a
+            // HDMI route-change (routeConfig) partway through open; mpv's
+            // audiounit ao then fails to init, and WITHOUT this option mpv aborts
+            // the WHOLE file (END_FILE error -> "loading failed" -> black screen +
+            // the yellow error overlay, retrying ~1 min before the route settles).
+            // With audio-fallback-to-null the ao falls back to null and VIDEO KEEPS
+            // PLAYING; runAudioHealthCheck then reinits real audio (stereo downmix)
+            // once the route is stable. This is why the AVPlayer-remux path (system
+            // audio) never hit it. setOption so an option this MPVKit build lacks is
+            // a logged no-op, not a hard failure (cf. audio-wait-open above).
+            setOption(mpv, "audio-fallback-to-null", "yes")
             setOption(mpv, "vd-lavc-fast", "yes")
             setOption(mpv, "vd-lavc-skiploopfilter", "nonref")
             // `stream-lavf-o=reconnect=...`: libavformat-level HTTP reconnect
@@ -6075,12 +6087,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //    audio-focus (lastWrittenAID == "no").
             let appDisabledAudio = lastWrittenAID == "no" ||
                 (lastWrittenAID == nil && initialTileCount >= 7 && !initialIsAudioActive)
-            let chainDeadNoCodec = codec == nil && ao == nil && !appDisabledAudio
-            let chainDeadWithCodec = codec != nil && (decCh <= 0 || ao == nil)
+            // GH #56: with audio-fallback-to-null a failed ao surfaces as
+            // ao="null" (not nil) while video keeps playing. Treat that as a dead
+            // chain too so the stereo-downmix reinit still runs and brings real
+            // audio back once the HDMI route settles.
+            let aoDead = ao == nil || ao == "null"
+            let chainDeadNoCodec = codec == nil && aoDead && !appDisabledAudio
+            let chainDeadWithCodec = codec != nil && (decCh <= 0 || aoDead)
             guard chainDeadNoCodec || chainDeadWithCodec, !audioStereoFallbackApplied else { return }
             audioStereoFallbackApplied = true
             let failureShape = codec == nil ? "audio disabled after ao init failure"
-                : (ao == nil ? "no audio output" : "0 channels")
+                : (aoDead ? "no audio output" : "0 channels")
             debugLog("[AUDIO-FALLBACK] \(streamTag) audio chain failed to open (\(failureShape)); forcing stereo downmix + audio chain reinit (Dolby Atmos output workaround)")
             mpv_set_property_string(mpv, "audio-channels", "stereo")
             // Cycle the audio track so the audio output reopens cleanly with
