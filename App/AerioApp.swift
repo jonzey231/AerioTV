@@ -313,6 +313,14 @@ struct AerioApp: App {
         WindowGroup {
             AppEntryView()
                 .environmentObject(ThemeManager.shared)
+                // GH #33: this Apple TV is a companion HOST -- advertise
+                // _aeriotv._tcp + run the WS server so an iPhone or Android
+                // phone can control it. Overlay shows the pairing code on the
+                // TV during pairing. iOS is a client, not a host (no-op there).
+                #if os(tvOS)
+                .overlay { CompanionPairingOverlay() }
+                .task { CompanionHost.shared.start() }
+                #endif
                 .onAppear {
                     DebugLogger.shared.logLifecycle("App launched")
                     #if DEBUG

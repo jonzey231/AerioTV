@@ -768,3 +768,305 @@ struct CompanionPickerSheet: View {
     }
 }
 #endif
+
+// MARK: - Companion HOST (tvOS) -- phones control THIS Apple TV
+
+#if os(tvOS)
+import Foundation
+import Network
+import SwiftUI
+import UIKit
+
+/// tvOS mirror of the Android CompanionHostController: advertises `_aeriotv._tcp`
+/// over mDNS and runs a native WebSocket server (NWListener + NWProtocolWebSocket,
+/// no third-party dep). A paired phone (the iOS CompanionClient OR the Android
+/// companion client -- same wire format) drives THIS Apple TV's player: tune a
+/// channel, play/pause. Speaks the identical CompanionProtocol/CastControl JSON,
+/// so no client change is needed to control an Apple TV.
+///
+/// Security parity with the Android host (adversarial-review-hardened): control
+/// is refused until authenticated; a wrong 6-digit code both counts against a
+/// per-connection budget AND rotates the displayed code (the space can't be
+/// swept); the code clears when the last unpaired socket drops. (Origin-header
+/// rejection isn't exposed by NWProtocolWebSocket's built-in upgrade the way
+/// Ktor exposes it; the token/code gate is the real protection and a
+/// browser-scripted socket still can't control without the code.)
+@MainActor
+final class CompanionHost: NSObject, ObservableObject {
+
+    static let shared = CompanionHost()
+
+    /// 6-digit code to show on the TV while a phone is pairing (nil = hidden).
+    @Published private(set) var pairingCode: String?
+
+    private final class Session {
+        let conn: NWConnection
+        var authed = false
+        var wasPairing = false
+        var codeAttempts = 0
+        init(_ conn: NWConnection) { self.conn = conn }
+    }
+
+    private var listener: NWListener?
+    private var sessions: [ObjectIdentifier: Session] = [:]
+    private var pairingWaiters = 0
+    private var started = false
+    private var ticker: Task<Void, Never>?
+
+    private static let maxCodeAttempts = 5
+    private static let tokensKey = "companion.host.tokens"
+    private static let deviceIDKey = "companion.host.deviceId"
+
+    // MARK: Advertise + serve
+
+    func start() {
+        guard !started else { return }
+        do {
+            let params = NWParameters.tcp
+            let ws = NWProtocolWebSocket.Options()
+            ws.autoReplyPing = true
+            params.defaultProtocolStack.applicationProtocols.insert(ws, at: 0)
+            // Ephemeral port (nil) -- the advertised Bonjour service carries the
+            // real port, same as the Android host's port-0 bind.
+            let listener = try NWListener(using: params)
+            let txt = NWTXTRecord(["v": "1", "id": Self.deviceID()])
+            listener.service = NWListener.Service(
+                name: Self.deviceName(), type: "_aeriotv._tcp", domain: nil, txtRecord: txt
+            )
+            listener.newConnectionHandler = { [weak self] conn in
+                Task { @MainActor in self?.accept(conn) }
+            }
+            listener.stateUpdateHandler = { [weak self] state in
+                if case .failed = state {
+                    Task { @MainActor in self?.started = false; self?.listener = nil }
+                }
+            }
+            listener.start(queue: .main)
+            self.listener = listener
+            started = true
+        } catch {
+            started = false
+        }
+    }
+
+    private func accept(_ conn: NWConnection) {
+        let session = Session(conn)
+        sessions[ObjectIdentifier(conn)] = session
+        conn.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed, .cancelled:
+                Task { @MainActor in self?.drop(conn) }
+            default:
+                break
+            }
+        }
+        conn.start(queue: .main)
+        // Hello immediately (needsPairing=true; the phone answers with a
+        // remembered token or asks the user for the code).
+        send(hello(), to: conn)
+        receive(conn)
+    }
+
+    private func receive(_ conn: NWConnection) {
+        conn.receiveMessage { [weak self] data, _, _, error in
+            Task { @MainActor in
+                guard let self else { return }
+                if let data, let text = String(data: data, encoding: .utf8) {
+                    self.handle(text, conn: conn)
+                }
+                if error == nil, self.sessions[ObjectIdentifier(conn)] != nil {
+                    self.receive(conn)
+                } else {
+                    self.drop(conn)
+                }
+            }
+        }
+    }
+
+    private func drop(_ conn: NWConnection) {
+        guard let session = sessions.removeValue(forKey: ObjectIdentifier(conn)) else { return }
+        conn.cancel()
+        // Last unpaired pairing socket gone -> take the code overlay down.
+        if session.wasPairing, !session.authed {
+            pairingWaiters = max(0, pairingWaiters - 1)
+            if pairingWaiters == 0 { pairingCode = nil }
+        }
+        if sessions.values.allSatisfy({ !$0.authed }) {
+            ticker?.cancel(); ticker = nil
+        }
+    }
+
+    // MARK: Handshake + control
+
+    private func handle(_ text: String, conn: NWConnection) {
+        guard let session = sessions[ObjectIdentifier(conn)],
+              let data = text.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+
+        if let type = json["t"] as? String, !type.isEmpty {
+            guard type == "auth" else { return }
+            let token = json["token"] as? String ?? ""
+            let code = json["code"] as? String ?? ""
+            if let issued = tryAuth(token: token, code: code) {
+                session.authed = true
+                pairingCode = nil
+                send(authOk(token: issued), to: conn)
+                startTickerIfNeeded()
+                pushState(to: conn)   // immediate first paint
+                return
+            }
+            // Wrong code: count it AND rotate the code (can't be brute-swept).
+            if !code.isEmpty {
+                session.codeAttempts += 1
+                pairingCode = nil
+            }
+            if session.codeAttempts >= Self.maxCodeAttempts {
+                send(authFail(reason: "badCode"), to: conn)
+                drop(conn)
+                return
+            }
+            if !session.wasPairing { session.wasPairing = true; pairingWaiters += 1 }
+            ensurePairingCode()
+            send(authFail(reason: token.isEmpty ? "badCode" : "badToken"), to: conn)
+            return
+        }
+
+        guard session.authed else { return } // control refused pre-auth
+        switch json["cmd"] as? String {
+        case "setChannel":
+            if let id = json["channelId"] as? String { openChannel(id) }
+        case "toggle":
+            MultiviewStore.shared.audioProgressStore?.togglePauseAction?()
+        case "play":
+            let store = MultiviewStore.shared.audioProgressStore
+            if store?.isPaused == true { store?.togglePauseAction?() }
+        case "pause":
+            let store = MultiviewStore.shared.audioProgressStore
+            if store?.isPaused == false { store?.togglePauseAction?() }
+        default:
+            break // seek/track/aspect: not yet mapped on tvOS; clients degrade
+        }
+    }
+
+    /// Tune a "disp:<uuid>" channel id (Dispatcharr; the only cross-platform
+    /// identity) from ANY app state -- begin() enters the player like a fresh
+    /// tap, mirroring the Android host's requestOpenChannel path.
+    private func openChannel(_ channelID: String) {
+        let uuid = channelID.hasPrefix("disp:") ? String(channelID.dropFirst(5)) : channelID
+        guard let item = ChannelStore.shared.channels.first(where: { $0.uuid == uuid })
+        else { return }
+        _ = PlayerSession.shared.begin(item: item, server: ChannelStore.shared.activeServer)
+    }
+
+    private func tryAuth(token: String, code: String) -> String? {
+        var tokens = UserDefaults.standard.stringArray(forKey: Self.tokensKey) ?? []
+        if !token.isEmpty, tokens.contains(token) { return token } // remembered
+        if !code.isEmpty, let pending = pairingCode, code == pending {
+            let fresh = UUID().uuidString
+            tokens.append(fresh)
+            UserDefaults.standard.set(tokens, forKey: Self.tokensKey)
+            return fresh
+        }
+        return nil
+    }
+
+    private func ensurePairingCode() {
+        if pairingCode == nil {
+            pairingCode = String(format: "%06d", Int.random(in: 0..<1_000_000))
+        }
+    }
+
+    // MARK: State push
+
+    private func startTickerIfNeeded() {
+        guard ticker == nil else { return }
+        ticker = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                self?.broadcastState()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+
+    private func broadcastState() {
+        for session in sessions.values where session.authed {
+            pushState(to: session.conn)
+        }
+    }
+
+    private func pushState(to conn: NWConnection) {
+        let playing = MultiviewStore.shared.audioProgressStore.map { !$0.isPaused } ?? true
+        send(#"{"cmd":"position","isPlaying":\#(playing),"isLive":true,"canSeek":false}"#, to: conn)
+    }
+
+    // MARK: Frame builders
+
+    private func hello() -> String {
+        let name = Self.jsonEscape(Self.deviceName())
+        let np = Self.jsonEscape(NowPlayingManager.shared.playingItem?.name ?? "")
+        return #"{"t":"hello","v":1,"device":"\#(name)","needsPairing":true,"nowPlaying":"\#(np)"}"#
+    }
+    private func authOk(token: String) -> String {
+        #"{"t":"authOk","token":"\#(Self.jsonEscape(token))"}"#
+    }
+    private func authFail(reason: String) -> String {
+        #"{"t":"authFail","reason":"\#(reason)"}"#
+    }
+
+    private func send(_ text: String, to conn: NWConnection) {
+        let meta = NWProtocolWebSocket.Metadata(opcode: .text)
+        let context = NWConnection.ContentContext(identifier: "text", metadata: [meta])
+        conn.send(content: text.data(using: .utf8), contentContext: context,
+                  isComplete: true, completion: .contentProcessed { _ in })
+    }
+
+    private static func jsonEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+    }
+
+    private static func deviceName() -> String {
+        let n = UIDevice.current.name
+        return n.isEmpty ? "Apple TV" : n
+    }
+    private static func deviceID() -> String {
+        if let id = UserDefaults.standard.string(forKey: deviceIDKey) { return id }
+        let id = UUID().uuidString
+        UserDefaults.standard.set(id, forKey: deviceIDKey)
+        return id
+    }
+}
+
+/// Full-screen "enter this code on your phone" overlay shown on the Apple TV
+/// while a phone is pairing. Mounted at the app root.
+struct CompanionPairingOverlay: View {
+    @ObservedObject private var host = CompanionHost.shared
+
+    var body: some View {
+        if let code = host.pairingCode {
+            ZStack {
+                Color.black.opacity(0.82).ignoresSafeArea()
+                VStack(spacing: 24) {
+                    Image(systemName: "iphone.gen3.radiowaves.left.and.right")
+                        .font(.system(size: 64))
+                        .foregroundStyle(Color.accentColor)
+                    Text("Pair your phone")
+                        .font(.title.weight(.semibold))
+                        .foregroundStyle(.white)
+                    Text("Enter this code in AerioTV on your phone")
+                        .font(.title3)
+                        .foregroundStyle(.white.opacity(0.7))
+                    Text(code)
+                        .font(.system(size: 88, weight: .bold, design: .rounded).monospacedDigit())
+                        .tracking(16)
+                        .foregroundStyle(.white)
+                }
+                .padding(60)
+            }
+            .transition(.opacity)
+            .zIndex(100)
+        }
+    }
+}
+#endif
