@@ -255,6 +255,10 @@ extension AerioCastController: GCKSessionManagerListener {
             load(pending, on: session)
             return
         }
+        // Cast takes precedence over an active companion session: tear that
+        // down first so the two remote covers can never both be live (review
+        // 2026-07-16). Companion Disconnect leaves the Android TV playing.
+        if CompanionClient.shared.isControlling { CompanionClient.shared.disconnect() }
         // Fresh session started from the player chrome: hand the CURRENTLY
         // playing channel to the TV, then tear the local player down (frees
         // the decoder AND the Dispatcharr connection slot -- the receiver is
@@ -266,6 +270,12 @@ extension AerioCastController: GCKSessionManagerListener {
             setContent(content)
             AppOrientationLock.release()
             PlayerSession.shared.stop()
+        } else {
+            // Nothing castable to hand over (the chrome gate keys on tile 0,
+            // but the seed/audio item may differ in multiview): don't strand a
+            // connected-but-empty session that renders no cover and can't be
+            // stopped except by re-finding the icon (review 2026-07-16).
+            stopCasting()
         }
     }
 
@@ -383,6 +393,10 @@ final class CompanionClient: NSObject, ObservableObject {
     // MARK: Connection
 
     func connect(to tv: TV) {
+        // Mutual exclusion with casting: cast is the heavier transport and
+        // wins (review 2026-07-16). The companion picker button is already
+        // hidden while casting; this guards the programmatic path too.
+        guard !AerioCastController.shared.isCasting else { return }
         disconnect(userInitiated: false)
         currentTV = tv
         generation += 1
@@ -412,19 +426,35 @@ final class CompanionClient: NSObject, ObservableObject {
                         self.conn = .idle
                     }
                 default:
+                    // .waiting (unreachable host / connection refused) retries
+                    // forever with default NWParameters, so never resolves on
+                    // its own -- the timeout below is the only escape.
                     break
                 }
             }
         }
         probe.start(queue: .main)
+        // Fail an unresolvable pick (ghost mDNS record, dead WS server) instead
+        // of spinning "Connecting…" forever (review 2026-07-16).
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            guard let self, gen == self.generation, self.resolver != nil else { return }
+            self.resolver?.cancel()
+            self.resolver = nil
+            if case .connecting = self.conn { self.conn = .idle }
+        }
     }
 
     private func openSocket(host: NWEndpoint.Host, port: NWEndpoint.Port, gen: Int) {
-        // IPv6 hosts need brackets and lose their %interface scope (link-local
-        // scoping doesn't survive URL form; the LAN address form works).
+        // Bracket IPv6, and PRESERVE the %interface zone (link-local fe80::/10
+        // is common on flat home LANs and unroutable without its scope) by
+        // percent-encoding it as %25<zone> per RFC 6874 -- NOT stripping it,
+        // which black-holed link-local companion connections (review 2026-07-16).
         var h = "\(host)"
-        if let pct = h.firstIndex(of: "%") { h = String(h[..<pct]) }
-        if h.contains(":") { h = "[\(h)]" }
+        if h.contains(":") {
+            h = h.replacingOccurrences(of: "%", with: "%25")
+            h = "[\(h)]"
+        }
         guard let url = URL(string: "ws://\(h):\(port)/remote") else {
             conn = .idle
             return
@@ -718,7 +748,14 @@ struct CompanionPickerSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button("Close") {
+                        // Cancel an in-flight / unpaired attempt so it doesn't
+                        // stay retained + spinning after the sheet is gone
+                        // (review 2026-07-16). A fully connected session is
+                        // left alone -- its cover takes over.
+                        if !companion.isControlling { companion.disconnect() }
+                        dismiss()
+                    }
                 }
             }
         }
