@@ -622,19 +622,31 @@ struct ResolvedEngine {
 }
 
 enum PlaybackFeatureFlags {
-    /// TEST (branch test/avplayer-hls-engine): when true, live streams
-    /// whose URL is genuine HLS (.m3u8) play through the native AVPlayer
-    /// engine instead of libmpv. Off by default; toggled in Settings >
-    /// Developer. mpv remains the engine for raw TS and all fallbacks.
+    /// Engine auto-detection, HLS arm (user directive 2026-07-15: "detect the
+    /// stream type; AVPlayer when able, mpv fallback"). **Default ON**: live
+    /// streams that are genuine HLS (.m3u8) or come from a Dispatcharr server
+    /// that natively segments HLS (HLSCapabilityStore probe) play through
+    /// AVPlayer -- the device-verified strong path (fast first frame, native
+    /// HEVC decode, real HDR out). mpv remains the automatic engine for
+    /// everything else, and a hard AVPlayer failure one-way downgrades the
+    /// session to mpv (MultiviewStore.downgradeToMPV). Absent-key-means-on
+    /// (object(forKey:) probe) so existing installs pick the default up
+    /// without regressing an explicit user opt-out.
     static var avPlayerForHLS: Bool {
-        UserDefaults.standard.bool(forKey: "playback.avplayerHLS")
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "playback.avplayerHLS") == nil {
+            return true
+        }
+        return defaults.bool(forKey: "playback.avplayerHLS")
     }
 
-    /// TEST (branch test/avplayer-hls-engine): when true, raw MPEG-TS
-    /// live streams (Dispatcharr /proxy/ts/) route through the on-device
-    /// TS-to-HLS remuxer and play in AVPlayer. H.264 + AC-3/AAC only;
-    /// the remuxer's codec gate auto-falls back to mpv for anything else
-    /// (HEVC, MPEG-2, MP2 audio). Off by default.
+    /// Engine auto-detection, remux arm: raw MPEG-TS live streams
+    /// (Dispatcharr /proxy/ts/) through the on-device TS-to-HLS remuxer into
+    /// AVPlayer. H.264 + AC-3/AAC only; the codec gate auto-falls back to mpv
+    /// (HEVC, MPEG-2, MP2). **Deliberately still opt-in**: the loopback remux
+    /// server suspends when the app backgrounds (no background audio) and
+    /// native<->container transitions restart the stream -- the "playback
+    /// works well" bar for defaulting is not met yet (June 2026 eval).
     static var avPlayerRemuxTS: Bool {
         UserDefaults.standard.bool(forKey: "playback.avplayerRemuxTS")
     }

@@ -27,12 +27,16 @@ struct DeveloperSettingsView: View {
     /// who hit a unified-path regression can flip this off for the
     /// legacy `PlayerView` fallback while we chase the bug.
     @AppStorage("playback.unified") private var unifiedPlayback = true
-    /// TEST (branch test/avplayer-hls-engine): routes genuine HLS (.m3u8)
-    /// live streams to the native AVPlayer engine. Off by default.
-    @AppStorage("playback.avplayerHLS") private var avPlayerHLS = false
-    /// TEST: routes raw MPEG-TS live streams through the on-device
+    /// Engine auto-detection, HLS arm. **Default ON** (matches
+    /// PlaybackFeatureFlags.avPlayerForHLS absent-key-means-on): genuine
+    /// HLS + natively-HLS-capable Dispatcharr servers ride AVPlayer; mpv
+    /// stays the automatic fallback. The off switch remains for chasing
+    /// AVPlayer-path regressions.
+    @AppStorage("playback.avplayerHLS") private var avPlayerHLS = true
+    /// Engine auto-detection, remux arm: raw MPEG-TS through the on-device
     /// TS-to-HLS remuxer into AVPlayer (H.264 + AC-3/AAC only; auto
-    /// fallback to mpv otherwise). Off by default.
+    /// fallback to mpv otherwise). Still opt-in: background-audio +
+    /// transition-restart caveats keep it below the default-on bar.
     @AppStorage("playback.avplayerRemuxTS") private var avPlayerRemuxTS = false
 
     /// **Experimental** — iPhone-only. When on, the Live TV chrome is
@@ -226,8 +230,8 @@ struct DeveloperSettingsView: View {
                                 .font(.bodyMedium)
                                 .foregroundColor(.textPrimary)
                             Text(avPlayerHLS
-                                 ? "On: HLS channels play on Apple's AVPlayer (HEVC auto-falls back to mpv)"
-                                 : "Off: every channel uses the mpv engine (the default)")
+                                 ? "On (default): HLS-capable channels auto-play on Apple's AVPlayer; everything else stays on mpv"
+                                 : "Off: every channel uses the mpv engine")
                                 .font(.labelSmall)
                                 .foregroundColor(avPlayerHLS ? .accentPrimary : .textTertiary)
                         }
