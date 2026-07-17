@@ -388,7 +388,12 @@ final class CompanionClient: NSObject, ObservableObject {
 
     // MARK: Discovery
 
+    /// True between startDiscovery() and stopDiscovery(): the auto-restart
+    /// paths only revive a browse the app still wants.
+    private var discoveryWanted = false
+
     func startDiscovery() {
+        discoveryWanted = true
         guard browser == nil else { return }
         let b = NWBrowser(
             for: .bonjourWithTXTRecord(type: "_aeriotv._tcp", domain: nil),
@@ -406,14 +411,42 @@ final class CompanionClient: NSObject, ObservableObject {
             }.sorted { $0.name.lowercased() < $1.name.lowercased() }
             Task { @MainActor [weak self] in self?.devices = tvs }
         }
+        // An NWBrowser that dies while the app is suspended reports .failed on
+        // resume; without this handler the wedged instance also blocked
+        // startDiscovery()'s nil guard forever, freezing `devices` with ghost
+        // entries (2026-07-16: picker kept a stale "Apple TV" and never saw
+        // its "Living Room" re-registration, so connecting just timed out).
+        b.stateUpdateHandler = { [weak self] state in
+            if case .failed = state {
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.browser?.cancel()
+                    self.browser = nil
+                    if self.discoveryWanted { self.startDiscovery() }
+                }
+            }
+        }
         b.start(queue: .main)
         browser = b
     }
 
     func stopDiscovery() {
+        discoveryWanted = false
         browser?.cancel()
         browser = nil
         devices = []
+    }
+
+    /// Scene-foreground re-assert: restart the browse if it is missing or not
+    /// healthy. `devices` is intentionally NOT cleared here -- the fresh
+    /// browser's first results callback replaces the list wholesale, so ghost
+    /// entries drop without the Control-TV button blinking on every foreground.
+    func ensureDiscovery() {
+        guard discoveryWanted else { return }
+        if let b = browser, case .ready = b.state { return }
+        browser?.cancel()
+        browser = nil
+        startDiscovery()
     }
 
     // MARK: Connection
