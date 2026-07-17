@@ -57,6 +57,18 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.0",
+            title: "What's new in 1.8.0",
+            bullets: [
+                "Control your TV from your phone: open AerioTV on your iPhone and tap the TV button to run your Apple TV or Google TV as a remote",
+                "Browse the guide, change channels, pause and rewind, switch stream sources, and start a recording - all from your phone",
+                "New remote options: Sleep Timer, Audio Only (screen off, sound keeps playing), and full audio, subtitle, speed, and aspect controls",
+                "iPhone: send live video to AirPlay from the player",
+                "Long-press the Controlling pill to disconnect"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.0")
+        ),
+        WhatsNewRelease(
             version: "1.7.12",
             title: "What's new in 1.7.12",
             bullets: [
