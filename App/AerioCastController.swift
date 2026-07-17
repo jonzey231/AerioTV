@@ -990,10 +990,27 @@ struct RemoteControlScreen: View {
 struct RemoteOptionsSheet: View {
     @ObservedObject var companion: CompanionClient
     @Environment(\.dismiss) private var dismiss
+    @State private var showSwitchStream = false
 
     private let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
     private let aspects: [(key: String, label: String)] =
         [("fit", "Fit"), ("fill", "Fill"), ("zoom", "Zoom")]
+
+    /// The controlled channel resolved on THIS phone, when Switch Stream can
+    /// work: Dispatcharr swaps the source server-side while the TV keeps
+    /// playing the same proxy URL, so the phone can drive the swap directly
+    /// (same pk/uuid/admin gate as the native player's Switch Stream row).
+    private var switchStreamTarget: (id: Int, uuid: String, name: String)? {
+        guard let cid = companion.controllingChannelID,
+              cid.hasPrefix("disp:"),
+              ChannelStore.shared.activeServer?.dispatcharrCanSwitchStream ?? false
+        else { return nil }
+        let uuid = String(cid.dropFirst(5))
+        guard let item = ChannelStore.shared.channels.first(where: { $0.uuid == uuid }),
+              let pk = item.dispatcharrChannelID
+        else { return nil }
+        return (pk, uuid, item.name)
+    }
 
     var body: some View {
         NavigationStack {
@@ -1023,6 +1040,15 @@ struct RemoteOptionsSheet: View {
                         row(a.label, checked: s.aspect == a.key) { companion.setAspect(a.key) }
                     }
                 }
+                if switchStreamTarget != nil {
+                    Section {
+                        Button {
+                            showSwitchStream = true
+                        } label: {
+                            Label("Switch Stream", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                    }
+                }
                 if !s.streamInfo.isEmpty {
                     Section("Stream Info") {
                         Text(s.streamInfo).font(.footnote.monospaced())
@@ -1035,6 +1061,11 @@ struct RemoteOptionsSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showSwitchStream) {
+                if let t = switchStreamTarget {
+                    SwitchStreamView(channelID: t.id, channelUUID: t.uuid, channelName: t.name)
                 }
             }
         }
