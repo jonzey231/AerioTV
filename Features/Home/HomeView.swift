@@ -2899,6 +2899,18 @@ final class NowPlayingManager: ObservableObject {
     private var pendingChannelChangeTask: Task<Void, Never>?
 
     func startPlaying(_ item: ChannelDisplayItem, headers: [String: String], isLive: Bool = true, wakeChrome: Bool = true) {
+        #if os(iOS)
+        // GH #33: while this phone is a companion remote, a live channel tap
+        // RETUNES THE TV instead of starting local playback (the user browsed
+        // the guide via the remote's Channels button). Non-Dispatcharr
+        // channels can't be addressed on the TV and fall through to local.
+        if isLive, CompanionClient.shared.isControlling,
+           let androidID = CompanionClient.androidChannelID(for: item) {
+            debugLog("🎮 NowPlaying.startPlaying: routing \(item.name) to companion TV")
+            CompanionClient.shared.setChannel(androidID, title: item.name)
+            return
+        }
+        #endif
         debugLog("🎮 NowPlaying.startPlaying: \(item.name) (id=\(item.id)), isLive=\(isLive), wakeChrome=\(wakeChrome), wasMinimized=\(isMinimized), wasPlaying=\(playingItem?.name ?? "nil")")
         playingItem = item
         // v1.6.18: persistent breadcrumb for guide focus default —
@@ -3926,7 +3938,7 @@ struct MainTabView: View {
                 )
                 .zIndex(3)
                 .transition(.opacity)
-            } else if companionClient.isControlling {
+            } else if companionClient.isControlling, !companionClient.remoteMinimized {
                 RemoteControlScreen(
                     title: companionClient.nowPlaying,
                     subtitle: nil,
@@ -3938,7 +3950,11 @@ struct MainTabView: View {
                     onChannelUp: { companionClient.flipChannel(1) },
                     onChannelDown: { companionClient.flipChannel(-1) },
                     onStop: { companionClient.disconnect() },
-                    companion: companionClient   // full options (scrubber + sheet)
+                    companion: companionClient,  // full options (scrubber + sheet)
+                    // GH #33: minimize back to the guide while staying
+                    // connected -- channel taps route to the TV and pop this
+                    // remote back open.
+                    onBrowse: { companionClient.remoteMinimized = true }
                 )
                 .zIndex(3)
                 .transition(.opacity)
@@ -4141,7 +4157,26 @@ struct MainTabView: View {
         // controlling / casting (their covers take over).
         #if os(iOS)
         .overlay(alignment: .bottomTrailing) {
-            if !companionClient.devices.isEmpty,
+            if companionClient.isControlling, companionClient.remoteMinimized {
+                // Browsing the guide while connected: tap to pop the remote
+                // back open (channel taps also route to the TV and reopen it).
+                Button { companionClient.remoteMinimized = false } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "tv.and.mediabox")
+                        Text("Controlling \(companionClient.connectedTVName ?? "TV")")
+                            .lineLimit(1)
+                    }
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(ThemeManager.shared.accent)
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 16)
+                }
+                .liquidGlass(cornerRadius: 24)
+                .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
+                .padding(.trailing, 20)
+                .padding(.bottom, 52)
+                .accessibilityLabel("Return to remote")
+            } else if !companionClient.devices.isEmpty,
                !companionClient.isControlling,
                !castController.isCasting,
                nowPlaying.playingItem == nil || nowPlaying.isMinimized {

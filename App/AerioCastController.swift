@@ -400,6 +400,16 @@ final class CompanionClient: NSObject, ObservableObject {
             using: NWParameters()
         )
         b.browseResultsChangedHandler = { [weak self] results, _ in
+            // Raw dump (GH #33 field debugging): every result with its full
+            // endpoint + TXT so ghost-vs-real mysteries are diagnosable from
+            // the device log.
+            let dump = results.map { r -> String in
+                var txt = "-"
+                if case .bonjour(let t) = r.metadata { txt = t.dictionary.description }
+                return "\(r.endpoint) txt=\(txt) if=\(r.interfaces.map { "\($0.type)" }.joined(separator: "+"))"
+            }.joined(separator: " | ")
+            DebugLogger.shared.log("companion browse results (\(results.count)): \(dump)")
+            print("[companion] browse results (\(results.count)): \(dump)")
             let tvs: [TV] = results.compactMap { result in
                 guard case .service(let name, _, _, _) = result.endpoint else { return nil }
                 var stableID = name
@@ -417,6 +427,8 @@ final class CompanionClient: NSObject, ObservableObject {
         // entries (2026-07-16: picker kept a stale "Apple TV" and never saw
         // its "Living Room" re-registration, so connecting just timed out).
         b.stateUpdateHandler = { [weak self] state in
+            DebugLogger.shared.log("companion browser state: \(state)")
+            print("[companion] browser state: \(state)")
             if case .failed = state {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -491,6 +503,7 @@ final class CompanionClient: NSObject, ObservableObject {
         // hidden while casting; this guards the programmatic path too.
         guard !AerioCastController.shared.isCasting else { return }
         disconnect(userInitiated: false)
+        remoteMinimized = false
         currentTV = tv
         generation += 1
         let gen = generation
@@ -585,7 +598,32 @@ final class CompanionClient: NSObject, ObservableObject {
         }
     }
 
+    /// Liveness: both hosts tick ~1Hz while a session is authed, so silence
+    /// means the TV app died/restarted (2026-07-16 test: the phone sat frozen
+    /// on "Controlling Living Room" after a tvOS redeploy). Tear the session
+    /// down instead of leaving a dead remote on screen.
+    private var lastMessageAt = Date()
+    private var livenessTask: Task<Void, Never>?
+
+    private func startLiveness(gen: Int) {
+        livenessTask?.cancel()
+        lastMessageAt = Date()
+        livenessTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard let self, gen == self.generation, self.isControlling else { return }
+                if Date().timeIntervalSince(self.lastMessageAt) > 12 {
+                    debugLog("companion liveness: no traffic for 12s -> dropping session")
+                    self.disconnect(userInitiated: false)
+                    self.conn = .idle
+                    return
+                }
+            }
+        }
+    }
+
     private func handle(_ json: [String: Any]) {
+        lastMessageAt = Date()
         if let t = json["t"] as? String, !t.isEmpty {
             switch t {
             case "hello":
@@ -595,6 +633,7 @@ final class CompanionClient: NSObject, ObservableObject {
                 conn = .connected(currentTV?.name)
                 onControllingStarted()
                 requestState()
+                startLiveness(gen: generation)
             case "authFail":
                 conn = .needsPairing(currentTV?.name)
             default:
@@ -606,6 +645,13 @@ final class CompanionClient: NSObject, ObservableObject {
         case "state":
             remoteState = Self.decodeState(json)
             if let playing = json["isPlaying"] as? Bool { remoteIsPlaying = playing }
+            // Adopt the TV's reported channel as the flip anchor -- covers
+            // connecting to a TV that is already playing something this phone
+            // didn't start (and TVs that switch channels on their own remote).
+            if let cid = json["channelId"] as? String, !cid.isEmpty {
+                controllingChannelID = cid
+            }
+            if let np = json["nowPlaying"] as? String, !np.isEmpty { nowPlaying = np }
         case "position":
             if let playing = json["isPlaying"] as? Bool { remoteIsPlaying = playing }
             // Live scrubber fields crawl via the ~1Hz tick.
@@ -685,10 +731,16 @@ final class CompanionClient: NSObject, ObservableObject {
         PlayerSession.shared.stop()
     }
 
+    /// True while the remote cover is minimized so the user can browse the
+    /// guide (Channels button); channel taps still route to the TV. Cleared
+    /// on connect and whenever a channel is sent, so the remote pops back.
+    @Published var remoteMinimized = false
+
     func setChannel(_ androidChannelID: String, title: String?) {
         controllingChannelID = androidChannelID
         if let title, !title.isEmpty { nowPlaying = title }
         sendJSON(["cmd": "setChannel", "channelId": androidChannelID])
+        remoteMinimized = false
     }
 
     func togglePlayPause() { sendJSON(["cmd": "toggle"]) }
@@ -707,9 +759,16 @@ final class CompanionClient: NSObject, ObservableObject {
     /// (companion ids only translate for Dispatcharr sources).
     func flipChannel(_ delta: Int) {
         let channels = ChannelStore.shared.channels
-        guard let currentID = controllingChannelID,
-              var idx = channels.firstIndex(where: { Self.androidChannelID(for: $0) == currentID })
-        else { return }
+        var idx: Int
+        if let currentID = controllingChannelID,
+           let cur = channels.firstIndex(where: { Self.androidChannelID(for: $0) == currentID }) {
+            idx = cur
+        } else {
+            // No anchor (TV idle on its guide, or playing something we can't
+            // map): behave like a real remote and start from the ends -- up
+            // tunes the first controllable channel, down the last.
+            idx = delta > 0 ? -1 : channels.count
+        }
         for _ in 0..<channels.count {
             idx += delta
             guard channels.indices.contains(idx) else { return } // clamp at ends
@@ -784,12 +843,37 @@ struct RemoteControlScreen: View {
     /// Non-nil for the companion transport (full options: scrubber + Options
     /// sheet). nil for basic cast (web receiver has no control namespace).
     var companion: CompanionClient? = nil
+    /// Non-nil shows a "Channels" button that minimizes this remote back to
+    /// the guide (stay connected, browse, tap a channel to send it to the TV).
+    var onBrowse: (() -> Void)? = nil
 
     @State private var showOptions = false
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            if let onBrowse {
+                VStack {
+                    HStack {
+                        Button(action: onBrowse) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "square.grid.2x2")
+                                Text("Channels")
+                            }
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 14)
+                            .background(Capsule().fill(Color.white.opacity(0.08)))
+                        }
+                        .accessibilityLabel("Browse channels")
+                        Spacer()
+                    }
+                    .padding(.top, 12)
+                    .padding(.horizontal, 20)
+                    Spacer()
+                }
+            }
             VStack(spacing: 18) {
                 Spacer()
                 if let art = artURL, let url = URL(string: art) {
@@ -1093,6 +1177,19 @@ final class CompanionHost: NSObject, ObservableObject {
     /// 6-digit code to show on the TV while a phone is pairing (nil = hidden).
     @Published private(set) var pairingCode: String?
 
+    /// Transient on-TV confirmation ("Phone connected"); auto-clears.
+    @Published private(set) var toast: String?
+    private var toastClear: Task<Void, Never>?
+
+    private func showToast(_ message: String) {
+        toast = message
+        toastClear?.cancel()
+        toastClear = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            if !Task.isCancelled { self?.toast = nil }
+        }
+    }
+
     private final class Session {
         let conn: NWConnection
         var authed = false
@@ -1263,6 +1360,7 @@ final class CompanionHost: NSObject, ObservableObject {
                 startTickerIfNeeded()
                 sendState(to: conn)   // full snapshot on connect
                 pushPosition(to: conn)
+                showToast("Phone connected")
                 return
             }
             // Wrong code: count it AND rotate the code (can't be brute-swept).
@@ -1330,6 +1428,14 @@ final class CompanionHost: NSObject, ObservableObject {
         // Mirror the Android host: after EVERY command push the full snapshot
         // (so the phone's pickers/scrubber stay in sync) + the position tick.
         sendState(to: conn)
+        // mpv applies track/speed changes asynchronously, so the immediate
+        // push above can still carry the PRE-change selection (2026-07-16
+        // path-1 test: TV rendered the subtitle but the phone's checkmark
+        // stayed on Off). Re-push once the engine has settled.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            self?.sendState(to: conn)
+        }
     }
 
     private func intArg(_ v: Any?) -> Int? {
@@ -1437,6 +1543,14 @@ final class CompanionHost: NSObject, ObservableObject {
         ]
         // Ensure isPlaying rides the state too (some clients read it off state).
         state["isPlaying"] = ps.map { !$0.isPaused } ?? true
+        // Anchor for the phone's channel up/down: what THIS TV is playing, in
+        // the shared Android channel-id format. Without it a phone that
+        // connected to an already-playing TV had no flip anchor (2026-07-16
+        // path-1 test: chevrons were silent no-ops).
+        if let item = NowPlayingManager.shared.playingItem {
+            if let uuid = item.uuid, !uuid.isEmpty { state["channelId"] = "disp:\(uuid)" }
+            state["nowPlaying"] = item.name
+        }
         if let data = try? JSONSerialization.data(withJSONObject: state),
            let text = String(data: data, encoding: .utf8) {
             send(text, to: conn)
@@ -1519,6 +1633,27 @@ struct CompanionPairingOverlay: View {
     @ObservedObject private var host = CompanionHost.shared
 
     var body: some View {
+        // Transient connect confirmation (bottom-center capsule, auto-clears).
+        if host.pairingCode == nil, let toast = host.toast {
+            VStack {
+                Spacer()
+                HStack(spacing: 12) {
+                    Image(systemName: "iphone.gen3.radiowaves.left.and.right")
+                        .foregroundStyle(Color.accentColor)
+                    Text(toast)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+                .padding(.vertical, 14)
+                .padding(.horizontal, 26)
+                .background(Capsule().fill(Color.black.opacity(0.78)))
+                .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
+                .padding(.bottom, 60)
+            }
+            .transition(.opacity)
+            .zIndex(99)
+            .animation(.easeInOut(duration: 0.25), value: host.toast)
+        }
         if let code = host.pairingCode {
             ZStack {
                 Color.black.opacity(0.82).ignoresSafeArea()
