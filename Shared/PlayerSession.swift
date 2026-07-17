@@ -436,6 +436,24 @@ final class PlayerSession: ObservableObject {
         // session engine is the single source of truth.
         _ = bypassNativeRouter
 
+        #if os(iOS)
+        // GH #33: while this phone is a companion remote, a live channel tap
+        // RETUNES THE TV instead of starting local playback. This must gate
+        // HERE (not only in NowPlayingManager.startPlaying) because begin()
+        // spins the whole tile pipeline up before startPlaying runs -- the
+        // 2026-07-17 Streamer test left ESPN2 playing silently BEHIND the
+        // remote cover. Non-Dispatcharr channels fall through to local.
+        if isLive, CompanionClient.shared.isControlling,
+           let androidID = CompanionClient.androidChannelID(for: item) {
+            DebugLogger.shared.log(
+                "[Companion] begin: routing \(item.name) to controlled TV",
+                category: "Playback", level: .info
+            )
+            CompanionClient.shared.setChannel(androidID, title: item.name)
+            return true
+        }
+        #endif
+
         let store = MultiviewStore.shared
 
         // Gate at the cap — `add(...)` will reject past `maxTiles` but
