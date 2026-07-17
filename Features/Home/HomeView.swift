@@ -3177,6 +3177,9 @@ struct MainTabView: View {
     @ObservedObject private var castController = AerioCastController.shared
     /// GH #33 companion remote: same cover pattern for a paired Android TV.
     @ObservedObject private var companionClient = CompanionClient.shared
+    /// Presents the "Control a TV" picker from the floating pill (no channel
+    /// needs to be playing on the phone -- act as a pure remote).
+    @State private var showCompanionPickerGlobal = false
     #endif
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
@@ -4134,18 +4137,30 @@ struct MainTabView: View {
         // upward so the tab bar sits above the mini player bar and remains tappable.
         #if os(iOS)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            // v1.6.13: only iPhone uses the bottom MiniPlayerBar.
-            // iPad uses a top-right corner mini (handled inside the
-            // body's main ZStack — see the iPad GeometryReader
-            // branches above), so the bottom bar would double-render
-            // an off-screen mini and steal vertical space from the
-            // guide.
-            if UIDevice.current.userInterfaceIdiom == .phone,
-               nowPlaying.isMinimized,
-               let item = nowPlaying.playingItem {
-                MiniPlayerBar(item: item, nowPlaying: nowPlaying, dragOffset: $miniPlayerDragOffset)
+            VStack(spacing: 0) {
+                // GH #33: floating "Control TV" pill -- appears the moment a
+                // controllable AerioTV TV is discovered so the phone can be a
+                // remote without opening a channel first. Hidden while already
+                // controlling / casting (their covers take over).
+                if !companionClient.devices.isEmpty,
+                   !companionClient.isControlling,
+                   !castController.isCasting {
+                    CompanionControlPill { showCompanionPickerGlobal = true }
+                }
+                // v1.6.13: only iPhone uses the bottom MiniPlayerBar.
+                // iPad uses a top-right corner mini (handled inside the
+                // body's main ZStack — see the iPad GeometryReader
+                // branches above), so the bottom bar would double-render
+                // an off-screen mini and steal vertical space from the
+                // guide.
+                if UIDevice.current.userInterfaceIdiom == .phone,
+                   nowPlaying.isMinimized,
+                   let item = nowPlaying.playingItem {
+                    MiniPlayerBar(item: item, nowPlaying: nowPlaying, dragOffset: $miniPlayerDragOffset)
+                }
             }
         }
+        .sheet(isPresented: $showCompanionPickerGlobal) { CompanionPickerSheet() }
         #endif
         #if os(tvOS)
         // v1.6.12: GH #11 fix (v5).
