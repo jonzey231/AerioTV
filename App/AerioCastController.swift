@@ -1216,7 +1216,8 @@ final class CompanionHost: NSObject, ObservableObject {
         toast = message
         toastClear?.cancel()
         toastClear = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            // 4.5s: TV-glanceable (the viewer looks up from the phone).
+            try? await Task.sleep(nanoseconds: 4_500_000_000)
             if !Task.isCancelled { self?.toast = nil }
         }
     }
