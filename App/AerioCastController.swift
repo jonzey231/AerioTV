@@ -409,7 +409,7 @@ final class CompanionClient: NSObject, ObservableObject {
                 }
                 return TV(id: stableID, name: name, endpoint: result.endpoint)
             }.sorted { $0.name.lowercased() < $1.name.lowercased() }
-            Task { @MainActor [weak self] in self?.devices = tvs }
+            Task { @MainActor [weak self] in self?.publishDevices(tvs) }
         }
         // An NWBrowser that dies while the app is suspended reports .failed on
         // resume; without this handler the wedged instance also blocked
@@ -449,6 +449,40 @@ final class CompanionClient: NSObject, ObservableObject {
         startDiscovery()
     }
 
+    // MARK: Ghost filtering
+
+    /// Connect-failed quarantine. The phone's system mDNS cache keeps a dead
+    /// service's PTR record for up to 75 min when the goodbye packets were
+    /// missed (phone suspended), so a fresh browse can list TVs that no longer
+    /// exist (2026-07-16: two ghost "Apple TV" rows after the ATV renamed).
+    /// A failed connect is the one reliable ghost detector: hide that entry
+    /// for a while (a real TV that was just briefly unreachable comes back on
+    /// the next results change or after the window).
+    private var deadTVs: [String: Date] = [:]
+    private static let deadTVWindow: TimeInterval = 60
+
+    private static func tvKey(_ tv: TV) -> String { "\(tv.id)|\(tv.name)" }
+
+    /// Collapse duplicate rows (one advert seen via several interfaces / a
+    /// re-registration sharing TXT id + name) and hide quarantined ghosts.
+    private func publishDevices(_ tvs: [TV]) {
+        var seen = Set<String>()
+        devices = tvs.filter { tv in
+            let key = Self.tvKey(tv)
+            guard !seen.contains(key) else { return false }
+            seen.insert(key)
+            if let died = deadTVs[key],
+               Date().timeIntervalSince(died) < Self.deadTVWindow { return false }
+            return true
+        }
+    }
+
+    private func quarantine(_ tv: TV) {
+        let key = Self.tvKey(tv)
+        deadTVs[key] = Date()
+        devices.removeAll { Self.tvKey($0) == key }
+    }
+
     // MARK: Connection
 
     func connect(to tv: TV) {
@@ -483,6 +517,7 @@ final class CompanionClient: NSObject, ObservableObject {
                     if case .connecting = self.conn, self.resolver != nil {
                         self.resolver = nil
                         self.conn = .idle
+                        self.quarantine(tv)
                     }
                 default:
                     // .waiting (unreachable host / connection refused) retries
@@ -501,6 +536,7 @@ final class CompanionClient: NSObject, ObservableObject {
             self.resolver?.cancel()
             self.resolver = nil
             if case .connecting = self.conn { self.conn = .idle }
+            self.quarantine(tv)
         }
     }
 
