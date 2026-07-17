@@ -52,6 +52,35 @@ func appendingHLSOutputFormat(_ url: URL) -> URL {
     return components.url ?? url
 }
 
+/// GH #33 basic cast: Dispatcharr's fMP4 output profile id that transcodes to
+/// H.264 + AAC ("Web Player (AAC Audio)" on the user's server). The Cast web
+/// receiver can only DECODE AAC-family audio (AC-3 is passthrough-only and
+/// silent on most devices), so the cast URL must pin this profile.
+/// TODO(shared with Android): auto-detect the AAC profile id per server via
+/// /hdhr/output_profile/<id>/lineup.json instead of hardcoding 2.
+let castWebOutputProfileID = "2"
+
+/// GH #33 basic cast: rewrite a Dispatcharr LIVE proxy URL into the directly
+/// playable form the custom web receiver (app 76DC0564) loads:
+/// `?output_format=fmp4&output_profile=2` = fragmented MP4 (MSE-valid) with
+/// H.264+AAC. Returns nil for anything that is not a Dispatcharr /proxy/ts/
+/// stream (XC / M3U direct sources have no server-side repackager, so they
+/// cannot be basic-cast; callers hide the cast affordance instead of loading
+/// an unplayable URL -- the Android review found that black-screens the TV).
+func webCastStreamURL(_ url: URL?) -> URL? {
+    guard let url, url.path.contains("/proxy/ts/stream/"),
+          var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+        return nil
+    }
+    var items = (components.queryItems ?? []).filter {
+        $0.name != "output_format" && $0.name != "output" && $0.name != "output_profile"
+    }
+    items.append(URLQueryItem(name: "output_format", value: "fmp4"))
+    items.append(URLQueryItem(name: "output_profile", value: castWebOutputProfileID))
+    components.queryItems = items
+    return components.url
+}
+
 /// TEST (branch test/avplayer-hls-engine): per-host capability cache for
 /// Dispatcharr's native HLS output. Probes a real stream URL with
 /// `output_format=hls` WITHOUT following redirects: a 302 means the

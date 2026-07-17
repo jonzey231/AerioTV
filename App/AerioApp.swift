@@ -161,7 +161,18 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
         // UIKit invokes delegate methods on the main thread, so it is safe to
         // assume the isolation and seed the at-rest mask for this idiom.
-        MainActor.assumeIsolated { AppOrientationLock.syncBase() }
+        MainActor.assumeIsolated {
+            AppOrientationLock.syncBase()
+            // Google Cast sender (GH #33): initialise GCKCastContext once at
+            // launch so GCKUICastButton can discover the Android TV receiver.
+            // iOS-only; the whole controller is #if os(iOS).
+            AerioCastController.shared.start()
+            // Companion remote (GH #33 second-screen): passive mDNS browse for
+            // open AerioTV Android TV apps, app-lifetime. Chrome-scoped
+            // discovery churned the browse on every chrome show (Android
+            // device test) -- app scope is the cheap, stable choice.
+            CompanionClient.shared.startDiscovery()
+        }
         return true
     }
 
@@ -302,6 +313,14 @@ struct AerioApp: App {
         WindowGroup {
             AppEntryView()
                 .environmentObject(ThemeManager.shared)
+                // GH #33: this Apple TV is a companion HOST -- advertise
+                // _aeriotv._tcp + run the WS server so an iPhone or Android
+                // phone can control it. Overlay shows the pairing code on the
+                // TV during pairing. iOS is a client, not a host (no-op there).
+                #if os(tvOS)
+                .overlay { CompanionPairingOverlay() }
+                .task { CompanionHost.shared.start() }
+                #endif
                 .onAppear {
                     DebugLogger.shared.logLifecycle("App launched")
                     #if DEBUG
@@ -387,6 +406,18 @@ struct AerioApp: App {
             switch phase {
             case .active:
                 DebugLogger.shared.logLifecycle("Scene → active (foreground)")
+                #if os(tvOS)
+                // GH #33: tvOS cancels the companion host's NWListener on
+                // suspend and start() alone won't revive it (started guard) --
+                // re-assert the _aeriotv._tcp advert on every foreground.
+                CompanionHost.shared.ensureRunning()
+                #endif
+                #if os(iOS)
+                // GH #33: the companion browse can die while suspended (its
+                // .failed only lands on resume); re-assert so the Control-TV
+                // button never shows a frozen device list.
+                CompanionClient.shared.ensureDiscovery()
+                #endif
                 // Start iCloud sync if enabled (pull happens during EPG loading)
                 SyncManager.shared.startObserving()
                 // Re-probe LAN on every foreground transition — covers

@@ -268,6 +268,12 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var setAudioTrackAction: ((Int) -> Void)?
     /// Closure set by the Coordinator; sets subtitle track (0 = off).
     var setSubtitleTrackAction: ((Int) -> Void)?
+    /// Closure set by the Coordinator; enables/disables the video track
+    /// (mpv vid=auto/no) and mirrors `isAudioOnly`. Drives the companion
+    /// hosts' Audio Only command (GH #33 parity with the Android host's
+    /// setVideoTrackEnabled) -- unlike the overflow menu's overlay-only
+    /// toggle, this actually stops video decode.
+    var setVideoEnabledAction: ((Bool) -> Void)?
     /// Whether PiP is currently active. Written synchronously by the
     /// AVPictureInPictureController delegates (auto-PiP only — the manual
     /// menu entry was removed in favour of swipe-home auto-PiP). Read by
@@ -4705,6 +4711,16 @@ struct NativeHLSPlayerScreen: View {
         // so automatic (auto-wait=true) is the fast-start choice on every link.
         // The 9s live offset is the only explicit live-edge lever.
         let avPlayer = AVPlayer(playerItem: playerItem)
+        // GH #33 AirPlay: the AVPlayer engine is the video-AirPlay surface
+        // (mpv frames never leave the GPU, so mpv sessions stay audio-only).
+        // allowsExternalPlayback defaults true but is pinned explicitly, and
+        // usesExternalPlaybackWhileExternalScreenIsActive makes fullscreen
+        // playback claim the external screen outright. Probe 2026-07-16:
+        // AVFoundation REFUSES the live progressive fMP4 cast URL
+        // (-11850/-12939, no byte-range support on a growing stream), so
+        // AirPlay live rides exactly this HLS path -- never the cast URL.
+        avPlayer.allowsExternalPlayback = true
+        avPlayer.usesExternalPlaybackWhileExternalScreenIsActive = true
         avPlayer.play()
         player = avPlayer
 

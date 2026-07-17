@@ -79,6 +79,16 @@ struct PlaybackChromeOverlay: View {
     /// chrome is re-created for a new player session.
     @State private var forcedLandscape = false
 
+    #if os(iOS)
+    /// GH #33: gates the cast button on device availability. The session
+    /// lifecycle itself (local teardown + remote cover) is HomeView's job.
+    @ObservedObject private var castController = AerioCastController.shared
+    /// GH #33 companion remote: gates the "Control a TV" button on mDNS
+    /// discovery of an open AerioTV Android TV app.
+    @ObservedObject private var companionClient = CompanionClient.shared
+    @State private var showCompanionPicker = false
+    #endif
+
     // v1.6.15: removed `verticalSizeClass` + `isiPhonePortrait` —
     // they only existed to switch between the inline title layout
     // (iPad / iPhone landscape) and the three-line title row
@@ -237,6 +247,67 @@ struct PlaybackChromeOverlay: View {
                 // rotates with the device).
                 if UIDevice.current.userInterfaceIdiom == .phone {
                     landscapeButton_iOS
+                }
+                // GH #33 basic cast: GCKUICastButton (SDK owns discovery + the
+                // device picker). Shown only when cast devices exist AND the
+                // playing channel is basic-castable (Dispatcharr /proxy/ts/
+                // source -- webCastStreamURL returns nil otherwise; loading a
+                // non-castable channel black-screens the receiver, Android
+                // review 2026-07-15). Session start/teardown is handled at
+                // HomeView scope (it owns the local-player swap).
+                if castController.state != .unavailable,
+                   webCastStreamURL(store.tiles.first?.streamURL) != nil {
+                    CastButton()
+                        .frame(width: 30, height: 30)
+                        .padding(11)
+                        .background(
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                        )
+                }
+                // GH #33 AirPlay: VIDEO AirPlay exists only on the AVPlayer
+                // engine (mpv frames never leave the GPU), so the route picker
+                // appears exactly when this session rides AVPlayer -- which,
+                // with engine auto-detect default-on, is every HLS-capable
+                // channel. mpv sessions keep the audio-only AirPlay entry in
+                // the overflow menu.
+                if store.sessionEngine.isAVPlayer {
+                    AirPlayButton()
+                        .frame(width: 30, height: 30)
+                        .padding(11)
+                        .background(
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                        )
+                }
+                // GH #33 companion remote: control an OPEN AerioTV Android TV
+                // app over the LAN (mDNS + WebSocket; full native player on the
+                // TV, so no codec limits -- unlike basic cast). Shown when an
+                // AerioTV TV is discovered AND the playing channel's identity
+                // translates (Dispatcharr channels share the server uuid).
+                if !companionClient.devices.isEmpty,
+                   let tile = store.tiles.first,
+                   CompanionClient.androidChannelID(for: tile.item) != nil {
+                    Button {
+                        chromeState.reportInteraction()
+                        showCompanionPicker = true
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .fill(.ultraThinMaterial)
+                                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                            Image(systemName: "tv.and.mediabox")
+                                .font(.system(size: 18, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                        .frame(width: 52, height: 52)
+                    }
+                    .accessibilityLabel("Control a TV")
+                    .sheet(isPresented: $showCompanionPicker) {
+                        CompanionPickerSheet()
+                    }
                 }
                 #endif
                 if let audio = store.audioProgressStore {

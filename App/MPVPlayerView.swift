@@ -788,6 +788,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// `MultiviewStore` are both `@MainActor`-isolated.
         @MainActor
         fileprivate func shouldDriveNowPlayingBridge() -> Bool {
+            #if os(iOS)
+            // GH #33: while casting, the phone plays nothing -- a lingering
+            // mpv coordinator (teardown races the cast handoff) must not
+            // repopulate Now Playing. Android shipped the same fix after a
+            // stale media notification survived into remote mode.
+            if AerioCastController.shared.isCasting { return false }
+            #endif
             // Single-mode coordinator — always authoritative.
             guard let tileID else { return true }
             // Multiview coordinator — only the audio tile drives the
@@ -2541,6 +2548,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DispatchQueue.main.async { self.progressStore.currentSubtitleTrackID = trackID }
             }
 
+            // Audio Only via the companion remote (GH #33): drop/restore the
+            // video track like the Android host's setVideoTrackEnabled --
+            // audio keeps rolling with zero video decode. isAudioOnly mirrors
+            // so the chrome overlay + background discipline stay consistent.
+            progressStore.setVideoEnabledAction = { [weak self] enabled in
+                guard let self else { return }
+                debugLog("[Companion] host: setVideoEnabled(\(enabled)) (audioOnly=\(!enabled))")
+                self.mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    mpv_set_property_string(mpv, "vid", enabled ? "auto" : "no")
+                }
+                DispatchQueue.main.async { self.progressStore.isAudioOnly = !enabled }
+            }
+
             // Background/foreground handling — disable video output to prevent GPU crashes
             NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
                                                    name: UIApplication.didEnterBackgroundNotification, object: nil)
@@ -2965,7 +2986,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let carPlayConnected = MainActor.assumeIsolated {
                     NowPlayingManager.shared.isCarPlayConnected
                 }
-                if !carPlayConnected {
+                // Also stay suppressed while Audio Only is on (companion
+                // remote can set it while foregrounded now) -- foreground
+                // must not silently undo an explicit audio-only choice.
+                if !carPlayConnected, !progressStore.isAudioOnly {
                     mpv_set_property_string(mpv, "vid", "auto")
                 }
             }
@@ -4660,6 +4684,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // failure at worst. Leaving the intent here as a
             // reminder in case a future MPVKit bump brings it in.
             setOption(mpv, "initial-audio-sync", "no")
+            // GH #56 (OTA HDHR AC-3 black-screen): make an audio-output OPEN
+            // FAILURE non-fatal. On tvOS an AC-3 (ATSC A/52A) stream can hit a
+            // HDMI route-change (routeConfig) partway through open; mpv's
+            // audiounit ao then fails to init, and WITHOUT this option mpv aborts
+            // the WHOLE file (END_FILE error -> "loading failed" -> black screen +
+            // the yellow error overlay, retrying ~1 min before the route settles).
+            // With audio-fallback-to-null the ao falls back to null and VIDEO KEEPS
+            // PLAYING; runAudioHealthCheck then reinits real audio (stereo downmix)
+            // once the route is stable. This is why the AVPlayer-remux path (system
+            // audio) never hit it. setOption so an option this MPVKit build lacks is
+            // a logged no-op, not a hard failure (cf. audio-wait-open above).
+            setOption(mpv, "audio-fallback-to-null", "yes")
             setOption(mpv, "vd-lavc-fast", "yes")
             setOption(mpv, "vd-lavc-skiploopfilter", "nonref")
             // `stream-lavf-o=reconnect=...`: libavformat-level HTTP reconnect
@@ -6075,12 +6111,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             //    audio-focus (lastWrittenAID == "no").
             let appDisabledAudio = lastWrittenAID == "no" ||
                 (lastWrittenAID == nil && initialTileCount >= 7 && !initialIsAudioActive)
-            let chainDeadNoCodec = codec == nil && ao == nil && !appDisabledAudio
-            let chainDeadWithCodec = codec != nil && (decCh <= 0 || ao == nil)
+            // GH #56: with audio-fallback-to-null a failed ao surfaces as
+            // ao="null" (not nil) while video keeps playing. Treat that as a dead
+            // chain too so the stereo-downmix reinit still runs and brings real
+            // audio back once the HDMI route settles.
+            let aoDead = ao == nil || ao == "null"
+            let chainDeadNoCodec = codec == nil && aoDead && !appDisabledAudio
+            let chainDeadWithCodec = codec != nil && (decCh <= 0 || aoDead)
             guard chainDeadNoCodec || chainDeadWithCodec, !audioStereoFallbackApplied else { return }
             audioStereoFallbackApplied = true
             let failureShape = codec == nil ? "audio disabled after ao init failure"
-                : (ao == nil ? "no audio output" : "0 channels")
+                : (aoDead ? "no audio output" : "0 channels")
             debugLog("[AUDIO-FALLBACK] \(streamTag) audio chain failed to open (\(failureShape)); forcing stereo downmix + audio chain reinit (Dolby Atmos output workaround)")
             mpv_set_property_string(mpv, "audio-channels", "stereo")
             // Cycle the audio track so the audio output reopens cleanly with

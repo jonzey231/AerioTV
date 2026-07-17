@@ -2899,6 +2899,18 @@ final class NowPlayingManager: ObservableObject {
     private var pendingChannelChangeTask: Task<Void, Never>?
 
     func startPlaying(_ item: ChannelDisplayItem, headers: [String: String], isLive: Bool = true, wakeChrome: Bool = true) {
+        #if os(iOS)
+        // GH #33: while this phone is a companion remote, a live channel tap
+        // RETUNES THE TV instead of starting local playback (the user browsed
+        // the guide via the remote's Channels button). Non-Dispatcharr
+        // channels can't be addressed on the TV and fall through to local.
+        if isLive, CompanionClient.shared.isControlling,
+           let androidID = CompanionClient.androidChannelID(for: item) {
+            debugLog("🎮 NowPlaying.startPlaying: routing \(item.name) to companion TV")
+            CompanionClient.shared.setChannel(androidID, title: item.name)
+            return
+        }
+        #endif
         debugLog("🎮 NowPlaying.startPlaying: \(item.name) (id=\(item.id)), isLive=\(isLive), wakeChrome=\(wakeChrome), wasMinimized=\(isMinimized), wasPlaying=\(playingItem?.name ?? "nil")")
         playingItem = item
         // v1.6.18: persistent breadcrumb for guide focus default —
@@ -3169,6 +3181,18 @@ struct MainTabView: View {
     /// `MultiviewContainerView` is the rendering surface now, but
     /// collapsing it behaves like a single stream at N=1.
     @ObservedObject private var multiviewStore = MultiviewStore.shared
+    #if os(iOS)
+    /// GH #33 basic cast: MainTabView owns the local<->remote swap. On
+    /// session connect it hands the playing channel to the web receiver and
+    /// tears down local playback; while connected it renders the cast-remote
+    /// cover; on session end it resumes the last cast channel locally.
+    @ObservedObject private var castController = AerioCastController.shared
+    /// GH #33 companion remote: same cover pattern for a paired Android TV.
+    @ObservedObject private var companionClient = CompanionClient.shared
+    /// Presents the "Control a TV" picker from the floating pill (no channel
+    /// needs to be playing on the phone -- act as a pure remote).
+    @State private var showCompanionPickerGlobal = false
+    #endif
     @AppStorage("hasCompletedInitialEPG") private var hasCompletedInitialEPG = false
     @State private var showInitialEPGLoading = false
     /// v1.6.23 — set to `true` when the user explicitly Skips the
@@ -3893,6 +3917,49 @@ struct MainTabView: View {
             // nil-ed during multiview — the seed channel metadata is
             // still the single-stream fallback for when the user
             // exits multiview keeping the audio tile.
+            #if os(iOS)
+            // GH #33: while a REMOTE screen plays (cast web receiver, or a
+            // companion-controlled Android TV), local playback is torn down and
+            // this fullscreen remote drives the TV. Cast Stop resumes the
+            // channel locally; companion Disconnect leaves the TV playing and
+            // returns to the guide (device-verified Android semantics).
+            if castController.isCasting, let content = castController.castingContent {
+                RemoteControlScreen(
+                    title: content.title,
+                    subtitle: content.subtitle,
+                    artURL: content.artURL,
+                    statusText: "Casting to \(castController.connectedDeviceName ?? "TV")",
+                    isPlaying: castController.remoteIsPlaying,
+                    stopLabel: "Stop casting",
+                    onTogglePlayPause: { castController.remoteTogglePlayPause() },
+                    onChannelUp: { castController.castChannel(1) },
+                    onChannelDown: { castController.castChannel(-1) },
+                    onStop: { castController.stopCasting() }
+                )
+                .zIndex(3)
+                .transition(.opacity)
+            } else if companionClient.isControlling, !companionClient.remoteMinimized {
+                RemoteControlScreen(
+                    title: companionClient.nowPlaying,
+                    subtitle: nil,
+                    artURL: nil,
+                    statusText: "Controlling \(companionClient.connectedTVName ?? "TV")",
+                    isPlaying: companionClient.remoteIsPlaying,
+                    stopLabel: "Disconnect",
+                    onTogglePlayPause: { companionClient.togglePlayPause() },
+                    onChannelUp: { companionClient.flipChannel(1) },
+                    onChannelDown: { companionClient.flipChannel(-1) },
+                    onStop: { companionClient.disconnect() },
+                    companion: companionClient,  // full options (scrubber + sheet)
+                    // GH #33: minimize back to the guide while staying
+                    // connected -- channel taps route to the TV and pop this
+                    // remote back open.
+                    onBrowse: { companionClient.remoteMinimized = true }
+                )
+                .zIndex(3)
+                .transition(.opacity)
+            }
+            #endif
             if playerSession.mode == .multiview {
                 #if os(tvOS)
                 // At N=1 under unified playback, restore the 1.6.0
@@ -4082,22 +4149,70 @@ struct MainTabView: View {
             ChannelInfoBanner()
                 .zIndex(3)
         }
+        // GH #33: round floating "Control a TV" button above the right end of
+        // the tab bar -- appears the moment a controllable AerioTV TV is
+        // discovered so the phone can act as a remote without opening a
+        // channel first. Hidden while the full-screen player is up (the
+        // in-player Control-a-TV button owns that surface) and while already
+        // controlling / casting (their covers take over).
+        #if os(iOS)
+        .overlay(alignment: .bottomTrailing) {
+            if companionClient.isControlling, companionClient.remoteMinimized {
+                // Browsing the guide while connected: tap to pop the remote
+                // back open (channel taps also route to the TV and reopen it).
+                Button { companionClient.remoteMinimized = false } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "tv.and.mediabox")
+                        Text("Controlling \(companionClient.connectedTVName ?? "TV")")
+                            .lineLimit(1)
+                    }
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(ThemeManager.shared.accent)
+                    .padding(.vertical, 12)
+                    .padding(.horizontal, 16)
+                }
+                .liquidGlass(cornerRadius: 24)
+                .contextMenu {
+                    Button(role: .destructive) {
+                        companionClient.disconnect()
+                    } label: {
+                        Label("Disconnect from \(companionClient.connectedTVName ?? "TV")",
+                              systemImage: "xmark.circle")
+                    }
+                }
+                .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
+                .padding(.trailing, 20)
+                .padding(.bottom, 52)
+                .accessibilityLabel("Return to remote")
+            } else if !companionClient.devices.isEmpty,
+               !companionClient.isControlling,
+               !castController.isCasting,
+               nowPlaying.playingItem == nil || nowPlaying.isMinimized {
+                CompanionControlFAB { showCompanionPickerGlobal = true }
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 52)
+            }
+        }
+        #endif
         // safeAreaInset on the outer ZStack pushes the entire TabView (including its tab bar)
         // upward so the tab bar sits above the mini player bar and remains tappable.
         #if os(iOS)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            // v1.6.13: only iPhone uses the bottom MiniPlayerBar.
-            // iPad uses a top-right corner mini (handled inside the
-            // body's main ZStack — see the iPad GeometryReader
-            // branches above), so the bottom bar would double-render
-            // an off-screen mini and steal vertical space from the
-            // guide.
-            if UIDevice.current.userInterfaceIdiom == .phone,
-               nowPlaying.isMinimized,
-               let item = nowPlaying.playingItem {
-                MiniPlayerBar(item: item, nowPlaying: nowPlaying, dragOffset: $miniPlayerDragOffset)
+            VStack(spacing: 0) {
+                // v1.6.13: only iPhone uses the bottom MiniPlayerBar.
+                // iPad uses a top-right corner mini (handled inside the
+                // body's main ZStack — see the iPad GeometryReader
+                // branches above), so the bottom bar would double-render
+                // an off-screen mini and steal vertical space from the
+                // guide.
+                if UIDevice.current.userInterfaceIdiom == .phone,
+                   nowPlaying.isMinimized,
+                   let item = nowPlaying.playingItem {
+                    MiniPlayerBar(item: item, nowPlaying: nowPlaying, dragOffset: $miniPlayerDragOffset)
+                }
             }
         }
+        .sheet(isPresented: $showCompanionPickerGlobal) { CompanionPickerSheet() }
         #endif
         #if os(tvOS)
         // v1.6.12: GH #11 fix (v5).
