@@ -14,6 +14,18 @@ target 'Aerio_tvOS' do
 end
 
 post_install do |installer|
+  # Silence Xcode's recurring "Update to recommended settings" prompt on the
+  # generated Pods project. The prompt is gated by the project's
+  # LastUpgradeCheck lagging the current Xcode; CocoaPods regenerates the
+  # project each `pod install` with an older marker, so the nag returns after
+  # every install. Stamping the current Xcode version suppresses it without
+  # touching any build behaviour (it is only a validation marker). We do NOT
+  # blanket-apply the individual recommended settings -- enabling the Clang
+  # Module Verifier on the vendored Protobuf / Cast pods can surface fresh
+  # errors, which we don't want to risk right before a release.
+  installer.pods_project.root_object.attributes['LastUpgradeCheck'] = 2700
+  installer.pods_project.root_object.attributes['LastSwiftUpdateCheck'] = 2700
+
   installer.pods_project.targets.each do |t|
     t.build_configurations.each do |config|
       if t.platform_name.to_s == 'tvos'

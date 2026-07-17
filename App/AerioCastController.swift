@@ -628,13 +628,16 @@ final class CompanionClient: NSObject, ObservableObject {
             case "hello":
                 if let np = json["nowPlaying"] as? String, !np.isEmpty { nowPlaying = np }
             case "authOk":
+                let remembered = (json["token"] as? String)?.isEmpty == false
                 if let token = json["token"] as? String, !token.isEmpty { storeToken(token) }
                 conn = .connected(currentTV?.name)
+                Self.clog("authOk -> connected to \(currentTV?.name ?? "TV") (token=\(remembered ? "issued" : "none"))")
                 onControllingStarted()
                 requestState()
                 startLiveness(gen: generation)
             case "authFail":
                 conn = .needsPairing(currentTV?.name)
+                Self.clog("authFail reason=\(json["reason"] as? String ?? "?") -> needs pairing", level: .warning)
             default:
                 break
             }
@@ -648,6 +651,7 @@ final class CompanionClient: NSObject, ObservableObject {
             // connecting to a TV that is already playing something this phone
             // didn't start (and TVs that switch channels on their own remote).
             if let cid = json["channelId"] as? String, !cid.isEmpty {
+                if cid != controllingChannelID { Self.clog("state anchor adopt \(cid) audioOnly=\(remoteState.audioOnly)") }
                 controllingChannelID = cid
             }
             if let np = json["nowPlaying"] as? String, !np.isEmpty { nowPlaying = np }
@@ -713,6 +717,7 @@ final class CompanionClient: NSObject, ObservableObject {
     /// Stop controlling. The TV keeps playing; the phone does NOT resume local
     /// playback (companion Disconnect semantics, device-verified on Android).
     func disconnect(userInitiated: Bool = true) {
+        if isControlling { Self.clog("disconnect(userInitiated=\(userInitiated)) from \(connectedTVName ?? "TV")") }
         generation += 1
         socket?.cancel(with: .normalClosure, reason: nil)
         socket = nil
@@ -741,11 +746,13 @@ final class CompanionClient: NSObject, ObservableObject {
     func armSleepTimer(minutes: Int) {
         sleepTimerTask?.cancel()
         sleepTimerTask = nil
-        guard minutes > 0 else { sleepEndsAt = nil; return }
+        guard minutes > 0 else { sleepEndsAt = nil; Self.clog("sleep timer cancelled"); return }
         sleepEndsAt = Date().addingTimeInterval(TimeInterval(minutes) * 60)
+        Self.clog("sleep timer armed: \(minutes)m")
         sleepTimerTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
             guard !Task.isCancelled, let self, self.isControlling else { return }
+            Self.clog("sleep timer fired -> pausing TV + minimizing remote")
             self.pause()
             self.sleepEndsAt = nil
             self.remoteMinimized = true
@@ -769,23 +776,31 @@ final class CompanionClient: NSObject, ObservableObject {
     /// on connect and whenever a channel is sent, so the remote pops back.
     @Published var remoteMinimized = false
 
+    /// Shared diagnostic breadcrumb for the companion remote. Gated behind the
+    /// user's debug-logging pref (DebugLogger); safe to leave in Release so a
+    /// user hitting a bug can flip logging on, reproduce, and send the file.
+    static func clog(_ message: String, level: LogLevel = .info) {
+        DebugLogger.shared.log("[Companion] \(message)", category: "Companion", level: level)
+    }
+
     func setChannel(_ androidChannelID: String, title: String?) {
         controllingChannelID = androidChannelID
         if let title, !title.isEmpty { nowPlaying = title }
         sendJSON(["cmd": "setChannel", "channelId": androidChannelID])
         remoteMinimized = false
+        Self.clog("-> TV setChannel \(androidChannelID) title=\(title ?? "-")")
     }
 
-    func togglePlayPause() { sendJSON(["cmd": "toggle"]) }
+    func togglePlayPause() { sendJSON(["cmd": "toggle"]); Self.clog("-> TV toggle") }
 
     // Full options surface (parity with the Android companion overlay).
     func requestState() { sendJSON(["cmd": "getState"]) }
-    func setAudioTrack(_ id: String) { sendJSON(["cmd": "setAudio", "id": id]) }
-    func setTextTrack(_ id: String?) { sendJSON(["cmd": "setText", "id": id ?? ""]) }
-    func setSpeed(_ speed: Double) { sendJSON(["cmd": "setSpeed", "speed": speed]) }
-    func setAspect(_ key: String) { sendJSON(["cmd": "setAspect", "aspect": key]) }
-    func pause() { sendJSON(["cmd": "pause"]) }
-    func setAudioOnly(_ on: Bool) { sendJSON(["cmd": "setAudioOnly", "audioOnly": on]) }
+    func setAudioTrack(_ id: String) { sendJSON(["cmd": "setAudio", "id": id]); Self.clog("-> TV setAudio \(id)") }
+    func setTextTrack(_ id: String?) { sendJSON(["cmd": "setText", "id": id ?? ""]); Self.clog("-> TV setText \(id ?? "off")") }
+    func setSpeed(_ speed: Double) { sendJSON(["cmd": "setSpeed", "speed": speed]); Self.clog("-> TV setSpeed \(speed)") }
+    func setAspect(_ key: String) { sendJSON(["cmd": "setAspect", "aspect": key]); Self.clog("-> TV setAspect \(key)") }
+    func pause() { sendJSON(["cmd": "pause"]); Self.clog("-> TV pause") }
+    func setAudioOnly(_ on: Bool) { sendJSON(["cmd": "setAudioOnly", "audioOnly": on]); Self.clog("-> TV setAudioOnly \(on)") }
     func seekBy(_ deltaMs: Int64) { sendJSON(["cmd": "seekBy", "deltaMs": deltaMs]) }
     func seekToWall(_ ms: Int64) { sendJSON(["cmd": "seekWall", "targetWallMs": ms]) }
     func goLive() { sendJSON(["cmd": "goLive"]) }
@@ -1102,6 +1117,7 @@ struct RemoteOptionsSheet: View {
                 Section {
                     if controlledItem?.dispatcharrChannelID != nil {
                         Button {
+                            CompanionClient.clog("Record Current Program opened for \(controlledItem?.name ?? "?")")
                             showRecord = true
                         } label: {
                             Label("Record Current Program", systemImage: "record.circle")
@@ -1499,6 +1515,8 @@ final class CompanionHost: NSObject, ObservableObject {
                 sendState(to: conn)   // full snapshot on connect
                 pushPosition(to: conn)
                 showToast("Phone connected")
+                DebugLogger.shared.log("[Companion] host: phone authed (\(token.isEmpty ? "code" : "token"))",
+                                       category: "Companion")
                 return
             }
             // Wrong code: count it AND rotate the code (can't be brute-swept).
@@ -1519,7 +1537,11 @@ final class CompanionHost: NSObject, ObservableObject {
 
         guard session.authed else { return } // control refused pre-auth
         let ps = MultiviewStore.shared.audioProgressStore
-        switch json["cmd"] as? String {
+        let cmd = json["cmd"] as? String
+        if let cmd, cmd != "getState" {
+            DebugLogger.shared.log("[Companion] host cmd: \(cmd)", category: "Companion")
+        }
+        switch cmd {
         case "setChannel":
             if let id = json["channelId"] as? String { openChannel(id) }
         case "toggle":
@@ -1616,7 +1638,11 @@ final class CompanionHost: NSObject, ObservableObject {
     private func openChannel(_ channelID: String) {
         let uuid = channelID.hasPrefix("disp:") ? String(channelID.dropFirst(5)) : channelID
         guard let item = ChannelStore.shared.channels.first(where: { $0.uuid == uuid })
-        else { return }
+        else {
+            DebugLogger.shared.log("[Companion] host openChannel: no channel for \(channelID)",
+                                   category: "Companion", level: .warning)
+            return
+        }
         // A remote setChannel means TUNE, not add-a-tile: with a session
         // already up, begin() takes its multiview-add branch, so the TV
         // keeps the old channel fullscreen (2026-07-17 ATV test: ESPN

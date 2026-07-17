@@ -2554,6 +2554,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // so the chrome overlay + background discipline stay consistent.
             progressStore.setVideoEnabledAction = { [weak self] enabled in
                 guard let self else { return }
+                debugLog("[Companion] host: setVideoEnabled(\(enabled)) (audioOnly=\(!enabled))")
                 self.mpvQueue.async { [weak self] in
                     guard let self, let mpv = self.activeMPVHandle() else { return }
                     mpv_set_property_string(mpv, "vid", enabled ? "auto" : "no")
