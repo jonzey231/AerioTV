@@ -908,22 +908,18 @@ struct RemoteOptionsSheet: View {
 /// Shown above the tab bar whenever a controllable AerioTV TV is discovered on
 /// the LAN -- so the phone can act as a remote for whatever the TV is already
 /// playing WITHOUT first opening a channel here (user request 2026-07-16).
-struct CompanionControlPill: View {
+struct CompanionControlFAB: View {
+    @ObservedObject private var theme: ThemeManager = .shared
     var action: () -> Void
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: "tv.and.mediabox")
-                Text("Control TV").fontWeight(.semibold)
-            }
-            .font(.callout)
-            .foregroundStyle(.white)
-            .padding(.vertical, 10)
-            .padding(.horizontal, 18)
-            .background(Capsule().fill(Color.accentColor))
-            .shadow(color: .black.opacity(0.3), radius: 8, y: 3)
+            Image(systemName: "tv.and.mediabox")
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundStyle(theme.accent)
+                .frame(width: 52, height: 52)
         }
-        .padding(.bottom, 6)
+        .liquidGlass(cornerRadius: 26)
+        .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
         .accessibilityLabel("Control a TV")
     }
 }

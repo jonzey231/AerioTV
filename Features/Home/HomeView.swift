@@ -4133,20 +4133,29 @@ struct MainTabView: View {
             ChannelInfoBanner()
                 .zIndex(3)
         }
+        // GH #33: round floating "Control a TV" button above the right end of
+        // the tab bar -- appears the moment a controllable AerioTV TV is
+        // discovered so the phone can act as a remote without opening a
+        // channel first. Hidden while the full-screen player is up (the
+        // in-player Control-a-TV button owns that surface) and while already
+        // controlling / casting (their covers take over).
+        #if os(iOS)
+        .overlay(alignment: .bottomTrailing) {
+            if !companionClient.devices.isEmpty,
+               !companionClient.isControlling,
+               !castController.isCasting,
+               nowPlaying.playingItem == nil || nowPlaying.isMinimized {
+                CompanionControlFAB { showCompanionPickerGlobal = true }
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 52)
+            }
+        }
+        #endif
         // safeAreaInset on the outer ZStack pushes the entire TabView (including its tab bar)
         // upward so the tab bar sits above the mini player bar and remains tappable.
         #if os(iOS)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 0) {
-                // GH #33: floating "Control TV" pill -- appears the moment a
-                // controllable AerioTV TV is discovered so the phone can be a
-                // remote without opening a channel first. Hidden while already
-                // controlling / casting (their covers take over).
-                if !companionClient.devices.isEmpty,
-                   !companionClient.isControlling,
-                   !castController.isCasting {
-                    CompanionControlPill { showCompanionPickerGlobal = true }
-                }
                 // v1.6.13: only iPhone uses the bottom MiniPlayerBar.
                 // iPad uses a top-right corner mini (handled inside the
                 // body's main ZStack — see the iPad GeometryReader
