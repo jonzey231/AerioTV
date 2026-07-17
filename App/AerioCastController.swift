@@ -662,6 +662,13 @@ final class CompanionClient: NSObject, ObservableObject {
             if let v = Self.int64(json["windowStartMs"]) { s.windowStartMs = v }
             if let v = Self.int64(json["windowEndMs"]) { s.windowEndMs = v }
             remoteState = s
+            // The anchor also rides the tick: the Android host's post-setChannel
+            // full-state push races its async re-prime (it still carries the OLD
+            // channel), and nothing else re-sent channelId -- Switch Stream then
+            // targeted the previous channel (2026-07-17 Streamer test).
+            if let cid = json["channelId"] as? String, !cid.isEmpty {
+                controllingChannelID = cid
+            }
         default:
             break
         }
@@ -1507,6 +1514,18 @@ final class CompanionHost: NSObject, ObservableObject {
         let uuid = channelID.hasPrefix("disp:") ? String(channelID.dropFirst(5)) : channelID
         guard let item = ChannelStore.shared.channels.first(where: { $0.uuid == uuid })
         else { return }
+        // A remote setChannel means TUNE, not add-a-tile: with a session
+        // already up, begin() takes its multiview-add branch, so the TV
+        // keeps the old channel fullscreen (2026-07-17 ATV test: ESPN
+        // stayed up when the phone picked ESPN2). Tear down first so
+        // begin() reseeds like a fresh tap; same-channel requests are
+        // left alone.
+        let store = MultiviewStore.shared
+        if !store.tiles.isEmpty {
+            if store.tiles.count == 1,
+               NowPlayingManager.shared.playingItem?.uuid == uuid { return }
+            PlayerSession.shared.exit()
+        }
         _ = PlayerSession.shared.begin(item: item, server: ChannelStore.shared.activeServer)
     }
 
@@ -1594,7 +1613,7 @@ final class CompanionHost: NSObject, ObservableObject {
         let ps = MultiviewStore.shared.audioProgressStore
         let rewind = LiveRewindEngine.shared
         let playing = ps.map { !$0.isPaused } ?? true
-        let pos: [String: Any] = [
+        var pos: [String: Any] = [
             "cmd": "position",
             "isPlaying": playing,
             "isLive": !rewind.timeshifting,
@@ -1603,6 +1622,12 @@ final class CompanionHost: NSObject, ObservableObject {
             "windowStartMs": rewind.tailWallMs,
             "windowEndMs": rewind.headWallMs,
         ]
+        // Anchor rides the tick (matches the Android host): a native TV-side
+        // channel change would otherwise leave connected phones' flip /
+        // Switch-Stream anchor stale until the next command's state push.
+        if let uuid = NowPlayingManager.shared.playingItem?.uuid, !uuid.isEmpty {
+            pos["channelId"] = "disp:\(uuid)"
+        }
         if let data = try? JSONSerialization.data(withJSONObject: pos),
            let text = String(data: data, encoding: .utf8) {
             send(text, to: conn)

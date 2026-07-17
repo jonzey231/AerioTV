@@ -4172,6 +4172,14 @@ struct MainTabView: View {
                     .padding(.horizontal, 16)
                 }
                 .liquidGlass(cornerRadius: 24)
+                .contextMenu {
+                    Button(role: .destructive) {
+                        companionClient.disconnect()
+                    } label: {
+                        Label("Disconnect from \(companionClient.connectedTVName ?? "TV")",
+                              systemImage: "xmark.circle")
+                    }
+                }
                 .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
                 .padding(.trailing, 20)
                 .padding(.bottom, 52)
