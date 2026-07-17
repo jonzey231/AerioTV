@@ -1033,6 +1033,9 @@ final class CompanionHost: NSObject, ObservableObject {
     }
 
     private var listener: NWListener?
+    /// The name Bonjour actually registered us under (the user's Apple TV name,
+    /// e.g. "Living Room"); nil until the first registration lands.
+    private var advertisedName: String?
     private var sessions: [ObjectIdentifier: Session] = [:]
     private var pairingWaiters = 0
     private var started = false
@@ -1055,9 +1058,21 @@ final class CompanionHost: NSObject, ObservableObject {
             // real port, same as the Android host's port-0 bind.
             let listener = try NWListener(using: params)
             let txt = NWTXTRecord(["v": "1", "id": Self.deviceID()])
+            // name: nil -> mDNSResponder registers under the system default
+            // service name, which IS the user-assigned Apple TV name ("Living
+            // Room"), the same name AirPlay shows. The app can't read that name
+            // directly (UIDevice.name is privacy-generic "Apple TV" on tvOS 16+
+            // without a special entitlement), but Bonjour fills it in daemon-side
+            // and reports the final registered name back below.
             listener.service = NWListener.Service(
-                name: Self.deviceName(), type: "_aeriotv._tcp", domain: nil, txtRecord: txt
+                name: nil, type: "_aeriotv._tcp", domain: nil, txtRecord: txt
             )
+            listener.serviceRegistrationUpdateHandler = { [weak self] change in
+                if case .add(let endpoint) = change,
+                   case .service(let name, _, _, _) = endpoint {
+                    Task { @MainActor in self?.advertisedName = name }
+                }
+            }
             listener.newConnectionHandler = { [weak self] conn in
                 Task { @MainActor in self?.accept(conn) }
             }
@@ -1394,7 +1409,7 @@ final class CompanionHost: NSObject, ObservableObject {
     // MARK: Frame builders
 
     private func hello() -> String {
-        let name = Self.jsonEscape(Self.deviceName())
+        let name = Self.jsonEscape(advertisedName ?? Self.deviceName())
         let np = Self.jsonEscape(NowPlayingManager.shared.playingItem?.name ?? "")
         return #"{"t":"hello","v":1,"device":"\#(name)","needsPairing":true,"nowPlaying":"\#(np)"}"#
     }
