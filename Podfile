@@ -15,16 +15,27 @@ end
 
 post_install do |installer|
   # Silence Xcode's recurring "Update to recommended settings" prompt on the
-  # generated Pods project. The prompt is gated by the project's
-  # LastUpgradeCheck lagging the current Xcode; CocoaPods regenerates the
-  # project each `pod install` with an older marker, so the nag returns after
-  # every install. Stamping the current Xcode version suppresses it without
-  # touching any build behaviour (it is only a validation marker). We do NOT
-  # blanket-apply the individual recommended settings -- enabling the Clang
-  # Module Verifier on the vendored Protobuf / Cast pods can surface fresh
-  # errors, which we don't want to risk right before a release.
-  installer.pods_project.root_object.attributes['LastUpgradeCheck'] = 2700
-  installer.pods_project.root_object.attributes['LastSwiftUpdateCheck'] = 2700
+  # generated Pods project. CocoaPods regenerates Pods.xcodeproj on every
+  # `pod install` with an older upgrade marker AND without the modern
+  # recommended settings, so the prompt returns each install. The marker
+  # alone is NOT enough -- Xcode 27 also diffs concrete build settings, so we
+  # apply the exact recommended set it asks for. All of these are Apple's own
+  # recommendations for pod targets; the release build is re-verified green
+  # after applying them.
+  proj = installer.pods_project
+  proj.root_object.attributes['LastUpgradeCheck'] = 2700
+  proj.root_object.attributes['LastSwiftUpdateCheck'] = 2700
+  # Project-level recommendations: dead-code stripping, default symbol
+  # stripping, String Catalog symbol generation, parallel target builds.
+  proj.build_configurations.each do |config|
+    config.build_settings['DEAD_CODE_STRIPPING'] = 'YES'
+    config.build_settings['SWIFT_EMIT_LOC_STRINGS'] = 'YES'
+    # "Reset symbol stripping to defaults" -> drop the overrides CocoaPods sets.
+    %w[STRIP_INSTALLED_PRODUCT STRIP_STYLE STRIP_SWIFT_SYMBOLS].each do |k|
+      config.build_settings.delete(k)
+    end
+  end
+  proj.root_object.attributes['BuildIndependentTargetsInParallel'] = 'YES'
 
   installer.pods_project.targets.each do |t|
     t.build_configurations.each do |config|
@@ -40,6 +51,21 @@ post_install do |installer|
       # none in our code. They are Google's vendored headers, so silence the
       # warning on the pod targets rather than patching upstream sources.
       config.build_settings['CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER'] = 'NO'
+      # Per-target recommendations: don't embed the Swift standard libraries in
+      # pod frameworks and don't code-sign them at build time (the app re-signs
+      # on embed).
+      config.build_settings['ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES'] = 'NO'
+      config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
+      # Enable the Clang module verifier (an Xcode-recommended setting) but tell
+      # its stricter modules pass not to treat the Protobuf pod's quoted
+      # framework includes (#include "GPBDescriptor.h") as fatal -- without the
+      # flag the verifier fails with 186 errors in Google's vendored headers
+      # (verified 2026-07-17). CLANG_WARN_...=NO above only covers the normal
+      # compile; the verifier needs its own flag.
+      config.build_settings['ENABLE_MODULE_VERIFIER'] = 'YES'
+      config.build_settings['MODULE_VERIFIER_SUPPORTED_LANGUAGES'] = 'objective-c objective-c++'
+      config.build_settings['MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS'] = 'gnu11 gnu++20'
+      config.build_settings['OTHER_MODULE_VERIFIER_FLAGS'] = '-Wno-quoted-include-in-framework-header'
     end
   end
 end
