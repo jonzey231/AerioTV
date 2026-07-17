@@ -1062,8 +1062,17 @@ final class CompanionHost: NSObject, ObservableObject {
                 Task { @MainActor in self?.accept(conn) }
             }
             listener.stateUpdateHandler = { [weak self] state in
-                if case .failed = state {
+                // .cancelled too: tvOS kills the listener when the app
+                // suspends (Home press / TV sleep), and it does NOT come back
+                // as .failed -- leaving `started` true made start() a no-op on
+                // return, so the Apple TV silently stopped advertising until a
+                // full app relaunch (found 2026-07-16: iPhone saw the Streamer
+                // but never the ATV).
+                switch state {
+                case .failed, .cancelled:
                     Task { @MainActor in self?.started = false; self?.listener = nil }
+                default:
+                    break
                 }
             }
             listener.start(queue: .main)
@@ -1072,7 +1081,37 @@ final class CompanionHost: NSObject, ObservableObject {
         } catch {
             started = false
         }
+        // Watchdog (parity with the Android host): whatever tears the listener
+        // down while the app stays frontmost, bring the advert back.
+        if watchdog == nil {
+            watchdog = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 15_000_000_000)
+                    await MainActor.run { self?.ensureRunning() }
+                }
+            }
+        }
     }
+
+    /// Restart advertising if the listener is gone or dead. Called on scene
+    /// foreground and by the watchdog; cheap no-op while healthy.
+    func ensureRunning() {
+        guard UIApplication.shared.applicationState == .active else { return }
+        if let l = listener {
+            switch l.state {
+            case .ready, .setup, .waiting:
+                return // healthy or still coming up
+            default:
+                break
+            }
+        }
+        started = false
+        listener?.cancel()
+        listener = nil
+        start()
+    }
+
+    private var watchdog: Task<Void, Never>?
 
     private func accept(_ conn: NWConnection) {
         let session = Session(conn)

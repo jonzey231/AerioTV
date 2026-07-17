@@ -406,6 +406,12 @@ struct AerioApp: App {
             switch phase {
             case .active:
                 DebugLogger.shared.logLifecycle("Scene → active (foreground)")
+                #if os(tvOS)
+                // GH #33: tvOS cancels the companion host's NWListener on
+                // suspend and start() alone won't revive it (started guard) --
+                // re-assert the _aeriotv._tcp advert on every foreground.
+                CompanionHost.shared.ensureRunning()
+                #endif
                 // Start iCloud sync if enabled (pull happens during EPG loading)
                 SyncManager.shared.startObserving()
                 // Re-probe LAN on every foreground transition — covers
