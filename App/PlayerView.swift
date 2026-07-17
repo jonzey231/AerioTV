@@ -268,6 +268,12 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var setAudioTrackAction: ((Int) -> Void)?
     /// Closure set by the Coordinator; sets subtitle track (0 = off).
     var setSubtitleTrackAction: ((Int) -> Void)?
+    /// Closure set by the Coordinator; enables/disables the video track
+    /// (mpv vid=auto/no) and mirrors `isAudioOnly`. Drives the companion
+    /// hosts' Audio Only command (GH #33 parity with the Android host's
+    /// setVideoTrackEnabled) -- unlike the overflow menu's overlay-only
+    /// toggle, this actually stops video decode.
+    var setVideoEnabledAction: ((Bool) -> Void)?
     /// Whether PiP is currently active. Written synchronously by the
     /// AVPictureInPictureController delegates (auto-PiP only — the manual
     /// menu entry was removed in favour of swipe-home auto-PiP). Read by

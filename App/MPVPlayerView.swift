@@ -2548,6 +2548,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DispatchQueue.main.async { self.progressStore.currentSubtitleTrackID = trackID }
             }
 
+            // Audio Only via the companion remote (GH #33): drop/restore the
+            // video track like the Android host's setVideoTrackEnabled --
+            // audio keeps rolling with zero video decode. isAudioOnly mirrors
+            // so the chrome overlay + background discipline stay consistent.
+            progressStore.setVideoEnabledAction = { [weak self] enabled in
+                guard let self else { return }
+                self.mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    mpv_set_property_string(mpv, "vid", enabled ? "auto" : "no")
+                }
+                DispatchQueue.main.async { self.progressStore.isAudioOnly = !enabled }
+            }
+
             // Background/foreground handling — disable video output to prevent GPU crashes
             NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
                                                    name: UIApplication.didEnterBackgroundNotification, object: nil)
@@ -2972,7 +2985,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let carPlayConnected = MainActor.assumeIsolated {
                     NowPlayingManager.shared.isCarPlayConnected
                 }
-                if !carPlayConnected {
+                // Also stay suppressed while Audio Only is on (companion
+                // remote can set it while foregrounded now) -- foreground
+                // must not silently undo an explicit audio-only choice.
+                if !carPlayConnected, !progressStore.isAudioOnly {
                     mpv_set_property_string(mpv, "vid", "auto")
                 }
             }

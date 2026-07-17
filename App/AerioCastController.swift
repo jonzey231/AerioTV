@@ -363,6 +363,7 @@ final class CompanionClient: NSObject, ObservableObject {
         var positionWallMs: Int64 = 0
         var windowStartMs: Int64 = 0
         var windowEndMs: Int64 = 0
+        var audioOnly = false
     }
 
     @Published private(set) var devices: [TV] = []
@@ -409,7 +410,6 @@ final class CompanionClient: NSObject, ObservableObject {
                 return "\(r.endpoint) txt=\(txt) if=\(r.interfaces.map { "\($0.type)" }.joined(separator: "+"))"
             }.joined(separator: " | ")
             DebugLogger.shared.log("companion browse results (\(results.count)): \(dump)")
-            print("[companion] browse results (\(results.count)): \(dump)")
             let tvs: [TV] = results.compactMap { result in
                 guard case .service(let name, _, _, _) = result.endpoint else { return nil }
                 var stableID = name
@@ -428,7 +428,6 @@ final class CompanionClient: NSObject, ObservableObject {
         // its "Living Room" re-registration, so connecting just timed out).
         b.stateUpdateHandler = { [weak self] state in
             DebugLogger.shared.log("companion browser state: \(state)")
-            print("[companion] browser state: \(state)")
             if case .failed = state {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -694,6 +693,7 @@ final class CompanionClient: NSObject, ObservableObject {
         s.positionWallMs = int64(json["positionWallMs"]) ?? 0
         s.windowStartMs = int64(json["windowStartMs"]) ?? 0
         s.windowEndMs = int64(json["windowEndMs"]) ?? 0
+        s.audioOnly = json["audioOnly"] as? Bool ?? false
         return s
     }
 
@@ -718,11 +718,37 @@ final class CompanionClient: NSObject, ObservableObject {
         socket = nil
         resolver?.cancel()
         resolver = nil
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        sleepEndsAt = nil
         if userInitiated || conn != .idle {
             conn = .idle
             controllingChannelID = nil
             nowPlaying = ""
             remoteState = RemoteState()
+        }
+    }
+
+    // MARK: Sleep timer (Android companion-overlay parity)
+
+    /// When the armed timer fires (nil = off). Phone-side countdown, like the
+    /// Android overlay: the session is the user's own TV, so expiry PAUSES it
+    /// (a cast would be stopped) and drops the remote cover.
+    @Published private(set) var sleepEndsAt: Date?
+    private var sleepTimerTask: Task<Void, Never>?
+
+    /// Arm (minutes > 0) or cancel (0) the sleep timer.
+    func armSleepTimer(minutes: Int) {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        guard minutes > 0 else { sleepEndsAt = nil; return }
+        sleepEndsAt = Date().addingTimeInterval(TimeInterval(minutes) * 60)
+        sleepTimerTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
+            guard !Task.isCancelled, let self, self.isControlling else { return }
+            self.pause()
+            self.sleepEndsAt = nil
+            self.remoteMinimized = true
         }
     }
 
@@ -758,6 +784,8 @@ final class CompanionClient: NSObject, ObservableObject {
     func setTextTrack(_ id: String?) { sendJSON(["cmd": "setText", "id": id ?? ""]) }
     func setSpeed(_ speed: Double) { sendJSON(["cmd": "setSpeed", "speed": speed]) }
     func setAspect(_ key: String) { sendJSON(["cmd": "setAspect", "aspect": key]) }
+    func pause() { sendJSON(["cmd": "pause"]) }
+    func setAudioOnly(_ on: Bool) { sendJSON(["cmd": "setAudioOnly", "audioOnly": on]) }
     func seekBy(_ deltaMs: Int64) { sendJSON(["cmd": "seekBy", "deltaMs": deltaMs]) }
     func seekToWall(_ ms: Int64) { sendJSON(["cmd": "seekWall", "targetWallMs": ms]) }
     func goLive() { sendJSON(["cmd": "goLive"]) }
@@ -998,10 +1026,23 @@ struct RemoteOptionsSheet: View {
     @ObservedObject var companion: CompanionClient
     @Environment(\.dismiss) private var dismiss
     @State private var showSwitchStream = false
+    @State private var showRecord = false
 
     private let speeds: [Double] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
     private let aspects: [(key: String, label: String)] =
         [("fit", "Fit"), ("fill", "Fill"), ("zoom", "Zoom")]
+    private let sleepChoices: [(minutes: Int, label: String)] =
+        [(0, "Off"), (30, "30 minutes"), (60, "1 hour"), (90, "1.5 hours"), (120, "2 hours")]
+
+    /// The controlled channel resolved locally, for actions the phone drives
+    /// against Dispatcharr itself (Record) -- same anchor as Switch Stream
+    /// but without the admin-credentials gate.
+    private var controlledItem: ChannelDisplayItem? {
+        guard let cid = companion.controllingChannelID, cid.hasPrefix("disp:")
+        else { return nil }
+        let uuid = String(cid.dropFirst(5))
+        return ChannelStore.shared.channels.first(where: { $0.uuid == uuid })
+    }
 
     /// The controlled channel resolved on THIS phone, when Switch Stream can
     /// work: Dispatcharr swaps the source server-side while the TV keeps
@@ -1056,6 +1097,41 @@ struct RemoteOptionsSheet: View {
                         }
                     }
                 }
+                // Android companion-overlay parity: Record / Sleep Timer /
+                // Audio Only ride the same options surface.
+                Section {
+                    if controlledItem?.dispatcharrChannelID != nil {
+                        Button {
+                            showRecord = true
+                        } label: {
+                            Label("Record Current Program", systemImage: "record.circle")
+                        }
+                    }
+                    Menu {
+                        ForEach(sleepChoices, id: \.minutes) { c in
+                            Button(c.label) { companion.armSleepTimer(minutes: c.minutes) }
+                        }
+                    } label: {
+                        HStack {
+                            Label("Sleep Timer", systemImage: "timer")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Text(sleepValueLabel)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Button {
+                        companion.setAudioOnly(!s.audioOnly)
+                    } label: {
+                        HStack {
+                            Label("Audio Only", systemImage: "music.note")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Text(s.audioOnly ? "On" : "Off")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
                 if !s.streamInfo.isEmpty {
                     Section("Stream Info") {
                         Text(s.streamInfo).font(.footnote.monospaced())
@@ -1075,8 +1151,31 @@ struct RemoteOptionsSheet: View {
                     SwitchStreamView(channelID: t.id, channelUUID: t.uuid, channelName: t.name)
                 }
             }
+            .sheet(isPresented: $showRecord) {
+                if let item = controlledItem {
+                    let now = Date()
+                    RecordProgramSheet(
+                        programTitle: item.currentProgram ?? "\(item.name) live recording",
+                        programDescription: item.currentProgramDescription ?? "",
+                        channelID: item.id,
+                        channelName: item.name,
+                        scheduledStart: item.currentProgramStart ?? now,
+                        scheduledEnd: (item.currentProgramEnd.flatMap { $0 > now ? $0 : nil })
+                            ?? now.addingTimeInterval(3600),
+                        isLive: true,
+                        dispatcharrChannelID: item.dispatcharrChannelID,
+                        streamURL: item.streamURL
+                    )
+                }
+            }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    private var sleepValueLabel: String {
+        guard let end = companion.sleepEndsAt else { return "Off" }
+        let mins = max(1, Int(end.timeIntervalSinceNow / 60) + 1)
+        return "\(mins)m left"
     }
 
     private func row(_ label: String, checked: Bool, action: @escaping () -> Void) -> some View {
@@ -1444,6 +1543,10 @@ final class CompanionHost: NSObject, ObservableObject {
                 ps?.aspectMode = mode
                 UserDefaults.standard.set(mode.rawValue, forKey: "player.aspectMode")
             }
+        case "setAudioOnly":
+            // Android-host parity: drop/restore the video track (audio keeps
+            // playing, screen goes dark) rather than an overlay-only flag.
+            ps?.setVideoEnabledAction?(!(json["audioOnly"] as? Bool ?? false))
         case "seekBy":
             // window-relative: current playhead + signed delta (Live Rewind).
             if let store = ps, let delta = intArg64(json["deltaMs"]) {
@@ -1584,7 +1687,7 @@ final class CompanionHost: NSObject, ObservableObject {
             "textOff": subSelected == 0,
             "speed": ps?.speed ?? 1.0,
             "aspect": Self.aspectKey(ps?.aspectMode ?? .fit),
-            "audioOnly": false,
+            "audioOnly": ps?.isAudioOnly ?? false,
             "streamInfo": Self.streamInfoLine(ps),
             "canSeek": rewind.buffering,
             "isLive": !rewind.timeshifting,
