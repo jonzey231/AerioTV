@@ -57,6 +57,18 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.1",
+            title: "What's new in 1.8.1",
+            bullets: [
+                "Apple TV guide overhaul: focus stays visible, opens at now, and never wanders into the past",
+                "Menu now also snaps the guide timeline back to now",
+                "Channels without guide data are selectable again",
+                "New Audio Sync control in the player audio menu",
+                "Catch-up: smarter programme windows, and paused sessions stay alive"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.1")
+        ),
+        WhatsNewRelease(
             version: "1.8.0",
             title: "What's new in 1.8.0",
             bullets: [
