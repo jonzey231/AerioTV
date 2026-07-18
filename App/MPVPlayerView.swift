@@ -1858,6 +1858,90 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private var fboHeight: Int = 0
         /// Detected stream FPS — used for diagnostics.
         private var detectedFps: Double = 0
+
+        #if os(tvOS)
+        // MARK: - Display refresh-rate matching (task #186)
+        //
+        // Apple's automatic "Match Content" only engages for AVPlayer
+        // playback. Our tvOS video path is libmpv -> AVSampleBufferDisplayLayer,
+        // which AVKit knows nothing about, so European 50fps live streams
+        // played on a 60Hz-defaulted Apple TV judder forever (field report
+        // alturismo 2026-07-18 was Android, but tvOS had the same hole with
+        // ZERO matching code). The manual path: set
+        // window.avDisplayManager.preferredDisplayCriteria and tvOS performs
+        // the same mode switch AVPlayer would get -- still gated by the
+        // user's Settings > Video and Audio > Match Content setting, so
+        // users who left matching off see no change.
+        //
+        // Fullscreen single-stream only (tileID == nil): multiview tiles at
+        // mixed rates must not fight over the panel mode.
+
+        /// Refresh rate last written to preferredDisplayCriteria. Written on
+        /// main; read cross-queue only as a cheap dedup pre-check (a torn
+        /// read just costs one redundant main-queue hop).
+        private var appliedDisplayRefreshRate: Float = 0
+        /// The display manager we applied criteria to, so stop()/deinit can
+        /// clear it even after the view has left the window.
+        private weak var appliedDisplayManager: AVDisplayManager?
+
+        /// Rates a physical panel can actually be asked for. Measured fps is
+        /// snapped to the nearest entry (mpv's estimated-vf-fps for a 50fps
+        /// DVB feed reads e.g. 49.98).
+        private static let canonicalVideoRates: [Double] = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60]
+
+        private func applyDisplayCriteriaIfNeeded(fps: Double) {
+            guard tileID == nil, fps > 20, fps < 130 else { return }
+            guard let rate = Self.canonicalVideoRates.min(by: { abs($0 - fps) < abs($1 - fps) }),
+                  abs(rate - fps) <= 0.75 else { return }
+            let target = Float(rate)
+            // Cross-queue pre-check; the authoritative dedup re-runs on main.
+            if abs(appliedDisplayRefreshRate - target) < 0.01 { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      let window = self.viewController?.viewIfLoaded?.window else { return }
+                let dm = window.avDisplayManager
+                if self.appliedDisplayManager === dm,
+                   abs(self.appliedDisplayRefreshRate - target) < 0.01 { return }
+                let info = self.progressStore.streamInfo
+                let codecName = info.videoCodec.lowercased()
+                let codec: CMVideoCodecType =
+                    (codecName.contains("hevc") || codecName.contains("h265") || codecName.contains("265"))
+                    ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264
+                var fd: CMVideoFormatDescription?
+                // No color extensions: the mpv render path tone-maps to SDR,
+                // so the panel must NOT be asked for an HDR mode here even
+                // when the source is HDR.
+                CMVideoFormatDescriptionCreate(
+                    allocator: kCFAllocatorDefault,
+                    codecType: codec,
+                    width: info.width > 0 ? Int32(info.width) : 1920,
+                    height: info.height > 0 ? Int32(info.height) : 1080,
+                    extensions: nil,
+                    formatDescriptionOut: &fd)
+                guard let fd else { return }
+                self.appliedDisplayManager = dm
+                self.appliedDisplayRefreshRate = target
+                dm.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: target,
+                                                                formatDescription: fd)
+                debugLog("[MPV-DISPLAY] preferredDisplayCriteria \(target)Hz " +
+                         "(measured \(String(format: "%.2f", fps))fps, " +
+                         "matchingEnabled=\(dm.isDisplayCriteriaMatchingEnabled))")
+            }
+        }
+
+        /// Release our mode preference so the UI returns to the panel
+        /// default. Safe to call from any thread and repeatedly.
+        private func clearDisplayCriteria() {
+            let dm = appliedDisplayManager
+            appliedDisplayManager = nil
+            appliedDisplayRefreshRate = 0
+            guard dm != nil else { return }
+            DispatchQueue.main.async {
+                dm?.preferredDisplayCriteria = nil
+            }
+        }
+        #endif
+
         private var renderWidth: Int = 0
         private var renderHeight: Int = 0
         private var videoNativeWidth: Int = 0   // Video's display width (for render sizing)
@@ -2836,6 +2920,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
 
         deinit {
             NotificationCenter.default.removeObserver(self)
+            #if os(tvOS)
+            // Task #186: backstop for teardown paths that skip stop().
+            clearDisplayCriteria()
+            #endif
         }
 
         @objc private func didEnterBackground() {
@@ -3403,7 +3491,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 if isLive, let mpv = self.activeMPVHandle() {
                     var fpsVal: Double = 0
                     mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fpsVal)
-                    if fpsVal > 0 { detectedFps = fpsVal }
+                    if fpsVal > 0 {
+                        detectedFps = fpsVal
+                        // Task #186: live resize path often knows fps
+                        // before the first perf-pump tick.
+                        applyDisplayCriteriaIfNeeded(fps: fpsVal)
+                    }
                 }
                 // tvOS pixels/sec budget — multi-tile only.
                 // tvOS solo bypasses this so the user gets native
@@ -4420,6 +4513,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         func stop() {
             let mpvToStop = markShuttingDownAndSnapshotMPV()
             stopStreamInfoTimer()
+            #if os(tvOS)
+            // Task #186: drop our refresh-rate preference so the UI
+            // returns to the panel default outside the player.
+            clearDisplayCriteria()
+            #endif
             DebugLogger.shared.logPlayback(event: "Stop",
                                            url: urls[safe: currentIndex]?.absoluteString)
             // Task #149: free the native catch-up session's provider slot
@@ -6958,6 +7056,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     detectedFps = measuredFps
                 }
             }
+            #if os(tvOS)
+            // Task #186: periodic re-check catches streams whose fps only
+            // becomes known via measured intervals (unsignaled DVB TS), and
+            // fps changes mpv reports mid-stream. Deduped internally --
+            // steady state is a no-op.
+            if containerFPS > 0 {
+                applyDisplayCriteriaIfNeeded(fps: containerFPS)
+            } else if estimatedFPS > 0 {
+                applyDisplayCriteriaIfNeeded(fps: estimatedFPS)
+            }
+            #endif
             // Feed the AVSBDL re-enqueue watchdog the live container fps
             // so its stale threshold can scale to the stream's natural
             // frame interval. Without this the watchdog fires between
@@ -7439,6 +7548,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fps)
             }
             if fps > 0 { detectedFps = fps }
+            #if os(tvOS)
+            // Task #186: first shot at matching the panel to the stream.
+            // PLAYBACK_RESTART fires per (re)load, so channel flips
+            // re-evaluate. The perf-pump fallback below covers streams
+            // where mpv reports 0 here.
+            if fps > 0 { applyDisplayCriteriaIfNeeded(fps: fps) }
+            #endif
 
             // Also grab initial volatile values
             var cacheDur: Double = 0; var avsync: Double = 0; var drops: Int64 = 0; var bitrate: Double = 0
