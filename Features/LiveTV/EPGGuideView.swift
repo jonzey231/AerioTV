@@ -2374,6 +2374,15 @@ struct EPGGuideView: View {
     /// UIKit press overlay) is what finally makes the restore work.
     @FocusState private var focusedProgramID: String?
 
+    /// Task #185 (guide "gets away"): channel of the previously focused
+    /// programme, so the vertical-move corrective snap can tell a channel
+    /// change (UP/DOWN, needs column correction) from a same-row change
+    /// (our own snap / restore, must not loop).
+    @State private var lastFocusedChannelForSnap: String?
+    /// Task #185: guards the corrective snap's own focus writes from
+    /// re-triggering a second snap while the first is still asserting.
+    @State private var verticalSnapInFlight = false
+
     /// #42: while a hold-Right (close corner mini) is in progress, pin the guide
     /// timeline so the still-held Right does not scroll the EPG forward after the
     /// mini closes. Gated in `onMoveCommand(.right)`; driven by the
@@ -2732,14 +2741,21 @@ struct EPGGuideView: View {
             #endif
             .onAppear {
                 visibleProgramWidth = geo.size.width - channelColumnWidth
-                // Catch-up: the grid now extends `hoursBack` (up to 24h)
-                // into the past, so the initial offset must land the
-                // viewport on "now", not on the grid origin. The @State
-                // default still assumes the legacy 1h window; correct it
-                // once, before first paint of the cells.
+                // Task #185: anchor "now" left-aligned (15-min lead) fresh
+                // from the wall clock on EVERY appear when the timeline is
+                // stale. The old one-shot `-hoursBack * pixelsPerHour` was
+                // computed against the view's BUILD time and never refreshed,
+                // so a guide revisited hours later opened that far in the
+                // past (the "sometimes launches wrong" report - it tracked
+                // how long the view had been alive). First appear anchors
+                // unanimated before first paint; re-appears only correct
+                // when the timeline drifted from now (a user mid-browse
+                // within the slop is left alone).
                 if !didSetInitialGuideOffset {
                     didSetInitialGuideOffset = true
-                    horizontalOffset = -CGFloat(hoursBack) * pixelsPerHour
+                    reAnchorTimelineToNow(animated: false)
+                } else if timelineIsAwayFromNow() {
+                    reAnchorTimelineToNow(animated: false)
                 }
             }
             .onChange(of: geo.size.width) { _, w in visibleProgramWidth = w - channelColumnWidth }
@@ -2816,6 +2832,11 @@ struct EPGGuideView: View {
                     withAnimation(.easeOut(duration: 0.3)) {
                         horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
                     }
+                    // Task #185: focus rides the viewport. Without this, the
+                    // pan left the OLD cell focused - it slid off-screen while
+                    // still holding focus, so the ring vanished and OK acted
+                    // on an invisible programme.
+                    retargetFocusToViewportColumn()
                 case .right:
                     // #42: a hold-Right (close corner mini) freezes the timeline so
                     // the still-held Right does not scroll the EPG forward after the
@@ -2825,8 +2846,43 @@ struct EPGGuideView: View {
                     withAnimation(.easeOut(duration: 0.3)) {
                         horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * 0.5)
                     }
+                    retargetFocusToViewportColumn()
                 default:
                     break
+                }
+            }
+            // Task #185: vertical corrective snap. UP/DOWN still move focus via
+            // the system focus engine, but the engine picks by raw geometry
+            // (widest overlap with the outgoing cell), which drifts the column
+            // - most visibly landing on programmes that ENDED hours ago when
+            // the outgoing cell was long. When focus lands on a DIFFERENT
+            // channel and the landed cell does not contain the viewport anchor
+            // column, snap to the cell that does. Same-channel changes (our
+            // own snaps/restores/pans) are ignored so this can never loop.
+            .onChange(of: focusedProgramID) { _, newValue in
+                guard let pid = newValue else { lastFocusedChannelForSnap = nil; return }
+                let chID = channelID(ofProgram: pid)
+                defer { lastFocusedChannelForSnap = chID }
+                guard let chID,
+                      let previous = lastFocusedChannelForSnap,
+                      previous != chID,
+                      !verticalSnapInFlight else { return }
+                let anchor = viewportAnchorTime
+                let progs = guideStore.programs[chID] ?? []
+                guard let landed = progs.first(where: { $0.id == pid }) else { return }
+                // Engine already picked the anchor-column cell: nothing to do.
+                if landed.start <= anchor && anchor < landed.end { return }
+                guard let target = programID(forChannel: chID, containing: anchor),
+                      target != pid else { return }
+                verticalSnapInFlight = true
+                debugLog("🧭 [GuideFocus] column snap ch=\(chID) landed=\(landed.start) -> anchor cell")
+                Task { @MainActor in
+                    for _ in 0..<4 {
+                        focusedProgramID = target
+                        try? await Task.sleep(nanoseconds: 60_000_000)
+                        if focusedProgramID == target { break }
+                    }
+                    verticalSnapInFlight = false
                 }
             }
             #endif
@@ -2896,6 +2952,11 @@ struct EPGGuideView: View {
                 // view to realize it, then re-assert focusedChannelID until the
                 // engine accepts it (a single write is dropped while the row is
                 // still laying out). The readback log shows what actually stuck.
+                // Task #185: the same press also restores a wandered timeline
+                // to left-aligned now - "return to top channel" with the axis
+                // still hours in the future was useless. This keeps the sacred
+                // Menu semantics (top channel) and completes the home position.
+                if timelineIsAwayFromNow() { reAnchorTimelineToNow() }
                 Task { @MainActor in
                     // Focus the top of the guide. Channel-column cells are non-
                     // focusable on tvOS, so we focus a PROGRAM cell via
@@ -3124,6 +3185,88 @@ struct EPGGuideView: View {
         let now = Date()
         return (progs.first { $0.start <= now && now < $0.end } ?? progs.first)?.id
     }
+
+    // MARK: - Task #185: viewport-anchored focus (the "guide gets away" fix)
+    // Field-traced on the Apple TV 2026-07-18 against Emby's guide as the
+    // reference: focus must live at a stable on-screen time column. Before
+    // this, LEFT/RIGHT panned the timeline while focus stayed glued to the
+    // old cell (which could slide clean off-screen yet remain focused, so
+    // OK acted on something invisible), and UP/DOWN's default focus search
+    // then navigated by that off-screen geometry - landing on programmes
+    // that ended hours ago.
+
+    /// Wall-clock time at the programme strip's visible LEFT edge.
+    private var timeAtViewportLeft: Date {
+        let x = -horizontalOffset
+        let elapsed = TimeInterval(x / totalGridWidth) * totalDuration
+        return windowStart.addingTimeInterval(elapsed)
+    }
+
+    /// The time column focus should occupy: a quarter-hour inside the
+    /// visible window, so it always falls within the first visible slot.
+    private var viewportAnchorTime: Date {
+        timeAtViewportLeft.addingTimeInterval(15 * 60)
+    }
+
+    /// The programme cell on `channelID` containing `date`, if composed data
+    /// covers it.
+    private func programID(forChannel channelID: String, containing date: Date) -> String? {
+        (guideStore.programs[channelID] ?? [])
+            .first { $0.start <= date && date < $0.end }?.id
+    }
+
+    /// The channel that owns programme `pid`. Programme ids are prefixed
+    /// with their channel id, but a channel id can be a prefix of another,
+    /// so membership in that channel's programme list is the authority.
+    private func channelID(ofProgram pid: String) -> String? {
+        channels.first { ch in
+            pid.hasPrefix("\(ch.id)-") &&
+                (guideStore.programs[ch.id]?.contains { $0.id == pid } ?? false)
+        }?.id
+    }
+
+    /// True when the timeline sits more than half an hour away from the
+    /// "now left-aligned" anchor position (the same slop the Android guide
+    /// uses, so a Menu press near now doesn't burn on a micro-correction).
+    private func timelineIsAwayFromNow() -> Bool {
+        let lead = pixelsPerHour * 0.25
+        let target = min(0, max(maxHorizontalOffset, -xOffset(for: Date()) + lead))
+        return abs(horizontalOffset - target) > pixelsPerHour * 0.5
+    }
+
+    /// Snap the timeline so "now" sits just right of the channel column
+    /// (a 15-minute lead of past visible - the Emby/Android-fix anchor).
+    /// Recomputed fresh from the wall clock every call: the old one-shot
+    /// initial offset went stale as the guide view outlived its build time
+    /// (the "opens two hours in the past" launches).
+    private func reAnchorTimelineToNow(animated: Bool = true) {
+        let lead = pixelsPerHour * 0.25
+        let target = min(0, max(maxHorizontalOffset, -xOffset(for: Date()) + lead))
+        if animated {
+            withAnimation(.easeOut(duration: 0.3)) { horizontalOffset = target }
+        } else {
+            horizontalOffset = target
+        }
+    }
+
+    #if os(tvOS)
+    /// After a LEFT/RIGHT timeline pan, walk focus to the cell at the NEW
+    /// viewport anchor column on the same channel row, so the ring rides
+    /// the visible window instead of sliding off-screen with the old cell.
+    private func retargetFocusToViewportColumn() {
+        guard let pid = focusedProgramID, let chID = channelID(ofProgram: pid) else { return }
+        let anchor = viewportAnchorTime
+        guard let target = programID(forChannel: chID, containing: anchor),
+              target != pid else { return }
+        Task { @MainActor in
+            for _ in 0..<4 {
+                focusedProgramID = target
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                if focusedProgramID == target { break }
+            }
+        }
+    }
+    #endif
 
     /// Resolve a REAL focusable program id for programmatic focus. Channel-
     /// column cells are intentionally non-focusable on tvOS (only program
