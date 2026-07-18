@@ -4506,10 +4506,17 @@ enum CatchupSupport {
     /// against `base`. `start` renders as ISO-8601 UTC seconds - one of
     /// the server's accepted shapes - and selects WHICH archived show
     /// (or programmeStart+offset for the floored-minute seek model).
+    ///
+    /// Task #183: `durationMinutes` is our guide's programme length. The
+    /// server (dev 14bfd25d) prefers it over ITS EPG-derived duration and
+    /// adds its own provider-lag buffer, so send the exact length - do not
+    /// pre-pad. Older servers ignore unknown fields, so this is safe to
+    /// send unconditionally.
     nonisolated static func mintNativeSession(base: String,
                                               authHeaders: [String: String],
                                               channelUUID: String,
-                                              start: Date) async -> NativeMintResult {
+                                              start: Date,
+                                              durationMinutes: Int? = nil) async -> NativeMintResult {
         let trimmedBase = base.hasSuffix("/") ? String(base.dropLast()) : base
         guard let url = URL(string: "\(trimmedBase)/api/catchup/sessions/") else { return .error }
         let iso = ISO8601DateFormatter()
@@ -4519,10 +4526,12 @@ enum CatchupSupport {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         for (k, v) in authHeaders { request.setValue(v, forHTTPHeaderField: k) }
-        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+        var body: [String: Any] = [
             "channel_uuid": channelUUID,
             "start": iso.string(from: start),
-        ])
+        ]
+        if let minutes = durationMinutes, minutes >= 1 { body["duration"] = minutes }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         guard let (data, response) = try? await HTTPRouter.data(for: request),
               let status = (response as? HTTPURLResponse)?.statusCode else { return .error }
         if status == 404 { return .unsupported }
@@ -4548,10 +4557,17 @@ enum CatchupSupport {
         let port = currentURL.port.map { ":\($0)" } ?? ""
         let base = "\(scheme)://\(host)\(port)"
         let start = playback.programStart.addingTimeInterval(max(0, offsetSeconds))
+        // Task #183: window the re-minted session to the REMAINING length
+        // (start is mid-programme). Full length would overshoot into the
+        // next show by the seek offset; nil past the end lets the server
+        // fall back to its default window.
+        let remainingSecs = playback.programEnd.timeIntervalSince(start)
+        let remainingMinutes = remainingSecs > 0 ? max(1, Int((remainingSecs / 60).rounded(.up))) : nil
         if case .created(let url) = await mintNativeSession(base: base,
                                                             authHeaders: playback.nativeAuthHeaders,
                                                             channelUUID: uuid,
-                                                            start: start) {
+                                                            start: start,
+                                                            durationMinutes: remainingMinutes) {
             return url
         }
         return nil
@@ -4573,6 +4589,45 @@ enum CatchupSupport {
         request.httpMethod = "DELETE"
         for (k, v) in playback.nativeAuthHeaders { request.setValue(v, forHTTPHeaderField: k) }
         Task { _ = try? await HTTPRouter.data(for: request) }
+    }
+
+    /// Task #183: report the local playhead / pause state for a native
+    /// catch-up session (POST /api/catchup/sessions/<id>/position/, dev
+    /// 6f62d807). Keeps the server's admin stats aligned with what the
+    /// viewer actually sees after local pause/scrub AND refreshes the
+    /// session's idle TTL - which protects a long-paused session from
+    /// expiring. Does NOT seek the stream.
+    ///
+    /// Returns false ONLY when the endpoint is absent (404 - stable-tag
+    /// server): the caller should stop reporting for this playback.
+    /// Transient failures return true so reporting continues.
+    nonisolated static func reportNativePosition(playback: CatchupPlayback,
+                                                 currentURL: URL,
+                                                 positionSecs: Double,
+                                                 paused: Bool) async -> Bool {
+        guard playback.nativeChannelUUID != nil,
+              let scheme = currentURL.scheme, let host = currentURL.host,
+              let comps = URLComponents(url: currentURL, resolvingAgainstBaseURL: false),
+              let sessionID = comps.queryItems?.first(where: { $0.name == "session_id" })?.value,
+              !sessionID.isEmpty else { return true }
+        let port = currentURL.port.map { ":\($0)" } ?? ""
+        // Trailing slash required - Django redirects/404s without it.
+        guard let url = URL(string: "\(scheme)://\(host)\(port)/api/catchup/sessions/\(sessionID)/position/") else { return true }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        for (k, v) in playback.nativeAuthHeaders { request.setValue(v, forHTTPHeaderField: k) }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "position_secs": max(0, positionSecs),
+            "paused": paused,
+        ])
+        guard let (_, response) = try? await HTTPRouter.data(for: request),
+              let status = (response as? HTTPURLResponse)?.statusCode else { return true }
+        if status == 404 {
+            debugLog("[CATCHUP] position endpoint absent (404) - disabling reports for this playback")
+            return false
+        }
+        return true
     }
 
     /// Channel UUID from a Dispatcharr live proxy URL
@@ -4674,10 +4729,13 @@ enum CatchupSupport {
                 }
                 let ua = server.effectiveUserAgent
                 if !ua.isEmpty { authHeaders["User-Agent"] = ua }
+                let programSecs = programEnd.timeIntervalSince(programStart)
+                let programMinutes = programSecs > 0 ? max(1, Int((programSecs / 60).rounded())) : nil
                 switch await mintNativeSession(base: nativeBase,
                                                authHeaders: authHeaders,
                                                channelUUID: channelUUID,
-                                               start: programStart) {
+                                               start: programStart,
+                                               durationMinutes: programMinutes) {
                 case .created(let playbackURL):
                     nativeSupportCache[nativeBase] = true
                     var headers: [String: String] = [:]

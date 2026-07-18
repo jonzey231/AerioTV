@@ -728,6 +728,42 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// One-shot guard for the mid-programme EOF re-tune; reset per
         /// fresh play() so each window gets one recovery attempt.
         var catchupEofRetuneUsed = false
+        /// Task #183: native catch-up position/pause reporting
+        /// (Dispatcharr dev 6f62d807). Best-effort telemetry state:
+        /// written from the stats tick (mpv event thread) and the pause
+        /// path (main); the races are benign one-way/monotonic updates,
+        /// accepted by design - do NOT add locking for these.
+        var catchupLastKnownPositionSecs: Double = 0
+        var catchupPositionLastReportAt: Date? = nil
+        var catchupPositionReportedPaused: Bool? = nil
+        var catchupPositionUnsupported = false
+        static let catchupPositionReportIntervalSecs: TimeInterval = 20
+
+        /// Task #183: POST the local playhead + pause state to the native
+        /// session's position endpoint. Sent on the stats tick (which
+        /// keeps firing while PAUSED - each accepted report refreshes the
+        /// session idle TTL so a long pause can't expire the session) and
+        /// immediately on pause/resume flips. One 404 latches reporting
+        /// off for this playback (stable-tag server without the endpoint).
+        func reportCatchupPositionIfDue(positionSecs: Double, paused: Bool, force: Bool) {
+            guard let cu = catchup, cu.nativeChannelUUID != nil,
+                  !catchupPositionUnsupported else { return }
+            let now = Date()
+            let pausedChanged = catchupPositionReportedPaused != paused
+            let intervalDue = catchupPositionLastReportAt
+                .map { now.timeIntervalSince($0) >= Self.catchupPositionReportIntervalSecs } ?? true
+            guard force || pausedChanged || intervalDue else { return }
+            catchupPositionLastReportAt = now
+            catchupPositionReportedPaused = paused
+            let url = catchupCurrentURL ?? cu.url
+            Task(priority: .utility) { [weak self] in
+                let keep = await CatchupSupport.reportNativePosition(playback: cu,
+                                                                    currentURL: url,
+                                                                    positionSecs: positionSecs,
+                                                                    paused: paused)
+                if !keep { self?.catchupPositionUnsupported = true }
+            }
+        }
 
         fileprivate static let dvrLiveEdgeGuardSec: Double = 6.0
         fileprivate let progressStore: PlayerProgressStore
@@ -1372,6 +1408,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 category: "MPV-STREAM", level: .info
             )
             setMPVFlag(property: "pause", value: paused)
+
+            // Task #183: pause/resume flips report immediately so the
+            // server's stats freeze/unfreeze at the right playhead. The
+            // last stats-tick position (<=5s stale) is accurate enough
+            // for stats; the periodic tick keeps the TTL fresh after.
+            reportCatchupPositionIfDue(positionSecs: catchupLastKnownPositionSecs,
+                                       paused: paused, force: true)
 
             // LIVE stream unpause → jump to live edge by reloading
             // the URL. Without this, resuming after a pause (e.g.
@@ -7013,6 +7056,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 "vo_drops=+\(deltaVideoDrops) dec_drops=+\(deltaDecoderDrops) cache=\(String(format: "%.1f", cacheDuration))s fps=\(String(format: "%.1f", estimatedFPS)) bufEvents=\(bufferEventCount) bufTime=\(String(format: "%.1f", totalBufferingDuration))s underruns=\(audioUnderrunCount)",
                 category: "MPV-Perf", level: .perf)
 
+            // Task #183: native catch-up position reporting rides this
+            // stats tick (5s cadence on timeshift files) WHILE PLAYING.
+            // These ticks are time-pos-driven, so they stop when paused -
+            // the 2s streamInfoTimer carries the paused-side heartbeat
+            // instead. Displayed programme position = window base offset
+            // + mpv time-pos within the window.
+            if let cu = catchup, cu.nativeChannelUUID != nil {
+                let position = Double(catchupBaseOffsetMs) / 1000.0 + max(0, timeSec)
+                catchupLastKnownPositionSecs = position
+                reportCatchupPositionIfDue(positionSecs: position,
+                                           paused: lastAppliedPause == true,
+                                           force: false)
+            }
+
             // Process-wide resource snapshot, tagged with this tile's
             // ID so the stats from multiple concurrent tiles can be
             // disambiguated in the log stream. `ProcessMetrics` uses
@@ -7440,6 +7497,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             timer.schedule(deadline: .now() + 2, repeating: 2)
             timer.setEventHandler { [weak self] in
                 self?.refreshVolatileStreamInfo()
+                // Task #183: while PAUSED the time-pos event stream is
+                // silent (no stats ticks), so this always-running timer
+                // carries the periodic catch-up position report - the
+                // accepted report refreshes the session idle TTL, which
+                // is what keeps a long-paused native session alive.
+                // While playing, the time-pos tick reports instead. The
+                // 20s throttle inside the hook keeps this 2s timer cheap.
+                if let self, self.lastAppliedPause == true {
+                    self.reportCatchupPositionIfDue(positionSecs: self.catchupLastKnownPositionSecs,
+                                                    paused: true, force: false)
+                }
             }
             timer.resume()
             streamInfoTimer = timer
