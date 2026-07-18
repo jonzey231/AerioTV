@@ -1893,7 +1893,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             guard tileID == nil, fps > 20, fps < 130 else { return }
             guard let rate = Self.canonicalVideoRates.min(by: { abs($0 - fps) < abs($1 - fps) }),
                   abs(rate - fps) <= 0.75 else { return }
-            let target = Float(rate)
+            // Only ever ask for the 50 / 59.94 / 60 class: 25 / 29.97 / 30
+            // content is requested at DOUBLE rate (clean 2:2 cadence on a
+            // mode the UI can live on). Requesting sub-mode rates directly
+            // caused a pathological low-rate presentation state on Android
+            // (janky UI + repeated visible video dropouts, Logan's Hisense
+            // 2026-07-18); mirror the safe mapping here. 23.976 / 24 film
+            // cadence is deliberately not requested (divides neither 50 nor
+            // 60) until handled on purpose.
+            let doubled: Double
+            switch rate {
+            case 25, 29.97, 30: doubled = rate * 2
+            case 50, 59.94, 60: doubled = rate
+            default: return
+            }
+            let target = Float(doubled)
             // Cross-queue pre-check; the authoritative dedup re-runs on main.
             if abs(appliedDisplayRefreshRate - target) < 0.01 { return }
             DispatchQueue.main.async { [weak self] in
