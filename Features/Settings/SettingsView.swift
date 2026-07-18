@@ -2827,6 +2827,11 @@ struct EditServerSheet: View {
                     .foregroundColor(.textTertiary)
             }
 
+            // Task #189 (Android parity): user-chosen Channel Profile.
+            if server.type == .dispatcharrAPI {
+                ChannelProfilePickerSection(server: server)
+            }
+
             Section {
                 HStack {
                     Text("Type")
@@ -2910,10 +2915,103 @@ struct EditServerSheet: View {
 
 
 // MARK: - tvOS Edit Server (full page, no modal)
+/// Task #189 (Android parity): "Channel Profile" section of the iOS/iPad
+/// edit form. Lists the Dispatcharr server's Channel Profiles
+/// (`/api/channels/profiles/`) and stores the user's pick on
+/// `server.dispatcharrSelectedProfileID` (nil = All Channels). The filter
+/// itself is applied fail-open at channel sync in
+/// `ChannelStore.fetchDispatcharr`. Mirrors Android
+/// EditPlaylistScreen's Channel Profile section.
+private struct ChannelProfilePickerSection: View {
+    @Bindable var server: ServerConnection
+    @State private var profiles: [DispatcharrAPI.ChannelProfileSummary] = []
+    @State private var loadFailed = false
+
+    var body: some View {
+        Section {
+            Picker("Channel Profile", selection: $server.dispatcharrSelectedProfileID) {
+                Text("All Channels").tag(Int?.none)
+                ForEach(profiles) { profile in
+                    Text("\(profile.name) (\(profile.channels.count) channels)")
+                        .tag(Int?.some(profile.id))
+                }
+            }
+            .listRowBackground(Color.cardBackground)
+        } header: {
+            Text("Channel Profile").sectionHeaderStyle()
+        } footer: {
+            Text(loadFailed
+                 ? "Couldn't load this server's Channel Profiles. All Channels stays in effect; check the connection and reopen this page to retry."
+                 : "Sync only the channels in a Dispatcharr Channel Profile. Changes apply on the next channel refresh.")
+                .font(.labelSmall)
+                .foregroundColor(.textTertiary)
+        }
+        .task { await loadProfiles() }
+    }
+
+    private func loadProfiles() async {
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode)
+        do {
+            profiles = try await api.listChannelProfiles()
+            loadFailed = false
+        } catch {
+            loadFailed = true
+            debugLog("[PROFILE-PICKER] listChannelProfiles failed: \(error.localizedDescription)")
+        }
+    }
+}
+
+
 #if os(tvOS)
 struct EditServerPage: View {
     @Bindable var server: ServerConnection
     @Environment(\.dismiss) private var dismiss
+    /// Task #189: Channel Profile picker state (Dispatcharr only).
+    @State private var channelProfiles: [DispatcharrAPI.ChannelProfileSummary] = []
+    @State private var channelProfilesLoadFailed = false
+
+    /// Task #189: one radio-style row of the Channel Profile picker.
+    /// id == nil is the "All Channels" row.
+    @ViewBuilder
+    private func channelProfileRow(name: String, count: Int?, id: Int?) -> some View {
+        Button {
+            server.dispatcharrSelectedProfileID = id
+        } label: {
+            HStack {
+                if let count {
+                    Text("\(name) (\(count) channels)")
+                        .font(.system(size: 28, weight: .medium))
+                } else {
+                    Text(name)
+                        .font(.system(size: 28, weight: .medium))
+                }
+                Spacer()
+                if server.dispatcharrSelectedProfileID == id {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundColor(.accentPrimary)
+                }
+            }
+        }
+    }
+
+    /// Task #189: load the server's Channel Profiles for the picker.
+    private func loadChannelProfiles() async {
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode)
+        do {
+            channelProfiles = try await api.listChannelProfiles()
+            channelProfilesLoadFailed = false
+        } catch {
+            channelProfilesLoadFailed = true
+            debugLog("[PROFILE-PICKER] tvOS listChannelProfiles failed: \(error.localizedDescription)")
+        }
+    }
     /// See SettingsView. Tvos edit page uses accent-tinted Save
     /// button + form field underlines; without this they freeze at
     /// whichever theme was active when the page was first pushed.
@@ -3191,6 +3289,28 @@ struct EditServerPage: View {
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.top, 4)
+                    }
+
+                    // Task #189 (Android parity): user-chosen Channel
+                    // Profile. Radio-style rows (like Android's picker);
+                    // a segmented control can't hold N variable-length
+                    // profile names on tvOS.
+                    if server.type == .dispatcharrAPI {
+                        tvSection("Channel Profile") {
+                            channelProfileRow(name: "All Channels", count: nil, id: nil)
+                            ForEach(channelProfiles) { profile in
+                                channelProfileRow(name: profile.name,
+                                                  count: profile.channels.count,
+                                                  id: profile.id)
+                            }
+                            Text(channelProfilesLoadFailed
+                                 ? "Couldn't load this server's Channel Profiles. All Channels stays in effect; check the connection and reopen this page to retry."
+                                 : "Sync only the channels in a Dispatcharr Channel Profile. Changes apply on the next channel refresh.")
+                                .font(.system(size: 22))
+                                .foregroundColor(.textTertiary)
+                                .padding(.top, 4)
+                        }
+                        .task { await loadChannelProfiles() }
                     }
 
                     // Info

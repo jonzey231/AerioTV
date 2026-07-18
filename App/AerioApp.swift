@@ -1646,6 +1646,9 @@ struct RootView: View {
                     // leaves the local field unfiltered; only a positively
                     // synced non-empty value applies the filter.
                     local.dispatcharrChannelProfileIDs = remote.dispatcharrChannelProfileIDs
+                    // Task #189: adopt the user-chosen Channel Profile so
+                    // the synced lineup matches across devices.
+                    local.dispatcharrSelectedProfileID = remote.dispatcharrSelectedProfileID
                     // Catch-up: adopt the remote guide-history retention
                     // so the replay window matches across devices.
                     local.epgRetentionDays = remote.epgRetentionDays
@@ -1704,6 +1707,8 @@ struct RootView: View {
                 // the same way on this device. Absent in the payload
                 // defaults to "" (no profile = show all) via deserialize.
                 newServer.dispatcharrChannelProfileIDs = remote.dispatcharrChannelProfileIDs
+                // Task #189: inherit the user-chosen Channel Profile.
+                newServer.dispatcharrSelectedProfileID = remote.dispatcharrSelectedProfileID
                 // Catch-up: inherit the guide-history retention setting.
                 newServer.epgRetentionDays = remote.epgRetentionDays
                 // Queue credential writes for after the merge

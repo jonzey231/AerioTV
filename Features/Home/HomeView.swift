@@ -2330,6 +2330,24 @@ final class ChannelStore: ObservableObject {
             debugLog("🔷 ChannelStore.fetchDispatcharr: Channel Profile filter \(before) -> \(dChannels.count) channels (allowed union=\(allowedIDs.count))")
         }
 
+        // Task #189 (Android parity): USER-CHOSEN Channel Profile from the
+        // Edit Playlist picker, applied as a second intersection AFTER the
+        // account filter above (matching Android PlaylistRepository's
+        // Layer A/Layer B order). Unlike the account filter this is a
+        // convenience selection, so it fails OPEN: a membership-fetch
+        // error logs and keeps the current list instead of failing the
+        // whole load or blanking the lineup.
+        if let selectedProfileID = activeServer?.dispatcharrSelectedProfileID {
+            do {
+                let ids = Set(try await dAPI.fetchChannelProfileChannelIDs(profileID: selectedProfileID))
+                let before = dChannels.count
+                dChannels = dChannels.filter { ids.contains($0.id) }
+                debugLog("🔷 ChannelStore.fetchDispatcharr: selected profile \(selectedProfileID) filter \(before) -> \(dChannels.count) channels")
+            } catch {
+                debugLog("🔷 ChannelStore.fetchDispatcharr: selected profile \(selectedProfileID) fetch failed, keeping all channels (fail-open): \(error.localizedDescription)")
+            }
+        }
+
         // uniquingKeysWith so duplicate group ids (or a malformed paginated
         // response that repeats a row) collapse instead of trapping the load
         // on a duplicate-key fatal error. First occurrence wins.

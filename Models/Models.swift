@@ -246,6 +246,17 @@ final class ServerConnection {
     /// Possible values: `""`, `"44"`, `"44,57"`.
     var dispatcharrChannelProfileIDs: String = ""
 
+    /// Task #189 (Android parity): the USER-CHOSEN Dispatcharr Channel
+    /// Profile to sync from this playlist (Edit Playlist > Channel
+    /// Profile). Unlike `dispatcharrChannelProfileIDs` above (the
+    /// account-assigned, fail-closed child-safety filter), this is a
+    /// deliberate convenience filter the user picks from the server's
+    /// profile list, and it fails OPEN: nil means "All Channels", and a
+    /// membership-fetch error at sync time keeps the full list rather
+    /// than blanking the lineup. Mirrors Android
+    /// `PlaylistEntity.dispatcharrProfileId`.
+    var dispatcharrSelectedProfileID: Int? = nil
+
     init(
         name: String,
         type: ServerType,

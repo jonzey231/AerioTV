@@ -1678,6 +1678,28 @@ struct DispatcharrAPI {
         return try decode(ProfileChannels.self, from: data).channels
     }
 
+    /// One entry from `/api/channels/profiles/` -- a server-defined
+    /// Channel Profile the user can choose to sync (Task #189, Android
+    /// parity: `DispatcharrClient.listProfiles`). `channels` carries the
+    /// member channel ids; the picker only shows its count.
+    struct ChannelProfileSummary: Decodable, Identifiable {
+        let id: Int
+        let name: String
+        let channels: [Int]
+    }
+
+    /// Lists the server's Channel Profiles for the Edit Playlist picker.
+    /// Plain (non-paginated) array response, same shape Android's
+    /// `listProfiles` consumes in production.
+    func listChannelProfiles() async throws -> [ChannelProfileSummary] {
+        let url = try buildURL(path: "/api/channels/profiles/")
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await loggedData(for: request)
+        try validate(response: response, data: data)
+        return try decode([ChannelProfileSummary].self, from: data)
+    }
+
     // MARK: - Lightweight channel summary (fast guide UI)
     func getChannelSummaries() async throws -> [DispatcharrChannelSummary] {
         try await fetchAllPages(DispatcharrChannelSummary.self, firstPath: "/api/channels/summary/")

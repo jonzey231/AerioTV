@@ -926,6 +926,12 @@ final class SyncManager: ObservableObject {
         if !server.dispatcharrChannelProfileIDs.isEmpty {
             dict["dispatcharrChannelProfileIDs"] = server.dispatcharrChannelProfileIDs
         }
+        // Task #189: user-chosen Channel Profile (Edit Playlist picker).
+        // Only carried when set, same older-client-invisible pattern as
+        // the account field above.
+        if let selected = server.dispatcharrSelectedProfileID {
+            dict["dispatcharrSelectedProfileID"] = selected
+        }
         // Catch-up: per-server guide-history retention (days). Only
         // carried when it differs from the default 7 so the payload
         // stays identical to today for untouched servers and older
@@ -1022,6 +1028,9 @@ final class SyncManager: ObservableObject {
             // positively synced non-empty value drives the child-safety
             // Channel Profile filter on this device.
             dispatcharrChannelProfileIDs: dict["dispatcharrChannelProfileIDs"] as? String ?? "",
+            // Task #189: absent means nil = All Channels (older sender or
+            // no profile chosen).
+            dispatcharrSelectedProfileID: dict["dispatcharrSelectedProfileID"] as? Int,
             // Catch-up: absent (older sender or untouched default)
             // means 7 days of retained guide history.
             epgRetentionDays: dict["epgRetentionDays"] as? Int ?? 7
@@ -1411,6 +1420,9 @@ struct SyncedServer: Sendable {
     /// the payload (older sender, or a server with no profile assigned),
     /// keeping unrestricted servers unfiltered.
     let dispatcharrChannelProfileIDs: String
+    /// Task #189: the USER-CHOSEN Channel Profile (Edit Playlist picker).
+    /// nil = All Channels; absent from older senders deserializes to nil.
+    let dispatcharrSelectedProfileID: Int?
     /// Catch-up: per-server guide-history retention in days. Absent
     /// in payloads from older clients; deserialize defaults it to 7.
     let epgRetentionDays: Int
