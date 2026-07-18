@@ -57,6 +57,16 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.2",
+            title: "What's new in 1.8.2",
+            bullets: [
+                "Apple TV: the display now matches the stream's frame rate (50fps content switches your TV to 50Hz, ending the judder on European channels)",
+                "Honors your Apple TV's Match Content setting - if matching is off there, nothing changes",
+                "The display returns to its normal mode when you leave the player"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.2")
+        ),
+        WhatsNewRelease(
             version: "1.8.1",
             title: "What's new in 1.8.1",
             bullets: [
