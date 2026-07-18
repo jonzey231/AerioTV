@@ -88,7 +88,18 @@ final class GuideStore: ObservableObject {
     /// still parsing silently.
     static let shared = GuideStore()
 
-    @Published var programs: [String: [GuideProgram]] = [:]  // channelID → programs
+    @Published var programs: [String: [GuideProgram]] = [:] {  // channelID → programs
+        // Task #188: any EPG mutation invalidates the focus-path memo below.
+        didSet { programChannelMemo.removeAll() }
+    }
+    /// Task #188: programID -> channelID memo for the D-pad focus hot path.
+    /// `channelID(ofProgram:)` is an O(channels) scan (string prefix + list
+    /// membership per candidate) that ran on EVERY focus change and up to
+    /// ~5x per horizontal press via the retarget/assert-retry loops. Focus
+    /// revisits the same programme ids constantly, so a lazy memo turns the
+    /// steady state into a dictionary hit. Grows only with programmes the
+    /// user actually focuses; cleared on every EPG write.
+    var programChannelMemo: [String: String] = [:]
     @Published var isLoading = false
 
     /// Wall-clock age of the currently-loaded EPG data: the newest
@@ -3219,11 +3230,17 @@ struct EPGGuideView: View {
     /// The channel that owns programme `pid`. Programme ids are prefixed
     /// with their channel id, but a channel id can be a prefix of another,
     /// so membership in that channel's programme list is the authority.
+    /// Task #188: memoized in GuideStore (cleared on EPG writes) -- the
+    /// linear scan ran on every focus change and up to ~5x per horizontal
+    /// press via the retarget/assert-retry loops.
     private func channelID(ofProgram pid: String) -> String? {
-        channels.first { ch in
+        if let hit = guideStore.programChannelMemo[pid] { return hit }
+        let resolved = channels.first { ch in
             pid.hasPrefix("\(ch.id)-") &&
                 (guideStore.programs[ch.id]?.contains { $0.id == pid } ?? false)
         }?.id
+        if let resolved { guideStore.programChannelMemo[pid] = resolved }
+        return resolved
     }
 
     /// True when the timeline sits more than half an hour away from the
@@ -3385,9 +3402,13 @@ struct EPGGuideView: View {
             let filterStart = visibleTimeStart.addingTimeInterval(-pad)
             let filterEnd = visibleTimeEnd.addingTimeInterval(pad)
 
+            // Task #188: no re-sort. Every GuideStore write path stores each
+            // channel's programmes start-sorted (loadFromCache uses a
+            // SortDescriptor, mergeProgramInto re-sorts touched lists), and
+            // .filter preserves order -- the old per-row per-pass .sorted was
+            // a pure allocation + O(n log n) tax on the render path.
             let sortedProgs = progs
                 .filter { $0.end > filterStart && $0.start < filterEnd }
-                .sorted { $0.start < $1.start }
 
             if sortedProgs.isEmpty {
                 // No VISIBLE guide cells - truly EPG-less channels AND channels
