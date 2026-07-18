@@ -3185,6 +3185,7 @@ struct EPGGuideView: View {
         let now = Date()
         return (progs.first { $0.start <= now && now < $0.end } ?? progs.first)?.id
     }
+    #endif
 
     // MARK: - Task #185: viewport-anchored focus (the "guide gets away" fix)
     // Field-traced on the Apple TV 2026-07-18 against Emby's guide as the
@@ -3268,6 +3269,7 @@ struct EPGGuideView: View {
     }
     #endif
 
+    #if os(tvOS)
     /// Resolve a REAL focusable program id for programmatic focus. Channel-
     /// column cells are intentionally non-focusable on tvOS (only program
     /// cells accept focus), so focus restore must land on a program cell. If
@@ -3373,35 +3375,48 @@ struct EPGGuideView: View {
 
             let progs = guideStore.programs[channel.id] ?? []
 
-            if progs.isEmpty {
-                // No guide programs — show a tappable row so the channel is still selectable
+            // Viewport clipping: only render programs overlapping the visible time window
+            // plus 30-min padding on each side for smooth scrolling.
+            let visibleFraction = -horizontalOffset / totalGridWidth
+            let visibleWidthFraction = visibleProgramWidth / totalGridWidth
+            let visibleTimeStart = windowStart.addingTimeInterval(Double(visibleFraction) * totalDuration)
+            let visibleTimeEnd = visibleTimeStart.addingTimeInterval(Double(visibleWidthFraction) * totalDuration)
+            let pad: TimeInterval = 1800 // 30 minutes
+            let filterStart = visibleTimeStart.addingTimeInterval(-pad)
+            let filterEnd = visibleTimeEnd.addingTimeInterval(pad)
+
+            let sortedProgs = progs
+                .filter { $0.end > filterStart && $0.start < filterEnd }
+                .sorted { $0.start < $1.start }
+
+            if sortedProgs.isEmpty {
+                // No VISIBLE guide cells - truly EPG-less channels AND channels
+                // whose data all falls outside the current window (task #185
+                // follow-up: channel 5 had stale out-of-window entries, so the
+                // old `progs.isEmpty` gate rendered NOTHING and the row was
+                // unreachable by D-pad). Show a tappable/focusable row either
+                // way so the channel is always selectable.
                 #if os(tvOS)
+                // Sized to the visible viewport and pinned there (the row
+                // content is offset by horizontalOffset, so -horizontalOffset
+                // is the viewport's left edge). The old full-strip width put
+                // the button's frame center hours off-screen and the focus
+                // engine's candidate scoring always preferred the next row.
                 GuideEmptyRowButton(
                     label: channel.currentProgram ?? "No guide data",
-                    width: totalGridWidth, rowHeight: rowHeight
+                    width: max(1, visibleProgramWidth), rowHeight: rowHeight
                 ) { onSelectChannel(channel) }
+                .offset(x: -horizontalOffset)
                 #else
                 Text(channel.currentProgram ?? "No guide data")
                     .font(.labelSmall)
                     .foregroundColor(.textTertiary)
-                    .frame(width: totalGridWidth, height: rowHeight, alignment: .center)
+                    .frame(width: max(1, visibleProgramWidth), height: rowHeight, alignment: .center)
                     .contentShape(Rectangle())
                     .onTapGesture { onSelectChannel(channel) }
+                    .offset(x: -horizontalOffset)
                 #endif
             } else {
-                // Viewport clipping: only render programs overlapping the visible time window
-                // plus 30-min padding on each side for smooth scrolling.
-                let visibleFraction = -horizontalOffset / totalGridWidth
-                let visibleWidthFraction = visibleProgramWidth / totalGridWidth
-                let visibleTimeStart = windowStart.addingTimeInterval(Double(visibleFraction) * totalDuration)
-                let visibleTimeEnd = visibleTimeStart.addingTimeInterval(Double(visibleWidthFraction) * totalDuration)
-                let pad: TimeInterval = 1800 // 30 minutes
-                let filterStart = visibleTimeStart.addingTimeInterval(-pad)
-                let filterEnd = visibleTimeEnd.addingTimeInterval(pad)
-
-                let sortedProgs = progs
-                    .filter { $0.end > filterStart && $0.start < filterEnd }
-                    .sorted { $0.start < $1.start }
                 ForEach(Array(sortedProgs.enumerated()), id: \.element.id) { index, prog in
                     let nextStart: Date? = index + 1 < sortedProgs.count ? sortedProgs[index + 1].start : nil
                     programCell(prog, channelItem: channel, nextProgramStart: nextStart)
