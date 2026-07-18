@@ -142,6 +142,10 @@ struct MultiviewTileView: View {
     /// dialog on the next render.
     @State private var showAudioTrackMenu: Bool = false
     @State private var showSubtitleTrackMenu: Bool = false
+    /// Task #184: Audio Sync stepper dialog (confirmationDialog is the
+    /// codebase's reliable tvOS shape; a tap dismisses, and reopening
+    /// shows the updated offset in the title).
+    @State private var showAudioSyncMenu: Bool = false
     // Issue #48: the global multiview layout mode, shared with the container's
     // binding through the same @AppStorage key. Surfaced as a "Layout" submenu
     // in the per-tile long-press menu (the reachable multiview surface — the
@@ -475,6 +479,13 @@ struct MultiviewTileView: View {
         ) {
             subtitleTrackButtons
         }
+        .confirmationDialog(
+            audioSyncDialogTitle,
+            isPresented: $showAudioSyncMenu,
+            titleVisibility: .visible
+        ) {
+            audioSyncButtons
+        }
         // Phase 2: VOD "Finished" overlay as a SIBLING of the tile
         // Button (not inside its label) so the Replay / Remove buttons
         // are real focus targets on tvOS. Gated to `.vod` so live / DVR
@@ -586,6 +597,17 @@ struct MultiviewTileView: View {
                 Task { @MainActor in showAudioTrackMenu = true }
             } label: {
                 Label("Audio Track", systemImage: "waveform")
+            }
+        }
+        // Task #184: mpv-engine tiles only (setAudioSyncAction nil on AVPlayer).
+        if progressStore.setAudioSyncAction != nil {
+            Button {
+                Task { @MainActor in showAudioSyncMenu = true }
+            } label: {
+                Label(progressStore.audioSyncMs == 0
+                        ? "Audio Sync"
+                        : "Audio Sync: \(String(format: "%+d", progressStore.audioSyncMs)) ms",
+                      systemImage: "metronome")
             }
         }
         if !progressStore.subtitleTracks.isEmpty {
@@ -789,6 +811,13 @@ struct MultiviewTileView: View {
                 titleVisibility: .visible
             ) {
                 subtitleTrackButtons
+            }
+            .confirmationDialog(
+                audioSyncDialogTitle,
+                isPresented: $showAudioSyncMenu,
+                titleVisibility: .visible
+            ) {
+                audioSyncButtons
             }
             // Phase 2: VOD "Finished" overlay layered OUTSIDE
             // `tappableRegion` (so its Replay / Remove buttons receive
@@ -1671,6 +1700,14 @@ struct MultiviewTileView: View {
                 Task { @MainActor in showAudioTrackMenu = true }
             }
         }
+        // Task #184: mpv-engine tiles only (setAudioSyncAction nil on AVPlayer).
+        if progressStore.setAudioSyncAction != nil {
+            Button(progressStore.audioSyncMs == 0
+                    ? "Audio Sync…"
+                    : "Audio Sync (\(String(format: "%+d", progressStore.audioSyncMs)) ms)…") {
+                Task { @MainActor in showAudioSyncMenu = true }
+            }
+        }
         if !progressStore.subtitleTracks.isEmpty {
             Button("Subtitle Track…") {
                 Task { @MainActor in showSubtitleTrackMenu = true }
@@ -1748,6 +1785,32 @@ struct MultiviewTileView: View {
                 progressStore.setAudioTrackAction?(track.id)
             } label: {
                 Text(verbatim: active ? "✓ \(track.displayName)" : track.displayName)
+            }
+        }
+        Button("Cancel", role: .cancel) {}
+    }
+
+    /// Task #184: dialog title carries the live offset so each reopen
+    /// shows where you are ("Audio Sync: +200 ms").
+    private var audioSyncDialogTitle: String {
+        progressStore.audioSyncMs == 0
+            ? "Audio Sync"
+            : "Audio Sync: \(String(format: "%+d", progressStore.audioSyncMs)) ms"
+    }
+
+    /// Task #184: 100ms steppers (positive = audio later). A dialog tap
+    /// dismisses by design; the menu row + title show the current value.
+    @ViewBuilder
+    private var audioSyncButtons: some View {
+        Button("Audio later +100 ms") {
+            progressStore.setAudioSyncAction?(progressStore.audioSyncMs + 100)
+        }
+        Button("Audio earlier -100 ms") {
+            progressStore.setAudioSyncAction?(progressStore.audioSyncMs - 100)
+        }
+        if progressStore.audioSyncMs != 0 {
+            Button("Reset to 0") {
+                progressStore.setAudioSyncAction?(0)
             }
         }
         Button("Cancel", role: .cancel) {}

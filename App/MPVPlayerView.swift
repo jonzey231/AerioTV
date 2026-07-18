@@ -2605,6 +2605,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DispatchQueue.main.async { self.progressStore.isAudioOnly = !enabled }
             }
 
+            // Task #184: user audio sync offset (mpv audio-delay; positive
+            // = audio later). The property lives on the warm mpv instance,
+            // so it survives channel swaps for the session by design.
+            progressStore.setAudioSyncAction = { [weak self] ms in
+                guard let self else { return }
+                let clamped = max(-1000, min(1000, ms))
+                debugLog("[AUDIO-SYNC] set audio-delay=\(clamped)ms")
+                self.mpvQueue.async { [weak self] in
+                    guard let self, let mpv = self.activeMPVHandle() else { return }
+                    mpv_set_property_string(mpv, "audio-delay",
+                                            String(format: "%.3f", Double(clamped) / 1000.0))
+                }
+                DispatchQueue.main.async { self.progressStore.audioSyncMs = clamped }
+            }
+
             // Background/foreground handling — disable video output to prevent GPU crashes
             NotificationCenter.default.addObserver(self, selector: #selector(didEnterBackground),
                                                    name: UIApplication.didEnterBackgroundNotification, object: nil)

@@ -274,6 +274,15 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// setVideoTrackEnabled) -- unlike the overflow menu's overlay-only
     /// toggle, this actually stops video decode.
     var setVideoEnabledAction: ((Bool) -> Void)?
+    /// Task #184: current audio sync offset in ms (positive = audio
+    /// later). Session-lifetime: mpv's audio-delay property lives on the
+    /// warm mpv instance, so it survives channel swaps and resets only
+    /// when the engine is torn down. Not persisted to disk.
+    @Published var audioSyncMs: Int = 0
+    /// Closure set by the Coordinator; applies an audio sync offset in ms
+    /// (mpv audio-delay). nil on engines without the knob (AVPlayer) -
+    /// the menus hide the control when unset.
+    var setAudioSyncAction: ((Int) -> Void)?
     /// Whether PiP is currently active. Written synchronously by the
     /// AVPictureInPictureController delegates (auto-PiP only — the manual
     /// menu entry was removed in favour of swipe-home auto-PiP). Read by
@@ -2310,7 +2319,11 @@ private struct PlayerRootView: View {
             // default. Keep this false here so the menu stays clean on
             // the legacy path.
             canRecord: false,
+            audioSyncMs: progressStore.audioSyncMs,
             setAudioTrack: { [weak progressStore] in progressStore?.setAudioTrackAction?($0) },
+            setAudioSync: progressStore.setAudioSyncAction == nil
+                ? nil
+                : { [weak progressStore] in progressStore?.setAudioSyncAction?($0) },
             setSubtitleTrack: { [weak progressStore] in progressStore?.setSubtitleTrackAction?($0) },
             setSpeed: { [weak progressStore] in progressStore?.setSpeedAction?($0) },
             setAspect: { progressStore.aspectMode = $0; UserDefaults.standard.set($0.rawValue, forKey: "player.aspectMode") },
@@ -2695,9 +2708,15 @@ struct PlayerOverflowMenu: View, Equatable {
     /// fires `recordAction`. Gated off the audio tile's live EPG state
     /// in the unified chrome so it hides for streams without EPG data.
     let canRecord: Bool
+    /// Task #184: current audio sync offset in ms (positive = audio
+    /// later). The Audio Sync submenu shows only when `setAudioSync`
+    /// is non-nil (mpv engine; AVPlayer has no delay knob).
+    let audioSyncMs: Int
 
     // Action closures — excluded from equality check.
     var setAudioTrack: ((Int) -> Void)?
+    /// Task #184: same presence-gates-row pattern as switchStreamAction.
+    nonisolated(unsafe) var setAudioSync: ((Int) -> Void)?
     var setSubtitleTrack: ((Int) -> Void)?
     var setSpeed: ((Double) -> Void)?
     var setAspect: ((VideoAspectMode) -> Void)?
@@ -2731,10 +2750,17 @@ struct PlayerOverflowMenu: View, Equatable {
         lhs.isAudioOnly == rhs.isAudioOnly &&
         lhs.aspectMode == rhs.aspectMode &&
         lhs.canRecord == rhs.canRecord &&
+        lhs.audioSyncMs == rhs.audioSyncMs &&
         // Closures are excluded from ==, but the PRESENCE of the Switch
         // Stream action gates whether the row shows, so compare its
         // nil-ness so eligibility changes still re-render the menu.
-        (lhs.switchStreamAction == nil) == (rhs.switchStreamAction == nil)
+        (lhs.switchStreamAction == nil) == (rhs.switchStreamAction == nil) &&
+        (lhs.setAudioSync == nil) == (rhs.setAudioSync == nil)
+    }
+
+    /// Task #184: "+0.25 s" style label for the Audio Sync submenu.
+    private var audioSyncLabel: String {
+        audioSyncMs == 0 ? "0 ms" : String(format: "%+d ms", audioSyncMs)
     }
 
     private var sleepTimerRemainingText: String? {
@@ -2769,6 +2795,31 @@ struct PlayerOverflowMenu: View, Equatable {
                         }
                     } label: {
                         Label("Audio Track", systemImage: "waveform.circle")
+                    }
+                }
+
+                // Task #184: Audio Sync (sub-menu; SwiftUI Menu cannot host
+                // a Slider, so 100ms steppers). Positive = audio later.
+                // Hidden on engines without the knob (setAudioSync nil).
+                if let setAudioSync {
+                    Menu {
+                        Button { setAudioSync(audioSyncMs + 100) } label: {
+                            Label("Audio later +100 ms", systemImage: "plus.circle")
+                        }
+                        Button { setAudioSync(audioSyncMs - 100) } label: {
+                            Label("Audio earlier -100 ms", systemImage: "minus.circle")
+                        }
+                        if audioSyncMs != 0 {
+                            Button { setAudioSync(0) } label: {
+                                Label("Reset to 0", systemImage: "arrow.counterclockwise")
+                            }
+                        }
+                    } label: {
+                        if audioSyncMs == 0 {
+                            Label("Audio Sync", systemImage: "metronome")
+                        } else {
+                            Label("Audio Sync: \(audioSyncLabel)", systemImage: "metronome")
+                        }
                     }
                 }
 

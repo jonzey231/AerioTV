@@ -835,7 +835,11 @@ private struct iPadOverflowAdapter: View {
             isAudioOnly: progressStore.isAudioOnly,
             aspectMode: progressStore.aspectMode,
             canRecord: canRecord,
+            audioSyncMs: progressStore.audioSyncMs,
             setAudioTrack: { [weak progressStore] in progressStore?.setAudioTrackAction?($0) },
+            setAudioSync: progressStore.setAudioSyncAction == nil
+                ? nil
+                : { [weak progressStore] in progressStore?.setAudioSyncAction?($0) },
             setSubtitleTrack: { [weak progressStore] in progressStore?.setSubtitleTrackAction?($0) },
             setSpeed: { [weak progressStore] in progressStore?.setSpeedAction?($0) },
             setAspect: { [weak progressStore] in
