@@ -3949,6 +3949,18 @@ private struct GuideChannelButton: View {
         }
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        // Catch-up badge (2026-07-20, all-platform parity): a small history
+        // clock in the rail's top-right whenever the channel has a
+        // replayable archive, so users needn't scroll into the past to check.
+        .overlay(alignment: .topTrailing) {
+            if channel.hasCatchup {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.textTertiary)
+                    .padding(.top, 6)
+                    .padding(.trailing, 8)
+            }
+        }
         #else
         VStack(spacing: 4) {
             // v1.6.23: same auth-aware fix as the tvOS branch above.
@@ -3973,6 +3985,16 @@ private struct GuideChannelButton: View {
         }
         .padding(.horizontal, 4)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        // Catch-up badge, phone-scaled (see tvOS branch above).
+        .overlay(alignment: .topTrailing) {
+            if channel.hasCatchup {
+                Image(systemName: "clock.arrow.circlepath")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.textTertiary)
+                    .padding(.top, 3)
+                    .padding(.trailing, 3)
+            }
+        }
         #endif
     }
 

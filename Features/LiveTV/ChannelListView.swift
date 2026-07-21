@@ -2251,10 +2251,20 @@ struct ChannelRow: View {
                     }
 
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(item.name)
-                            .font(.system(size: 26, weight: .semibold))
-                            .foregroundColor(.textPrimary)
-                            .lineLimit(1)
+                        HStack(spacing: 8) {
+                            Text(item.name)
+                                .font(.system(size: 26, weight: .semibold))
+                                .foregroundColor(.textPrimary)
+                                .lineLimit(1)
+                            // Catch-up badge (2026-07-20, all-platform
+                            // parity): history clock beside the name when
+                            // the channel has a replayable archive.
+                            if item.hasCatchup {
+                                Image(systemName: "clock.arrow.circlepath")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(.textTertiary)
+                            }
+                        }
 
                         if let prog = liveProgram {
                             HStack(spacing: 8) {
@@ -2381,10 +2391,18 @@ struct ChannelRow: View {
             }
 
             VStack(alignment: .leading, spacing: (isWide ? 4 : 2) * s) {
-                Text(item.name)
-                    .font(.system(size: (isWide ? 17 : 15) * s, weight: .medium))
-                    .foregroundColor(.textPrimary)
-                    .lineLimit(1)
+                HStack(spacing: 5 * s) {
+                    Text(item.name)
+                        .font(.system(size: (isWide ? 17 : 15) * s, weight: .medium))
+                        .foregroundColor(.textPrimary)
+                        .lineLimit(1)
+                    // Catch-up badge (see tvOS row above).
+                    if item.hasCatchup {
+                        Image(systemName: "clock.arrow.circlepath")
+                            .font(.system(size: (isWide ? 12 : 10) * s, weight: .semibold))
+                            .foregroundColor(.textTertiary)
+                    }
+                }
 
                 if let prog = liveProgram {
                     HStack(spacing: 8) {
