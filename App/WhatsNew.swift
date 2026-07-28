@@ -57,6 +57,15 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.3",
+            title: "What's new in 1.8.3",
+            bullets: [
+                "Fixes the app holding two connections to your provider when Live Rewind is on (pausing live TV or a brief stream hiccup left a second stream running)",
+                "Fixes a memory build-up during long Live Rewind sessions on high-bitrate channels that could make the app restart"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.3")
+        ),
+        WhatsNewRelease(
             version: "1.8.2",
             title: "What's new in 1.8.2",
             bullets: [

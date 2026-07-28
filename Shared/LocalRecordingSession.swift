@@ -406,7 +406,10 @@ final class LiveRewindReader: @unchecked Sendable {
         // the buffer (engine attempt cap) and exits immediately.
         while segments.isEmpty && !buffer.closed {
             Thread.sleep(forTimeInterval: 0.1)
-            segments = LiveRewindBuffer.listSegments(in: buffer.sessionDir)
+            // GH #60: this runs on libmpv's own C pthread, which has NO
+            // draining autorelease pool - every Foundation temporary made
+            // here would stay pinned for the life of the stream thread.
+            segments = autoreleasepool { LiveRewindBuffer.listSegments(in: buffer.sessionDir) }
         }
         guard !segments.isEmpty else { return nil }
         segIndex = max(0, segments.lastIndex(where: { $0.startWallMs <= target }) ?? 0)
@@ -441,19 +444,30 @@ final class LiveRewindReader: @unchecked Sendable {
         // ~6-10s cadence, and the reader's head cushion plus mpv's
         // demuxer buffer absorb the <=0.5s worst-case discovery delay.
         while true {
-            if let h = handle,
-               let data = try? h.read(upToCount: nbytes),
-               !data.isEmpty {
-                data.withUnsafeBytes { raw in
-                    dest.copyMemory(from: raw.baseAddress!, byteCount: data.count)
-                }
-                return data.count
+            // GH #60 (the 4K jetsam leak): this read loop runs on libmpv's own
+            // C pthread, which never drains an autorelease pool. The old
+            // FileHandle.read(upToCount:) returned an autoreleased NSData per
+            // ~64KiB chunk, so EVERY streamed byte stayed pinned until the
+            // stream thread exited - RSS grew at exactly the stream bitrate
+            // (~3 MB/s on 4K) into the ~2 GB jetsam kill. Read straight into
+            // mpv's buffer with POSIX read() instead: zero Foundation
+            // temporaries on the hot path.
+            if let h = handle {
+                var n: Int = -1
+                repeat {
+                    n = Darwin.read(h.fileDescriptor, dest, nbytes)
+                } while n == -1 && errno == EINTR
+                if n > 0 { return n }
+                // n == 0 (grown-to-EOF) or error: fall through to the
+                // segment-advance / wait logic below, same as before.
             }
             // Current segment exhausted or grown-to-EOF: periodically
             // check whether a newer segment exists to advance into.
+            // Foundation work below is wrapped in autoreleasepool for the
+            // same no-pool-on-this-thread reason.
             if listCountdown <= 0 {
                 listCountdown = 5
-                let fresh = LiveRewindBuffer.listSegments(in: buffer.sessionDir)
+                let fresh = autoreleasepool { LiveRewindBuffer.listSegments(in: buffer.sessionDir) }
                 if !fresh.isEmpty {
                     let currentStart = segments.indices.contains(segIndex)
                         ? segments[segIndex].startWallMs : -1
@@ -466,8 +480,10 @@ final class LiveRewindReader: @unchecked Sendable {
                     if freshIdx < fresh.count - 1 {
                         segments = fresh
                         segIndex = freshIdx + 1
-                        try? handle?.close()
-                        handle = try? FileHandle(forReadingFrom: segments[segIndex].url)
+                        autoreleasepool {
+                            try? handle?.close()
+                            handle = try? FileHandle(forReadingFrom: segments[segIndex].url)
+                        }
                         continue
                     }
                     segments = fresh
@@ -1068,15 +1084,18 @@ final class CatchupHTTPReader: NSObject, URLSessionDataDelegate, @unchecked Send
             cond.wait()
         }
         let want = min(nbytes, Int(bytesWritten - readOffset))
-        guard let rh = readHandle,
-              let data = try? rh.read(upToCount: want), !data.isEmpty else {
-            return failed ? -1 : 0
-        }
-        data.withUnsafeBytes { raw in
-            dest.copyMemory(from: raw.baseAddress!, byteCount: data.count)
-        }
-        readOffset += Int64(data.count)
-        return data.count
+        // GH #60: POSIX read straight into mpv's buffer. The old
+        // FileHandle.read(upToCount:) autoreleased an NSData per chunk on
+        // libmpv's pool-less stream thread, pinning the whole catch-up
+        // stream in RSS (same 4K-bitrate leak as the live rewind reader).
+        guard let rh = readHandle else { return failed ? -1 : 0 }
+        var n: Int = -1
+        repeat {
+            n = Darwin.read(rh.fileDescriptor, dest, want)
+        } while n == -1 && errno == EINTR
+        guard n > 0 else { return failed ? -1 : 0 }
+        readOffset += Int64(n)
+        return n
     }
 
     func close() {

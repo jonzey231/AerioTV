@@ -870,6 +870,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// back off on PiP-exit regardless of the last event the
         /// observer saw.
         private var lastAppliedPause: Bool?
+        /// GH #60: mpv's ACTUAL pause state, mirrored from the "pause"
+        /// property observer - covers every pause path (progress-store
+        /// commands, PiP, rewind transport), unlike lastAppliedPause which
+        /// only tracks applyPauseIfChanged. Gates the stale/soft watchdogs.
+        private var mpvObservedPaused = false
 
         /// **Belt-and-suspenders** for the `aid` and `mute` writes
         /// inside `applyAudioFocusIfChanged`. v1.6.12 fix for the
@@ -3663,6 +3668,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                       staleAge >= staleStallReportThresholdSec,
                       isLive,
                       lastAppliedPause != true,
+                      // GH #60: same observed-pause gate as the reload sibling.
+                      !mpvObservedPaused,
                       // Only report a WEDGE of an actively-playing stream. At a
                       // fresh open / channel swap, `lastEnqueueTime` is still 0
                       // (never enqueued a frame) so `staleAge` = seconds-since-
@@ -3756,6 +3763,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if staleAge >= staleFrameStormThresholdSec,
                isLive,
                lastAppliedPause != true,
+               // GH #60: also honor mpv's observed pause - an intentional
+               // pause via any path must never read as a wedged stream.
+               !mpvObservedPaused,
                watchdogReloadEnabled,
                hasReachedPlaybackRestartForStream {
                 let wallNow = CFAbsoluteTimeGetCurrent()
@@ -3769,7 +3779,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                    forcedReloadAllowed(now: wallNow) {
                     lastForcedBlackReloadAt = wallNow
                     noteForcedReload()
-                    let safeURL = DebugLogger.sanitize(reloadURL.absoluteString)
+                    // GH #60: while the Live Rewind relay is active, reload the
+                    // RELAY (aeriots://live), never the raw upstream URL. The
+                    // old urls.first reload left the engine downloading
+                    // headless at full bitrate with no consumer while mpv
+                    // opened a SECOND direct connection to Dispatcharr (the
+                    // reporter's two-connection screenshot). Reloading the
+                    // relay keeps the single app-owned connection + the rewind
+                    // window; a genuinely wedged relay still escapes via
+                    // relayErrorRecovery -> fallBackToDirectStream, which is
+                    // the one path that stops the engine session.
+                    let reloadTarget = liveRewindActive ? "aeriots://live" : reloadURL.absoluteString
+                    let safeURL = DebugLogger.sanitize(reloadTarget)
                     debugLog("[STALE-RELOAD] \(streamTag) stale=\(String(format: "%.0f", staleAge * 1000))ms >= threshold=\(String(format: "%.0f", staleFrameStormThresholdSec * 1000))ms; issuing loadfile replace to re-prime pipeline (url=\(safeURL.prefix(80)))")
                     DebugLogger.shared.log(
                         "🟡 [MPV-RELOAD] stale-frame storm reload tile=\(tileID ?? "single") stale_ms=\(Int(staleAge * 1000))",
@@ -3786,7 +3807,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     cachedRenderer?.flush(removingDisplayedImage: false)
                     mpvQueue.async { [weak self] in
                         guard let self, let mpv = self.activeMPVHandle() else { return }
-                        self.mpvCommand(mpv, ["loadfile", reloadURL.absoluteString, "replace"])
+                        self.mpvCommand(mpv, ["loadfile", reloadTarget, "replace"])
                     }
                 }
             }
@@ -4297,7 +4318,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                        forcedReloadAllowed(now: now) {
                         lastForcedBlackReloadAt = now
                         noteForcedReload()
-                        let safeURL = DebugLogger.sanitize(reloadURL.absoluteString)
+                        // GH #60: relay-aware reload target - never bypass the
+                        // rewind relay with a raw-URL reload (headless engine
+                        // download + second Dispatcharr connection).
+                        let reloadTarget = liveRewindActive ? "aeriots://live" : reloadURL.absoluteString
+                        let safeURL = DebugLogger.sanitize(reloadTarget)
                         debugLog("[BLACK-RELOAD] \(streamTag) consecutive=\(consecutiveBlackFramesSuppressed) >= threshold=\(blackFrameStormThreshold); issuing loadfile replace to re-prime pipeline (url=\(safeURL.prefix(80)))")
                         DebugLogger.shared.log(
                             "🟡 [MPV-RELOAD] black-frame storm reload tile=\(tileID ?? "single") consec=\(consecutiveBlackFramesSuppressed)",
@@ -4318,7 +4343,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         cachedRenderer?.flush(removingDisplayedImage: false)
                         mpvQueue.async { [weak self] in
                             guard let self, let mpv = self.activeMPVHandle() else { return }
-                            self.mpvCommand(mpv, ["loadfile", reloadURL.absoluteString, "replace"])
+                            self.mpvCommand(mpv, ["loadfile", reloadTarget, "replace"])
                         }
                     }
                 }
@@ -5291,9 +5316,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 var candidate = LiveRewindEngine.shared.bufferForReader
                 var waited = 0
                 while (candidate == nil || candidate!.closed), waited < 30 {
-                    Thread.sleep(forTimeInterval: 0.1)
-                    waited += 1
-                    candidate = LiveRewindEngine.shared.bufferForReader
+                    // GH #60: mpv's C thread has no draining autorelease pool;
+                    // keep Foundation temporaries from pinning (see the reader).
+                    autoreleasepool {
+                        Thread.sleep(forTimeInterval: 0.1)
+                        waited += 1
+                        candidate = LiveRewindEngine.shared.bufferForReader
+                    }
                 }
                 guard let buffer = candidate, !buffer.closed,
                       let reader = LiveRewindReader(buffer: buffer, fromWallMs: fromWall) else {
@@ -6864,6 +6893,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             case "pause":
                 if prop.format == MPV_FORMAT_FLAG, let data = prop.data {
                     let paused = data.assumingMemoryBound(to: Int32.self).pointee != 0
+                    // GH #60: authoritative pause mirror for the watchdogs.
+                    // lastAppliedPause only tracks applyPauseIfChanged; pauses
+                    // via the progress-store commands / PiP / rewind transport
+                    // write mpv directly and bypassed it - 12s into such a
+                    // pause the stale watchdog treated the intentional freeze
+                    // as a wedge and loadfile-replace-looped (reporter's
+                    // every-20s double connection while paused).
+                    mpvObservedPaused = paused
                     let ps = progressStore
                     DispatchQueue.main.async { ps.isPaused = paused }
 
