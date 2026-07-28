@@ -2317,6 +2317,14 @@ struct EPGGuideView: View {
     let channels: [ChannelDisplayItem]
     let servers: [ServerConnection]
     let onSelectChannel: (ChannelDisplayItem) -> Void
+    /// Docked group sidebar (Group Selection: Sidebar Menu) state, threaded
+    /// from ChannelListView. When true the grid cells go non-focusable so the
+    /// sidebar owns focus and Right can't escape into the guide (tvOS analog of
+    /// Android's onPreviewKeyEvent-consumes-Right). Default false = no change.
+    var sidebarOpen: Bool = false
+    /// Called with the focused now-airing program id when a short-Left on the
+    /// now column should open the group sidebar (sidebar mode only).
+    var onRequestGroupSidebar: ((String) -> Void)? = nil
 
     // Observe the shared GuideStore so its loading state is visible to
     // MainTabView's initial-sync loading cover (see HomeView's
@@ -2840,6 +2848,20 @@ struct EPGGuideView: View {
                 guard focusedProgramID != nil else { return }
                 switch direction {
                 case .left:
+                    #if os(tvOS)
+                    // Sidebar mode: a short-Left on the now column (timeline not
+                    // panned into history) opens the docked group sidebar
+                    // instead of scrolling earlier. A HOLD-Left is consumed by
+                    // the window-level LeftHoldHostView before this fires, so a
+                    // hold can never also open the sidebar. Once browsing
+                    // history, short-Left keeps paging earlier.
+                    if RemoteControlStore.shared.useGroupSidebar, !sidebarOpen,
+                       let fpid = focusedProgramID, let request = onRequestGroupSidebar,
+                       !timelineIsAwayFromNow() {
+                        request(fpid)
+                        return
+                    }
+                    #endif
                     withAnimation(.easeOut(duration: 0.3)) {
                         horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
                     }
@@ -3070,6 +3092,33 @@ struct EPGGuideView: View {
                         focusedProgramID = target
                         try? await Task.sleep(nanoseconds: 70_000_000)
                         debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(target) got=\(focusedProgramID ?? "nil")")
+                        if focusedProgramID == target { break }
+                    }
+                }
+            }
+            // Docked group sidebar closed: re-assert focus onto the guide grid
+            // (the cells became focusable again the same render pass) so Right /
+            // Back never orphan focus onto the Live TV nav tab. Reuses the same
+            // resetFocus + retry-assert loop as forceGuideFocus.
+            .onReceive(
+                NotificationCenter.default.publisher(for: .guideGroupSidebarDismissed)
+            ) { note in
+                let rebind = (note.userInfo?["rebind"] as? Bool) ?? false
+                let returnID = note.userInfo?["returnID"] as? String
+                Task { @MainActor in
+                    // Let the pane tear down + the grid cells become focusable.
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                    // Unchanged group → restore the exact origin cell. Group
+                    // changed → the origin cell is likely gone, so land on a
+                    // fresh now-cell of the newly-filtered list (never the List
+                    // toggle).
+                    let target: String? = (!rebind ? returnID : nil)
+                        ?? resolveFocusProgramID(preferringChannel: channels.first?.id)
+                    guard let target else { resetFocus(in: guideFocusNS); return }
+                    resetFocus(in: guideFocusNS)
+                    for _ in 0..<8 {
+                        focusedProgramID = target
+                        try? await Task.sleep(nanoseconds: 70_000_000)
                         if focusedProgramID == target { break }
                     }
                 }
@@ -3486,7 +3535,8 @@ struct EPGGuideView: View {
             onSelect: onSelectChannel,
             onMultiviewIntent: { handleMultiviewIntent(channel: $0) },
             onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) },
-            focusedProgramID: $focusedProgramID
+            focusedProgramID: $focusedProgramID,
+            sidebarOpen: sidebarOpen
         )
         .offset(x: x, y: 0)
         #else
@@ -4040,6 +4090,10 @@ private struct GuideProgramButton: View {
     /// `.focused(focusedProgramID, equals: prog.id)` so the guide can
     /// programmatically focus this cell for focus restore.
     var focusedProgramID: FocusState<String?>.Binding
+    /// True while the docked group sidebar is open: makes this cell
+    /// non-focusable so the sidebar owns focus and a Right press can't 2D-move
+    /// back into the guide (the tvOS analog of Android consuming Right).
+    var sidebarOpen: Bool = false
     #endif
     // Access ReminderManager directly — @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
@@ -4336,7 +4390,7 @@ private struct GuideProgramButton: View {
             // release), so tap and long-press stay separate gestures, as on
             // iOS. isFocused drives the highlight; focusedProgramID is the
             // programmatic restore target.
-            .focusable()
+            .focusable(!sidebarOpen)
             .focused($isFocused)
             .focused(focusedProgramID, equals: prog.id)
             .onTapGesture {
@@ -4346,7 +4400,14 @@ private struct GuideProgramButton: View {
                     onSelect(channelItem)
                 }
             }
-            .onLongPressGesture(minimumDuration: 0.4) { showCtxDialog = true }
+            .onLongPressGesture(minimumDuration: 0.35) {
+                // Guide "Select (hold)" slot. The confirmationDialog below IS
+                // the program menu (okLong = .programInfo by default); a user
+                // who maps the slot to Do Nothing suppresses it.
+                if RemoteControlStore.shared.guideAction(.okLong) != .none {
+                    showCtxDialog = true
+                }
+            }
             .confirmationDialog(prog.title,
                                 isPresented: $showCtxDialog,
                                 titleVisibility: .visible) {

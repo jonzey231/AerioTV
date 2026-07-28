@@ -355,10 +355,13 @@ struct MyRecordingsView: View {
             if rec.destination == .dispatcharrServer,
                rec.dispatcharrFileURL != nil,
                rec.remoteRecordingID != nil {
+                // Row tap now starts from the beginning; this menu leads with
+                // jumping to the live edge instead (matches Android's
+                // "Start at Live").
                 Button {
                     playServerRecording(rec)
                 } label: {
-                    Label("Watch Live", systemImage: "play.fill")
+                    Label("Start at Live", systemImage: "play.fill")
                 }
                 // Issue #29: play the in-progress recording from the start
                 // (the /file/ partial) rather than the live edge.
@@ -508,7 +511,11 @@ struct MyRecordingsView: View {
         if rec.destination == .local, let path = rec.localFilePath {
             playRecording(rec, path: path)
         } else if rec.destination == .dispatcharrServer, rec.remoteRecordingID != nil {
-            playServerRecording(rec)
+            // Android parity: tapping an in-progress recording starts it FROM
+            // THE BEGINNING (not the live edge). Completed rows already play
+            // from the start of the file, so fromStart only matters here for
+            // the in-progress HLS route (emits X-Aerio-Start-From-Beginning).
+            playServerRecording(rec, fromStart: rec.isInProgress)
         }
     }
 
@@ -836,14 +843,17 @@ private struct RecordingRow: View {
                 }
 
                 if canWatchLive {
-                    Label("Watch Live", systemImage: "play.circle.fill")
+                    // Row tap now starts from the beginning, so the pill no
+                    // longer says "Watch Live" (that's the long-press menu's
+                    // "Start at Live"). Keep the red in-progress tint.
+                    Label("In Progress", systemImage: "record.circle")
                         .font(.caption2.bold())
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(Color.red.opacity(0.18))
                         .foregroundColor(.red)
                         .clipShape(Capsule())
-                        .accessibilityHint("Tap the row to watch this recording while it captures")
+                        .accessibilityHint("Tap to watch from the beginning; long-press for Start at Live, Stop, or Delete.")
                 }
             }
 

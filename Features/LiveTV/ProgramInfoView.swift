@@ -473,13 +473,21 @@ struct ProgramInfoView: View {
 
             Section {
                 LabeledContent("Channel", value: target.channelName)
-                // Program row: title with the feed badges trailing, and the
-                // episode sub-title as a secondary italic line beneath.
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(target.title)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        EPGFlagsRow(flags: titleBadges)
+                // Program row: title on its OWN full-width line (soft-wraps,
+                // so a long single-word title can never mid-word-break), with
+                // the feed badges wrapping in a flow layout underneath rather
+                // than a horizontal run that squeezes the title. Episode
+                // sub-title as a secondary italic line beneath.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(target.title)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !titleBadges.isEmpty {
+                        CategoryPillsLayout(spacing: 4) {
+                            ForEach(titleBadges.indices, id: \.self) { i in
+                                EPGFlagBadge(flag: titleBadges[i])
+                            }
+                        }
                     }
                     if let sub = target.subTitle, !sub.isEmpty {
                         Text(sub)
@@ -553,18 +561,28 @@ struct ProgramInfoView: View {
                             .clipped()
                             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
-                    // Header - channel + title + feed badges + episode sub-title
+                    // Header - channel + title + feed badges + episode sub-title.
+                    // Title gets its OWN full-width line (soft-wraps, so long
+                    // single-word titles never mid-word-break); the feed badges
+                    // wrap in a flow layout beneath instead of a horizontal run
+                    // that squeezes the title.
                     VStack(alignment: .leading, spacing: 12) {
                         Text(target.channelName.uppercased())
                             .font(.system(size: 24, weight: .semibold))
                             .foregroundColor(.textSecondary)
                             .tracking(1.5)
-                        HStack(alignment: .firstTextBaseline, spacing: 14) {
-                            Text(target.title)
-                                .font(.system(size: 44, weight: .bold))
-                                .foregroundColor(.textPrimary)
-                            // Feed flags + "ON NOW" (gated to avoid a double LIVE).
-                            EPGFlagsRow(flags: titleBadges)
+                        Text(target.title)
+                            .font(.system(size: 44, weight: .bold))
+                            .foregroundColor(.textPrimary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                        // Feed flags + "ON NOW" (gated to avoid a double LIVE).
+                        if !titleBadges.isEmpty {
+                            CategoryPillsLayout(spacing: 10) {
+                                ForEach(titleBadges.indices, id: \.self) { i in
+                                    EPGFlagBadge(flag: titleBadges[i])
+                                }
+                            }
                         }
                         if let sub = target.subTitle, !sub.isEmpty {
                             Text(sub)

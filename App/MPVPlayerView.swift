@@ -870,6 +870,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// back off on PiP-exit regardless of the last event the
         /// observer saw.
         private var lastAppliedPause: Bool?
+        /// GH #60: mpv's ACTUAL pause state, mirrored from the "pause"
+        /// property observer - covers every pause path (progress-store
+        /// commands, PiP, rewind transport), unlike lastAppliedPause which
+        /// only tracks applyPauseIfChanged. Gates the stale/soft watchdogs.
+        private var mpvObservedPaused = false
 
         /// **Belt-and-suspenders** for the `aid` and `mute` writes
         /// inside `applyAudioFocusIfChanged`. v1.6.12 fix for the
@@ -2385,8 +2390,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         //   the storm is sourced upstream.
         private var consecutiveBlackFramesSuppressed: Int = 0
         private var lastForcedBlackReloadAt: CFAbsoluteTime = 0
-        private let blackFrameStormThreshold: Int = 30
-        private let blackFrameReloadCooldownSec: CFAbsoluteTime = 5.0
+        // GH #60 detector rework (the 6-7 min glitch cycle): the old model
+        // suppressed EVERY matching frame (holding the last bright frame, so
+        // the luma baseline never updated and a legit ad-break cut to black
+        // kept matching forever) and reloaded at 30 consecutive = 0.5s -
+        // tripped by ordinary slates, and each trip churned the Dispatcharr
+        // connection. Now: suppression only bridges a short anti-flash HOLD
+        // (~8 frames); past it the black frames are ENQUEUED (the source
+        // really went dark - show it) and the baseline updates, ending the
+        // storm naturally. The storm reload is re-keyed to BIT-FLAT ZERO
+        // frames (avg==0 && std==0): decoder zero-fill produces exact zeros
+        // (the 2026-06-06 367-frame wedge), while camera/ad blacks carry
+        // dither and never match. 240 frames = ~4s at 60fps before reload.
+        private let blackFrameSuppressHoldFrames: Int = 8
+        private var consecutiveZeroFrames: Int = 0
+        private let blackFrameStormThreshold: Int = 240
+        private let blackFrameReloadCooldownSec: CFAbsoluteTime = 120.0
 
         // #37 (Glitzbr 2026-06-17 multiview OTA log): a commercial break can
         // trip BOTH reload watchdogs repeatedly. Each loadfile-replace fails
@@ -2732,6 +2751,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // in deinit alongside the others.
             NotificationCenter.default.addObserver(self, selector: #selector(dropLiveRewindRelay),
                                                    name: .aerioLiveRewindDropRelay, object: nil)
+            // GH #60 seatbelt (memory-warning hook -> one relay reload).
+            NotificationCenter.default.addObserver(self, selector: #selector(memorySeatbeltReload),
+                                                   name: .aerioMemorySeatbeltReload, object: nil)
             // Switch Stream: after a confirmed switch the picker asks the live
             // player to reload so libmpv re-locks onto the channel's fresh
             // buffer (recovers the dead-upstream/failover-cascade freeze). Only
@@ -3663,6 +3685,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                       staleAge >= staleStallReportThresholdSec,
                       isLive,
                       lastAppliedPause != true,
+                      // GH #60: same observed-pause gate as the reload sibling.
+                      !mpvObservedPaused,
                       // Only report a WEDGE of an actively-playing stream. At a
                       // fresh open / channel swap, `lastEnqueueTime` is still 0
                       // (never enqueued a frame) so `staleAge` = seconds-since-
@@ -3756,6 +3780,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if staleAge >= staleFrameStormThresholdSec,
                isLive,
                lastAppliedPause != true,
+               // GH #60: also honor mpv's observed pause - an intentional
+               // pause via any path must never read as a wedged stream.
+               !mpvObservedPaused,
                watchdogReloadEnabled,
                hasReachedPlaybackRestartForStream {
                 let wallNow = CFAbsoluteTimeGetCurrent()
@@ -3769,7 +3796,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                    forcedReloadAllowed(now: wallNow) {
                     lastForcedBlackReloadAt = wallNow
                     noteForcedReload()
-                    let safeURL = DebugLogger.sanitize(reloadURL.absoluteString)
+                    // GH #60: while the Live Rewind relay is active, reload the
+                    // RELAY (aeriots://live), never the raw upstream URL. The
+                    // old urls.first reload left the engine downloading
+                    // headless at full bitrate with no consumer while mpv
+                    // opened a SECOND direct connection to Dispatcharr (the
+                    // reporter's two-connection screenshot). Reloading the
+                    // relay keeps the single app-owned connection + the rewind
+                    // window; a genuinely wedged relay still escapes via
+                    // relayErrorRecovery -> fallBackToDirectStream, which is
+                    // the one path that stops the engine session.
+                    let reloadTarget = liveRewindActive ? "aeriots://live" : reloadURL.absoluteString
+                    let safeURL = DebugLogger.sanitize(reloadTarget)
                     debugLog("[STALE-RELOAD] \(streamTag) stale=\(String(format: "%.0f", staleAge * 1000))ms >= threshold=\(String(format: "%.0f", staleFrameStormThresholdSec * 1000))ms; issuing loadfile replace to re-prime pipeline (url=\(safeURL.prefix(80)))")
                     DebugLogger.shared.log(
                         "🟡 [MPV-RELOAD] stale-frame storm reload tile=\(tileID ?? "single") stale_ms=\(Int(staleAge * 1000))",
@@ -3786,7 +3824,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     cachedRenderer?.flush(removingDisplayedImage: false)
                     mpvQueue.async { [weak self] in
                         guard let self, let mpv = self.activeMPVHandle() else { return }
-                        self.mpvCommand(mpv, ["loadfile", reloadURL.absoluteString, "replace"])
+                        self.mpvCommand(mpv, ["loadfile", reloadTarget, "replace"])
                     }
                 }
             }
@@ -4215,6 +4253,71 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 && blackProbe.std < 8.0
                 && blackFramePrevAvgLuma > 25.0
                 && blackFramePrevPrevAvgLuma > 20.0
+                // GH #60: suppression is an anti-flash HOLD, not a latch. Past
+                // the hold the frame enqueues normally, the luma baseline
+                // updates to the dark content, and the detector stops matching
+                // - a real ad-break/scene black displays as black instead of a
+                // frozen frame + a reload storm.
+                && consecutiveBlackFramesSuppressed < blackFrameSuppressHoldFrames
+
+            // GH #60: decoder-wedge discriminator. Zero-FILL frames from a
+            // wedged pipeline are bit-flat (avg==0, std==0); real dark content
+            // carries dither. Tracked independently of suppression so the
+            // storm reload below still catches the genuine sustained wedge
+            // (2026-06-06: ~367 zero frames, no spontaneous recovery).
+            if probeValid {
+                if blackProbe.avg == 0.0 && blackProbe.std == 0.0 {
+                    consecutiveZeroFrames &+= 1
+                } else {
+                    consecutiveZeroFrames = 0
+                }
+            }
+
+            // Storm reload (GH #60 rework of the v1.7.x watchdog): only a
+            // sustained run of BIT-FLAT zero frames marks a wedged pipeline
+            // (2026-06-06 field test: ~367 zero frames over 7s, no spontaneous
+            // recovery; a loadfile replace re-primed it in ~1s). Real dark
+            // content never matches (dither), so ad slates / scene blacks no
+            // longer reload - the false-fire behind the 6-7 min glitch cycle.
+            // `>=` + the 120s cooldown lets a failed reload retry.
+            if consecutiveZeroFrames >= blackFrameStormThreshold,
+               // #44 (GH): LIVE ONLY. Recordings/VOD are seekable files, so
+               // `loadfile <url> replace` restarts them at 0:00; libmpv
+               // reconfigures format changes on a seekable file on its own.
+               isLive,
+               watchdogReloadEnabled,
+               hasReachedPlaybackRestartForStream {
+                let now = CFAbsoluteTimeGetCurrent()
+                // #37: gate like the stale path - post-resolution-change grace
+                // (commercial fade / ad blanking) + per-stream reload backoff.
+                if now - lastForcedBlackReloadAt >= blackFrameReloadCooldownSec,
+                   now - lastResolutionChangeAt >= resolutionChangeReloadGraceSec,
+                   let reloadURL = urls.first,
+                   forcedReloadAllowed(now: now) {
+                    lastForcedBlackReloadAt = now
+                    noteForcedReload()
+                    // GH #60: relay-aware reload target - never bypass the
+                    // rewind relay with a raw-URL reload (headless engine
+                    // download + second Dispatcharr connection).
+                    let reloadTarget = liveRewindActive ? "aeriots://live" : reloadURL.absoluteString
+                    let safeURL = DebugLogger.sanitize(reloadTarget)
+                    debugLog("[BLACK-RELOAD] \(streamTag) zeroFrames=\(consecutiveZeroFrames) >= threshold=\(blackFrameStormThreshold); issuing loadfile replace to re-prime pipeline (url=\(safeURL.prefix(80)))")
+                    DebugLogger.shared.log(
+                        "🟡 [MPV-RELOAD] black-frame storm reload tile=\(tileID ?? "single") zero_consec=\(consecutiveZeroFrames)",
+                        category: "MPV-STREAM", level: .warning
+                    )
+                    // MEMORY-LEAK FIX (5ce93cf): flush the display-layer
+                    // renderer BEFORE re-priming so its enqueued 4K
+                    // CMSampleBuffers are not orphaned across the reload.
+                    // `removingDisplayedImage: false` keeps the last good
+                    // frame on screen, so no black flash.
+                    cachedRenderer?.flush(removingDisplayedImage: false)
+                    mpvQueue.async { [weak self] in
+                        guard let self, let mpv = self.activeMPVHandle() else { return }
+                        self.mpvCommand(mpv, ["loadfile", reloadTarget, "replace"])
+                    }
+                }
+            }
 
             if layerStatus == .failed {
                 if isInBackground && markAutoPausedOnBackgroundIfNeeded() {
@@ -4261,76 +4364,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     debugLog("[BLACK-DETECT] \(streamTag) suppressed black frame #\(blackFramesSuppressedCount) (consec=\(consecutiveBlackFramesSuppressed) avg=\(String(format: "%.2f", blackProbe.avg)) std=\(String(format: "%.2f", blackProbe.std)) prev=\(String(format: "%.0f", blackFramePrevAvgLuma)) prev_prev=\(String(format: "%.0f", blackFramePrevPrevAvgLuma)))")
                 }
                 #endif
-                // v1.7.x storm reload: if libmpv has been emitting
-                // all-zero frames for blackFrameStormThreshold in a
-                // row, its video pipeline is wedged - the upstream
-                // audio reconfig / decoder re-prime case from the
-                // 2026-06-06 field test produced ~367 consecutive
-                // black frames over 7s with no spontaneous recovery.
-                // A single `loadfile <currentURL> replace` re-primes
-                // the demuxer + decoder against the same URL and the
-                // stream resumes within ~1s. Cooldown prevents repeat
-                // hits when the source is genuinely dark or the
-                // proxy keeps producing the same broken bytes.
-                if consecutiveBlackFramesSuppressed == blackFrameStormThreshold,
-                   // #44 (GH): LIVE ONLY. Recordings/VOD are seekable files,
-                   // so `loadfile <url> replace` restarts them at 0:00. OTA
-                   // recordings splice a different encode at each commercial,
-                   // and that format change produces a ~30-frame black stretch
-                   // during the decoder reconfig — which the live-tuned storm
-                   // watchdog misread as a wedged pipeline and "re-primed",
-                   // looping the recording back to the beginning. libmpv
-                   // reconfigures format changes on a seekable file on its own
-                   // (audio_reconfigs in the logs confirm it), so the reload is
-                   // never the right move off-live. Live keeps the re-prime.
-                   isLive,
-                   watchdogReloadEnabled,
-                   hasReachedPlaybackRestartForStream {
-                    let now = CFAbsoluteTimeGetCurrent()
-                    // #37: gate the black-frame reload like the stale path -
-                    // skip during the post-resolution-change grace (commercial
-                    // fade / ad blanking) and obey the per-stream reload
-                    // backoff so blanking cannot drive a reload loop.
-                    if now - lastForcedBlackReloadAt >= blackFrameReloadCooldownSec,
-                       now - lastResolutionChangeAt >= resolutionChangeReloadGraceSec,
-                       let reloadURL = urls.first,
-                       forcedReloadAllowed(now: now) {
-                        lastForcedBlackReloadAt = now
-                        noteForcedReload()
-                        let safeURL = DebugLogger.sanitize(reloadURL.absoluteString)
-                        debugLog("[BLACK-RELOAD] \(streamTag) consecutive=\(consecutiveBlackFramesSuppressed) >= threshold=\(blackFrameStormThreshold); issuing loadfile replace to re-prime pipeline (url=\(safeURL.prefix(80)))")
-                        DebugLogger.shared.log(
-                            "🟡 [MPV-RELOAD] black-frame storm reload tile=\(tileID ?? "single") consec=\(consecutiveBlackFramesSuppressed)",
-                            category: "MPV-STREAM", level: .warning
-                        )
-                        // MEMORY-LEAK FIX: flush the display-layer renderer
-                        // BEFORE re-priming. The renderer retains its enqueued
-                        // CMSampleBuffers (and their 4K CVPixelBuffers); if this
-                        // `loadfile replace` fails (transient LOADING_FAILED) and
-                        // the error path re-plays, those old buffers are never
-                        // cleared, so the failed load + re-play stacked a SECOND
-                        // 4K HDR pipeline (~750MB) on top of the un-freed first
-                        // and the app climbed toward the jetsam ceiling (live
-                        // capture 2026-06-29: rss flat at 307MB then spiked to
-                        // ~1GB within 15s of this reload, thermal nominal).
-                        // `removingDisplayedImage: false` keeps the last good
-                        // frame on screen, so no black flash.
-                        cachedRenderer?.flush(removingDisplayedImage: false)
-                        mpvQueue.async { [weak self] in
-                            guard let self, let mpv = self.activeMPVHandle() else { return }
-                            self.mpvCommand(mpv, ["loadfile", reloadURL.absoluteString, "replace"])
-                        }
-                    }
-                }
-                // Note: we deliberately do NOT update the prev/prev-
-                // prev luma history with the suppressed frame. The
-                // surround check on the NEXT frame still compares
-                // against the last GOOD frame's luma, so a sustained
-                // codec-zero burst (rare but possible) would only
-                // suppress the first frame, not subsequent ones —
-                // which is correct: if the source actually went
-                // dark, we want frames after the first to update
-                // the comparison baseline.
+                // GH #60: history deliberately stays frozen ONLY for the short
+                // anti-flash hold. Past blackFrameSuppressHoldFrames the
+                // isSuspectBlackFrame gate above goes false, the frame takes
+                // the normal enqueue path below, and the luma baseline updates
+                // to the dark content - so a genuine cut to black displays as
+                // black and the detector stops matching. The storm reload
+                // moved out of this branch and is keyed to the bit-flat
+                // zero-frame counter (see below the detector).
             } else if let sampleBuffer = Self.makeSampleBuffer(from: renderPixelBuffer, presentationTime: presentationTime) {
                 nonisolated(unsafe) let sb = sampleBuffer
                 cachedRenderer?.enqueue(sb)
@@ -5291,9 +5332,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 var candidate = LiveRewindEngine.shared.bufferForReader
                 var waited = 0
                 while (candidate == nil || candidate!.closed), waited < 30 {
-                    Thread.sleep(forTimeInterval: 0.1)
-                    waited += 1
-                    candidate = LiveRewindEngine.shared.bufferForReader
+                    // GH #60: mpv's C thread has no draining autorelease pool;
+                    // keep Foundation temporaries from pinning (see the reader).
+                    autoreleasepool {
+                        Thread.sleep(forTimeInterval: 0.1)
+                        waited += 1
+                        candidate = LiveRewindEngine.shared.bufferForReader
+                    }
                 }
                 guard let buffer = candidate, !buffer.closed,
                       let reader = LiveRewindReader(buffer: buffer, fromWallMs: fromWall) else {
@@ -5759,6 +5804,27 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         @objc private func dropLiveRewindRelay() {
             guard liveRewindActive else { return }
             fallBackToDirectStream(reason: "multiview tile added")
+        }
+
+        /// GH #60 seatbelt: one relay reload when RSS crosses the runaway line
+        /// (memory-warning hook). Swapping mpv's stream thread releases
+        /// whatever that thread had pinned; belt-and-braces behind the POSIX-
+        /// read leak fix. Self-throttled so repeated warnings can't storm.
+        private var lastSeatbeltReloadAt: CFAbsoluteTime = 0
+        @objc private func memorySeatbeltReload() {
+            guard liveRewindActive else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            guard now - lastSeatbeltReloadAt >= 60 else { return }
+            lastSeatbeltReloadAt = now
+            DebugLogger.shared.log(
+                "🟡 [MPV-RELOAD] memory seatbelt relay reload tile=\(tileID ?? "single")",
+                category: "MPV-STREAM", level: .warning
+            )
+            cachedRenderer?.flush(removingDisplayedImage: false)
+            mpvQueue.async { [weak self] in
+                guard let self, let mpv = self.activeMPVHandle() else { return }
+                self.mpvCommand(mpv, ["loadfile", "aeriots://live", "replace"])
+            }
         }
 
         private func fallBackToDirectStream(reason: String) {
@@ -6864,6 +6930,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             case "pause":
                 if prop.format == MPV_FORMAT_FLAG, let data = prop.data {
                     let paused = data.assumingMemoryBound(to: Int32.self).pointee != 0
+                    // GH #60: authoritative pause mirror for the watchdogs.
+                    // lastAppliedPause only tracks applyPauseIfChanged; pauses
+                    // via the progress-store commands / PiP / rewind transport
+                    // write mpv directly and bypassed it - 12s into such a
+                    // pause the stale watchdog treated the intentional freeze
+                    // as a wedge and loadfile-replace-looped (reporter's
+                    // every-20s double connection while paused).
+                    mpvObservedPaused = paused
                     let ps = progressStore
                     DispatchQueue.main.async { ps.isPaused = paused }
 

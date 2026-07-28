@@ -893,4 +893,8 @@ extension Notification.Name {
     /// tile's coordinator drops the buffer relay (its eligibility was
     /// captured at play time and multiview must never ride the relay).
     static let aerioLiveRewindDropRelay = Notification.Name("aerioLiveRewindDropRelay")
+    /// GH #60 seatbelt: posted by the memory-warning hook when RSS crosses the
+    /// runaway line during playback; the live coordinator answers with ONE
+    /// relay reload (drops the old mpv stream thread + its pinned buffers).
+    static let aerioMemorySeatbeltReload = Notification.Name("aerioMemorySeatbeltReload")
 }

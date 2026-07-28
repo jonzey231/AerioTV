@@ -35,7 +35,9 @@ struct AuthPosterImage: View {
                 Color.cardBackground
             }
         }
-        .task(id: url?.absoluteString) {
+        // Keyed on url + the active effective host so a LAN/WAN probe flip
+        // re-attempts covers that failed under the previous routing.
+        .task(id: (url?.absoluteString ?? "") + "|" + (ChannelStore.shared.activeServer?.effectiveBaseURL ?? "")) {
             guard let url else { return }
             let key = url.absoluteString
             if let cached = AuthImageCache.shared.image(for: key) {
@@ -45,17 +47,24 @@ struct AuthPosterImage: View {
             }
             var req = URLRequest(url: url, timeoutInterval: 20)
             // SECURITY: attach the server's credential headers ONLY when the
-            // image is on the configured server's host. A malicious or
-            // compromised backend can return a poster URL pointing at an
-            // attacker host; without this gate the Dispatcharr X-API-Key /
-            // Authorization would be sent there and harvested. Foreign posters
-            // (TMDB / CDN) are public and load fine with no headers. The active
-            // server is the one every VOD/EPG poster context is viewed under
-            // (same source ProgramInfoView already uses for its poster auth).
-            let allowedHost = ChannelStore.shared.activeServer
-                .flatMap { URL(string: $0.effectiveBaseURL)?.host?.lowercased() }
-            if let allowedHost, url.host?.lowercased() == allowedHost {
+            // image is on one of the configured server's OWN hosts (public
+            // base + LAN local). A malicious backend can return a poster URL
+            // pointing at an attacker host; without this gate the Dispatcharr
+            // X-API-Key / Authorization would be sent there and harvested.
+            // Foreign posters (TMDB / CDN) are public and load with no
+            // headers. v1.7.9 regression fix: the old check compared against
+            // the SINGLE `effectiveBaseURL` host at render time, but poster
+            // URLs are built at fetch time and the effective host flips
+            // between local/public per TVLANProbe - dual-URL setups routinely
+            // diverged, headers were withheld, and every cover 401'd blank.
+            let allowedHosts = ChannelStore.shared.activeServer?.ownHosts ?? []
+            VODService.registerOwnHosts(allowedHosts)
+            if let host = url.host?.lowercased(), allowedHosts.contains(host) {
                 headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+            } else if !headers.isEmpty {
+                // Diagnostics for the next covers report: one grep-able line
+                // that says exactly why credentials were withheld.
+                debugLog("🖼️ AuthPosterImage: headers WITHHELD host=\(url.host?.lowercased() ?? "nil") trusted=\(allowedHosts.sorted().joined(separator: ","))")
             }
             guard let (data, _) = try? await URLSession.shared.data(for: req),
                   let img = UIImage(data: data) else { return }

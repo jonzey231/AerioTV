@@ -24,12 +24,19 @@ struct ServerSnapshot: Sendable {
     /// device label in the admin Stats panel without round-tripping
     /// back to the model on a background thread.
     let userAgent: String
+    /// BOTH of the server's own hosts (public base + LAN local), for the
+    /// image trust boundary - see ServerConnection.ownHosts.
+    let ownHosts: Set<String>
 }
 
 extension ServerConnection {
     /// Snapshot server properties on the MainActor for safe cross-isolation use.
     @MainActor var snapshot: ServerSnapshot {
-        ServerSnapshot(
+        // Feed the image trust registry every time a server is snapshotted -
+        // covers resolveURL/resolveImageURL callers that only carry the one
+        // fetch-time base URL.
+        VODService.registerOwnHosts(ownHosts)
+        return ServerSnapshot(
             id: id,
             type: type,
             baseURL: effectiveBaseURL,
@@ -37,7 +44,8 @@ extension ServerConnection {
             password: effectivePassword,
             apiKey: effectiveApiKey,
             dispatcharrAuthMode: dispatcharrHeaderMode,
-            userAgent: effectiveUserAgent
+            userAgent: effectiveUserAgent,
+            ownHosts: ownHosts
         )
     }
 }
@@ -46,6 +54,31 @@ extension ServerConnection {
 // Unified interface to fetch VOD content from XC or Dispatcharr sources.
 
 final class VODService {
+
+    // MARK: - Own-host trust registry (v1.7.9 blank-covers fix)
+
+    /// Every configured server's OWN hosts (public base + LAN local),
+    /// registered from main-actor code (ServerConnection.snapshot,
+    /// AuthPosterImage) and read by the static URL validators on any thread.
+    /// Grows within a session as servers are snapshotted; only ever contains
+    /// hosts the USER configured, so widening the trust set is safe.
+    private static let ownHostsLock = NSLock()
+    // nonisolated(unsafe) is truthful here: every access goes through
+    // ownHostsLock (register/known below are the only touch points).
+    nonisolated(unsafe) private static var ownHostsRegistry: Set<String> = []
+
+    static func registerOwnHosts(_ hosts: Set<String>) {
+        guard !hosts.isEmpty else { return }
+        ownHostsLock.lock()
+        ownHostsRegistry.formUnion(hosts)
+        ownHostsLock.unlock()
+    }
+
+    static func knownOwnHosts() -> Set<String> {
+        ownHostsLock.lock()
+        defer { ownHostsLock.unlock() }
+        return ownHostsRegistry
+    }
 
     /// Hosts on the TMDB CDN that we know are safe to fetch directly
     /// without auth. These are anonymous public endpoints.
@@ -79,14 +112,30 @@ final class VODService {
     ///
     /// Returns nil on rejection. Caller should fall back to a
     /// placeholder image or skip the fetch.
-    static func validateAbsoluteURL(_ url: URL, serverHost: String?) -> URL? {
+    static func validateAbsoluteURL(_ url: URL, serverHost: String?, serverHosts: Set<String> = []) -> URL? {
         guard let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else { return nil }
         guard let host = url.host?.lowercased() else { return nil }
 
         // Always allow the user's own server (LAN or public, doesn't
-        // matter; same trust boundary).
+        // matter; same trust boundary). `serverHosts` carries BOTH of the
+        // server's own hosts (public base + LAN local) so an RFC-1918 cover
+        // URL from the server's own LAN address is not rejected while the
+        // app happens to be routed via WAN (v1.7.9 blank-covers regression,
+        // second defect: the single-host check below only knew the one
+        // fetch-time host).
         if let serverHost = serverHost?.lowercased(), host == serverHost {
+            return url
+        }
+        if serverHosts.contains(host) {
+            return url
+        }
+        // Registry of every configured server's own hosts (public + LAN),
+        // populated from the main actor (ServerConnection.snapshot /
+        // AuthPosterImage). Lets resolveURL/resolveImageURL - whose callers
+        // only carry the ONE fetch-time base - accept the server's other
+        // host without threading a Set through every call site.
+        if Self.knownOwnHosts().contains(host) {
             return url
         }
         // Always allow well-known public image CDNs.

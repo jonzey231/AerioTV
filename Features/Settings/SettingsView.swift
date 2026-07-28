@@ -543,6 +543,7 @@ struct SettingsView: View {
                 switch route {
                 case "appearance":      AppearanceSettingsView()
                 case "app-behaviors":   AppBehaviorsSettingsView()
+                case "remote-control":  RemoteControlSettingsView()
                 case "multiview":       MultiviewSettingsView()
                 case "network":         NetworkSettingsView()
                 case "dvr-settings": DVRSettingsView()
@@ -873,6 +874,10 @@ struct SettingsView: View {
                     TVSettingsNavButton(label: "App Behaviors", icon: "switch.2",
                                         iconColor: .accentPrimary, subtitle: "Default tab, launch & gestures") {
                         navPath.append("app-behaviors")
+                    }
+                    TVSettingsNavButton(label: "Remote Control", icon: "av.remote",
+                                        iconColor: .accentPrimary, subtitle: "Customize what the Siri Remote buttons do") {
+                        navPath.append("remote-control")
                     }
                     TVSettingsNavButton(label: "Multiview", icon: "rectangle.split.2x2.fill",
                                         iconColor: .accentPrimary, subtitle: "Audio focus, tile spacing & corners") {

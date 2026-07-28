@@ -25,7 +25,7 @@ final class RecentChannelsStore: ObservableObject {
     /// Hard cap. Each entry is a small String, so 20 is comfortable
     /// both in memory and in UserDefaults; the picker will only ever
     /// show the first ~8 in its section anyway.
-    private static let maxEntries = 20
+    private static let maxEntries = 25
 
     private static let defaultsKey = "aerio.recent.channels.v1"
 

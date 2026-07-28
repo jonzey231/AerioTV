@@ -2196,7 +2196,10 @@ final class ChannelStore: ObservableObject {
             let catName = categories.first(where: { $0.id == s.categoryID })?.name ?? "Uncategorized"
             var item = ChannelDisplayItem(
                 id: String(s.streamID), name: s.name,
-                number: String(s.num ?? (i + 1)),
+                // GH #59: keep the panel's channel number verbatim (decimal
+                // subchannels like "6.1" included); list index only when the
+                // panel sent nothing.
+                number: s.channelNumber ?? String(i + 1),
                 logoURL: s.streamIcon.flatMap { URL(string: $0) },
                 group: catName,
                 categoryOrder: catOrder[s.categoryID ?? ""] ?? Int.max,
@@ -2829,6 +2832,14 @@ final class NowPlayingManager: ObservableObject {
     @Published var isCarPlayConnected: Bool = false
     @Published var isLive: Bool = true
 
+    /// The channel that was playing before the current one, for the
+    /// last-channel "zap back" gesture (rightShort default in the tvOS remote
+    /// map). Captured on every distinct live tune.
+    @Published var previousChannelID: String? = nil
+    /// Set when the fullscreen player hands off to global search (hold-Down);
+    /// the search sheet's onDismiss restores fullscreen when this is true.
+    @Published var searchOpenedFromPlayer: Bool = false
+
     /// `true` when `PlayerSession.mode == .multiview`. In that state
     /// `playingItem` / `playingHeaders` may still be populated (seed
     /// channel left over from the transition from single to multiview),
@@ -2930,6 +2941,11 @@ final class NowPlayingManager: ObservableObject {
         }
         #endif
         debugLog("🎮 NowPlaying.startPlaying: \(item.name) (id=\(item.id)), isLive=\(isLive), wakeChrome=\(wakeChrome), wasMinimized=\(isMinimized), wasPlaying=\(playingItem?.name ?? "nil")")
+        // Capture the outgoing channel for the last-channel zap gesture (a
+        // second zap toggles back because this fires again on the return tune).
+        if isLive, let outgoing = playingItem?.id, outgoing != item.id {
+            previousChannelID = outgoing
+        }
         playingItem = item
         // v1.6.18: persistent breadcrumb for guide focus default —
         // see the property docstring above.
@@ -3022,6 +3038,18 @@ final class NowPlayingManager: ObservableObject {
         }
     }
 
+    /// Tune the previously-playing channel (last-channel "zap back"). Immediate
+    /// (bypasses the 300ms flip accumulate) so a decisive zap isn't swallowed;
+    /// `startPlaying` re-captures the outgoing channel, so a second zap toggles
+    /// back to where you were.
+    @MainActor
+    func zapToPreviousChannel() {
+        guard let prevID = previousChannelID,
+              let target = ChannelStore.shared.channels.first(where: { $0.id == prevID }) else { return }
+        let headers = ChannelStore.shared.activeServer?.authHeaders ?? ["Accept": "*/*"]
+        startPlaying(target, headers: headers, isLive: true, wakeChrome: false)
+    }
+
     /// Apply the accumulated step from `changeChannel(direction:)`.
     /// Resolves the target channel by index in
     /// `ChannelStore.channels`, clamps to the list bounds (so a
@@ -3040,6 +3068,9 @@ final class NowPlayingManager: ObservableObject {
         let newIdx = max(0, min(list.count - 1, currentIdx + step))
         guard newIdx != currentIdx else { return }
         let next = list[newIdx]
+        // Remember where we came from so the last-channel zap can return here
+        // (the unified in-place swap below doesn't route through startPlaying).
+        previousChannelID = current.id
         let server = ChannelStore.shared.activeServer
         let resolvedHeaders = server?.authHeaders ?? ["Accept": "*/*"]
         debugLog("[MV-ChannelFlip] flush step=\(step) from=\(current.name)(id=\(current.id)) to=\(next.name)(id=\(next.id)) unified=\(PlaybackFeatureFlags.useUnifiedPlayback)")
@@ -3903,8 +3934,16 @@ struct MainTabView: View {
                             guideMenuHint("Press Menu/Back or Play/Pause to resume playback.")
                             guideMenuHint("Hold right on remote to close the mini player.")
                         }
-                        guideMenuHint("Double press Menu/Back to return to top channel.")
-                        guideMenuHint("Hold left on remote to return to the All group pill.")
+                        guideMenuHint("Double Back returns to top channel")
+                        // Hold-Left copy DERIVED from the effective guide map
+                        // (default: browse earlier programs).
+                        if let holdLeft = RemoteControlHints.guideHoldLeftHint(RemoteControlStore.shared.map) {
+                            guideMenuHint(holdLeft)
+                        }
+                        // Sidebar mode adds a short-Left = groups affordance.
+                        if RemoteControlStore.shared.useGroupSidebar {
+                            guideMenuHint("Left on the current program = channel groups")
+                        }
                     }
                     .padding(.leading, 16)
                     .padding(.top, isAnyBackgroundWork ? 52 : 12)
@@ -5315,6 +5354,9 @@ struct MainTabView: View {
         Text(text)
             .font(.system(size: 15, weight: .medium))
             .foregroundColor(.white.opacity(0.55))
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: 360, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .background(Color.black.opacity(0.4).clipShape(Capsule()))
@@ -5681,6 +5723,12 @@ private struct ChannelInfoBanner: View {
         Text(text)
             .font(.system(size: 15, weight: .medium))
             .foregroundColor(.white.opacity(0.55))
+            // Keep hint chips to a single line + cap width so a long dynamic
+            // (remapped) label can't bleed across the card.
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: 360, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             // #42 Part 4: match the program info card's dark fill (black @ 0.72).
@@ -5697,11 +5745,16 @@ private struct ChannelInfoBanner: View {
                     // #42 Part 4: gesture hints below the channel info card,
                     // riding the banner's same 5s appear/fade window on tune-in.
                     // Left-padded by sidePadding to line up with the card's edge.
+                    // Hints DERIVED from the effective remote map so a remapped
+                    // button never advertises a stale gesture (compressed
+                    // "gesture = result" copy). Read at banner-appear time.
                     VStack(alignment: .leading, spacing: 6) {
-                        playerHint("Press Menu/Back to return to TV Guide.")
-                        playerHint("Press Select to show player controls.")
-                        if appleTVChannelFlip {
-                            playerHint("Press Up/Down to change channels.")
+                        playerHint("Back = TV Guide")
+                        if let selectLine = RemoteControlHints.selectHint(RemoteControlStore.shared.map) {
+                            playerHint(selectLine)
+                        }
+                        if RemoteControlHints.verticalFlipMapped(RemoteControlStore.shared.map) {
+                            playerHint("Up/Down = channels")
                         }
                     }
                     .padding(.leading, sidePadding)
