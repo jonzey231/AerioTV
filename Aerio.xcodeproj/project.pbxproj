@@ -65,6 +65,7 @@
 		5FC5F24E2D48E01D39209E78 /* Pods_Aerio_iOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 3C4A3C566D1C265C5BBE6B35 /* Pods_Aerio_iOS.framework */; };
 		61F895DEB15DE1F7C3EACD17 /* PlaylistModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA33B18A62A3411B6425B661 /* PlaylistModels.swift */; };
 		622B003E0D0A155E9FE7D9B7 /* PlaylistParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */; };
+		62842087B22608DF35AAE271 /* SwiftDraw in Frameworks */ = {isa = PBXBuildFile; productRef = E12C9B65A0DB5BD84E376DB2 /* SwiftDraw */; };
 		62AD11B70BF6B745FD727C8B /* AerioSplash.mp4 in Resources */ = {isa = PBXBuildFile; fileRef = 880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */; };
 		6308BAE1E16965A379092AE8 /* OnDemandView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CBF1B5E89BE18F8E73482B9 /* OnDemandView.swift */; };
 		65A50DB238B2354D5B81DE09 /* Aerio.xcworkspace in Resources */ = {isa = PBXBuildFile; fileRef = TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */; };
@@ -82,6 +83,7 @@
 		788D987295F9672EFA03E102 /* Pods.xcodeproj in Resources */ = {isa = PBXBuildFile; fileRef = 2AF171D5A7722CF07BDE9B48 /* Pods.xcodeproj */; };
 		7A11FAB6D3BD7B764BF99C59 /* SwitchStreamView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65319FCB313930453DF8EFCA /* SwitchStreamView.swift */; };
 		7A7218D999F2EBB150A606A1 /* ReminderBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6123CC8F10ADF7063AE0E97 /* ReminderBannerView.swift */; };
+		7AF9925D8E7C7F7069D682C9 /* AerioImageDecoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A434E6ED5CFF73E3A9D731 /* AerioImageDecoding.swift */; };
 		7CFFD573C287B60F267445BD /* PlaylistImportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */; };
 		7D775CD7B45EE60B92377A6F /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
 		8021E4CA54981EDD0F04AE72 /* SplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5044B9CD69C05A6836588548 /* SplashView.swift */; };
@@ -155,6 +157,7 @@
 		B1C2D3E4F5A67890ACE00B02 /* CategoryColor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE00B03 /* CategoryColor.swift */; };
 		B1C2D3E4F5A67890ACE0A002 /* RemoteInputLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */; };
 		B1C2D3E4F5A67890ACE0A003 /* RemoteInputLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1C2D3E4F5A67890ACE0A001 /* RemoteInputLogger.swift */; };
+		B2E5D9A83014F26FAF9FD0A0 /* AerioImageDecoding.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A434E6ED5CFF73E3A9D731 /* AerioImageDecoding.swift */; };
 		B4833CE00C0F5847BBC5F2A8 /* RecentChannelsOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = A89CA175FB602262C1F1669D /* RecentChannelsOverlay.swift */; };
 		B4874C9D2075467ED09F0552 /* SwitchStreamView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65319FCB313930453DF8EFCA /* SwitchStreamView.swift */; };
 		B5AE22380A5D13659655A5CD /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00F4EE98C1564A7E3A5DD86B /* SearchView.swift */; };
@@ -197,6 +200,7 @@
 		F11A12EB07CB46158E23B73E /* ProgramInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */; };
 		F1B2C3D4E5F6A70890BC2345 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
 		F3D3906F995E10786B3C924D /* Pods_Aerio_tvOS.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = BB5A3862C25D699CA7931AE8 /* Pods_Aerio_tvOS.framework */; };
+		F564DDA103FF386C57BADEDE /* SwiftDraw in Frameworks */ = {isa = PBXBuildFile; productRef = 7DA561DBA031A892F41D5EDE /* SwiftDraw */; };
 		F6DA0B63B6CE27A4CE6FED9F /* GroupSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D05502DABB3026FDA895C1 /* GroupSidebar.swift */; };
 		F7D895407ADC7A76C1959955 /* GroupSidebar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9D05502DABB3026FDA895C1 /* GroupSidebar.swift */; };
 		F7E00AC7791418818CC81D52 /* RemoteControlHints.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7548A26AF128BE1520EA3FFA /* RemoteControlHints.swift */; };
@@ -374,6 +378,7 @@
 		E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ProgramInfoView.swift; sourceTree = "<group>"; };
 		EA33B18A62A3411B6425B661 /* PlaylistModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaylistModels.swift; sourceTree = "<group>"; };
 		EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RecordingCoordinator.swift; sourceTree = "<group>"; };
+		F1A434E6ED5CFF73E3A9D731 /* AerioImageDecoding.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = AerioImageDecoding.swift; path = AerioImageDecoding.swift; sourceTree = "<group>"; };
 		F249D5C39D90BC11107F3420 /* Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Release-input-files.xcfilelist"; sourceTree = "<group>"; };
 		F356BF2199707EDA1DCD6308 /* ServerConnectionViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConnectionViewModel.swift; sourceTree = "<group>"; };
 		F4EDC8A716508CF4B4F1D2DA /* RemoteControlSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RemoteControlSettingsView.swift; sourceTree = "<group>"; };
@@ -404,6 +409,7 @@
 			files = (
 				BDD64B872F76FD890055F82C /* MPVKit-GPL in Frameworks */,
 				F3D3906F995E10786B3C924D /* Pods_Aerio_tvOS.framework in Frameworks */,
+				62842087B22608DF35AAE271 /* SwiftDraw in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -420,6 +426,7 @@
 			files = (
 				BDD64B832F76FD240055F82C /* MPVKit-GPL in Frameworks */,
 				5FC5F24E2D48E01D39209E78 /* Pods_Aerio_iOS.framework in Frameworks */,
+				F564DDA103FF386C57BADEDE /* SwiftDraw in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -831,6 +838,7 @@
 				0D4994E16D37F74AE4F116EC /* RemoteControlMap.swift */,
 				344E207916F518E489F82832 /* RemoteControlStore.swift */,
 				7548A26AF128BE1520EA3FFA /* RemoteControlHints.swift */,
+				F1A434E6ED5CFF73E3A9D731 /* AerioImageDecoding.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -854,6 +862,9 @@
 			dependencies = (
 			);
 			name = Aerio_iOS;
+			packageProductDependencies = (
+				7DA561DBA031A892F41D5EDE /* SwiftDraw */,
+			);
 			productName = Aerio_iOS;
 			productReference = A2FD31E5C3E95D9CF2F53F4E /* Aerio.app */;
 			productType = "com.apple.product-type.application";
@@ -874,6 +885,9 @@
 				873E8E1D3999D625281F5672 /* PBXTargetDependency */,
 			);
 			name = Aerio_tvOS;
+			packageProductDependencies = (
+				E12C9B65A0DB5BD84E376DB2 /* SwiftDraw */,
+			);
 			productName = Aerio_tvOS;
 			productReference = A1AB8E6203108C63D4696924 /* Aerio.app */;
 			productType = "com.apple.product-type.application";
@@ -937,6 +951,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				BDD64B7F2F76FD240055F82C /* XCRemoteSwiftPackageReference "MPVKit" */,
+				F14B1CE1620BA3F5A29FABEB /* XCRemoteSwiftPackageReference "SwiftDraw" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = D35434453E2FAF35DC5DD5BE /* Products */;
@@ -1175,6 +1190,7 @@
 				E84F424529D2C704578CE146 /* ChannelListOverlay.swift in Sources */,
 				11498F007DA11FFB20B44A68 /* RecentChannelsOverlay.swift in Sources */,
 				5EE3763D926BD2529786F56B /* RemoteControlSettingsView.swift in Sources */,
+				7AF9925D8E7C7F7069D682C9 /* AerioImageDecoding.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1271,6 +1287,7 @@
 				15A7DCA00E6B561C88FEAB27 /* ChannelListOverlay.swift in Sources */,
 				B4833CE00C0F5847BBC5F2A8 /* RecentChannelsOverlay.swift in Sources */,
 				240BCCC86B210B13A95FB87C /* RemoteControlSettingsView.swift in Sources */,
+				B2E5D9A83014F26FAF9FD0A0 /* AerioImageDecoding.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1322,7 +1339,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.8.3;
+				MARKETING_VERSION = 1.8.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio.TopShelf";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1376,7 +1393,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.8.3;
+				MARKETING_VERSION = 1.8.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio";
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1402,7 +1419,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.8.3;
+				MARKETING_VERSION = 1.8.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio.TopShelf";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1472,7 +1489,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.8.3;
+				MARKETING_VERSION = 1.8.4;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1504,7 +1521,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.8.3;
+				MARKETING_VERSION = 1.8.4;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio";
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1575,7 +1592,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.8.3;
+				MARKETING_VERSION = 1.8.4;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -1707,9 +1724,22 @@
 				minimumVersion = 0.41.0;
 			};
 		};
+		F14B1CE1620BA3F5A29FABEB /* XCRemoteSwiftPackageReference "SwiftDraw" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/swhitty/SwiftDraw";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.18.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		7DA561DBA031A892F41D5EDE /* SwiftDraw */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F14B1CE1620BA3F5A29FABEB /* XCRemoteSwiftPackageReference "SwiftDraw" */;
+			productName = SwiftDraw;
+		};
 		BDD64B822F76FD240055F82C /* MPVKit-GPL */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = BDD64B7F2F76FD240055F82C /* XCRemoteSwiftPackageReference "MPVKit" */;
@@ -1719,6 +1749,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = BDD64B7F2F76FD240055F82C /* XCRemoteSwiftPackageReference "MPVKit" */;
 			productName = "MPVKit-GPL";
+		};
+		E12C9B65A0DB5BD84E376DB2 /* SwiftDraw */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F14B1CE1620BA3F5A29FABEB /* XCRemoteSwiftPackageReference "SwiftDraw" */;
+			productName = SwiftDraw;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

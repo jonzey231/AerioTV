@@ -67,7 +67,8 @@ struct AuthPosterImage: View {
                 debugLog("🖼️ AuthPosterImage: headers WITHHELD host=\(url.host?.lowercased() ?? "nil") trusted=\(allowedHosts.sorted().joined(separator: ","))")
             }
             guard let (data, _) = try? await URLSession.shared.data(for: req),
-                  let img = UIImage(data: data) else { return }
+                  // GH #61: decode accepts SVG artwork in addition to bitmaps.
+                  let img = AerioImageDecoding.decode(data) else { return }
             AuthImageCache.shared.store(img, for: key)
             guard !Task.isCancelled else { return }
             uiImage = img

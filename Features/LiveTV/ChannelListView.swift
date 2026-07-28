@@ -3985,7 +3985,8 @@ struct CachedLogoImage: View {
             }
             do {
                 let data = try await LogoFetcher.fetch(url)
-                if let img = UIImage(data: data) {
+                // GH #61: decode accepts SVG logos in addition to bitmaps.
+                if let img = AerioImageDecoding.decode(data) {
                     LogoCache.shared.store(img, for: key)
                     uiImage = img
                 }

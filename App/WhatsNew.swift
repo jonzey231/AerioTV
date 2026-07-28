@@ -57,6 +57,19 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.4",
+            title: "What's new in 1.8.4",
+            bullets: [
+                "SVG channel logos and artwork now display",
+                "Xtream Codes: subchannels like 6.1 and 6.2 now appear with their real numbers",
+                "Fixed movie and series artwork not loading on some setups",
+                "Faster channel tunes on Apple TV for Xtream Codes playlists",
+                "Ad-break fades and dark scenes no longer trigger periodic stream reloads",
+                "DVR: tap an in-progress recording to watch from the beginning, plus clearer program info"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.4")
+        ),
+        WhatsNewRelease(
             version: "1.8.3",
             title: "What's new in 1.8.3",
             bullets: [

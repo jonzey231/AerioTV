@@ -1,5 +1,5 @@
 {
-  "originHash" : "ef00e3d8fbb2d30a5feeffd901afe269da81ef29cbd621b41e76ca47bb5e65af",
+  "originHash" : "bb02723799b3924ebd43594a8709a19f0212c471a172cf0861a5fece42df14ed",
   "pins" : [
     {
       "identity" : "mpvkit",
@@ -8,6 +8,15 @@
       "state" : {
         "revision" : "613c0ccc3acf70e136aaff880a9b5fe8fdfaf5b8",
         "version" : "0.41.0"
+      }
+    },
+    {
+      "identity" : "swiftdraw",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swhitty/SwiftDraw",
+      "state" : {
+        "revision" : "82699f4bdf2f075793cfa0d392eb27c59b41a3fe",
+        "version" : "0.29.0"
       }
     }
   ],
