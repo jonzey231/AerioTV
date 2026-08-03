@@ -2054,6 +2054,18 @@ struct DispatcharrAPI {
     /// VOD". XC's equivalent (`get_vod_streams`) returns the full
     /// list in one call, which is why XC users never saw this hang.
     /// Returns 0 if the count field is missing — a non-zero return
+    /// Fetches the EPG sources configured on the Dispatcharr server
+    /// from `/api/epg/sources/` (list permission is IsStandardUser,
+    /// so any API key can read it). Catch-up depth: Dispatcharr's
+    /// own grid only retains a couple of days of history, but the
+    /// upstream XMLTV feeds it ingests usually carry a much deeper
+    /// past window, so GuideStore fetches those URLs directly and
+    /// layers them on the grid the same way the manual Custom XMLTV
+    /// URL override is layered.
+    func getEPGSources() async throws -> [DispatcharrEPGSource] {
+        try await fetchAllPages(DispatcharrEPGSource.self, firstPath: "/api/epg/sources/")
+    }
+
     /// value here is only used cosmetically to render the stage's
     /// "Loaded N movies" detail line.
     func getVODMovieCount() async throws -> Int {
@@ -3637,6 +3649,27 @@ struct DispatcharrChannel: Decodable, Identifiable {
     /// Dispatcharr's channel number, normalised to a display-ready
     /// string. v1.7.x: stored as `String?` (was `Double?`) so ATSC
     /// over-the-air `major.minor` numbers like "2.1" / "5.1" survive
+/// One EPG source from `/api/epg/sources/`. `sourceType` is "xmltv",
+/// "schedules_direct", or "dummy"; only active xmltv sources with an
+/// http(s) URL are fetchable by the app. `hasChannels` is a server-side
+/// annotation (does any channel's EPGData point at this source); it is
+/// optional because older Dispatcharr builds may not include it.
+struct DispatcharrEPGSource: Decodable, Identifiable {
+    let id: Int
+    let name: String?
+    let sourceType: String?
+    let url: String?
+    let isActive: Bool?
+    let hasChannels: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, url
+        case sourceType = "source_type"
+        case isActive = "is_active"
+        case hasChannels = "has_channels"
+    }
+}
+
     /// the round trip from Dispatcharr's API into the channel-list
     /// UI.
     ///
