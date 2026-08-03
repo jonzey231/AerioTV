@@ -336,6 +336,30 @@ struct VODDetailView: View {
                 }
             }
         }
+        // GH #63: on tvOS 26.5/27 the pushed detail renders with NO
+        // in-page focus at all (the tab bar stays live above it, Up
+        // reaches the pills, and every Select is a no-op because Play
+        // never receives focus). The credits-edge driver above never
+        // fires when TMDB credits are absent, so ALSO assert Play on
+        // appear with the same retry loop the credits path needed.
+        .onAppear {
+            guard item.type == .movie else { return }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                resetFocus(in: detailFocusNS)
+                for attempt in 0..<10 {
+                    playFocused = true
+                    try? await Task.sleep(nanoseconds: 80_000_000)
+                    if playFocused {
+                        debugLog("[VOD-Play] onAppear focus driver landed (attempt \(attempt))")
+                        break
+                    }
+                }
+                if !playFocused {
+                    debugLog("[VOD-Play] onAppear focus driver FAILED after 10 attempts")
+                }
+            }
+        }
         #endif
         .task {
             await loadDetail()
@@ -923,6 +947,9 @@ struct VODDetailView: View {
 
     private func playButton(url: URL?, title: String) -> some View {
         TVPlayButton(isResolvingURL: isResolvingURL) {
+            // GH #63 diagnosis: log EVERY press so a silent guard-return is
+            // distinguishable from focus never reaching the button.
+            debugLog("[VOD-Play] pressed url=\(url?.absoluteString ?? "NIL") resolving=\(isResolvingURL)")
             guard let url, !isResolvingURL else { return }
             Task { await resolveAndLaunch(url: url, title: title) }
         }
