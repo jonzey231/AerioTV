@@ -7847,10 +7847,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         func pictureInPictureControllerTimeRangeForPlayback(
             _ pictureInPictureController: AVPictureInPictureController
         ) -> CMTimeRange {
-            // Live streams have no defined range
-            if isLive { return CMTimeRange(start: .negativeInfinity, end: .positiveInfinity) }
-            let duration = CMTime(value: Int64(progressStore.durationMs), timescale: 1000)
-            return CMTimeRange(start: .zero, duration: duration)
+            // ALWAYS the infinite range, recordings included. Our sample
+            // buffers are stamped with HOST-CLOCK presentation times
+            // (CMClockGetTime in the render path), not media time, and the
+            // layer has no controlTimebase. AVKit derives "current time"
+            // from those PTS values, so against a finite [0, duration]
+            // range the position reads as hours past the end and PiP
+            // paints its indefinite loading spinner over the video
+            // (recordings/VOD showed a gray tile with audio only; live
+            // already returned infinite and rendered fine). The infinite
+            // range tells AVKit not to model a timeline at all; frames
+            // are display-immediately so presentation is unaffected.
+            CMTimeRange(start: .negativeInfinity, end: .positiveInfinity)
         }
 
         func pictureInPictureControllerIsPlaybackPaused(
