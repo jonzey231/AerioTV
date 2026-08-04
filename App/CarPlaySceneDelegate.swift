@@ -273,8 +273,10 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         if let logoURL = channel.logoURL {
             Task {
                 guard !Task.isCancelled else { return }
+                // GH #61: decode accepts SVG logos too, so CarPlay rows show
+                // artwork for the same channels the list view does.
                 if let data = try? await LogoFetcher.fetch(logoURL),
-                   let image = UIImage(data: data) {
+                   let image = AerioImageDecoding.decode(data) {
                     guard !Task.isCancelled else { return }
                     item.setImage(image.scaledToFit(CPListItem.maximumImageSize))
                 }

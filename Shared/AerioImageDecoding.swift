@@ -37,8 +37,14 @@ enum AerioImageDecoding {
         // SVGs are small text files; anything huge is not a logo we
         // want to rasterize on a UI-adjacent path.
         guard data.count <= 2_000_000 else { return false }
+        // Strip a BOM explicitly. `.whitespacesAndNewlines` does NOT
+        // include U+FEFF (it is category Cf, not Z), so a byte-order
+        // mark survived the trim and every hasPrefix check below failed
+        // -- a BOM'd SVG (routine output from Windows/.NET tooling and
+        // some CDNs) was rejected and fell back to the placeholder
+        // monogram, which is the exact symptom GH #61 reported.
         let head = String(decoding: data.prefix(512), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}")))
             .lowercased()
         guard head.hasPrefix("<?xml") || head.hasPrefix("<svg") ||
               head.hasPrefix("<!doctype svg") || head.hasPrefix("<!--")
