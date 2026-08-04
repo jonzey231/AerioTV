@@ -29,15 +29,11 @@ import SwiftUI
 
 struct TVSettingsRailItem: Identifiable {
     let id: String
-    /// nil = the Add Playlist action row (activates instead of selecting).
-    let route: SettingsRoute?
+    let route: SettingsRoute
     let label: String
     let icon: String
     let iconColor: Color
     var subtitle: String? = nil
-    var isPlaylist: Bool = false
-    var isActivePlaylist: Bool = false
-    var serverID: UUID? = nil
 }
 
 struct TVSettingsSplitView<Detail: View>: View {
@@ -48,11 +44,6 @@ struct TVSettingsSplitView<Detail: View>: View {
     /// Incremented by the host to force focus back onto the rail
     /// (the Menu-in-detail path).
     let railReturnToken: Int
-    let onAddPlaylist: () -> Void
-    let onEditPlaylist: (UUID) -> Void
-    let onDeletePlaylist: (UUID) -> Void
-    /// (serverID, delta): -1 move up, +1 move down.
-    let onMovePlaylist: (UUID, Int) -> Void
     @ViewBuilder let detail: (SettingsRoute) -> Detail
 
     private enum Pane: Hashable { case rail, detail }
@@ -82,9 +73,8 @@ struct TVSettingsSplitView<Detail: View>: View {
             // even if the container-level focusedPane binding lags.
             if id != nil { focusInDetail = false }
             guard let id,
-                  let item = items.first(where: { $0.id == id }),
-                  let route = item.route else { return }
-            scheduleSelection(route)
+                  let item = items.first(where: { $0.id == id }) else { return }
+            scheduleSelection(item.route)
         }
         .onChange(of: railReturnToken) { _, _ in
             assertRailFocus()
@@ -141,6 +131,8 @@ struct TVSettingsSplitView<Detail: View>: View {
 
     // MARK: Rail
 
+    @Namespace private var railFocusNS
+
     private var railColumn: some View {
         ScrollView(showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 6) {
@@ -153,19 +145,22 @@ struct TVSettingsSplitView<Detail: View>: View {
             .padding(.trailing, 16)
         }
         .background(Color.appBackground)
+        .focusScope(railFocusNS)
+        // Known-issue fix: on first entry the focus engine preferred the
+        // detail pane over the onAppear assert loop. defaultFocus makes the
+        // rail the engine's own first choice, so the assert loop only has
+        // to keep it there.
+        .defaultFocus($focusedRow, items.first?.id)
+        .prefersDefaultFocus(in: railFocusNS)
     }
 
     @ViewBuilder
     private func railRow(_ item: TVSettingsRailItem) -> some View {
         Button {
-            if let route = item.route {
-                debounceTask?.cancel()
-                pendingSelection = nil
-                selection = route
-                focusedPane = .detail
-            } else {
-                onAddPlaylist()
-            }
+            debounceTask?.cancel()
+            pendingSelection = nil
+            selection = item.route
+            focusedPane = .detail
         } label: {
             HStack(spacing: 14) {
                 Image(systemName: item.icon)
@@ -185,32 +180,11 @@ struct TVSettingsSplitView<Detail: View>: View {
                     }
                 }
                 Spacer(minLength: 0)
-                if item.isActivePlaylist {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundColor(.statusOnline)
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .buttonStyle(TVRailRowStyle(isSelected: item.route == selection))
         .focused($focusedRow, equals: item.id)
-        .contextMenu {
-            if item.isPlaylist, let sid = item.serverID {
-                Button { onMovePlaylist(sid, -1) } label: {
-                    Label("Move Up", systemImage: "arrow.up")
-                }
-                Button { onMovePlaylist(sid, 1) } label: {
-                    Label("Move Down", systemImage: "arrow.down")
-                }
-                Button { onEditPlaylist(sid) } label: {
-                    Label("Edit", systemImage: "pencil")
-                }
-                Button(role: .destructive) { onDeletePlaylist(sid) } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-            }
-        }
     }
 
     // MARK: Detail

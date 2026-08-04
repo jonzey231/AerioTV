@@ -65,6 +65,10 @@ struct DVRSettingsView: View {
         .navigationTitle("DVR")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        #else
+        // Pane views own their layout; without this the nav bar renders a
+        // "DVR" header inside the pane and shifts the content down.
+        .toolbar(.hidden, for: .navigationBar)
         #endif
         .alert("Delete All Local Recordings?", isPresented: $showClearConfirmation) {
             Button("Delete", role: .destructive) { clearAllLocalRecordings() }

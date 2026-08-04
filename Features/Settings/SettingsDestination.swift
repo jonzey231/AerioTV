@@ -23,6 +23,7 @@ import Foundation
 /// would not. Nothing persists these strings; they only document the
 /// mechanical conversion from the old switch.
 enum SettingsDestination: String, Hashable, CaseIterable {
+    case playlists      = "playlists"       // Phase 3 pane: playlist list (rail lists categories only)
     case appearance     = "appearance"
     case appBehaviors   = "app-behaviors"
     case remoteControl  = "remote-control"

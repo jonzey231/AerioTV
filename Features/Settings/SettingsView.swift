@@ -562,7 +562,7 @@ struct SettingsView: View {
                 case .category(.syncCategories): SyncCategoriesSettingsView()
                 case .category(.developer):      DeveloperSettingsView()
                 // Phase 3 pane hosts; nothing pushes these yet.
-                case .category(.sync), .category(.about):
+                case .category(.playlists), .category(.sync), .category(.about):
                     EmptyView()
                 case .editServer(let id):
                     // The route carries the server id, so editing the SAME
@@ -748,30 +748,24 @@ struct SettingsView: View {
 
     /// Pane selection for the rail. Defaults to Appearance until onAppear
     /// promotes the first playlist (plan: the detail pane is never empty).
-    @State private var tvSelection: SettingsRoute = .category(.appearance)
+    @State private var tvSelection: SettingsRoute = .category(.playlists)
     /// True while focus is in the detail pane; drives the Menu semantics.
     @State private var tvFocusInDetail = false
     /// Incremented to order the split view to put focus back on the rail.
     @State private var railReturnToken = 0
-    @State private var tvSelectionSeeded = false
-
     private var tvRailItems: [TVSettingsRailItem] {
         var items: [TVSettingsRailItem] = []
-        for server in servers {
-            items.append(TVSettingsRailItem(
-                id: "srv-\(server.id.uuidString)",
-                route: .server(server.id),
-                label: server.name,
-                icon: server.type == .dispatcharrAPI ? "key.horizontal.fill" : "rectangle.stack.badge.play",
-                iconColor: .accentPrimary,
-                subtitle: nil,
-                isPlaylist: true,
-                isActivePlaylist: server.isActive,
-                serverID: server.id))
-        }
+        // Playlists is an ordinary tab: its pane lists the playlists like
+        // every other category (user ruling 2026-08-04, replacing the
+        // short-lived in-rail disclosure group). The subtitle surfaces
+        // the active playlist without entering the pane.
         items.append(TVSettingsRailItem(
-            id: "add-playlist", route: nil, label: "Add Playlist",
-            icon: "plus.circle.fill", iconColor: .accentPrimary))
+            id: "playlists",
+            route: .category(.playlists),
+            label: "Playlists",
+            icon: "rectangle.stack.fill",
+            iconColor: .accentPrimary,
+            subtitle: servers.first(where: { $0.isActive })?.name))
         items.append(TVSettingsRailItem(
             id: "appearance", route: .category(.appearance), label: "Appearance",
             icon: "paintbrush.fill", iconColor: .accentPrimary, subtitle: "Theme, scale & category colors"))
@@ -806,30 +800,9 @@ struct SettingsView: View {
             items: tvRailItems,
             selection: $tvSelection,
             focusInDetail: $tvFocusInDetail,
-            railReturnToken: railReturnToken,
-            onAddPlaylist: { showAddServer = true },
-            onEditPlaylist: { id in navPath.append(SettingsRoute.editServer(id)) },
-            onDeletePlaylist: { id in
-                if let server = servers.first(where: { $0.id == id }) {
-                    serverToDelete = server
-                    showDeleteAlert = true
-                }
-            },
-            onMovePlaylist: { id, delta in
-                if let idx = servers.firstIndex(where: { $0.id == id }) {
-                    moveServer(from: idx, by: delta)
-                }
-            }
+            railReturnToken: railReturnToken
         ) { route in
             tvDetailPane(for: route)
-        }
-        .onAppear {
-            if !tvSelectionSeeded {
-                tvSelectionSeeded = true
-                if let first = servers.first {
-                    tvSelection = .server(first.id)
-                }
-            }
         }
     }
 
@@ -843,6 +816,7 @@ struct SettingsView: View {
                 // Playlist was deleted out from under the selection.
                 Color.appBackground
             }
+        case .category(.playlists):      tvPlaylistsPane
         case .category(.appearance):     AppearanceSettingsView()
         case .category(.appBehaviors):   AppBehaviorsSettingsView()
         case .category(.remoteControl):  RemoteControlSettingsView()
@@ -857,13 +831,98 @@ struct SettingsView: View {
         }
     }
 
+    /// The Playlists pane: the legacy root's playlist section as a detail
+    /// pane. Rows push ServerDetailView (classic push); the long-press
+    /// context menu keeps switch/reorder/edit/delete.
+    private var tvPlaylistsPane: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                if servers.isEmpty {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 12) {
+                            Image(systemName: "list.and.film")
+                                .font(.system(size: 36))
+                                .foregroundColor(.textSecondary)
+                            Text("No playlists added")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textSecondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 28)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.cardBackground))
+                } else {
+                    ForEach(servers) { server in
+                        TVSettingsNavRow(destination: ServerDetailView(server: server).trackedAsClassicSettingsChild()) {
+                            ServerListRow(server: server,
+                                          onSetActive: servers.count > 1 ? { setActiveServer(server) } : nil)
+                        }
+                        .contextMenu {
+                            if servers.count > 1 {
+                                Button {
+                                    setActiveServer(server)
+                                } label: {
+                                    if server.isActive {
+                                        Label("Active Playlist", systemImage: "checkmark.circle.fill")
+                                    } else {
+                                        Label("Use This Playlist", systemImage: "checkmark.circle")
+                                    }
+                                }
+                                .disabled(server.isActive)
+
+                                let idx = servers.firstIndex(where: { $0.id == server.id }) ?? 0
+                                if idx > 0 {
+                                    Button {
+                                        moveServer(from: idx, by: -1)
+                                    } label: {
+                                        Label("Move Up", systemImage: "arrow.up")
+                                    }
+                                }
+                                if idx < servers.count - 1 {
+                                    Button {
+                                        moveServer(from: idx, by: 1)
+                                    } label: {
+                                        Label("Move Down", systemImage: "arrow.down")
+                                    }
+                                }
+                            }
+                            Button { navPath.append(SettingsRoute.editServer(server.id)) } label: {
+                                Label("Edit", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                serverToDelete = server
+                                showDeleteAlert = true
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+                TVSettingsActionRow(icon: "plus.circle.fill",
+                                    label: "Add Playlist",
+                                    isAccent: true) {
+                    showAddServer = true
+                }
+                if !servers.isEmpty {
+                    Label("Long press for options: switch playlist, edit, or delete", systemImage: "hand.tap")
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundColor(.textPrimary.opacity(0.7))
+                        .padding(.top, 12)
+                }
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 40)
+        }
+    }
+
     /// The Sync pane: the root-inline iCloud toggles moved into a pane
     /// (Rev 2 canon amendment 2 — layout only, same copy and order),
     /// followed by the Sync Categories nav row exactly as the root had it.
     private var tvSyncPane: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
-                tvSettingsHeader("Sync")
                 TVSettingsToggleRow(
                     icon: "icloud.fill",
                     iconColor: .accentPrimary,
@@ -914,7 +973,6 @@ struct SettingsView: View {
     private var tvAboutPane: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                tvSettingsHeader("About").padding(.bottom, 12)
                 VStack(spacing: 0) {
                     tvAboutRow("Device",          value: aboutDevice)
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
