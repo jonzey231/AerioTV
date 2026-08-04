@@ -103,6 +103,21 @@ func performServerCascadeDelete(_ server: ServerConnection,
     }
 }
 
+/// Activate a playlist: stop whatever the old source is still playing
+/// (GH #22 parity), flip the isActive flags, persist, and push to iCloud.
+/// Shared by the root list activation and the Playlist Detail "Set Active"
+/// row (Rev 2 canon amendment 1) so both paths stay in lockstep.
+@MainActor
+func performSetActiveServer(_ server: ServerConnection,
+                            servers: [ServerConnection],
+                            modelContext: ModelContext) {
+    PlayerSession.shared.stop()
+    for s in servers { s.isActive = false }
+    server.isActive = true
+    try? modelContext.save()
+    SyncManager.shared.pushServers(servers)
+}
+
 struct ServerDetailView: View {
     let server: ServerConnection
     /// See SettingsView for the rationale — observing ThemeManager
@@ -218,6 +233,26 @@ struct ServerDetailView: View {
                 .listRowBackground(Color.cardBackground)
 
                 Section {
+                    // Rev 2 canon amendment 1: activation lives on the
+                    // Playlist Detail page on EVERY form factor. The rail
+                    // and sidebar models make focus/selection show the
+                    // detail, so OK-to-activate cannot survive on TV roots;
+                    // this row replaces it one focus-move away. Disabled
+                    // with a checkmark when already active, mirroring the
+                    // old tvOS root action.
+                    Button {
+                        performSetActiveServer(server, servers: Array(servers), modelContext: modelContext)
+                    } label: {
+                        HStack {
+                            Image(systemName: server.isActive ? "checkmark.circle.fill" : "power.circle")
+                                .foregroundColor(server.isActive ? .statusOnline : .accentPrimary)
+                            Text(server.isActive ? "Active Playlist" : "Set Active")
+                                .foregroundColor(server.isActive ? .statusOnline : .accentPrimary)
+                        }
+                    }
+                    .disabled(server.isActive)
+                    .listRowBackground(Color.cardBackground)
+
                     #if os(tvOS)
                     // TV: a top-right toolbar button is off the D-pad
                     // path, so editing is the first action row here

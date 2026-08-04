@@ -106,6 +106,9 @@ struct SettingsView: View {
             .onChange(of: navPath.count) { _, _ in
                 syncIsSubviewPushed()
             }
+            .onChange(of: tvFocusInDetail) { _, _ in
+                syncIsSubviewPushed()
+            }
             .onReceive(dismissStack.$depth) { _ in
                 syncIsSubviewPushed()
             }
@@ -128,7 +131,11 @@ struct SettingsView: View {
     /// value actually changes (avoids invalidating MainTabView on
     /// every navPath mutation of the same emptiness).
     private func syncIsSubviewPushed() {
-        let pushed = !navPath.isEmpty || dismissStack.depth > 0
+        // Phase 3: focus sitting in the detail pane counts as "pushed" so
+        // MainTabView routes Menu here; performOnePop then returns focus to
+        // the rail instead of popping navigation. The Menu-swallow contract
+        // with MainTabView is preserved, not replaced (plan A3).
+        let pushed = !navPath.isEmpty || dismissStack.depth > 0 || tvFocusInDetail
         if isSubviewPushed != pushed {
             isSubviewPushed = pushed
         }
@@ -142,6 +149,11 @@ struct SettingsView: View {
             dismissStack.popTop()
         } else if !navPath.isEmpty {
             navPath.removeLast()
+        } else if tvFocusInDetail {
+            // Nothing pushed: Menu in the detail pane returns focus to the
+            // rail. Menu in the rail keeps falling through to MainTabView's
+            // default (exit toward the tab bar).
+            railReturnToken += 1
         }
     }
     #endif
@@ -152,7 +164,7 @@ struct SettingsView: View {
                 Color.appBackground.ignoresSafeArea()
 
                 #if os(tvOS)
-                tvOSContent
+                tvSplitRoot
                 #else
                 List {
                     // MARK: - Playlists Section
@@ -686,16 +698,10 @@ struct SettingsView: View {
     // MARK: - Active Server
 
     private func setActiveServer(_ server: ServerConnection) {
-        // GH #22 (Android parity): switching sources stops whatever the OLD
-        // source is still playing (corner mini on tvOS, minimized/PiP on
-        // iOS). Playing stale content from a server the user just switched
-        // away from was wrong on its own, and on Android the equivalent
-        // leftover session latch caused dead tunes after the switch.
-        PlayerSession.shared.stop()
-        for s in servers { s.isActive = false }
-        server.isActive = true
-        try? modelContext.save()
-        SyncManager.shared.pushServers(servers)
+        // Delegates to the shared routine (ServerDetailView.swift) so the
+        // root activation and the detail page's Set Active row stay in
+        // lockstep (GH #22 stop-old-source behavior included).
+        performSetActiveServer(server, servers: Array(servers), modelContext: modelContext)
     }
 
     // MARK: - Reorder helpers (v1.6.17)
@@ -738,6 +744,214 @@ struct SettingsView: View {
     // MARK: - tvOS Settings Layout
 
     #if os(tvOS)
+    // MARK: - Phase 3 two-pane root (rail + detail)
+
+    /// Pane selection for the rail. Defaults to Appearance until onAppear
+    /// promotes the first playlist (plan: the detail pane is never empty).
+    @State private var tvSelection: SettingsRoute = .category(.appearance)
+    /// True while focus is in the detail pane; drives the Menu semantics.
+    @State private var tvFocusInDetail = false
+    /// Incremented to order the split view to put focus back on the rail.
+    @State private var railReturnToken = 0
+    @State private var tvSelectionSeeded = false
+
+    private var tvRailItems: [TVSettingsRailItem] {
+        var items: [TVSettingsRailItem] = []
+        for server in servers {
+            items.append(TVSettingsRailItem(
+                id: "srv-\(server.id.uuidString)",
+                route: .server(server.id),
+                label: server.name,
+                icon: server.type == .dispatcharrAPI ? "key.horizontal.fill" : "rectangle.stack.badge.play",
+                iconColor: .accentPrimary,
+                subtitle: nil,
+                isPlaylist: true,
+                isActivePlaylist: server.isActive,
+                serverID: server.id))
+        }
+        items.append(TVSettingsRailItem(
+            id: "add-playlist", route: nil, label: "Add Playlist",
+            icon: "plus.circle.fill", iconColor: .accentPrimary))
+        items.append(TVSettingsRailItem(
+            id: "appearance", route: .category(.appearance), label: "Appearance",
+            icon: "paintbrush.fill", iconColor: .accentPrimary, subtitle: "Theme, scale & category colors"))
+        items.append(TVSettingsRailItem(
+            id: "app-behaviors", route: .category(.appBehaviors), label: "App Behaviors",
+            icon: "switch.2", iconColor: .accentPrimary, subtitle: "Default tab, launch & gestures"))
+        // Remote Control: case exists, rail row stays hidden until #195
+        // (mirrors the commented root entry it replaces).
+        items.append(TVSettingsRailItem(
+            id: "multiview", route: .category(.multiview), label: "Multiview",
+            icon: "rectangle.split.2x2.fill", iconColor: .accentPrimary, subtitle: "Audio focus, tile spacing & corners"))
+        items.append(TVSettingsRailItem(
+            id: "network", route: .category(.network), label: "Network",
+            icon: "network", iconColor: .accentSecondary, subtitle: "Timeout, buffer & background refresh"))
+        items.append(TVSettingsRailItem(
+            id: "sync", route: .category(.sync), label: "Sync",
+            icon: "icloud.fill", iconColor: .accentPrimary, subtitle: "iCloud sync & categories"))
+        items.append(TVSettingsRailItem(
+            id: "dvr", route: .category(.dvr), label: "DVR",
+            icon: "record.circle", iconColor: .red, subtitle: "Recordings, buffers & storage"))
+        items.append(TVSettingsRailItem(
+            id: "developer", route: .category(.developer), label: "Developer",
+            icon: "ladybug.fill", iconColor: .accentSecondary, subtitle: "Debug logging & diagnostics"))
+        items.append(TVSettingsRailItem(
+            id: "about", route: .category(.about), label: "About",
+            icon: "info.circle.fill", iconColor: .accentPrimary, subtitle: "Version & links"))
+        return items
+    }
+
+    private var tvSplitRoot: some View {
+        TVSettingsSplitView(
+            items: tvRailItems,
+            selection: $tvSelection,
+            focusInDetail: $tvFocusInDetail,
+            railReturnToken: railReturnToken,
+            onAddPlaylist: { showAddServer = true },
+            onEditPlaylist: { id in navPath.append(SettingsRoute.editServer(id)) },
+            onDeletePlaylist: { id in
+                if let server = servers.first(where: { $0.id == id }) {
+                    serverToDelete = server
+                    showDeleteAlert = true
+                }
+            },
+            onMovePlaylist: { id, delta in
+                if let idx = servers.firstIndex(where: { $0.id == id }) {
+                    moveServer(from: idx, by: delta)
+                }
+            }
+        ) { route in
+            tvDetailPane(for: route)
+        }
+        .onAppear {
+            if !tvSelectionSeeded {
+                tvSelectionSeeded = true
+                if let first = servers.first {
+                    tvSelection = .server(first.id)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tvDetailPane(for route: SettingsRoute) -> some View {
+        switch route {
+        case .server(let id):
+            if let server = servers.first(where: { $0.id == id }) {
+                ServerDetailView(server: server)
+            } else {
+                // Playlist was deleted out from under the selection.
+                Color.appBackground
+            }
+        case .category(.appearance):     AppearanceSettingsView()
+        case .category(.appBehaviors):   AppBehaviorsSettingsView()
+        case .category(.remoteControl):  RemoteControlSettingsView()
+        case .category(.multiview):      MultiviewSettingsView()
+        case .category(.network):        NetworkSettingsView()
+        case .category(.dvr):            DVRSettingsView()
+        case .category(.syncCategories): SyncCategoriesSettingsView()
+        case .category(.developer):      DeveloperSettingsView()
+        case .category(.sync):           tvSyncPane
+        case .category(.about):          tvAboutPane
+        case .editServer, .myRecordings: Color.appBackground
+        }
+    }
+
+    /// The Sync pane: the root-inline iCloud toggles moved into a pane
+    /// (Rev 2 canon amendment 2 — layout only, same copy and order),
+    /// followed by the Sync Categories nav row exactly as the root had it.
+    private var tvSyncPane: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                tvSettingsHeader("Sync")
+                TVSettingsToggleRow(
+                    icon: "icloud.fill",
+                    iconColor: .accentPrimary,
+                    title: "iCloud Sync",
+                    subtitle: "Sync playlists, preferences, and watch progress",
+                    isOn: $iCloudSyncEnabled
+                ) { enabled in
+                    SyncManager.shared.syncSettingChanged(enabled: enabled)
+                }
+
+                if iCloudSyncEnabled {
+                    TVSettingsActionRow(
+                        icon: "arrow.triangle.2.circlepath.icloud",
+                        label: syncLastDate > 0
+                            ? "Sync Now  ·  Last synced \(lastSyncedString)"
+                            : "Sync Now"
+                    ) {
+                        SyncManager.shared.pushServers(servers, immediate: true)
+                        SyncManager.shared.pushPreferencesImmediate()
+                        if let ctx = WatchProgressManager.modelContext,
+                           let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
+                            SyncManager.shared.pushWatchProgress(all, immediate: true)
+                        }
+                        SyncManager.shared.pushReminders(immediate: true)
+                    }
+                }
+                TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild()) {
+                    SettingsRow(icon: "slider.horizontal.3",
+                                iconColor: .accentPrimary,
+                                title: "Sync Categories",
+                                subtitle: "Choose what syncs across your devices")
+                }
+                TVSettingsActionRow(
+                    icon: "trash.circle.fill",
+                    label: "Clear iCloud Data",
+                    isDestructive: true
+                ) {
+                    showClearICloudConfirm = true
+                }
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 40)
+        }
+    }
+
+    /// The About pane: the root About rows plus the memorial line
+    /// (Rev 2 canon amendment 2 — layout only).
+    private var tvAboutPane: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                tvSettingsHeader("About").padding(.bottom, 12)
+                VStack(spacing: 0) {
+                    tvAboutRow("Device",          value: aboutDevice)
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutRow("System",          value: aboutSystem)
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutRow("App Version",     value: aboutVersion)
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutRow("First Installed", value: aboutInstallDate)
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutRow("Last Updated",    value: aboutUpdateDate)
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutLinkRow("Developer Website", urlString: "https://github.com/jonzey231/AerioTV")
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    tvAboutLinkRow("Report an Issue",   urlString: "https://github.com/jonzey231/AerioTV/issues/new")
+                }
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(Color.cardBackground))
+                .padding(.bottom, 8)
+
+                Text("In loving memory of Jesse Mann aka EPG Guru")
+                    .font(.system(size: 22))
+                    .italic()
+                    .foregroundColor(.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 12)
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 40)
+        }
+        .sheet(item: $tvQRLink) { link in
+            TVQRLinkSheet(link: link)
+        }
+    }
+
+    /// Legacy stacked tvOS root, superseded by tvSplitRoot in Phase 3.
+    /// Kept during the rail bring-up as the reference for content parity;
+    /// deleted in the Phase 5 cleanup.
     private var tvOSContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
