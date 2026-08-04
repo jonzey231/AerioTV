@@ -61,7 +61,7 @@ enum WhatsNewStore {
             title: "What's new in 1.8.4",
             bullets: [
                 "Dispatcharr: deeper catch-up history. The guide now pulls past programming straight from your server's EPG sources, so catch-up reaches as far back as your provider's guide data goes instead of the couple of days Dispatcharr retains",
-                "Multiview now works in portrait: tiles stack top to bottom, and rotating the phone re-flows them side by side",
+                "Multiview now works in portrait: tiles stack top to bottom, and rotating the phone re-flows them side by side. On Apple TV, a new Stacked layout gives you the same top/bottom split from the layout picker",
                 "SVG channel logos and artwork now display",
                 "Xtream Codes: subchannels like 6.1 and 6.2 now appear with their real numbers",
                 "Fixed movie and series artwork not loading on some setups",

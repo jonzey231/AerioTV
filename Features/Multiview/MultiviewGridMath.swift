@@ -25,6 +25,14 @@ enum MultiviewLayoutMode: String, CaseIterable, Identifiable, Sendable {
     /// empty bottom-right cell filled by the 6th tile (issue #48). Falls back
     /// to `.auto` at any other count.
     case heroCorner
+    /// One full-width column: every tile stacked top to bottom, equal heights.
+    ///
+    /// In portrait this is what `.auto` already picks for most counts, but on a
+    /// TV (always landscape) nothing else produces a top/bottom split, so this
+    /// is the only way to get one there. Unlike the tables above it ignores
+    /// container shape entirely: an explicit pick should stack in either
+    /// orientation, not silently turn back into columns on rotation.
+    case stacked
 
     var id: String { rawValue }
 
@@ -37,6 +45,7 @@ enum MultiviewLayoutMode: String, CaseIterable, Identifiable, Sendable {
         case .evenGrid:   return "Even Grid"
         case .spotlight:  return "Spotlight"
         case .heroCorner: return "Hero + Corner"
+        case .stacked:    return "Stacked"
         }
     }
 
@@ -47,6 +56,7 @@ enum MultiviewLayoutMode: String, CaseIterable, Identifiable, Sendable {
         case .evenGrid:   return "rectangle.grid.2x2"
         case .spotlight:  return "rectangle.lefthalf.inset.filled"
         case .heroCorner: return "rectangle.grid.1x2"
+        case .stacked:    return "square.split.1x2"
         }
     }
 
@@ -54,11 +64,16 @@ enum MultiviewLayoutMode: String, CaseIterable, Identifiable, Sendable {
     /// `.auto` omitted (for 4/6/7/8/9 the default already IS an even grid).
     /// Returns `[]` for counts with no real choice (<= 1) so the picker hides.
     static func available(forTileCount n: Int) -> [MultiviewLayoutMode] {
+        // `.stacked` is offered up to 4 only: a 16:9 screen split 5+ ways
+        // vertically leaves each tile a sliver too short to letterbox video
+        // into. It IS offered in both orientations -- on a TV it is the only
+        // route to a top/bottom split, and in portrait it still differs from
+        // `.auto` at the hero counts.
         switch n {
         case ..<2:  return []
-        case 2:     return [.auto, .spotlight]
-        case 3:     return [.auto, .evenGrid]          // .auto (layout3) is already the spotlight shape
-        case 4:     return [.auto, .spotlight]
+        case 2:     return [.auto, .spotlight, .stacked]
+        case 3:     return [.auto, .evenGrid, .stacked] // .auto (layout3) is already the spotlight shape
+        case 4:     return [.auto, .spotlight, .stacked]
         case 5:     return [.auto, .evenGrid, .spotlight]
         case 6:     return [.auto, .heroCorner, .spotlight]
         default:    return [.auto, .spotlight]          // 7, 8, 9
@@ -292,7 +307,20 @@ enum MultiviewGridMath {
             return count == 6
                 ? heroCornerRects(container, spacing: spacing)
                 : rects(for: count, in: container, spacing: spacing)
+        case .stacked:   return stackedRects(for: count, in: container, spacing: spacing)
         }
+    }
+
+    /// One full-width column, equal heights, in reading order. Orientation
+    /// plays no part: the user asked for a stack, so it stacks either way.
+    static func stackedRects(
+        for count: Int,
+        in c: CGSize,
+        spacing: CGFloat = defaultSpacing
+    ) -> [CGRect] {
+        guard count > 0, c.width > 0, c.height > 0 else { return [] }
+        let n = min(count, 9)
+        return gridRects(cols: 1, rows: n, count: n, in: c, spacing: spacing)
     }
 
     /// The 5-tile hero layout (`layout5`) with the normally-empty bottom-right
