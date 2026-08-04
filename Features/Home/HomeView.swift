@@ -3210,6 +3210,11 @@ struct MainTabView: View {
     @ObservedObject private var favoritesStore = FavoritesStore.shared
     @ObservedObject private var vodStore = VODStore.shared
     @ObservedObject private var channelStore = ChannelStore.shared
+    /// Watched purely so `hasRecordings` recomputes the moment a capture
+    /// starts or stops — the DVR tab has to stay up for an in-flight
+    /// recording even when it belongs to a server the user has switched away
+    /// from. See `hasRecordings`.
+    @ObservedObject private var recordingCoordinator = RecordingCoordinator.shared
     /// Watches the shared GuideStore so the initial-sync loading cover
     /// can wait for the XMLTV parse (which populates category data and
     /// most of the guide content) to finish before dismissing. Without
@@ -4349,7 +4354,17 @@ struct MainTabView: View {
     ///
     /// Mirrors the per-playlist scope applied inside
     /// `MyRecordingsView` itself, so the tab and its contents agree.
+    ///
+    /// One exception to the per-server scope: a capture that is CURRENTLY
+    /// running keeps the tab up no matter which server is active. The
+    /// per-server filter is right for stored rows, but a local recording
+    /// outlives a playlist switch — the capture keeps writing in the
+    /// background — and scoping it away hid the only UI that can show or stop
+    /// it, and bounced the user off the tab mid-recording (the `.onChange(of:
+    /// hasRecordings)` redirect below). Android already ORs its live recorder
+    /// state in the same way (`LocalRecordingService.activeRecording`).
     private var hasRecordings: Bool {
+        if recordingCoordinator.isRecording { return true }
         guard let active = allServers.first(where: { $0.isActive }) ?? allServers.first else {
             return false
         }

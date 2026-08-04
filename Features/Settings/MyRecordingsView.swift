@@ -62,9 +62,17 @@ struct MyRecordingsView: View {
     /// Recordings tied to the currently-active server. Used as the
     /// source for every segment so the counts in the pill selector
     /// also reflect the per-server scope.
+    ///
+    /// A capture that is running RIGHT NOW is exempt from the per-server
+    /// scope: a local recording keeps writing across a playlist switch, and
+    /// filtering it out left the user with a DVR tab that showed nothing and
+    /// no way to stop the capture. Membership comes from the coordinator's
+    /// live session map rather than `status == .recording`, so a stale row
+    /// left by a previous run (crash mid-capture) does not leak in here.
     private var visibleRecordings: [Recording] {
-        guard let sid = currentServerID else { return [] }
-        return allRecordings.filter { $0.serverID == sid }
+        func isCapturing(_ r: Recording) -> Bool { coordinator.activeSessions[r.id] != nil }
+        guard let sid = currentServerID else { return allRecordings.filter(isCapturing) }
+        return allRecordings.filter { $0.serverID == sid || isCapturing($0) }
     }
 
     /// Terminal states always belong in Completed regardless of the clock.
