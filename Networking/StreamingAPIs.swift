@@ -3642,13 +3642,6 @@ enum DispatcharrDateValue: Decodable {
     }
 }
 
-struct DispatcharrChannel: Decodable, Identifiable {
-    let id: Int
-    let name: String
-
-    /// Dispatcharr's channel number, normalised to a display-ready
-    /// string. v1.7.x: stored as `String?` (was `Double?`) so ATSC
-    /// over-the-air `major.minor` numbers like "2.1" / "5.1" survive
 /// One EPG source from `/api/epg/sources/`. `sourceType` is "xmltv",
 /// "schedules_direct", or "dummy"; only active xmltv sources with an
 /// http(s) URL are fetchable by the app. `hasChannels` is a server-side
@@ -3670,6 +3663,13 @@ struct DispatcharrEPGSource: Decodable, Identifiable {
     }
 }
 
+struct DispatcharrChannel: Decodable, Identifiable {
+    let id: Int
+    let name: String
+
+    /// Dispatcharr's channel number, normalised to a display-ready
+    /// string. v1.7.x: stored as `String?` (was `Double?`) so ATSC
+    /// over-the-air `major.minor` numbers like "2.1" / "5.1" survive
     /// the round trip from Dispatcharr's API into the channel-list
     /// UI.
     ///
