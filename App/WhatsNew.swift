@@ -57,6 +57,30 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.4",
+            title: "What's new in 1.8.4",
+            bullets: [
+                "Dispatcharr: deeper catch-up history. The guide now pulls past programming straight from your server's EPG sources, so catch-up reaches as far back as your provider's guide data goes instead of the couple of days Dispatcharr retains",
+                "Multiview now works in portrait: tiles stack top to bottom, and rotating the phone re-flows them side by side. On Apple TV, a new Stacked layout gives you the same top/bottom split from the layout picker",
+                "SVG channel logos and artwork now display",
+                "Xtream Codes: subchannels like 6.1 and 6.2 now appear with their real numbers",
+                "Fixed movie and series artwork not loading on some setups",
+                "Faster channel tunes on Apple TV for Xtream Codes playlists",
+                "Ad-break fades and dark scenes no longer trigger periodic stream reloads",
+                "DVR: tap an in-progress recording to watch from the beginning, plus clearer program info"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.4")
+        ),
+        WhatsNewRelease(
+            version: "1.8.3",
+            title: "What's new in 1.8.3",
+            bullets: [
+                "Fixes the app holding two connections to your provider when Live Rewind is on (pausing live TV or a brief stream hiccup left a second stream running)",
+                "Fixes a memory build-up during long Live Rewind sessions on high-bitrate channels that could make the app restart"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.3")
+        ),
+        WhatsNewRelease(
             version: "1.8.2",
             title: "What's new in 1.8.2",
             bullets: [

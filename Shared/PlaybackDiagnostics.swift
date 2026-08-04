@@ -159,6 +159,18 @@ enum PlaybackDiagnostics {
                     "[PlaybackDiag] 💥 memory warning tiles=\(tiles) audioTile=\(audioID) \(ProcessMetrics.summaryLine()) mainHops=\(mainHopsInflight)",
                     category: "Playback", level: .warning
                 )
+                // GH #60 seatbelt: past ~1.5 GB the next stop is the jetsam
+                // ceiling (~2 GB on ATV 4K). Ask the live coordinator for ONE
+                // relay reload - swapping mpv's stream thread frees whatever
+                // that thread had pinned. Harmless when nothing is listening
+                // or the relay is inactive; the handler self-throttles.
+                if ProcessMetrics.residentSetSizeBytes() > 1_500_000_000 {
+                    DebugLogger.shared.log(
+                        "[PlaybackDiag] 🚨 rss over seatbelt line - requesting relay reload",
+                        category: "Playback", level: .warning
+                    )
+                    NotificationCenter.default.post(name: .aerioMemorySeatbeltReload, object: nil)
+                }
             }
         }
     }

@@ -62,9 +62,17 @@ struct MyRecordingsView: View {
     /// Recordings tied to the currently-active server. Used as the
     /// source for every segment so the counts in the pill selector
     /// also reflect the per-server scope.
+    ///
+    /// A capture that is running RIGHT NOW is exempt from the per-server
+    /// scope: a local recording keeps writing across a playlist switch, and
+    /// filtering it out left the user with a DVR tab that showed nothing and
+    /// no way to stop the capture. Membership comes from the coordinator's
+    /// live session map rather than `status == .recording`, so a stale row
+    /// left by a previous run (crash mid-capture) does not leak in here.
     private var visibleRecordings: [Recording] {
-        guard let sid = currentServerID else { return [] }
-        return allRecordings.filter { $0.serverID == sid }
+        func isCapturing(_ r: Recording) -> Bool { coordinator.activeSessions[r.id] != nil }
+        guard let sid = currentServerID else { return allRecordings.filter(isCapturing) }
+        return allRecordings.filter { $0.serverID == sid || isCapturing($0) }
     }
 
     /// Terminal states always belong in Completed regardless of the clock.
@@ -355,10 +363,13 @@ struct MyRecordingsView: View {
             if rec.destination == .dispatcharrServer,
                rec.dispatcharrFileURL != nil,
                rec.remoteRecordingID != nil {
+                // Row tap now starts from the beginning; this menu leads with
+                // jumping to the live edge instead (matches Android's
+                // "Start at Live").
                 Button {
                     playServerRecording(rec)
                 } label: {
-                    Label("Watch Live", systemImage: "play.fill")
+                    Label("Start at Live", systemImage: "play.fill")
                 }
                 // Issue #29: play the in-progress recording from the start
                 // (the /file/ partial) rather than the live edge.
@@ -508,7 +519,11 @@ struct MyRecordingsView: View {
         if rec.destination == .local, let path = rec.localFilePath {
             playRecording(rec, path: path)
         } else if rec.destination == .dispatcharrServer, rec.remoteRecordingID != nil {
-            playServerRecording(rec)
+            // Android parity: tapping an in-progress recording starts it FROM
+            // THE BEGINNING (not the live edge). Completed rows already play
+            // from the start of the file, so fromStart only matters here for
+            // the in-progress HLS route (emits X-Aerio-Start-From-Beginning).
+            playServerRecording(rec, fromStart: rec.isInProgress)
         }
     }
 
@@ -836,14 +851,17 @@ private struct RecordingRow: View {
                 }
 
                 if canWatchLive {
-                    Label("Watch Live", systemImage: "play.circle.fill")
+                    // Row tap now starts from the beginning, so the pill no
+                    // longer says "Watch Live" (that's the long-press menu's
+                    // "Start at Live"). Keep the red in-progress tint.
+                    Label("In Progress", systemImage: "record.circle")
                         .font(.caption2.bold())
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(Color.red.opacity(0.18))
                         .foregroundColor(.red)
                         .clipShape(Capsule())
-                        .accessibilityHint("Tap the row to watch this recording while it captures")
+                        .accessibilityHint("Tap to watch from the beginning; long-press for Start at Live, Stop, or Delete.")
                 }
             }
 

@@ -494,6 +494,20 @@ final class ServerConnection {
         return normalizedLocalURL
     }
 
+    /// BOTH of this server's own hosts (public base + LAN local), lowercased.
+    /// The poster/image trust boundary must accept either at ANY time:
+    /// poster URLs are built at fetch time while `effectiveBaseURL` flips
+    /// between the two per TVLANProbe, so a single-host-at-one-instant
+    /// comparison strips auth headers / rejects the server's own LAN-IP
+    /// covers whenever fetch-time and check-time routing diverge (the
+    /// v1.7.9 blank-VOD-covers regression, Discord 2026-07-23).
+    var ownHosts: Set<String> {
+        var hosts = Set<String>()
+        if let h = URL(string: normalizedBaseURL)?.host?.lowercased() { hosts.insert(h) }
+        if !localURL.isEmpty, let h = URL(string: normalizedLocalURL)?.host?.lowercased() { hosts.insert(h) }
+        return hosts
+    }
+
     /// Returns localEPGURL when the server is reachable on the local
     /// network (per `TVLANProbe`), otherwise returns epgURL.
     var effectiveEPGURL: String {

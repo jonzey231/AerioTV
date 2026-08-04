@@ -94,7 +94,10 @@ final class SyncManager: ObservableObject {
         "categoryColor.music",
         // Live TV group sort mode (default/alphabetical/manual). The
         // manual order itself rides syncStringArrayKeys (order-preserving).
-        "channelGroupOrder.sortMode"
+        "channelGroupOrder.sortMode",
+        // TV guide group-selection surface (pills/sidebar), per-device-type.
+        // Mutually exclusive with the pills row. See RemoteControlStore.
+        RemoteControlStore.groupSelectorKey
     ]
     /// Data-typed keys (Codable JSON blobs). `customCategoryColors.v1`
     /// holds the user-defined `[CustomCategory]` list from
@@ -102,7 +105,11 @@ final class SyncManager: ObservableObject {
     /// sync lane because it's stored as Data in UserDefaults, not
     /// a plain String/Bool/Number.
     private let syncDataKeys: [String] = [
-        CategoryColor.customCategoriesKey
+        CategoryColor.customCategoriesKey,
+        // TV remote-control button map (JSON blob). Per-device-type: the `.tv`
+        // key syncs across the user's Apple TVs only. Older clients / phones
+        // ignore the unknown key. See RemoteControlStore.
+        RemoteControlStore.mapKey
     ]
     private let syncBoolKeys = [
         "useCustomAccent", "preferAVPlayer", "bgRefreshEnabled",
@@ -124,7 +131,10 @@ final class SyncManager: ObservableObject {
         "categoryBucketEnabled.documentary", "categoryBucketEnabled.drama",
         "categoryBucketEnabled.comedy",      "categoryBucketEnabled.reality",
         "categoryBucketEnabled.educational", "categoryBucketEnabled.scifi",
-        "categoryBucketEnabled.music"
+        "categoryBucketEnabled.music",
+        // TV "Play Channels In" mini-player toggle, per-device-type. See
+        // RemoteControlStore.
+        RemoteControlStore.tuneInMiniKey
     ]
     private let syncDoubleKeys  = ["networkTimeout"]
     private let syncIntKeys = [
@@ -1455,6 +1465,12 @@ extension Notification.Name {
     /// press cannot overshoot left into the leading Guide/Search/List controls.
     static let guideLeftHoldBegan = Notification.Name("guideLeftHoldBegan")
     static let guideLeftHoldEnded = Notification.Name("guideLeftHoldEnded")
+    /// Docked group sidebar (Group Selection: Sidebar Menu) closed. userInfo:
+    /// `rebind` (Bool - true when the group changed, so re-resolve a fresh
+    /// now-cell; false = restore the origin cell) + `returnID` (String? origin
+    /// program id). EPGGuideView runs its retry-assert focus loop on receipt so
+    /// Right/Back never orphan focus onto the nav tab.
+    static let guideGroupSidebarDismissed = Notification.Name("guideGroupSidebarDismissed")
     /// #42: a guide long-press Right while a corner mini-player is minimized.
     /// `Began` posts when the hold crosses the threshold (close the mini);
     /// `Ended` posts on release. Between them EPGGuideView pins its timeline

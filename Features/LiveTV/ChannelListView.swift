@@ -207,6 +207,38 @@ struct ChannelListView: View {
     // Left-hold detector sets it true.
     @State private var leftHoldPinningAll = false
 
+    // Docked group sidebar (Remote Control "Group Selection: Sidebar Menu",
+    // default off). Declared UNCONDITIONALLY (the guide branch is shared with
+    // the iPad guide); the tvOS-only behavior is gated inside the members below.
+    @State private var guideSidebarOpen = false
+    @State private var guideSidebarReturnProgramID: String?
+    @ObservedObject private var remoteStore = RemoteControlStore.shared
+
+    /// Sidebar-mode active (tvOS only): hides the pills row + arms short-Left
+    /// on the now-airing column. Mutually exclusive with the group pills.
+    private var guideSidebarSelectorActive: Bool {
+        #if os(tvOS)
+        return remoteStore.useGroupSidebar
+        #else
+        return false
+        #endif
+    }
+
+    /// Close the docked group sidebar and restore focus to the guide grid. On
+    /// tvOS, `.guideGroupSidebarDismissed` runs EPGGuideView's retry-assert
+    /// focus loop so Right/Back land back on the origin cell (rebind:false) or
+    /// the newly-filtered now-cell (rebind:true = group changed).
+    private func closeGuideSidebar(rebind: Bool) {
+        withAnimation(.easeOut(duration: 0.28)) { guideSidebarOpen = false }
+        #if os(tvOS)
+        NotificationCenter.default.post(
+            name: .guideGroupSidebarDismissed,
+            object: nil,
+            userInfo: ["rebind": rebind, "returnID": guideSidebarReturnProgramID as Any]
+        )
+        #endif
+    }
+
     #if os(tvOS)
     @State private var showSearchField = false
     /// tvOS guide focus target. Normally `nil` so the focus engine
@@ -634,29 +666,58 @@ struct ChannelListView: View {
                         capturedNaturalTop = newValue
                     }
 
-                VStack(spacing: 0) {
-                    // Compact-chrome honors the user's hide-filter preference even
-                    // in the iPad Guide layout (iPad itself is gated by the flag,
-                    // so this only activates on actual iPhones in landscape).
-                    if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
-                        && !compactChromeHidesFilterBar {
-                        groupFilterBar
-                            .padding(.vertical, 10)
-                            #if os(tvOS)
-                            .focusSection()
-                            #endif
-                    }
-                    EPGGuideView(
-                        channels: filteredChannels,
-                        servers: Array(servers),
-                        onSelectChannel: { item in
-                            startPlayback(item)
-                        }
-                    )
+                HStack(spacing: 0) {
                     #if os(tvOS)
-                    .focusSection()
+                    // Docked group sidebar (Group Selection: Sidebar Menu). The
+                    // guide shifts right beside it; Right/Back close it.
+                    if guideSidebarOpen {
+                        GuideGroupSidebarPane(
+                            groups: ["All"] + visibleGroups,
+                            selectedToken: selectedGroup,
+                            onSelect: { token in
+                                selectedGroup = token
+                                closeGuideSidebar(rebind: true)
+                            },
+                            onDismiss: { closeGuideSidebar(rebind: false) }
+                        )
+                        .transition(.move(edge: .leading))
+                        .focusSection()
+                    }
                     #endif
+                    VStack(spacing: 0) {
+                        // Compact-chrome honors the user's hide-filter preference even
+                        // in the iPad Guide layout (iPad itself is gated by the flag,
+                        // so this only activates on actual iPhones in landscape).
+                        // Sidebar mode hides the pills (mutually exclusive selectors).
+                        if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
+                            && !compactChromeHidesFilterBar
+                            && !guideSidebarSelectorActive {
+                            groupFilterBar
+                                .padding(.vertical, 10)
+                                #if os(tvOS)
+                                .focusSection()
+                                #endif
+                        }
+                        EPGGuideView(
+                            channels: filteredChannels,
+                            servers: Array(servers),
+                            onSelectChannel: { item in
+                                startPlayback(item)
+                            },
+                            sidebarOpen: guideSidebarOpen,
+                            onRequestGroupSidebar: { programID in
+                                guideSidebarReturnProgramID = programID
+                                withAnimation(.easeOut(duration: 0.28)) { guideSidebarOpen = true }
+                            }
+                        )
+                        #if os(tvOS)
+                        .focusSection()
+                        #endif
+                    }
                 }
+                #if os(tvOS)
+                .animation(.easeOut(duration: 0.28), value: guideSidebarOpen)
+                #endif
                 .padding(.top, miniPlayerTopInset(naturalTopAbsolute: capturedNaturalTop))
                 .animation(.spring(response: 0.35), value: capturedNaturalTop)
                 .animation(.spring(response: 0.35), value: nowPlaying.isMinimized)
@@ -1546,6 +1607,22 @@ struct ChannelListView: View {
         } else {
             nowPlaying.startPlaying(item, headers: playerHeaders())
         }
+        applyTuneInMiniIfNeeded()
+    }
+
+    /// "Play Channels In: Mini Player" (Remote Control settings, tvOS-only,
+    /// default off): a browse tune-in promotes to the corner mini after the
+    /// channel seeds, keeping the guide visible. Resume / deep-link / cast
+    /// paths don't route through here, so they stay fullscreen. No-op on
+    /// iPhone (bottom-bar mini) and whenever the setting is off.
+    private func applyTuneInMiniIfNeeded() {
+        #if os(tvOS)
+        guard RemoteControlStore.shared.tuneInMini else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            nowPlaying.minimize()
+        }
+        #endif
     }
 
     // MARK: - Deep Link Handler
@@ -3616,6 +3693,22 @@ struct FavoritesView: View {
         } else {
             nowPlaying.startPlaying(item, headers: playerHeaders())
         }
+        applyTuneInMiniIfNeeded()
+    }
+
+    /// "Play Channels In: Mini Player" (Remote Control settings, tvOS-only,
+    /// default off): a browse tune-in promotes to the corner mini after the
+    /// channel seeds, keeping the guide visible. Resume / deep-link / cast
+    /// paths don't route through here, so they stay fullscreen. No-op on
+    /// iPhone (bottom-bar mini) and whenever the setting is off.
+    private func applyTuneInMiniIfNeeded() {
+        #if os(tvOS)
+        guard RemoteControlStore.shared.tuneInMini else { return }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            nowPlaying.minimize()
+        }
+        #endif
     }
 }
 
@@ -3892,7 +3985,8 @@ struct CachedLogoImage: View {
             }
             do {
                 let data = try await LogoFetcher.fetch(url)
-                if let img = UIImage(data: data) {
+                // GH #61: decode accepts SVG logos in addition to bitmaps.
+                if let img = AerioImageDecoding.decode(data) {
                     LogoCache.shared.store(img, for: key)
                     uiImage = img
                 }

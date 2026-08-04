@@ -756,6 +756,17 @@ final class GuideStore: ObservableObject {
                 windowEnd: windowEnd,
                 replaceExisting: replaceExisting
             )
+            // Catch-up depth: after the grid lands, layer the server's
+            // own upstream XMLTV sources for deep history. Runs OUTSIDE
+            // fetchDispatcharr because its beginBatch/endBatch must
+            // commit before fetchXMLTVFromURL writes `programs` (a
+            // write between begin and end would be lost to the batch
+            // re-assignment).
+            await layerDispatcharrUpstreamSources(
+                server: server,
+                channels: channels,
+                windowEnd: windowEnd
+            )
         case .xtreamCodes:
             // Xtream: still need per-channel fetching with batches
             let initialBatchSize = 40
@@ -1159,6 +1170,84 @@ final class GuideStore: ObservableObject {
         return didRefresh
     }
 
+    /// Catch-up depth: Dispatcharr's grid only retains a couple of days
+    /// of already-aired programming, so Direct Connect users could not
+    /// browse catch-up content older than that even when Guide History
+    /// (Edit Server) allows up to 30 days. The server knows where its
+    /// guide comes from though: `/api/epg/sources/` lists the XMLTV
+    /// feeds assigned to channels, and those upstream feeds usually
+    /// carry a much deeper past window. Fetch each active xmltv source
+    /// directly and layer it on the already-merged grid exactly like
+    /// the manual Custom XMLTV URL override, but with a retention-deep
+    /// windowStart so history actually survives the merge's time
+    /// filter. The bridged `epg_data_id -> EPGData.tvg_id` keys are
+    /// passed through because upstream feeds key programmes by exactly
+    /// those ids, which routinely differ from a channel's own tvg_id.
+    ///
+    /// Per-source failures are silent: sources that point at LAN-only
+    /// paths or file mounts on the server simply are not reachable from
+    /// the app, and the grid data the user already has is never at
+    /// risk. No Dispatcharr auth headers are sent to these URLs (they
+    /// are third-party providers; the API key must not leak to them).
+    private func layerDispatcharrUpstreamSources(server: ServerConnection,
+                                                 channels: [ChannelDisplayItem],
+                                                 windowEnd: Date) async {
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                  auth: .apiKey(server.effectiveApiKey),
+                                  userAgent: server.effectiveUserAgent,
+                                  authMode: server.dispatcharrHeaderMode,
+                                  serverID: server.id,
+                                  savedUsername: server.dispatcharrCredentialType == .usernamePassword
+                                      ? server.username : nil)
+        let sources: [DispatcharrEPGSource]
+        do {
+            sources = try await api.getEPGSources()
+        } catch {
+            debugLog("📺 Dispatcharr upstream-source list failed (\(error.localizedDescription)); catch-up depth stays grid-only")
+            return
+        }
+        let explicit = server.dispatcharrXMLTVURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        var seen = Set<String>()
+        let urls: [URL] = sources.compactMap { src in
+            guard src.isActive ?? true,
+                  src.sourceType == "xmltv",
+                  src.hasChannels != false,
+                  let raw = src.url?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty, raw != explicit,
+                  let u = URL(string: raw),
+                  let scheme = u.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  seen.insert(raw).inserted else { return nil }
+            return u
+        }
+        guard !urls.isEmpty else { return }
+        // Bridge channels to the tvg_id the upstream feed keys by (same
+        // map the grid merge uses; see fetchDispatcharr). Failure just
+        // degrades matching to raw tvg_id / number / UUID.
+        var bridgedTVGIDs: [String: [String]] = [:]
+        if let epgMap = try? await api.getAllEPGData() {
+            for ch in channels {
+                guard let epgID = ch.dispatcharrEPGDataID,
+                      let tvg = epgMap[epgID], !tvg.isEmpty else { continue }
+                let key = tvg.lowercased()
+                if bridgedTVGIDs[key]?.contains(ch.id) != true {
+                    bridgedTVGIDs[key, default: []].append(ch.id)
+                }
+            }
+        }
+        let historyStart = Date().addingTimeInterval(-GuideStore.activeRetentionSeconds())
+        for url in urls.prefix(8) {
+            debugLog("📺 [EPG source=dispatcharr upstream-source] host=\(url.host ?? "?") historyDays=\(GuideStore.activeRetentionDays())")
+            await fetchXMLTVFromURL(url: url,
+                                    channels: channels,
+                                    windowStart: historyStart,
+                                    windowEnd: windowEnd,
+                                    extraTVGIDs: bridgedTVGIDs,
+                                    categoryServerID: server.id.uuidString,
+                                    replaceExisting: false)
+        }
+    }
+
     // MARK: - Xtream Codes
     private func fetchXtream(server: ServerConnection, channels: [ChannelDisplayItem],
                               windowStart: Date, windowEnd: Date,
@@ -1460,6 +1549,7 @@ final class GuideStore: ObservableObject {
     func fetchXMLTVFromURL(url: URL, channels: [ChannelDisplayItem],
                                     windowStart: Date, windowEnd: Date,
                                     headers: [String: String] = [:],
+                                    extraTVGIDs: [String: [String]] = [:],
                                     categoryServerID: String,
                                     replaceExisting: Bool = false) async -> Bool {
         let inFlightKey = InFlightXMLTVKey(
@@ -1486,6 +1576,7 @@ final class GuideStore: ObservableObject {
             return await performXMLTVFetch(url: url, channels: channels,
                                            windowStart: windowStart, windowEnd: windowEnd,
                                            headers: headers,
+                                           extraTVGIDs: extraTVGIDs,
                                            categoryServerID: categoryServerID,
                                            replaceExisting: replaceExisting)
         }
@@ -1544,6 +1635,7 @@ final class GuideStore: ObservableObject {
     private func performXMLTVFetch(url: URL, channels: [ChannelDisplayItem],
                                    windowStart: Date, windowEnd: Date,
                                    headers: [String: String],
+                                   extraTVGIDs: [String: [String]] = [:],
                                    categoryServerID: String,
                                    replaceExisting: Bool) async -> Bool {
         // v1.6.22: log the actual error instead of swallowing it via
@@ -1565,6 +1657,11 @@ final class GuideStore: ObservableObject {
             if !ch.number.isEmpty { knownChannelKeys.insert(ch.number.lowercased()) }
             if let uuid = ch.uuid, !uuid.isEmpty { knownChannelKeys.insert(uuid.lowercased()) }
         }
+        // Catch-up depth: bridged `epg_data_id -> EPGData.tvg_id` keys from
+        // the caller (layerDispatcharrUpstreamSources). Upstream feeds key
+        // programmes by exactly these ids, which routinely differ from a
+        // channel's own tvg_id. Already lowercased by the builder.
+        for key in extraTVGIDs.keys { knownChannelKeys.insert(key) }
         let parsed: [ParsedEPGProgram]
         do {
             parsed = try await XMLTVParser.fetchAndParse(
@@ -1603,6 +1700,15 @@ final class GuideStore: ObservableObject {
             let key = tvg.lowercased()
             if tvgIDToChannelIDsBuild[key]?.contains(ch.id) != true {
                 tvgIDToChannelIDsBuild[key, default: []].append(ch.id)
+            }
+        }
+        // Catch-up depth: merge the caller's bridged EPGData tvg_id keys so
+        // upstream-source programmes route to channels whose own tvg_id
+        // differs from the EPGData row they map to (about 25% of channels
+        // on a real Dispatcharr instance; see fetchDispatcharr's bridge).
+        for (key, ids) in extraTVGIDs {
+            for id in ids where tvgIDToChannelIDsBuild[key]?.contains(id) != true {
+                tvgIDToChannelIDsBuild[key, default: []].append(id)
             }
         }
         let tvgIDToChannelIDs = tvgIDToChannelIDsBuild
@@ -2317,6 +2423,14 @@ struct EPGGuideView: View {
     let channels: [ChannelDisplayItem]
     let servers: [ServerConnection]
     let onSelectChannel: (ChannelDisplayItem) -> Void
+    /// Docked group sidebar (Group Selection: Sidebar Menu) state, threaded
+    /// from ChannelListView. When true the grid cells go non-focusable so the
+    /// sidebar owns focus and Right can't escape into the guide (tvOS analog of
+    /// Android's onPreviewKeyEvent-consumes-Right). Default false = no change.
+    var sidebarOpen: Bool = false
+    /// Called with the focused now-airing program id when a short-Left on the
+    /// now column should open the group sidebar (sidebar mode only).
+    var onRequestGroupSidebar: ((String) -> Void)? = nil
 
     // Observe the shared GuideStore so its loading state is visible to
     // MainTabView's initial-sync loading cover (see HomeView's
@@ -2840,6 +2954,20 @@ struct EPGGuideView: View {
                 guard focusedProgramID != nil else { return }
                 switch direction {
                 case .left:
+                    #if os(tvOS)
+                    // Sidebar mode: a short-Left on the now column (timeline not
+                    // panned into history) opens the docked group sidebar
+                    // instead of scrolling earlier. A HOLD-Left is consumed by
+                    // the window-level LeftHoldHostView before this fires, so a
+                    // hold can never also open the sidebar. Once browsing
+                    // history, short-Left keeps paging earlier.
+                    if RemoteControlStore.shared.useGroupSidebar, !sidebarOpen,
+                       let fpid = focusedProgramID, let request = onRequestGroupSidebar,
+                       !timelineIsAwayFromNow() {
+                        request(fpid)
+                        return
+                    }
+                    #endif
                     withAnimation(.easeOut(duration: 0.3)) {
                         horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
                     }
@@ -3070,6 +3198,33 @@ struct EPGGuideView: View {
                         focusedProgramID = target
                         try? await Task.sleep(nanoseconds: 70_000_000)
                         debugLog("🧭 [GuideFocus] assert(return) attempt=\(attempt) set=\(target) got=\(focusedProgramID ?? "nil")")
+                        if focusedProgramID == target { break }
+                    }
+                }
+            }
+            // Docked group sidebar closed: re-assert focus onto the guide grid
+            // (the cells became focusable again the same render pass) so Right /
+            // Back never orphan focus onto the Live TV nav tab. Reuses the same
+            // resetFocus + retry-assert loop as forceGuideFocus.
+            .onReceive(
+                NotificationCenter.default.publisher(for: .guideGroupSidebarDismissed)
+            ) { note in
+                let rebind = (note.userInfo?["rebind"] as? Bool) ?? false
+                let returnID = note.userInfo?["returnID"] as? String
+                Task { @MainActor in
+                    // Let the pane tear down + the grid cells become focusable.
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                    // Unchanged group → restore the exact origin cell. Group
+                    // changed → the origin cell is likely gone, so land on a
+                    // fresh now-cell of the newly-filtered list (never the List
+                    // toggle).
+                    let target: String? = (!rebind ? returnID : nil)
+                        ?? resolveFocusProgramID(preferringChannel: channels.first?.id)
+                    guard let target else { resetFocus(in: guideFocusNS); return }
+                    resetFocus(in: guideFocusNS)
+                    for _ in 0..<8 {
+                        focusedProgramID = target
+                        try? await Task.sleep(nanoseconds: 70_000_000)
                         if focusedProgramID == target { break }
                     }
                 }
@@ -3486,7 +3641,8 @@ struct EPGGuideView: View {
             onSelect: onSelectChannel,
             onMultiviewIntent: { handleMultiviewIntent(channel: $0) },
             onWatchCatchup: { ch, gp in handleWatchCatchup(channel: ch, prog: gp) },
-            focusedProgramID: $focusedProgramID
+            focusedProgramID: $focusedProgramID,
+            sidebarOpen: sidebarOpen
         )
         .offset(x: x, y: 0)
         #else
@@ -4040,6 +4196,10 @@ private struct GuideProgramButton: View {
     /// `.focused(focusedProgramID, equals: prog.id)` so the guide can
     /// programmatically focus this cell for focus restore.
     var focusedProgramID: FocusState<String?>.Binding
+    /// True while the docked group sidebar is open: makes this cell
+    /// non-focusable so the sidebar owns focus and a Right press can't 2D-move
+    /// back into the guide (the tvOS analog of Android consuming Right).
+    var sidebarOpen: Bool = false
     #endif
     // Access ReminderManager directly — @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
@@ -4336,7 +4496,7 @@ private struct GuideProgramButton: View {
             // release), so tap and long-press stay separate gestures, as on
             // iOS. isFocused drives the highlight; focusedProgramID is the
             // programmatic restore target.
-            .focusable()
+            .focusable(!sidebarOpen)
             .focused($isFocused)
             .focused(focusedProgramID, equals: prog.id)
             .onTapGesture {
@@ -4346,7 +4506,14 @@ private struct GuideProgramButton: View {
                     onSelect(channelItem)
                 }
             }
-            .onLongPressGesture(minimumDuration: 0.4) { showCtxDialog = true }
+            .onLongPressGesture(minimumDuration: 0.35) {
+                // Guide "Select (hold)" slot. The confirmationDialog below IS
+                // the program menu (okLong = .programInfo by default); a user
+                // who maps the slot to Do Nothing suppresses it.
+                if RemoteControlStore.shared.guideAction(.okLong) != .none {
+                    showCtxDialog = true
+                }
+            }
             .confirmationDialog(prog.title,
                                 isPresented: $showCtxDialog,
                                 titleVisibility: .visible) {

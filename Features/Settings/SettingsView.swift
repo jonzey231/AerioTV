@@ -543,6 +543,7 @@ struct SettingsView: View {
                 switch route {
                 case "appearance":      AppearanceSettingsView()
                 case "app-behaviors":   AppBehaviorsSettingsView()
+                case "remote-control":  RemoteControlSettingsView()
                 case "multiview":       MultiviewSettingsView()
                 case "network":         NetworkSettingsView()
                 case "dvr-settings": DVRSettingsView()
@@ -874,6 +875,14 @@ struct SettingsView: View {
                                         iconColor: .accentPrimary, subtitle: "Default tab, launch & gestures") {
                         navPath.append("app-behaviors")
                     }
+                    // Remote Control settings entry: HIDDEN for 1.8.4. The
+                    // screen and store work, but the player-side executor
+                    // (#195) is not built yet, so While Watching remaps would
+                    // silently do nothing. Re-enable when #195 lands.
+                    // TVSettingsNavButton(label: "Remote Control", icon: "av.remote",
+                    //                     iconColor: .accentPrimary, subtitle: "Customize what the Siri Remote buttons do") {
+                    //     navPath.append("remote-control")
+                    // }
                     TVSettingsNavButton(label: "Multiview", icon: "rectangle.split.2x2.fill",
                                         iconColor: .accentPrimary, subtitle: "Audio focus, tile spacing & corners") {
                         navPath.append("multiview")

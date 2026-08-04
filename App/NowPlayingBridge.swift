@@ -400,7 +400,10 @@ final class NowPlayingBridge {
                 let data = try await LogoFetcher.fetch(url)
                 guard !Task.isCancelled else { return }
                 #if canImport(UIKit)
-                guard let original = UIImage(data: data) else { return }
+                // GH #61: decode accepts SVG logos too. A raw UIImage(data:)
+                // here left lockscreen / Dynamic Island artwork blank for
+                // exactly the channels the SVG fix was meant to rescue.
+                guard let original = AerioImageDecoding.decode(data) else { return }
 
                 // Downscale to a lockscreen-sized thumbnail. 512pt matches
                 // the largest pixel dimension MPNowPlayingInfoCenter's

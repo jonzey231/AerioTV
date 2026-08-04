@@ -480,28 +480,25 @@ struct XtreamCodesAPI {
 
     /// Build ordered stream URL attempts for a channel.
     /// Xtream standard: /live/user/pass/stream_id.ext
-    /// tvOS: .m3u8 first (AVPlayer needs HLS). iOS: .ts first (MPV handles it natively).
+    /// .ts first on BOTH platforms (GH #59 perf: 3-4s XC tunes vs near-instant
+    /// Direct Connect). The old tvOS .m3u8-first order dated from the
+    /// AVPlayer-only era: classifyStreamURL trusts the extension, so the .m3u8
+    /// URL locked the AVPlayer-direct-HLS engine with NO probe - but
+    /// Dispatcharr's XC endpoint serves raw MPEG-TS for .m3u8 requests, and
+    /// every tvOS tune burned the ~4s AVPlayer stall watchdog before falling
+    /// back to mpv. The .ts URL classifies .mpegTS, hits the cached per-host
+    /// probe, and routes straight to mpv - Direct Connect speed. Genuine-HLS
+    /// panels still play via the .m3u8 fallback in the retry ladder.
     /// Note: requires Dispatcharr stream profile set to "Redirect" to work correctly.
     func streamURLs(for stream: XtreamStream) -> [URL] {
         var urls: [URL] = []
         let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        #if os(tvOS)
-        // HLS first — AVPlayer (only engine on tvOS) needs .m3u8
-        if let url = URL(string: "\(base)/live/\(username)/\(password)/\(stream.streamID).m3u8") {
-            urls.append(url)
-        }
-        if let url = URL(string: "\(base)/live/\(username)/\(password)/\(stream.streamID).ts") {
-            urls.append(url)
-        }
-        #else
-        // MPEG-TS first — MPV (primary engine on iOS) handles .ts natively
         if let url = URL(string: "\(base)/live/\(username)/\(password)/\(stream.streamID).ts") {
             urls.append(url)
         }
         if let url = URL(string: "\(base)/live/\(username)/\(password)/\(stream.streamID).m3u8") {
             urls.append(url)
         }
-        #endif
         // direct_source field if server provides it
         if let direct = stream.directSource, !direct.isEmpty, let url = URL(string: direct) {
             urls.append(url)
@@ -690,7 +687,11 @@ struct XtreamStream: Decodable, Identifiable {
     let epgChannelID: String?
     let added: String?
     let categoryID: String?
-    let num: Int?
+    /// GH #59: the panel's channel number, preserved VERBATIM as a string.
+    /// Subchannels are decimal ("6.1", "18.2"); the old `num: Int?` decode
+    /// nil'ed every one of them and the list-index fallback then hid the
+    /// fact - same class of bug the M3U path fixed in d1ac87a.
+    let channelNumber: String?
     let allowedOutputFormats: [String]?  // e.g. ["ts"], ["ts","m3u8"]
     let directSource: String?            // sometimes set to a direct HLS URL
     /// Catch-up: 1 when the provider archives this channel. Real panels
@@ -728,7 +729,19 @@ struct XtreamStream: Decodable, Identifiable {
         epgChannelID = try? c.decode(String.self, forKey: .epgChannelID)
         added = try? c.decode(String.self, forKey: .added)
         categoryID = try? c.decode(String.self, forKey: .categoryID)
-        num = try? c.decode(Int.self, forKey: .num)
+        // GH #59: tolerant `num` ladder (Double flattening whole numbers,
+        // then Int, then trimmed String) so decimal subchannel numbers
+        // survive. Panels send all three shapes.
+        if let d = try? c.decode(Double.self, forKey: .num) {
+            channelNumber = d == d.rounded() ? String(Int(d)) : String(d)
+        } else if let i = try? c.decode(Int.self, forKey: .num) {
+            channelNumber = String(i)
+        } else if let s = try? c.decode(String.self, forKey: .num) {
+            let trimmed = s.trimmingCharacters(in: .whitespaces)
+            channelNumber = trimmed.isEmpty ? nil : trimmed
+        } else {
+            channelNumber = nil
+        }
         allowedOutputFormats = try? c.decode([String].self, forKey: .allowedOutputFormats)
         directSource = try? c.decode(String.self, forKey: .directSource)
         if let i = try? c.decode(Int.self, forKey: .tvArchive) {
@@ -745,7 +758,10 @@ struct XtreamStream: Decodable, Identifiable {
         } else {
             tvArchiveDuration = 0
         }
-        id = num ?? streamID
+        // GH #59: identity is the panel's stream_id, never the channel
+        // number - the old `num ?? streamID` mixed two ID spaces and could
+        // collide Identifiable rows.
+        id = streamID
     }
 
 
@@ -2038,6 +2054,18 @@ struct DispatcharrAPI {
     /// VOD". XC's equivalent (`get_vod_streams`) returns the full
     /// list in one call, which is why XC users never saw this hang.
     /// Returns 0 if the count field is missing — a non-zero return
+    /// Fetches the EPG sources configured on the Dispatcharr server
+    /// from `/api/epg/sources/` (list permission is IsStandardUser,
+    /// so any API key can read it). Catch-up depth: Dispatcharr's
+    /// own grid only retains a couple of days of history, but the
+    /// upstream XMLTV feeds it ingests usually carry a much deeper
+    /// past window, so GuideStore fetches those URLs directly and
+    /// layers them on the grid the same way the manual Custom XMLTV
+    /// URL override is layered.
+    func getEPGSources() async throws -> [DispatcharrEPGSource] {
+        try await fetchAllPages(DispatcharrEPGSource.self, firstPath: "/api/epg/sources/")
+    }
+
     /// value here is only used cosmetically to render the stage's
     /// "Loaded N movies" detail line.
     func getVODMovieCount() async throws -> Int {
@@ -3621,6 +3649,27 @@ struct DispatcharrChannel: Decodable, Identifiable {
     /// Dispatcharr's channel number, normalised to a display-ready
     /// string. v1.7.x: stored as `String?` (was `Double?`) so ATSC
     /// over-the-air `major.minor` numbers like "2.1" / "5.1" survive
+/// One EPG source from `/api/epg/sources/`. `sourceType` is "xmltv",
+/// "schedules_direct", or "dummy"; only active xmltv sources with an
+/// http(s) URL are fetchable by the app. `hasChannels` is a server-side
+/// annotation (does any channel's EPGData point at this source); it is
+/// optional because older Dispatcharr builds may not include it.
+struct DispatcharrEPGSource: Decodable, Identifiable {
+    let id: Int
+    let name: String?
+    let sourceType: String?
+    let url: String?
+    let isActive: Bool?
+    let hasChannels: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, url
+        case sourceType = "source_type"
+        case isActive = "is_active"
+        case hasChannels = "has_channels"
+    }
+}
+
     /// the round trip from Dispatcharr's API into the channel-list
     /// UI.
     ///
