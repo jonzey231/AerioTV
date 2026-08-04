@@ -7,6 +7,22 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		5E7788A6AC6F15F4804AC5D7 /* TVSettingsRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */; };
+		5E77623636D6D388D3926ECA /* TVSettingsRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */; };
+		5E77169DCEFE3D1DACB4112E /* SettingsRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77857F44BAC0D4211F7D69 /* SettingsRow.swift */; };
+		5E77CB4F7943348FDE99CCFD /* SettingsRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77857F44BAC0D4211F7D69 /* SettingsRow.swift */; };
+		5E773CA46CF0A0073940E923 /* SettingsDismissStack.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77ECBC5F6EB1762A66D576 /* SettingsDismissStack.swift */; };
+		5E77DF7AE0FF15F76DB4D57E /* SettingsDismissStack.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77ECBC5F6EB1762A66D576 /* SettingsDismissStack.swift */; };
+		5E77AA8EB47EC6574E23FA2F /* ServerDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77CB834788CB7F421D46C0 /* ServerDetailView.swift */; };
+		5E7772EEE93BBDDD729CF540 /* ServerDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77CB834788CB7F421D46C0 /* ServerDetailView.swift */; };
+		5E77ABB81C8F17518EA013C0 /* EditServerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E777A2C7FE24BBFC1EF4FC8 /* EditServerSheet.swift */; };
+		5E77D1FF02570FFD946FDC84 /* EditServerSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E777A2C7FE24BBFC1EF4FC8 /* EditServerSheet.swift */; };
+		5E77A45D6034610CF103D54C /* EditServerPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77E0C0A7B7AE8C1313FBDA /* EditServerPage.swift */; };
+		5E778352E3A2D293826976EF /* EditServerPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77E0C0A7B7AE8C1313FBDA /* EditServerPage.swift */; };
+		5E776BD28835120B3F9F9FEC /* NetworkSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E776D8BC0A0AEA6CAAC54AC /* NetworkSettingsView.swift */; };
+		5E77023BB2E05CCAA24A0D92 /* NetworkSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E776D8BC0A0AEA6CAAC54AC /* NetworkSettingsView.swift */; };
+		5E7705A1E430A8350B1D294A /* CategoryColorEditors.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E775331398B45DCE888553D /* CategoryColorEditors.swift */; };
+		5E7792F2D2A8E88D01FDB45E /* CategoryColorEditors.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E775331398B45DCE888553D /* CategoryColorEditors.swift */; };
 		000A4A7BFF25A66945137BB3 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
 		07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7DA867EB45CC3896632152B6 /* RecordProgramSheet.swift */; };
 		0823BE6E3373A83D3FEBC32F /* Components.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D1DD47CBF4B1FE912B0AF08 /* Components.swift */; };
@@ -251,6 +267,14 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVSettingsRows.swift; sourceTree = "<group>"; };
+		5E77857F44BAC0D4211F7D69 /* SettingsRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsRow.swift; sourceTree = "<group>"; };
+		5E77ECBC5F6EB1762A66D576 /* SettingsDismissStack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDismissStack.swift; sourceTree = "<group>"; };
+		5E77CB834788CB7F421D46C0 /* ServerDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerDetailView.swift; sourceTree = "<group>"; };
+		5E777A2C7FE24BBFC1EF4FC8 /* EditServerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditServerSheet.swift; sourceTree = "<group>"; };
+		5E77E0C0A7B7AE8C1313FBDA /* EditServerPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditServerPage.swift; sourceTree = "<group>"; };
+		5E776D8BC0A0AEA6CAAC54AC /* NetworkSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkSettingsView.swift; sourceTree = "<group>"; };
+		5E775331398B45DCE888553D /* CategoryColorEditors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CategoryColorEditors.swift; sourceTree = "<group>"; };
 		00F4EE98C1564A7E3A5DD86B /* SearchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchView.swift; sourceTree = "<group>"; };
 		03AB1BA15FC7FAB4754ECE75 /* Pods-Aerio_iOS-frameworks-Debug-output-files.xcfilelist */ = {isa = PBXFileReference; lastKnownFileType = text.xcfilelist; path = "Pods-Aerio_iOS-frameworks-Debug-output-files.xcfilelist"; sourceTree = "<group>"; };
 		08B4D4146C07D85405524861 /* AerioApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AerioApp.swift; sourceTree = "<group>"; };
@@ -433,6 +457,16 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		5E7754FE5E34995DE10F87DF /* Components */ = {
+			isa = PBXGroup;
+			children = (
+				5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */,
+				5E77857F44BAC0D4211F7D69 /* SettingsRow.swift */,
+				5E77ECBC5F6EB1762A66D576 /* SettingsDismissStack.swift */,
+			);
+			path = Components;
+			sourceTree = "<group>";
+		};
 		11EC69739059FC54CFF03581 /* iOS */ = {
 			isa = PBXGroup;
 			children = (
@@ -717,6 +751,12 @@
 			isa = PBXGroup;
 			children = (
 				2C791BC8B23CD3EAA3E65BE1 /* AppearanceSettingsView.swift */,
+				5E7754FE5E34995DE10F87DF /* Components */,
+				5E77CB834788CB7F421D46C0 /* ServerDetailView.swift */,
+				5E777A2C7FE24BBFC1EF4FC8 /* EditServerSheet.swift */,
+				5E77E0C0A7B7AE8C1313FBDA /* EditServerPage.swift */,
+				5E776D8BC0A0AEA6CAAC54AC /* NetworkSettingsView.swift */,
+				5E775331398B45DCE888553D /* CategoryColorEditors.swift */,
 				BB1234567890ABCDEF123456 /* DeveloperSettingsView.swift */,
 				9C5D08BD1430E78C26390734 /* SettingsView.swift */,
 				0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */,
@@ -1134,6 +1174,14 @@
 				5B9C3D4E2F6A718903BB5C6D /* SyncManager.swift in Sources */,
 				5B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift in Sources */,
 				FD65778E5A378FA718D5D0E2 /* SettingsView.swift in Sources */,
+				5E77623636D6D388D3926ECA /* TVSettingsRows.swift in Sources */,
+				5E77CB4F7943348FDE99CCFD /* SettingsRow.swift in Sources */,
+				5E77DF7AE0FF15F76DB4D57E /* SettingsDismissStack.swift in Sources */,
+				5E7772EEE93BBDDD729CF540 /* ServerDetailView.swift in Sources */,
+				5E77D1FF02570FFD946FDC84 /* EditServerSheet.swift in Sources */,
+				5E778352E3A2D293826976EF /* EditServerPage.swift in Sources */,
+				5E77023BB2E05CCAA24A0D92 /* NetworkSettingsView.swift in Sources */,
+				5E7792F2D2A8E88D01FDB45E /* CategoryColorEditors.swift in Sources */,
 				8021E4CA54981EDD0F04AE72 /* SplashView.swift in Sources */,
 				D9B2C4CC2563512B2741AF83 /* TVShowsView.swift in Sources */,
 				E7C08D85CEAB0B3D8E268FBA /* ThemeManager.swift in Sources */,
@@ -1231,6 +1279,14 @@
 				6B9C3D4E2F6A718903BB5C6D /* SyncManager.swift in Sources */,
 				6B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift in Sources */,
 				2DD98124C6F98D06EFED419A /* SettingsView.swift in Sources */,
+				5E7788A6AC6F15F4804AC5D7 /* TVSettingsRows.swift in Sources */,
+				5E77169DCEFE3D1DACB4112E /* SettingsRow.swift in Sources */,
+				5E773CA46CF0A0073940E923 /* SettingsDismissStack.swift in Sources */,
+				5E77AA8EB47EC6574E23FA2F /* ServerDetailView.swift in Sources */,
+				5E77ABB81C8F17518EA013C0 /* EditServerSheet.swift in Sources */,
+				5E77A45D6034610CF103D54C /* EditServerPage.swift in Sources */,
+				5E776BD28835120B3F9F9FEC /* NetworkSettingsView.swift in Sources */,
+				5E7705A1E430A8350B1D294A /* CategoryColorEditors.swift in Sources */,
 				867C07594A685FB5BDCA5BB3 /* SplashView.swift in Sources */,
 				76842216BD4822B7380FDF05 /* TVShowsView.swift in Sources */,
 				8AC25DFB7121C1AEBCE36729 /* ThemeManager.swift in Sources */,
