@@ -539,31 +539,31 @@ struct SettingsView: View {
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
             #if os(tvOS)
-            .navigationDestination(for: String.self) { route in
+            .navigationDestination(for: SettingsRoute.self) { route in
                 switch route {
-                case "appearance":      AppearanceSettingsView()
-                case "app-behaviors":   AppBehaviorsSettingsView()
-                case "remote-control":  RemoteControlSettingsView()
-                case "multiview":       MultiviewSettingsView()
-                case "network":         NetworkSettingsView()
-                case "dvr-settings": DVRSettingsView()
-                case "sync-categories": SyncCategoriesSettingsView()
-                case "developer":  DeveloperSettingsView()
-                case "edit-server":
-                    if let server = serverToEdit {
+                case .category(.appearance):     AppearanceSettingsView()
+                case .category(.appBehaviors):   AppBehaviorsSettingsView()
+                case .category(.remoteControl):  RemoteControlSettingsView()
+                case .category(.multiview):      MultiviewSettingsView()
+                case .category(.network):        NetworkSettingsView()
+                case .category(.dvr):            DVRSettingsView()
+                case .category(.syncCategories): SyncCategoriesSettingsView()
+                case .category(.developer):      DeveloperSettingsView()
+                // Phase 3 pane hosts; nothing pushes these yet.
+                case .category(.sync), .category(.about):
+                    EmptyView()
+                case .editServer(let id):
+                    // The route carries the server id, so editing the SAME
+                    // server twice in a row just pushes a fresh route value.
+                    // This deletes the old serverToEdit onChange bridge and
+                    // its onDisappear-reset re-push hack.
+                    if let server = servers.first(where: { $0.id == id }) {
                         EditServerPage(server: server)
-                            // Reset serverToEdit when this page pops, so editing
-                            // the SAME server again is a real nil -> server change
-                            // that re-fires the .onChange push below. Without it,
-                            // serverToEdit stayed set to that server, the second
-                            // Edit tap was a no-op change, and the page never
-                            // pushed (you had to edit a different server first).
-                            // EditServerPage only calls dismiss() (no navPath
-                            // sub-routes or sheets), so onDisappear fires solely
-                            // on the real pop, never spuriously.
-                            .onDisappear { serverToEdit = nil }
                     }
-                default:           EmptyView()
+                case .server, .myRecordings:
+                    // Rail/sidebar targets from Phase 3 on; ServerDetailView
+                    // and MyRecordingsView remain classic pushes today.
+                    EmptyView()
                 }
             }
             #endif
@@ -589,13 +589,7 @@ struct SettingsView: View {
             } message: {
                 Text("This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
             }
-            #if os(tvOS)
-            .onChange(of: serverToEdit) { _, server in
-                if let server {
-                    navPath.append("edit-server")
-                }
-            }
-            #else
+            #if !os(tvOS)
             .sheet(item: $serverToEdit) { server in
                 EditServerSheet(server: server)
             }
@@ -830,7 +824,7 @@ struct SettingsView: View {
                                         }
                                     }
                                 }
-                                Button { serverToEdit = server } label: {
+                                Button { navPath.append(SettingsRoute.editServer(server.id)) } label: {
                                     Label("Edit", systemImage: "pencil")
                                 }
                                 Button(role: .destructive) {
@@ -869,11 +863,11 @@ struct SettingsView: View {
                 VStack(spacing: 8) {
                     TVSettingsNavButton(label: "Appearance", icon: "paintbrush.fill",
                                         iconColor: .accentPrimary, subtitle: "Theme, scale & category colors") {
-                        navPath.append("appearance")
+                        navPath.append(SettingsRoute.category(.appearance))
                     }
                     TVSettingsNavButton(label: "App Behaviors", icon: "switch.2",
                                         iconColor: .accentPrimary, subtitle: "Default tab, launch & gestures") {
-                        navPath.append("app-behaviors")
+                        navPath.append(SettingsRoute.category(.appBehaviors))
                     }
                     // Remote Control settings entry: HIDDEN for 1.8.4. The
                     // screen and store work, but the player-side executor
@@ -881,15 +875,15 @@ struct SettingsView: View {
                     // silently do nothing. Re-enable when #195 lands.
                     // TVSettingsNavButton(label: "Remote Control", icon: "av.remote",
                     //                     iconColor: .accentPrimary, subtitle: "Customize what the Siri Remote buttons do") {
-                    //     navPath.append("remote-control")
+                    //     navPath.append(SettingsRoute.category(.remoteControl))
                     // }
                     TVSettingsNavButton(label: "Multiview", icon: "rectangle.split.2x2.fill",
                                         iconColor: .accentPrimary, subtitle: "Audio focus, tile spacing & corners") {
-                        navPath.append("multiview")
+                        navPath.append(SettingsRoute.category(.multiview))
                     }
                     TVSettingsNavButton(label: "Network", icon: "network",
                                         iconColor: .accentSecondary, subtitle: "Timeout, buffer & background refresh") {
-                        navPath.append("network")
+                        navPath.append(SettingsRoute.category(.network))
                     }
                 }
 
@@ -952,14 +946,14 @@ struct SettingsView: View {
                 tvSettingsHeader("DVR").padding(.top, 36)
                 TVSettingsNavButton(label: "DVR", icon: "record.circle",
                                     iconColor: .red, subtitle: "Recordings, buffers & storage") {
-                    navPath.append("dvr-settings")
+                    navPath.append(SettingsRoute.category(.dvr))
                 }
 
                 // MARK: Developer
                 tvSettingsHeader("Developer").padding(.top, 36)
                 TVSettingsNavButton(label: "Developer", icon: "ladybug.fill",
                                     iconColor: .accentSecondary, subtitle: "Debug logging & diagnostics") {
-                    navPath.append("developer")
+                    navPath.append(SettingsRoute.category(.developer))
                 }
 
                 // MARK: About
