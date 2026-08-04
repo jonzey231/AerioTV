@@ -92,6 +92,14 @@ enum MultiviewLayoutMode: String, CaseIterable, Identifiable, Sendable {
 /// | 8 | 3×3 with bottom-center gap                             |
 /// | 9 | 3×3                                                    |
 ///
+/// The table above describes a LANDSCAPE (or square) container. A container
+/// taller than it is wide takes the portrait path instead: the hero shapes
+/// transpose (big tile on top, followers underneath) and the uniform grids
+/// re-shape to stack, so a 2-up splits top/bottom rather than left/right.
+/// See "MARK: - Portrait". Rotation needs no extra plumbing — the caller
+/// (`MultiviewLayoutView`) already re-runs this math from a `GeometryReader`,
+/// so a new container size picks the matching table on the spot.
+///
 /// All rects are computed against the container origin (0,0) and sized
 /// so that adjacent rect edges are separated by `spacing`. Negative or
 /// zero containers return an empty array (defensive — avoids NaN
@@ -219,6 +227,7 @@ enum MultiviewGridMath {
               container.width > 0,
               container.height > 0 else { return [] }
         let n = min(count, 9)
+        if isPortrait(container) { return portraitRects(for: n, in: container, spacing: spacing) }
         switch n {
         case 1: return layout1(container)
         case 2: return layout2(container, spacing: spacing)
@@ -246,6 +255,13 @@ enum MultiviewGridMath {
         guard count > 0, container.width > 0, container.height > 0 else { return [] }
         let n = min(count, 9)
         if n == 1 { return layout1(container) }
+        // Portrait: hero on TOP (full width, 2/3 height) with the followers
+        // in a row beneath. The transpose keeps the hero at index 0 and the
+        // followers in order, which is the contract `MultiviewLayoutView`
+        // relies on when it assigns rect[0] to the spotlighted tile.
+        if isPortrait(container) {
+            return transposed(container) { spotlightRects(for: n, in: $0, spacing: spacing) }
+        }
         let bigW = (container.width - spacing) * 2 / 3
         let smallW = container.width - bigW - spacing
         let smallCount = n - 1
@@ -284,6 +300,7 @@ enum MultiviewGridMath {
     /// hero → (2,0) → (2,1) → (0,2) → (1,2) → (2,2).
     static func heroCornerRects(_ c: CGSize, spacing: CGFloat = defaultSpacing) -> [CGRect] {
         guard c.width > 0, c.height > 0 else { return [] }
+        if isPortrait(c) { return transposed(c) { heroCornerRects($0, spacing: spacing) } }
         var rects = layout5(c, spacing: spacing)
         let cellW = (c.width  - 2 * spacing) / 3
         let cellH = (c.height - 2 * spacing) / 3
@@ -304,15 +321,36 @@ enum MultiviewGridMath {
     ) -> [CGRect] {
         guard count > 0, c.width > 0, c.height > 0 else { return [] }
         let n = min(count, 9)
-        let rows = max(1, Int(Double(n).squareRoot()))
-        let cols = Int((Double(n) / Double(rows)).rounded(.up))
+        let rows: Int, cols: Int
+        if isPortrait(c) {
+            // A tall container gets its shape from `bestFitGrid` instead, so
+            // the tiles stack rather than squeezing 16:9 video into narrow
+            // full-height columns.
+            (cols, rows) = bestFitGrid(n: n, in: c, spacing: spacing)
+        } else {
+            rows = max(1, Int(Double(n).squareRoot()))
+            cols = Int((Double(n) / Double(rows)).rounded(.up))
+        }
+        return gridRects(cols: cols, rows: rows, count: n, in: c, spacing: spacing)
+    }
+
+    /// `cols × rows` in reading order with a centered partial final row.
+    /// Shared by `evenGridRects` and the portrait tables.
+    private static func gridRects(
+        cols: Int,
+        rows: Int,
+        count: Int,
+        in c: CGSize,
+        spacing: CGFloat
+    ) -> [CGRect] {
         let w = (c.width  - CGFloat(cols - 1) * spacing) / CGFloat(cols)
         let h = (c.height - CGFloat(rows - 1) * spacing) / CGFloat(rows)
         var rects: [CGRect] = []
-        rects.reserveCapacity(n)
-        var remaining = n
+        rects.reserveCapacity(count)
+        var remaining = count
         for row in 0..<rows {
             let inRow = min(cols, remaining)
+            guard inRow > 0 else { break }
             // Center a partial final row.
             let rowW = CGFloat(inRow) * w + CGFloat(inRow - 1) * spacing
             let xStart = (c.width - rowW) / 2
@@ -326,6 +364,77 @@ enum MultiviewGridMath {
             remaining -= inRow
         }
         return rects
+    }
+
+    // MARK: - Portrait
+
+    /// True when the container is taller than it is wide. A square container
+    /// counts as landscape, which is also what guarantees `transposed` cannot
+    /// recurse: it swaps the axes before re-entering, so the inner call always
+    /// sees a landscape-or-square container.
+    static func isPortrait(_ c: CGSize) -> Bool { c.height > c.width }
+
+    /// Build a landscape table in an axis-swapped container, flip every rect
+    /// back, and re-sort into reading order.
+    ///
+    /// Geometry transposes cleanly — a hero on the left becomes a hero on top.
+    /// The ORDER does not: transposing walks a grid column-major, so tile 2 of
+    /// a 5-up would land bottom-left instead of top-right. Sorting by (y, x)
+    /// restores the reading order the landscape table had, which is what keeps
+    /// each tile in the same relative slot across a rotation.
+    private static func transposed(_ c: CGSize, _ build: (CGSize) -> [CGRect]) -> [CGRect] {
+        build(CGSize(width: c.height, height: c.width))
+            .map { CGRect(x: $0.minY, y: $0.minX, width: $0.height, height: $0.width) }
+            .sorted { a, b in
+                // 1pt of slop so tiles sharing a row survive rounding.
+                abs(a.minY - b.minY) > 1 ? a.minY < b.minY : a.minX < b.minX
+            }
+    }
+
+    /// Portrait counterpart of the per-N landscape table.
+    ///
+    /// The asymmetric hero shapes (3, 5) transpose: the big tile moves from the
+    /// left edge to the top and its followers wrap underneath. Everything else
+    /// is a uniform grid shaped by `bestFitGrid`, so 2 tiles split top/bottom
+    /// on a phone rather than standing up as two skinny full-height columns.
+    private static func portraitRects(for n: Int, in c: CGSize, spacing: CGFloat) -> [CGRect] {
+        switch n {
+        case 1: return layout1(c)
+        case 3: return transposed(c) { layout3($0, spacing: spacing) }
+        case 5: return transposed(c) { layout5($0, spacing: spacing) }
+        default:
+            let (cols, rows) = bestFitGrid(n: n, in: c, spacing: spacing)
+            return gridRects(cols: cols, rows: rows, count: n, in: c, spacing: spacing)
+        }
+    }
+
+    /// Pick the `cols × rows` split that renders the most video.
+    ///
+    /// Candidates are scored by the area a 16:9 frame actually paints inside
+    /// one cell, letterboxing included — the metric that matters, because a
+    /// cell far off the source aspect is mostly black bars. On a 393×780 phone
+    /// that resolves 2 tiles to 1×2 and 4 tiles to 1×4; a squarer iPad
+    /// container still resolves 4 to 2×2.
+    private static func bestFitGrid(n: Int, in c: CGSize, spacing: CGFloat) -> (cols: Int, rows: Int) {
+        let targetAspect: CGFloat = 16.0 / 9.0
+        var best = (cols: 1, rows: max(1, n))
+        var bestArea: CGFloat = -1
+        for rows in 1...max(1, n) {
+            let cols = Int((Double(n) / Double(rows)).rounded(.up))
+            // Reject shapes whose final row would be entirely empty (4 tiles
+            // in 3 rows of 2), which throw away a row's worth of height.
+            guard cols * (rows - 1) < n else { continue }
+            let w = (c.width  - CGFloat(cols - 1) * spacing) / CGFloat(cols)
+            let h = (c.height - CGFloat(rows - 1) * spacing) / CGFloat(rows)
+            guard w > 0, h > 0 else { continue }
+            let videoW = min(w, h * targetAspect)
+            let area = videoW * (videoW / targetAspect)
+            if area > bestArea {
+                bestArea = area
+                best = (cols, rows)
+            }
+        }
+        return best
     }
 
     // MARK: - Per-N layouts
