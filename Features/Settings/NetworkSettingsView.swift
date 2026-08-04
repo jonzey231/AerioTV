@@ -96,7 +96,7 @@ struct NetworkSettingsView: View {
     private var tvOSBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                tvSection("Request Timeout") {
+                SettingsSection("Request Timeout", style: .plain) {
                     ForEach([5, 10, 15, 30, 60], id: \.self) { secs in
                         TVSettingsSelectionRow(
                             label: "\(secs) seconds",
@@ -106,7 +106,7 @@ struct NetworkSettingsView: View {
                     }
                 }
 
-                tvSection("Buffer Size") {
+                SettingsSection("Buffer Size", style: .plain) {
                     ForEach(bufferOptions) { opt in
                         TVSettingsSelectionRow(
                             label: opt.label,
@@ -117,7 +117,7 @@ struct NetworkSettingsView: View {
                     }
                 }
 
-                tvSection("EPG Window") {
+                SettingsSection("EPG Window", style: .plain) {
                     let options: [(label: String, hours: Int)] = [
                         ("6 hours",  6),
                         ("12 hours", 12),
@@ -148,18 +148,6 @@ struct NetworkSettingsView: View {
         }
     }
 
-    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title.uppercased())
-                .font(.system(size: 22, weight: .bold))
-                .foregroundColor(.textTertiary)
-                .tracking(1)
-                .padding(.leading, 20)
-            VStack(alignment: .leading, spacing: 8) {
-                content()
-            }
-        }
-    }
     #endif
 
     // MARK: - iOS Body

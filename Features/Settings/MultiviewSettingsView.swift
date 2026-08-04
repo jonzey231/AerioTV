@@ -135,7 +135,7 @@ struct MultiviewSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
                 // Audio Focus Indicator
-                tvSection("Audio Focus Indicator") {
+                SettingsSection("Audio Focus Indicator", style: .plain) {
                     ForEach(MultiviewAudioFocusStyle.allCases) { style in
                         TVSettingsSelectionRow(
                             label: style.displayName,
@@ -147,7 +147,7 @@ struct MultiviewSettingsView: View {
                 }
 
                 // Padding Between Tiles
-                tvSection("Spacing") {
+                SettingsSection("Spacing", style: .plain) {
                     TVSettingsToggleRow(
                         icon: "rectangle.split.2x1",
                         iconColor: theme.accent,
@@ -159,7 +159,7 @@ struct MultiviewSettingsView: View {
                 }
 
                 // Tile Corners
-                tvSection("Tile Corners") {
+                SettingsSection("Tile Corners", style: .plain) {
                     TVSettingsSelectionRow(
                         icon: "square",
                         iconColor: theme.accent,
@@ -180,17 +180,5 @@ struct MultiviewSettingsView: View {
         }
     }
 
-    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title.uppercased())
-                .font(.system(size: 22, weight: .bold))
-                .foregroundColor(.textTertiary)
-                .tracking(1)
-                .padding(.leading, 20)
-            VStack(alignment: .leading, spacing: 8) {
-                content()
-            }
-        }
-    }
     #endif
 }

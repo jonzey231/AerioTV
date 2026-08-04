@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		5E783C4A3D74F99510FB9AD5 /* SettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */; };
+		5E781BAFD54382D25F834CDD /* SettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */; };
+		5E78653AC914E3F01DD09F7B /* SettingsMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E78541B1A57691D92ACD32B /* SettingsMetrics.swift */; };
+		5E78D9FC554EA8FD1F8E2855 /* SettingsMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E78541B1A57691D92ACD32B /* SettingsMetrics.swift */; };
 		5E7788A6AC6F15F4804AC5D7 /* TVSettingsRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */; };
 		5E77623636D6D388D3926ECA /* TVSettingsRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */; };
 		5E77169DCEFE3D1DACB4112E /* SettingsRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E77857F44BAC0D4211F7D69 /* SettingsRow.swift */; };
@@ -267,6 +271,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSection.swift; sourceTree = "<group>"; };
+		5E78541B1A57691D92ACD32B /* SettingsMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsMetrics.swift; sourceTree = "<group>"; };
 		5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVSettingsRows.swift; sourceTree = "<group>"; };
 		5E77857F44BAC0D4211F7D69 /* SettingsRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsRow.swift; sourceTree = "<group>"; };
 		5E77ECBC5F6EB1762A66D576 /* SettingsDismissStack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDismissStack.swift; sourceTree = "<group>"; };
@@ -460,6 +466,8 @@
 		5E7754FE5E34995DE10F87DF /* Components */ = {
 			isa = PBXGroup;
 			children = (
+				5E786BF6077FA6A633F43AD7 /* SettingsSection.swift */,
+				5E78541B1A57691D92ACD32B /* SettingsMetrics.swift */,
 				5E77D250DD29BDCAEAA1E4F3 /* TVSettingsRows.swift */,
 				5E77857F44BAC0D4211F7D69 /* SettingsRow.swift */,
 				5E77ECBC5F6EB1762A66D576 /* SettingsDismissStack.swift */,
@@ -1174,6 +1182,8 @@
 				5B9C3D4E2F6A718903BB5C6D /* SyncManager.swift in Sources */,
 				5B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift in Sources */,
 				FD65778E5A378FA718D5D0E2 /* SettingsView.swift in Sources */,
+				5E781BAFD54382D25F834CDD /* SettingsSection.swift in Sources */,
+				5E78D9FC554EA8FD1F8E2855 /* SettingsMetrics.swift in Sources */,
 				5E77623636D6D388D3926ECA /* TVSettingsRows.swift in Sources */,
 				5E77CB4F7943348FDE99CCFD /* SettingsRow.swift in Sources */,
 				5E77DF7AE0FF15F76DB4D57E /* SettingsDismissStack.swift in Sources */,
@@ -1279,6 +1289,8 @@
 				6B9C3D4E2F6A718903BB5C6D /* SyncManager.swift in Sources */,
 				6B9C3D4E2F6A718903BB5C7D /* SyncFlags.swift in Sources */,
 				2DD98124C6F98D06EFED419A /* SettingsView.swift in Sources */,
+				5E783C4A3D74F99510FB9AD5 /* SettingsSection.swift in Sources */,
+				5E78653AC914E3F01DD09F7B /* SettingsMetrics.swift in Sources */,
 				5E7788A6AC6F15F4804AC5D7 /* TVSettingsRows.swift in Sources */,
 				5E77169DCEFE3D1DACB4112E /* SettingsRow.swift in Sources */,
 				5E773CA46CF0A0073940E923 /* SettingsDismissStack.swift in Sources */,

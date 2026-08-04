@@ -150,7 +150,7 @@ struct SyncCategoriesSettingsView: View {
     private var tvOSBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                tvSection("Categories") {
+                SettingsSection("Categories", style: .compactCard) {
                     ForEach(SyncCategory.allCases) { category in
                         TVSettingsToggleRow(
                             icon: category.icon,
@@ -164,7 +164,7 @@ struct SyncCategoriesSettingsView: View {
                     }
                 }
 
-                tvSection("Delete from iCloud") {
+                SettingsSection("Delete from iCloud", style: .compactCard) {
                     ForEach(SyncCategory.allCases) { category in
                         TVSettingsActionRow(
                             icon: "icloud.slash",
@@ -186,18 +186,6 @@ struct SyncCategoriesSettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private func tvSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title)
-                .font(.title3.weight(.semibold))
-                .foregroundColor(.textSecondary)
-                .padding(.leading, 12)
-            VStack(spacing: 0) { content() }
-                .background(Color.cardBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        }
-    }
     #endif
 
     // MARK: - Copy

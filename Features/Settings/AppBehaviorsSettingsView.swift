@@ -579,7 +579,7 @@ struct AppBehaviorsSettingsView: View {
     private var tvOSBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                tvSection("Launch") {
+                SettingsSection("Launch", style: .card) {
                     TVSettingsToggleRow(
                         icon: "bolt.horizontal",
                         iconColor: theme.accent,
@@ -598,7 +598,7 @@ struct AppBehaviorsSettingsView: View {
                 }
 
                 // Default Tab
-                tvSection("Default Landing Tab") {
+                SettingsSection("Default Landing Tab", style: .card) {
                     ForEach(AppTab.allCases, id: \.self) { tab in
                         TVSettingsSelectionRow(
                             icon: tab.icon,
@@ -615,7 +615,7 @@ struct AppBehaviorsSettingsView: View {
                 // iPad honors) via the same key; Automatic keeps each form
                 // factor on its own default. The in-screen List / Guide pill
                 // stays session-only and never writes here.
-                tvSection("Default Live TV View") {
+                SettingsSection("Default Live TV View", style: .card) {
                     ForEach(Self.liveTVViewOptions, id: \.self) { option in
                         TVSettingsSelectionRow(
                             icon: liveTVViewIcon(option),
@@ -627,7 +627,7 @@ struct AppBehaviorsSettingsView: View {
                     }
                 }
 
-                tvSection("Guide") {
+                SettingsSection("Guide", style: .card) {
                     TVSettingsToggleRow(
                         icon: "tag",
                         iconColor: theme.accent,
@@ -643,7 +643,7 @@ struct AppBehaviorsSettingsView: View {
                         .padding(.top, 4)
                 }
 
-                tvSection("Live Rewind") {
+                SettingsSection("Live Rewind", style: .card) {
                     TVSettingsToggleRow(
                         icon: "gobackward.30",
                         iconColor: theme.accent,
@@ -659,7 +659,7 @@ struct AppBehaviorsSettingsView: View {
                 }
 
                 if liveRewindEnabled {
-                    tvSection("Keep Available") {
+                    SettingsSection("Keep Available", style: .card) {
                         tvSteppedSegmentsRow(
                             title: "Rewind up to",
                             values: Self.rewindDepthSteps,
@@ -677,7 +677,7 @@ struct AppBehaviorsSettingsView: View {
                     }
                 }
 
-                tvSection("Channel Flip Gesture") {
+                SettingsSection("Channel Flip Gesture", style: .card) {
                     TVSettingsToggleRow(
                         icon: "arrow.up.and.down",
                         iconColor: theme.accent,
@@ -693,7 +693,7 @@ struct AppBehaviorsSettingsView: View {
                         .padding(.top, 4)
                 }
 
-                tvSection("Stream Buffer") {
+                SettingsSection("Stream Buffer", style: .card) {
                     StreamBufferSlider(value: $streamBufferSeconds)
 
                     Text("Extra buffer to smooth jitter and stutter on live streams from any source. Higher is smoother but adds delay behind live. 0 keeps the lowest latency. Applies to the next channel you tune. Press left or right on the Siri Remote to adjust.")
@@ -703,7 +703,7 @@ struct AppBehaviorsSettingsView: View {
                         .padding(.top, 4)
                 }
 
-                tvSection("Stream Recovery") {
+                SettingsSection("Stream Recovery", style: .card) {
                     TVSettingsToggleRow(
                         icon: "arrow.clockwise.circle",
                         iconColor: theme.accent,
@@ -713,7 +713,7 @@ struct AppBehaviorsSettingsView: View {
                     ) { _ in }
                 }
 
-                tvSection("Program Posters") {
+                SettingsSection("Program Posters", style: .card) {
                     TVSettingsToggleRow(
                         icon: "photo.on.rectangle.angled",
                         iconColor: theme.accent,
@@ -775,24 +775,6 @@ struct AppBehaviorsSettingsView: View {
     /// Section wrapper matching `AppearanceSettingsView.tvAppearanceSection`
     /// shape so this submenu visually matches the rest of tvOS Settings.
     @ViewBuilder
-    private func tvSection<Content: View>(
-        _ title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(title)
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundColor(.textPrimary)
-            VStack(spacing: 12) {
-                content()
-            }
-            .padding(20)
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.cardBackground)
-            )
-        }
-    }
 
     /// tvOS discrete ladder row (2026-07-11 settings redesign): title
     /// left, one focusable segment per stop (the app's established tvOS

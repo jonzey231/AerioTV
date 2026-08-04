@@ -20,7 +20,7 @@ import SwiftUI
 ///   run today (omit rather than advertise a dead button); these mirror
 ///   the Android curation exactly.
 ///
-/// The section scaffold (the `tvSection` helper, the `TVSettings*Row`
+/// The section scaffold (`SettingsSection`, the `TVSettings*Row`
 /// components) is copied from `AppBehaviorsSettingsView` so this page
 /// matches the rest of tvOS Settings. Picking an action pushes a plain
 /// `List` of selection rows rather than a native `Picker` wheel, which
@@ -128,7 +128,7 @@ struct RemoteControlSettingsView: View {
 
     /// 1. Where a channel starts playing (bound to `tuneInMini`).
     private var playChannelsInSection: some View {
-        tvSection("Play Channels In") {
+        SettingsSection("Play Channels In", style: .card) {
             TVSettingsSelectionRow(
                 label: "Full Screen",
                 isSelected: !store.tuneInMini,
@@ -145,7 +145,7 @@ struct RemoteControlSettingsView: View {
 
     /// 2. How groups are picked in the guide (bound to `useGroupSidebar`).
     private var groupSelectionSection: some View {
-        tvSection("Group Selection") {
+        SettingsSection("Group Selection", style: .card) {
             TVSettingsSelectionRow(
                 label: "Top Group Pills",
                 isSelected: !store.useGroupSidebar,
@@ -162,7 +162,7 @@ struct RemoteControlSettingsView: View {
 
     /// 3. One row per user-facing player slot.
     private var whileWatchingSection: some View {
-        tvSection("While Watching") {
+        SettingsSection("While Watching", style: .card) {
             ForEach(Self.playerSlots, id: \.self) { slot in
                 playerSlotRow(slot)
             }
@@ -172,7 +172,7 @@ struct RemoteControlSettingsView: View {
 
     /// 4. Guide-context holds (short arrows are navigation, not shown).
     private var inTheGuideSection: some View {
-        tvSection("In the TV Guide") {
+        SettingsSection("In the TV Guide", style: .card) {
             ForEach(Self.guideSlots, id: \.self) { slot in
                 guideSlotRow(slot)
             }
@@ -182,7 +182,7 @@ struct RemoteControlSettingsView: View {
 
     /// 5. Dedicated remote buttons, player context.
     private var additionalButtonsSection: some View {
-        tvSection("Additional Buttons") {
+        SettingsSection("Additional Buttons", style: .card) {
             ForEach(Self.additionalPlayerSlots, id: \.self) { slot in
                 playerSlotRow(slot)
             }
@@ -192,7 +192,7 @@ struct RemoteControlSettingsView: View {
 
     /// 6. Guarded reset.
     private var resetSection: some View {
-        tvSection("Reset") {
+        SettingsSection("Reset", style: .card) {
             TVSettingsActionRow(
                 icon: "arrow.counterclockwise",
                 label: "Reset to Defaults",
@@ -262,27 +262,8 @@ struct RemoteControlSettingsView: View {
 
     // MARK: - Section scaffold (copied from AppBehaviorsSettingsView)
 
-    /// Section wrapper matching `AppBehaviorsSettingsView.tvSection` so
+    /// Sections use the shared `SettingsSection(style: .card)` so
     /// this submenu visually matches the rest of tvOS Settings.
-    @ViewBuilder
-    private func tvSection<Content: View>(
-        _ title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(title)
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundColor(.textPrimary)
-            VStack(spacing: 12) {
-                content()
-            }
-            .padding(20)
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.cardBackground)
-            )
-        }
-    }
 
     /// Grey explanatory footer, styled like the description text in
     /// `AppBehaviorsSettingsView`'s tvOS sections.

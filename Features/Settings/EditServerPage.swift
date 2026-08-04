@@ -176,18 +176,18 @@ struct EditServerPage: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 32) {
                     // Connection
-                    tvSection("Connection") {
+                    SettingsSection("Connection", style: .eyebrowCard) {
                         tvField("Name", text: $server.name)
                         tvField("URL", text: $server.baseURL)
                     }
 
                     // Credentials
                     if server.type == .xtreamCodes {
-                        tvSection("Credentials") {
+                        SettingsSection("Credentials", style: .eyebrowCard) {
                             tvField("Username", text: $server.username)
                             tvField("Password", text: $server.password, isSecure: true)
                         }
-                        tvSection("EPG Source") {
+                        SettingsSection("EPG Source", style: .eyebrowCard) {
                             tvField("Custom XMLTV URL (optional)", text: $server.xtreamXMLTVURL)
                             Text("Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own.")
                                 .font(.system(size: 22))
@@ -196,7 +196,7 @@ struct EditServerPage: View {
                         }
                     } else if server.type == .dispatcharrAPI {
                         Group {
-                            tvSection("Authentication") {
+                            SettingsSection("Authentication", style: .eyebrowCard) {
                                 // v1.7.x: credential mode picker on
                                 // tvOS Edit Server. The Apple TV
                                 // typing-burden is the primary reason
@@ -266,7 +266,7 @@ struct EditServerPage: View {
                                     tvField("Admin API Key", text: $server.apiKey, isSecure: true)
                                 }
                             }
-                            tvSection("EPG Source") {
+                            SettingsSection("EPG Source", style: .eyebrowCard) {
                                 tvField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)
                                 Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
                                     .font(.system(size: 22))
@@ -275,14 +275,14 @@ struct EditServerPage: View {
                             }
                         }
                     } else if server.type == .m3uPlaylist {
-                        tvSection("EPG Guide") {
+                        SettingsSection("EPG Guide", style: .eyebrowCard) {
                             tvField("EPG URL (optional)", text: $server.epgURL)
                         }
                     }
 
                     // Local Network
                     if server.type != .m3uPlaylist {
-                        tvSection("Local Network") {
+                        SettingsSection("Local Network", style: .eyebrowCard) {
                             tvField("Local URL", text: $server.localURL)
                             Text("Used when the Apple TV detects the local server is reachable. Leave blank to always use the main URL.")
                                 .font(.system(size: 22))
@@ -294,7 +294,7 @@ struct EditServerPage: View {
                     // User-Agent (Dispatcharr only) -- parity with the
                     // iOS edit sheet.
                     if server.type == .dispatcharrAPI {
-                        tvSection("User-Agent") {
+                        SettingsSection("User-Agent", style: .eyebrowCard) {
                             tvField("User-Agent", text: $server.customUserAgent)
                             Text("Shown in Dispatcharr's admin Stats panel to identify this device. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
                                 .font(.system(size: 22))
@@ -307,7 +307,7 @@ struct EditServerPage: View {
                     // and Guide History only existed on the iOS edit
                     // sheet; Apple TV users had no way to change them.
                     if server.supportsVOD {
-                        tvSection("On Demand") {
+                        SettingsSection("On Demand", style: .eyebrowCard) {
                             Toggle("Fetch On Demand from this playlist", isOn: $server.vodEnabled)
                                 .font(.system(size: 28, weight: .medium))
                                 .foregroundColor(.textPrimary)
@@ -320,7 +320,7 @@ struct EditServerPage: View {
                     }
 
                     // Guide History (catch-up retention)
-                    tvSection("Guide History") {
+                    SettingsSection("Guide History", style: .eyebrowCard) {
                         Picker("Guide History", selection: $server.epgRetentionDays) {
                             Text("1 day").tag(1)
                             Text("3 days").tag(3)
@@ -340,7 +340,7 @@ struct EditServerPage: View {
                     // a segmented control can't hold N variable-length
                     // profile names on tvOS.
                     if server.type == .dispatcharrAPI {
-                        tvSection("Channel Profile") {
+                        SettingsSection("Channel Profile", style: .eyebrowCard) {
                             channelProfileRow(name: "All Channels", count: nil, id: nil)
                             ForEach(channelProfiles) { profile in
                                 channelProfileRow(name: profile.name,
@@ -358,7 +358,7 @@ struct EditServerPage: View {
                     }
 
                     // Info
-                    tvSection("Info") {
+                    SettingsSection("Info", style: .eyebrowCard) {
                         HStack {
                             Text("Type")
                                 .font(.system(size: 28, weight: .medium))
@@ -415,22 +415,6 @@ struct EditServerPage: View {
         .toolbar(.hidden, for: .navigationBar)
     }
 
-    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title.uppercased())
-                .font(.system(size: 22, weight: .bold))
-                .foregroundColor(.textTertiary)
-                .tracking(1)
-            VStack(spacing: 16) {
-                content()
-            }
-            .padding(24)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.cardBackground)
-            )
-        }
-    }
 
     private func tvField(_ placeholder: String, text: Binding<String>, isSecure: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 6) {
