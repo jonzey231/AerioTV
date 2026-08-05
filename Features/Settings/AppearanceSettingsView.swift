@@ -346,35 +346,36 @@ struct AppearanceSettingsView: View {
 
                 // MARK: Color Theme
                 Section {
-                    ForEach(AppTheme.allCases, id: \.self) { t in
-                        Button {
-                            theme.setTheme(t)
-                        } label: {
-                            HStack(spacing: 14) {
-                                Circle()
-                                    .fill(t.accentPrimary)
-                                    .frame(width: 22, height: 22)
-                                    .overlay(Circle().stroke(Color.borderMedium, lineWidth: 1))
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(t.displayName)
-                                        .font(.bodyMedium)
-                                        .foregroundColor(.textPrimary)
-                                    Text(themeSubtitle(t))
-                                        .font(.labelSmall)
-                                        .foregroundColor(.textTertiary)
+                    // Phase 5 (plan A2 density): iPad shows the themes as a
+                    // two-column tile grid; iPhone keeps the stacked rows.
+                    if UIDevice.current.userInterfaceIdiom == .pad {
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10),
+                                            GridItem(.flexible(), spacing: 10)],
+                                  spacing: 10) {
+                            ForEach(AppTheme.allCases, id: \.self) { t in
+                                Button {
+                                    theme.setTheme(t)
+                                } label: {
+                                    themeRowLabel(t)
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 12)
+                                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .fill(Color.cardBackground))
                                 }
-
-                                Spacer()
-
-                                if theme.selectedTheme == t {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
+                                .buttonStyle(.plain)
                             }
                         }
-                        .listRowBackground(Color.cardBackground)
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets())
+                    } else {
+                        ForEach(AppTheme.allCases, id: \.self) { t in
+                            Button {
+                                theme.setTheme(t)
+                            } label: {
+                                themeRowLabel(t)
+                            }
+                            .listRowBackground(Color.cardBackground)
+                        }
                     }
 
                     // Appearance mode (Dark / Light / System) — a surface
@@ -641,11 +642,29 @@ struct AppearanceSettingsView: View {
                 // extra buckets + a Custom editor without cluttering
                 // the default Settings view.
                 Section {
-                    ForEach(CategoryColor.defaultBuckets, id: \.rawValue) { cat in
-                        CategoryColorPickerRow(category: cat)
-                            .listRowBackground(Color.cardBackground)
-                            .disabled(!enableCategoryColors)
-                            .opacity(enableCategoryColors ? 1.0 : 0.4)
+                    if UIDevice.current.userInterfaceIdiom == .pad {
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10),
+                                            GridItem(.flexible(), spacing: 10)],
+                                  spacing: 10) {
+                            ForEach(CategoryColor.defaultBuckets, id: \.rawValue) { cat in
+                                CategoryColorPickerRow(category: cat)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 6)
+                                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(Color.cardBackground))
+                                    .disabled(!enableCategoryColors)
+                                    .opacity(enableCategoryColors ? 1.0 : 0.4)
+                            }
+                        }
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets())
+                    } else {
+                        ForEach(CategoryColor.defaultBuckets, id: \.rawValue) { cat in
+                            CategoryColorPickerRow(category: cat)
+                                .listRowBackground(Color.cardBackground)
+                                .disabled(!enableCategoryColors)
+                                .opacity(enableCategoryColors ? 1.0 : 0.4)
+                        }
                     }
 
                     NavigationLink {
@@ -699,6 +718,34 @@ struct AppearanceSettingsView: View {
             // tints stuck on the previous theme. Keying the List
             // identity to the active theme forces a clean rebuild.
             .id("appearance-list-\(theme.selectedTheme.rawValue)-\(theme.appearanceMode.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
+    }
+
+    /// The theme row content shared by the iPhone stacked rows and the
+    /// iPad tile grid (Phase 5).
+    private func themeRowLabel(_ t: AppTheme) -> some View {
+        HStack(spacing: 14) {
+            Circle()
+                .fill(t.accentPrimary)
+                .frame(width: 22, height: 22)
+                .overlay(Circle().stroke(Color.borderMedium, lineWidth: 1))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(t.displayName)
+                    .font(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Text(themeSubtitle(t))
+                    .font(.labelSmall)
+                    .foregroundColor(.textTertiary)
+            }
+
+            Spacer()
+
+            if theme.selectedTheme == t {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(theme.accent)
+            }
+        }
     }
 
     /// iOS scale-slider row. Single horizontal HStack shared by the

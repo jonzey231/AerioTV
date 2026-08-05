@@ -197,6 +197,10 @@ struct TVSettingsSplitView<Detail: View>: View {
             .frame(maxWidth: SettingsMetrics.tvReadingColumnWidth)
             .frame(maxWidth: .infinity, alignment: .center)
             .id(selectionIdentity)
+            // Phase 5: soften the pane swap. The id change replaces the
+            // whole subtree; animating on the identity crossfades the
+            // outgoing/incoming panes instead of hard-cutting.
+            .animation(.easeInOut(duration: 0.18), value: selectionIdentity)
     }
 
     /// Reset pane scroll state when the pane CHANGES, without tearing the

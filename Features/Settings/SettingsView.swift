@@ -63,11 +63,10 @@ struct SettingsView: View {
     #endif
 
     #if os(iOS)
-    // Phase 4 (plan A2): iPad split-view state. Optional because
-    // List(selection:) wants an optional binding; the detail falls back
-    // to Playlists if the selection is ever cleared.
+    // Phase 4 (plan A2): iPad split-view state. Optional so a cleared
+    // selection falls back to Playlists.
+    @Environment(\.horizontalSizeClass) private var hSizeClass
     @State private var padSelection: SettingsRoute? = .category(.playlists)
-    @State private var padColumns = NavigationSplitViewVisibility.all
     #endif
 
     var body: some View {
@@ -132,7 +131,7 @@ struct SettingsView: View {
         // Phase 4 (plan A2): explicit idiom fork rather than trusting
         // NavigationSplitView's collapse heuristics, so the iPhone view
         // tree stays byte-identical.
-        if UIDevice.current.userInterfaceIdiom == .pad {
+        if UIDevice.current.userInterfaceIdiom == .pad && hSizeClass == .regular {
             padSplitRoot
         } else {
             NavigationStack { settingsContent }
@@ -760,21 +759,20 @@ struct SettingsView: View {
 
     #if os(iOS)
     private var padSplitRoot: some View {
-        NavigationSplitView(columnVisibility: $padColumns) {
+        // Hand-rolled split (plan A2 risk R4 fallback): NavigationSplitView
+        // on the iOS 27 SDK proposes the SCREEN width to its detail column
+        // inside a TabView, so List-backed panes overflowed the column and
+        // clipped at the right edge (verified on the iPad Pro; a frame cap
+        // and spacer centering both failed the same way). The HStack gives
+        // the detail column its true width, like the tvOS rail.
+        HStack(spacing: 0) {
             padSidebar
-        } detail: {
+                .frame(width: 340)
             NavigationStack {
                 padDetail(for: padSelection ?? .category(.playlists))
-                    .frame(maxWidth: SettingsMetrics.padDetailWidth)
-                    .frame(maxWidth: .infinity)
                     .background(Color.appBackground.ignoresSafeArea())
             }
         }
-        // Measured on-device (iPad Pro 12.9, iPadOS 27): the OnDemand-style
-        // 72pt capsule inset DOUBLE-spaced here because the split view's
-        // columns bring their own navigation bars, which the floating tab
-        // capsule already clears (plan A2's re-measure note). No extra
-        // inset needed.
         .background(Color.appBackground.ignoresSafeArea())
         // Presentations duplicated from the iPhone chain (only one idiom
         // branch is mounted, so they never double-present). Candidate for
@@ -834,21 +832,42 @@ struct SettingsView: View {
     private func padSidebarRow(_ dest: SettingsDestination, icon: String,
                                iconColor: Color, title: String,
                                subtitle: String?) -> some View {
-        NavigationLink(value: SettingsRoute.category(dest)) {
+        let selected = padSelection == .category(dest)
+        return Button {
+            padSelection = .category(dest)
+        } label: {
             SettingsRow(icon: icon, iconColor: iconColor,
                         title: title, subtitle: subtitle,
-                        selectionContrast: padSelection == .category(dest))
+                        selectionContrast: selected)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(selected ? theme.accent : Color.clear))
         }
+        .buttonStyle(.plain)
     }
 
     private var padSidebar: some View {
-        List(selection: $padSelection) {
-            Section {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Settings")
+                    .font(.title2.weight(.bold))
+                    .foregroundColor(.textPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 14)
+
                 padSidebarRow(.playlists, icon: "rectangle.stack.fill", iconColor: .accentPrimary,
                               title: "Playlists",
                               subtitle: servers.first(where: { $0.isActive })?.name)
-            }
-            Section("App Settings") {
+
+                Text("App Settings")
+                    .font(.title3.weight(.semibold))
+                    .foregroundColor(.textSecondary)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 18)
+                    .padding(.bottom, 6)
+
                 padSidebarRow(.appearance, icon: "paintbrush.fill", iconColor: .accentPrimary,
                               title: "Appearance", subtitle: "Theme, scale & category colors")
                 padSidebarRow(.appBehaviors, icon: "switch.2", iconColor: .accentPrimary,
@@ -857,8 +876,11 @@ struct SettingsView: View {
                               title: "Multiview", subtitle: "Audio focus, tile spacing & corners")
                 padSidebarRow(.network, icon: "network", iconColor: .accentSecondary,
                               title: "Network", subtitle: "Timeout, buffer & background refresh")
-            }
-            Section {
+
+                Divider()
+                    .background(Color.borderSubtle)
+                    .padding(.vertical, 12)
+
                 padSidebarRow(.sync, icon: "icloud.fill", iconColor: .accentPrimary,
                               title: "Sync", subtitle: "iCloud sync & categories")
                 padSidebarRow(.dvr, icon: "record.circle", iconColor: .red,
@@ -868,11 +890,13 @@ struct SettingsView: View {
                 padSidebarRow(.about, icon: "info.circle.fill", iconColor: .accentPrimary,
                               title: "About", subtitle: "Version & links")
             }
+            .padding(.horizontal, 12)
+            .padding(.top, 24)
+            .padding(.bottom, 24)
         }
         // Logan's ruling 2026-08-04: no gray panel behind the sidebar.
-        // Plain scrollable list on the app background, with a hairline
+        // Plain scrollable column on the app background, with a hairline
         // break at the trailing edge marking where the sidebar ends.
-        .scrollContentBackground(.hidden)
         .background(Color.appBackground)
         .overlay(alignment: .trailing) {
             Rectangle()
@@ -880,11 +904,6 @@ struct SettingsView: View {
                 .frame(width: 1)
                 .ignoresSafeArea()
         }
-        .navigationTitle("Settings")
-        // Theme rekey scoped to the sidebar List only (plan A2): the
-        // stale-cell issue is List/UITableView specific. padSelection is
-        // external state and survives the rekey.
-        .id("settings-sidebar-\(theme.selectedTheme.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
     }
 
     @ViewBuilder
