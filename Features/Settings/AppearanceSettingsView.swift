@@ -365,6 +365,11 @@ struct AppearanceSettingsView: View {
                                 .buttonStyle(.plain)
                             }
                         }
+                        // Keep outer tiles clear of the List's section
+                        // corner mask, which otherwise re-rounds the last
+                        // row's corner tiles (Logan's report: Light tile
+                        // corners uneven).
+                        .padding(6)
                         .listRowBackground(Color.clear)
                         .listRowInsets(EdgeInsets())
                     } else {
@@ -597,6 +602,7 @@ struct AppearanceSettingsView: View {
                                     .opacity(enableCategoryColors ? 1.0 : 0.4)
                             }
                         }
+                        .padding(6)
                         .listRowBackground(Color.clear)
                         .listRowInsets(EdgeInsets())
                     } else {
