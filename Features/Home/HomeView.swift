@@ -2025,6 +2025,15 @@ final class ChannelStore: ObservableObject {
         // kept: they carry different stream URLs. First occurrence wins.
         var seenRowKeys = Set<String>()
         let deduped = items.filter { seenRowKeys.insert($0.rowKey).inserted }
+        // GH #59: dedup is keyed on the stream URL, so it should only ever
+        // collapse genuine duplicates. If a user reports missing channels,
+        // this line says whether the dedup is what ate them.
+        if deduped.count != items.count {
+            let dropped = items.count - deduped.count
+            DebugLogger.shared.log(
+                "Channel dedup collapsed \(dropped) of \(items.count) rows sharing a stream URL",
+                category: "Channels", level: .warning)
+        }
 
         // `uniquingKeysWith: { first, _ in first }` so duplicate
         // group names in `groupOrder` (some IPTV resellers ship
@@ -2191,8 +2200,34 @@ final class ChannelStore: ObservableObject {
         let usedCatIDs = Set(streams.compactMap { $0.categoryID })
         var groupOrder = categories.filter { usedCatIDs.contains($0.id) }.map { $0.name }
         if streams.contains(where: { ($0.categoryID ?? "").isEmpty }) { groupOrder.append("Uncategorized") }
+        // GH #59 diagnostics. The subchannel report survived the v1.8.4 `num`
+        // decode fix, and tracing the whole XC path found no place the app can
+        // drop a stream: the decode never fails per-entry, the only compactMap
+        // guard cannot fire (the .ts URL always builds from stream_id), the
+        // dedup keys on that unique URL, and the sort handles decimals. So the
+        // next question is purely factual - how many decimal-numbered streams
+        // does the panel actually hand us, and do they survive to the list?
+        // These counts answer it from a user's exported log instead of another
+        // round of guessing.
+        let decimalNumbered = streams.filter { ($0.channelNumber ?? "").contains(".") }
+        DebugLogger.shared.log(
+            "XC ingest: \(streams.count) live streams decoded, " +
+            "\(decimalNumbered.count) with a decimal channel number" +
+            (decimalNumbered.isEmpty ? "" :
+                " (e.g. " + decimalNumbered.prefix(5)
+                    .map { "\($0.channelNumber ?? "?")=\($0.name)" }
+                    .joined(separator: ", ") + ")"),
+            category: "Channels", level: .info)
+
         let items: [ChannelDisplayItem] = streams.enumerated().compactMap { (i, s) in
-            let urls = xAPI.streamURLs(for: s); guard let primary = urls.first else { return nil }
+            let urls = xAPI.streamURLs(for: s)
+            guard let primary = urls.first else {
+                DebugLogger.shared.log(
+                    "XC ingest: DROPPED \(s.name) (num \(s.channelNumber ?? "nil"), " +
+                    "stream_id \(s.streamID)) - no playable URL could be built",
+                    category: "Channels", level: .warning)
+                return nil
+            }
             let catName = categories.first(where: { $0.id == s.categoryID })?.name ?? "Uncategorized"
             var item = ChannelDisplayItem(
                 id: String(s.streamID), name: s.name,
