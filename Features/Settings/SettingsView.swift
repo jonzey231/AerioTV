@@ -1398,6 +1398,32 @@ struct ServerListRow: View {
     #endif
 
     var body: some View {
+        // TestFlight 1.8.4 crash (mikec79, 2026-08-05): deleting a playlist
+        // trapped in SwiftData's _KKMDBackingData.getValue reading
+        // `server.type` from this row's body. The 2026-07-14 detached-model
+        // sweep guarded the pushed/presented ServerConnection views but
+        // deliberately skipped list rows, reasoning that @Query recreates them
+        // on delete. It does — but not before SwiftUI renders the row ONE more
+        // time with its identity still alive and the model already tombstoned,
+        // and a @Persisted read on a detached model traps rather than
+        // returning nil. Note the earlier crash was a SYNC delete; this one is
+        // an explicit USER delete, which is why "only sync delete+recreate
+        // matters" missed it.
+        //
+        // Same guard as the other views: `.modelContext` is a framework
+        // property, not a @Persisted attribute, so reading it after
+        // `context.delete` is safe and goes nil. ViewBuilder's `if` only
+        // evaluates the taken branch, so rowContent's persisted reads never run
+        // once detached. No dismiss here — it is a row, and @Query drops it on
+        // the next pass.
+        if server.modelContext == nil {
+            EmptyView()
+        } else {
+            rowContent
+        }
+    }
+
+    private var rowContent: some View {
         HStack(spacing: 14) {
             // Active server indicator — tapping sets this server as the active one
             if let onSetActive {
