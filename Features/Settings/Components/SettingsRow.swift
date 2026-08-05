@@ -14,6 +14,11 @@ struct SettingsRow: View {
     let iconColor: Color
     let title: String
     var subtitle: String? = nil
+    /// iPad sidebar (Phase 4): true while the row sits on the accent
+    /// selection pill, where the normal accent-tinted subtitle and icon
+    /// would blend into the fill. Flips the row to white-on-accent, the
+    /// native iPadOS sidebar look.
+    var selectionContrast: Bool = false
     /// Observe ThemeManager so the subtitle's `.textSecondary`
     /// (computed as `theme.accent.opacity(0.65)`) re-evaluates on
     /// theme changes. v1.6.8: parent SettingsView observes
@@ -41,21 +46,21 @@ struct SettingsRow: View {
         HStack(spacing: 14) {
             ZStack {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(iconColor.opacity(0.2))
+                    .fill(selectionContrast ? Color.white.opacity(0.2) : iconColor.opacity(0.2))
                     .frame(width: iconBoxSize, height: iconBoxSize)
                 Image(systemName: icon)
                     .font(.system(size: iconFontSize, weight: .semibold))
-                    .foregroundColor(iconColor)
+                    .foregroundColor(selectionContrast ? .white : iconColor)
             }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.bodyMedium)
-                    .foregroundColor(.textPrimary)
+                    .foregroundColor(selectionContrast ? .white : .textPrimary)
                 if let subtitle {
                     Text(subtitle)
                         .font(.bodySmall)
-                        .foregroundColor(.textSecondary)
+                        .foregroundColor(selectionContrast ? .white.opacity(0.85) : .textSecondary)
                 }
             }
         }
