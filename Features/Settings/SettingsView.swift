@@ -772,6 +772,11 @@ struct SettingsView: View {
                 padDetail(for: padSelection ?? .category(.playlists))
                     .background(Color.appBackground.ignoresSafeArea())
             }
+            // Rekey the stack on selection change so pages pushed from a
+            // pane (playlist detail, Sync Categories) pop when the user
+            // picks another sidebar item; otherwise the push stays on top
+            // of the swapped pane (observed on device).
+            .id(padSelection)
         }
         .background(Color.appBackground.ignoresSafeArea())
         // Presentations duplicated from the iPhone chain (only one idiom

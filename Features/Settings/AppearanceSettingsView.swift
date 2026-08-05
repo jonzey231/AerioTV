@@ -378,92 +378,33 @@ struct AppearanceSettingsView: View {
                         }
                     }
 
-                    // Appearance mode (Dark / Light / System) — a surface
-                    // luminance axis orthogonal to the hue/identity themes
-                    // above. Defaults to Dark; selecting a theme never
-                    // changes the mode, and vice versa.
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Appearance")
-                            .font(.bodyMedium).foregroundColor(.textPrimary)
-                        Picker("Appearance", selection: Binding(
-                            get: { theme.appearanceMode },
-                            set: { theme.setAppearanceMode($0) }
-                        )) {
-                            ForEach(AppearanceMode.allCases, id: \.self) { mode in
-                                Text(mode.displayName).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: theme.appearanceMode) { _, _ in
-                            SyncManager.shared.pushPreferencesImmediate()
-                        }
+                    // iPhone keeps the mode/accent rows in this section
+                    // (shipped canon). iPad moves them to their own section
+                    // below so the last theme tile ends its own pill
+                    // instead of visually fusing with the Appearance card
+                    // (Logan's report 2026-08-04).
+                    if UIDevice.current.userInterfaceIdiom != .pad {
+                        appearanceModeAndAccentRows
                     }
-                    .tint(theme.accent)
-                    .listRowBackground(Color.cardBackground)
-
-                    // Custom accent color toggle
-                    Toggle(isOn: $theme.useCustomAccent) {
-                        HStack(spacing: 10) {
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(Color(hex: theme.customAccentHex))
-                                .frame(width: 22, height: 22)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                        .stroke(Color.borderMedium, lineWidth: 1)
-                                )
-                            Text("Custom Accent Color")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
-                        }
-                    }
-                    .tint(theme.accent)
-                    .listRowBackground(Color.cardBackground)
-
-                    if theme.useCustomAccent {
-                        // Native system color picker — tap the swatch to open the full picker
-                        #if os(iOS)
-                        ColorPicker(
-                            selection: Binding(
-                                get: { Color(hex: theme.customAccentHex) },
-                                set: { theme.customAccentHex = $0.toHex() }
-                            ),
-                            supportsOpacity: false
-                        ) {
-                            Text("Accent Color")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
-                        }
-                        .listRowBackground(Color.cardBackground)
-                        #endif
-
-                        // Hex field for power users who want to paste a specific value
-                        HStack {
-                            Text("Hex")
-                                .font(.bodyMedium).foregroundColor(.textSecondary)
-                            Spacer()
-                            TextField("2DD4BF", text: Binding(
-                                get: { theme.customAccentHex },
-                                set: { newValue in
-                                    let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
-                                    let cleaned = newValue.filter { allowed.contains($0) }.uppercased()
-                                    theme.customAccentHex = String(cleaned.prefix(6))
-                                }
-                            ))
-                                .font(.monoSmall)
-                                .foregroundColor(.textPrimary)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 90)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.characters)
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-
                 } header: {
                     Text("Color Theme").sectionHeaderStyle()
                 } footer: {
-                    Text("Colors used throughout the app.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                    if UIDevice.current.userInterfaceIdiom != .pad {
+                        Text("Colors used throughout the app.")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
                 }
                 .listSectionSeparator(.hidden)
+
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    Section {
+                        appearanceModeAndAccentRows
+                    } footer: {
+                        Text("Colors used throughout the app.")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
+                    .listSectionSeparator(.hidden)
+                }
 
                 // MARK: Liquid Glass
                 Section {
@@ -718,6 +659,90 @@ struct AppearanceSettingsView: View {
             // tints stuck on the previous theme. Keying the List
             // identity to the active theme forces a clean rebuild.
             .id("appearance-list-\(theme.selectedTheme.rawValue)-\(theme.appearanceMode.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
+    }
+
+    /// Appearance mode (Dark / Light / System) + custom accent rows.
+    /// One definition, hosted inline in the Color Theme section on
+    /// iPhone and in a standalone section on iPad.
+    @ViewBuilder
+    private var appearanceModeAndAccentRows: some View {
+        // Appearance mode — a surface luminance axis orthogonal to the
+        // hue/identity themes. Defaults to Dark; selecting a theme never
+        // changes the mode, and vice versa.
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Appearance")
+                .font(.bodyMedium).foregroundColor(.textPrimary)
+            Picker("Appearance", selection: Binding(
+                get: { theme.appearanceMode },
+                set: { theme.setAppearanceMode($0) }
+            )) {
+                ForEach(AppearanceMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: theme.appearanceMode) { _, _ in
+                SyncManager.shared.pushPreferencesImmediate()
+            }
+        }
+        .tint(theme.accent)
+        .listRowBackground(Color.cardBackground)
+
+        // Custom accent color toggle
+        Toggle(isOn: $theme.useCustomAccent) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color(hex: theme.customAccentHex))
+                    .frame(width: 22, height: 22)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .stroke(Color.borderMedium, lineWidth: 1)
+                    )
+                Text("Custom Accent Color")
+                    .font(.bodyMedium).foregroundColor(.textPrimary)
+            }
+        }
+        .tint(theme.accent)
+        .listRowBackground(Color.cardBackground)
+
+        if theme.useCustomAccent {
+            // Native system color picker — tap the swatch to open the full picker
+            #if os(iOS)
+            ColorPicker(
+                selection: Binding(
+                    get: { Color(hex: theme.customAccentHex) },
+                    set: { theme.customAccentHex = $0.toHex() }
+                ),
+                supportsOpacity: false
+            ) {
+                Text("Accent Color")
+                    .font(.bodyMedium).foregroundColor(.textPrimary)
+            }
+            .listRowBackground(Color.cardBackground)
+            #endif
+
+            // Hex field for power users who want to paste a specific value
+            HStack {
+                Text("Hex")
+                    .font(.bodyMedium).foregroundColor(.textSecondary)
+                Spacer()
+                TextField("2DD4BF", text: Binding(
+                    get: { theme.customAccentHex },
+                    set: { newValue in
+                        let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
+                        let cleaned = newValue.filter { allowed.contains($0) }.uppercased()
+                        theme.customAccentHex = String(cleaned.prefix(6))
+                    }
+                ))
+                    .font(.monoSmall)
+                    .foregroundColor(.textPrimary)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 90)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.characters)
+            }
+            .listRowBackground(Color.cardBackground)
+        }
     }
 
     /// The theme row content shared by the iPhone stacked rows and the
