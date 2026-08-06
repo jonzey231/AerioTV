@@ -1599,6 +1599,23 @@ struct ChannelListView: View {
     /// `begin(...)` directly.
     private func startPlayback(_ item: ChannelDisplayItem) {
         guard !item.streamURLs.isEmpty else { return }
+        // "Play Channels In: Mini Player" (Remote Control settings, tvOS-only,
+        // default off; Android #226 twin, AerioTV-Android 8cfddab). First
+        // Select on a browse tune mounts the session ALREADY minimized (the
+        // old begin-fullscreen-then-minimize-400ms flow flashed the full
+        // player over the guide). A second Select on the channel already
+        // playing in the corner promotes it to fullscreen instead of
+        // re-tuning the same stream. Resume / deep-link / cast paths don't
+        // route through here, so they stay fullscreen.
+        #if os(tvOS)
+        if RemoteControlStore.shared.tuneInMini {
+            if nowPlaying.isMinimized, nowPlaying.playingItem?.id == item.id {
+                nowPlaying.expand()
+                return
+            }
+            nowPlaying.requestStartMinimized()
+        }
+        #endif
         if PlaybackFeatureFlags.useUnifiedPlayback {
             let server = channelStore.activeServer
                 ?? servers.first(where: { $0.isActive })
@@ -1607,22 +1624,6 @@ struct ChannelListView: View {
         } else {
             nowPlaying.startPlaying(item, headers: playerHeaders())
         }
-        applyTuneInMiniIfNeeded()
-    }
-
-    /// "Play Channels In: Mini Player" (Remote Control settings, tvOS-only,
-    /// default off): a browse tune-in promotes to the corner mini after the
-    /// channel seeds, keeping the guide visible. Resume / deep-link / cast
-    /// paths don't route through here, so they stay fullscreen. No-op on
-    /// iPhone (bottom-bar mini) and whenever the setting is off.
-    private func applyTuneInMiniIfNeeded() {
-        #if os(tvOS)
-        guard RemoteControlStore.shared.tuneInMini else { return }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            nowPlaying.minimize()
-        }
-        #endif
     }
 
     // MARK: - Deep Link Handler
@@ -3685,6 +3686,23 @@ struct FavoritesView: View {
     /// properties into a protocol.
     private func startPlayback(_ item: ChannelDisplayItem) {
         guard !item.streamURLs.isEmpty else { return }
+        // "Play Channels In: Mini Player" (Remote Control settings, tvOS-only,
+        // default off; Android #226 twin, AerioTV-Android 8cfddab). First
+        // Select on a browse tune mounts the session ALREADY minimized (the
+        // old begin-fullscreen-then-minimize-400ms flow flashed the full
+        // player over the guide). A second Select on the channel already
+        // playing in the corner promotes it to fullscreen instead of
+        // re-tuning the same stream. Resume / deep-link / cast paths don't
+        // route through here, so they stay fullscreen.
+        #if os(tvOS)
+        if RemoteControlStore.shared.tuneInMini {
+            if nowPlaying.isMinimized, nowPlaying.playingItem?.id == item.id {
+                nowPlaying.expand()
+                return
+            }
+            nowPlaying.requestStartMinimized()
+        }
+        #endif
         if PlaybackFeatureFlags.useUnifiedPlayback {
             let server = channelStore.activeServer
                 ?? servers.first(where: { $0.isActive })
@@ -3693,22 +3711,6 @@ struct FavoritesView: View {
         } else {
             nowPlaying.startPlaying(item, headers: playerHeaders())
         }
-        applyTuneInMiniIfNeeded()
-    }
-
-    /// "Play Channels In: Mini Player" (Remote Control settings, tvOS-only,
-    /// default off): a browse tune-in promotes to the corner mini after the
-    /// channel seeds, keeping the guide visible. Resume / deep-link / cast
-    /// paths don't route through here, so they stay fullscreen. No-op on
-    /// iPhone (bottom-bar mini) and whenever the setting is off.
-    private func applyTuneInMiniIfNeeded() {
-        #if os(tvOS)
-        guard RemoteControlStore.shared.tuneInMini else { return }
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            nowPlaying.minimize()
-        }
-        #endif
     }
 }
 

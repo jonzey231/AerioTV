@@ -37,6 +37,26 @@ enum RemoteControlHints {
         map.playerAction(.upShort) == .channelUp && map.playerAction(.downShort) == .channelDown
     }
 
+    /// The player's Left/Right line (Android parity, Logan 2026-08-06: users
+    /// forgot what the horizontal presses do). channelList gets the fixed
+    /// second-press note - Left inside the channel list opens the group
+    /// sidebar - because that stage is built into the overlay, not the map.
+    /// Nil when neither slot maps to a phrasable action.
+    static func playerHorizontalHint(_ map: RemoteControlMap) -> String? {
+        var parts: [String] = []
+        let left = map.playerAction(.leftShort)
+        if left == .channelList {
+            parts.append("Left = channel list")
+            parts.append("Left again = groups")
+        } else if let phrase = playerPhrase(left) {
+            parts.append("Left = \(phrase)")
+        }
+        if let phrase = playerPhrase(map.playerAction(.rightShort)) {
+            parts.append("Right = \(phrase)")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "  ·  ")
+    }
+
     private static func guidePhrase(_ action: GuideRemoteAction) -> String? {
         switch action {
         case .timelineBack:     return "browse earlier programs"

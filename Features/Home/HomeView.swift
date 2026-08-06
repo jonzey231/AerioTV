@@ -2952,7 +2952,7 @@ final class NowPlayingManager: ObservableObject {
         lastPlayedChannelID = item.id
         playingHeaders = headers
         self.isLive = isLive
-        isMinimized = false
+        isMinimized = consumeStartMinimized()
         // v1.6.15: always bump the stream-start signal for live so
         // the channel-info banner can run its own 5s timer.
         // Optionally also bump the chrome-wake signal — Siri Remote
@@ -2980,6 +2980,24 @@ final class NowPlayingManager: ObservableObject {
         if let serverID = ChannelStore.shared.activeServer?.id {
             LastPlayedTracker.record(channelID: item.id, serverID: serverID, isLive: isLive)
         }
+    }
+
+    /// tvOS "Play Channels In: Mini Player" (Android #226 twin, AerioTV-
+    /// Android 8cfddab): armed right before a browse tune so startPlaying
+    /// mounts the session ALREADY minimized. The old flow began fullscreen
+    /// and minimized 400ms later, flashing the full player over the guide.
+    /// Consume-once with a freshness cap so an aborted tune can't leak the
+    /// flag into an unrelated later fullscreen tune.
+    private var startMinimizedRequestedAt: Date?
+
+    func requestStartMinimized() {
+        startMinimizedRequestedAt = Date()
+    }
+
+    private func consumeStartMinimized() -> Bool {
+        guard let at = startMinimizedRequestedAt else { return false }
+        startMinimizedRequestedAt = nil
+        return Date().timeIntervalSince(at) <= 2
     }
 
     func minimize() {
@@ -5770,6 +5788,9 @@ private struct ChannelInfoBanner: View {
                         }
                         if RemoteControlHints.verticalFlipMapped(RemoteControlStore.shared.map) {
                             playerHint("Up/Down = channels")
+                        }
+                        if let horizontalLine = RemoteControlHints.playerHorizontalHint(RemoteControlStore.shared.map) {
+                            playerHint(horizontalLine)
                         }
                     }
                     .padding(.leading, sidePadding)
