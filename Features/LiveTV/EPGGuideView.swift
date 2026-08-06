@@ -2866,6 +2866,10 @@ struct EPGGuideView: View {
             #endif
             .onAppear {
                 visibleProgramWidth = geo.size.width - channelColumnWidth
+                // Audit #50: seed the guide-cell recording markers so the red
+                // "set to record" dot renders on first guide open, before any
+                // recording mutation or reconcile has refreshed the snapshot.
+                RecordingCoordinator.shared.refreshGuideRecordingMarkers(modelContext: modelContext)
                 // Task #185: anchor "now" left-aligned (15-min lead) fresh
                 // from the wall clock on EVERY appear when the timeline is
                 // stale. The old one-shot `-hoursBack * pixelsPerHour` was
@@ -4312,6 +4316,15 @@ private struct GuideProgramButton: View {
         isFutureProgram && reminderManager.hasReminder(forKey: reminderKey)
     }
 
+    /// Audit #50: this cell's programme has a Scheduled or in-progress
+    /// recording. Read directly off RecordingCoordinator's marker snapshot,
+    /// same non-observing pattern as `reminderManager` above.
+    private var hasScheduledRecording: Bool {
+        RecordingCoordinator.shared.hasGuideRecordingMarker(
+            channelID: channelItem.id, channelName: channelItem.name,
+            title: prog.title, start: prog.start, end: prog.end)
+    }
+
     /// iPhone/compact guide cell: season/episode pill + feed badges on
     /// their own row below the title and description. Renders nothing when
     /// the program carries neither. (tvOS keeps them on the time-range
@@ -4348,6 +4361,13 @@ private struct GuideProgramButton: View {
                     Image(systemName: "bell.fill")
                         .font(.system(size: 14))
                         .foregroundColor(isFocused ? .white : .accentPrimary)
+                }
+                // Audit #50: red dot on cells with a scheduled or
+                // in-progress recording (same DVR red as the Android twin).
+                if hasScheduledRecording {
+                    Circle()
+                        .fill(Color(red: 1.0, green: 0.28, blue: 0.34))
+                        .frame(width: 10, height: 10)
                 }
             }
             // GH #34: the XMLTV <sub-title> (episode / sports-match name) is what
@@ -4397,6 +4417,13 @@ private struct GuideProgramButton: View {
                     Image(systemName: "bell.fill")
                         .font(.system(size: 9 * guideScale))
                         .foregroundColor(.accentPrimary)
+                }
+                // Audit #50: red dot on cells with a scheduled or
+                // in-progress recording (same DVR red as the Android twin).
+                if hasScheduledRecording {
+                    Circle()
+                        .fill(Color(red: 1.0, green: 0.28, blue: 0.34))
+                        .frame(width: 6 * guideScale, height: 6 * guideScale)
                 }
             }
             // GH #34: XMLTV <sub-title> (match/episode name), guarded against the

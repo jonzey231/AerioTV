@@ -114,6 +114,57 @@ final class RecordingCoordinator: ObservableObject {
         customRecordingsDirectory ?? localRecordingsDirectory
     }
 
+    // MARK: - Guide recording markers (audit #50)
+
+    /// One row per Scheduled/Recording entry, snapshotted for the guide's
+    /// per-cell "set to record" dot. Cells read this directly -- the
+    /// ReminderManager pattern: no per-cell observation, because with
+    /// hundreds of visible cells a @Published invalidation on every
+    /// reconcile would be a real re-render cost. The snapshot refreshes on
+    /// every mutation path in this coordinator plus the guide's onAppear.
+    struct GuideRecordingMarker {
+        let channelID: String
+        /// Empty on rows imported from the server by reconcile.
+        let channelName: String
+        let title: String
+        let start: Date
+        let end: Date
+    }
+    private(set) var guideRecordingMarkers: [GuideRecordingMarker] = []
+
+    /// Rebuilds `guideRecordingMarkers` from SwiftData. Fetches every row
+    /// and filters in memory -- recording counts are tiny.
+    func refreshGuideRecordingMarkers(modelContext: ModelContext) {
+        let all = (try? modelContext.fetch(FetchDescriptor<Recording>())) ?? []
+        guideRecordingMarkers = all.compactMap { rec in
+            guard rec.status == .scheduled || rec.status == .recording else { return nil }
+            return GuideRecordingMarker(channelID: rec.channelID,
+                                        channelName: rec.channelName,
+                                        title: rec.programTitle,
+                                        start: rec.scheduledStart,
+                                        end: rec.scheduledEnd)
+        }
+    }
+
+    /// Guide-cell query: is a Scheduled/in-progress recording set for this
+    /// programme slot? Channel identity is matched on whichever field the
+    /// row actually carries (server-imported rows have a Dispatcharr
+    /// numeric channelID and an empty name; sheet-created rows carry the
+    /// guide's own id + name), with a case-insensitive title fallback so a
+    /// mismatched id space can't hide the dot. The window overlap keeps
+    /// the title fallback from lighting every airing of a series -- the
+    /// stored window is the original EPG slot (`scheduledStart/End`, no
+    /// pre/post-roll), so it lines up with the cell's own times.
+    func hasGuideRecordingMarker(channelID: String, channelName: String,
+                                 title: String, start: Date, end: Date) -> Bool {
+        guideRecordingMarkers.contains { m in
+            guard m.start < end, start < m.end else { return false }
+            if m.channelID == channelID { return true }
+            if !m.channelName.isEmpty && m.channelName == channelName { return true }
+            return m.title.compare(title, options: .caseInsensitive) == .orderedSame
+        }
+    }
+
     // MARK: - Start local recording
 
     /// Starts a local recording for the given `Recording` model object.
@@ -174,6 +225,7 @@ final class RecordingCoordinator: ObservableObject {
             updateRecordingState()
             try? modelContext.save()
         }
+        refreshGuideRecordingMarkers(modelContext: modelContext)
     }
 
     /// Stops a local recording, finalizes the file, updates model state.
@@ -201,6 +253,7 @@ final class RecordingCoordinator: ObservableObject {
         if written == 0 { recording.failureReason = "No data was written" }
         try? modelContext.save()
         updateRecordingState()
+        refreshGuideRecordingMarkers(modelContext: modelContext)
     }
 
     // MARK: - Dispatcharr server-side recording
@@ -225,6 +278,7 @@ final class RecordingCoordinator: ObservableObject {
         recording.remoteRecordingID = result.id
         recording.status = RecordingStatus(rawValue: result.status ?? "scheduled") ?? .scheduled
         try? modelContext.save()
+        refreshGuideRecordingMarkers(modelContext: modelContext)
     }
 
     /// Deletes a recording from the Dispatcharr server AND removes the
@@ -237,6 +291,7 @@ final class RecordingCoordinator: ObservableObject {
         }
         modelContext.delete(recording)
         try? modelContext.save()
+        refreshGuideRecordingMarkers(modelContext: modelContext)
     }
 
     /// Stops an in-flight Dispatcharr recording early, keeping the
@@ -248,6 +303,7 @@ final class RecordingCoordinator: ObservableObject {
         try await api.stopRecording(id: remoteID)
         recording.status = .stopped
         try? modelContext.save()
+        refreshGuideRecordingMarkers(modelContext: modelContext)
     }
 
     /// Downloads a completed Dispatcharr recording to local storage.
@@ -400,6 +456,7 @@ final class RecordingCoordinator: ObservableObject {
         if didMutate {
             try? modelContext.save()
         }
+        refreshGuideRecordingMarkers(modelContext: modelContext)
         return didMutate
     }
 
@@ -413,6 +470,7 @@ final class RecordingCoordinator: ObservableObject {
         }
         modelContext.delete(recording)
         try? modelContext.save()
+        refreshGuideRecordingMarkers(modelContext: modelContext)
     }
 
     // MARK: - Idle Timer

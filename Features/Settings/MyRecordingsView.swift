@@ -682,6 +682,7 @@ struct MyRecordingsView: View {
         } else {
             rec.status = .cancelled
             try? modelContext.save()
+            coordinator.refreshGuideRecordingMarkers(modelContext: modelContext)
         }
     }
 
