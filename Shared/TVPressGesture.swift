@@ -663,3 +663,95 @@ final class ScrubHoldHostView: UIView, UIGestureRecognizerDelegate {
 }
 
 #endif
+
+// MARK: - player long-press detector (Remote Control #195)
+
+#if os(tvOS)
+/// Window-level hold detector for the PLAYER's mapped long-press slots:
+/// Up/Down at 0.25s - deliberately UNDER the 300ms channel-flip debounce so
+/// a recognized hold can cancel the pending flip queued by the short press -
+/// and Select at 0.35s, where recognition swallows the release so the tile's
+/// Button action never also fires. One recognizer per press type so the
+/// callback knows which began. Installed on the window only while
+/// [isEnabled] (the bare fullscreen live player); short presses always pass
+/// through untouched. Modeled on GuideLongPressLeftDetector.
+struct PlayerLongPressDetector: UIViewRepresentable {
+    let isEnabled: Bool
+    let onBegan: (UIPress.PressType) -> Void
+
+    func makeUIView(context: Context) -> PlayerHoldHostView {
+        let v = PlayerHoldHostView()
+        v.onBegan = onBegan
+        v.isUserInteractionEnabled = false   // passthrough; never steals focus
+        v.setEnabled(isEnabled)
+        return v
+    }
+    func updateUIView(_ uiView: PlayerHoldHostView, context: Context) {
+        uiView.onBegan = onBegan
+        uiView.setEnabled(isEnabled)
+    }
+    static func dismantleUIView(_ uiView: PlayerHoldHostView, coordinator: ()) {
+        uiView.detachRecognizers()
+    }
+}
+
+final class PlayerHoldHostView: UIView, UIGestureRecognizerDelegate {
+    var onBegan: ((UIPress.PressType) -> Void)?
+    private weak var attachedWindow: UIWindow?
+    private var recognizers: [UILongPressGestureRecognizer] = []
+    private var enabled = false
+
+    override var canBecomeFocused: Bool { false }
+
+    func setEnabled(_ on: Bool) {
+        enabled = on
+        if on { attachIfPossible() } else { detachRecognizers() }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window !== attachedWindow { detachRecognizers() }
+        attachIfPossible()
+    }
+
+    private func attachIfPossible() {
+        guard enabled, let window, recognizers.isEmpty else { return }
+        let specs: [(UIPress.PressType, TimeInterval)] = [
+            (.upArrow, 0.25),
+            (.downArrow, 0.25),
+            (.select, 0.35),
+        ]
+        for (type, duration) in specs {
+            let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleHold(_:)))
+            lp.allowedPressTypes = [NSNumber(value: type.rawValue)]
+            lp.minimumPressDuration = duration
+            // Swallow the press once the hold recognizes so the release
+            // doesn't ALSO resolve as the short action (Select would
+            // otherwise fire the tile's Button on release).
+            lp.cancelsTouchesInView = true
+            lp.delaysTouchesBegan = false
+            lp.delegate = self
+            window.addGestureRecognizer(lp)
+            recognizers.append(lp)
+        }
+        attachedWindow = window
+    }
+
+    func detachRecognizers() {
+        for r in recognizers { attachedWindow?.removeGestureRecognizer(r) }
+        recognizers.removeAll()
+        attachedWindow = nil
+    }
+
+    @objc private func handleHold(_ gr: UILongPressGestureRecognizer) {
+        guard gr.state == .began,
+              let raw = (gr.allowedPressTypes.first as? NSNumber)?.intValue,
+              let type = UIPress.PressType(rawValue: raw) else { return }
+        onBegan?(type)
+    }
+
+    // Coexist with the focus engine + the scrub/guide hold recognizers.
+    func gestureRecognizer(_ g: UIGestureRecognizer,
+                           shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool { true }
+}
+#endif

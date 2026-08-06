@@ -3056,6 +3056,16 @@ final class NowPlayingManager: ObservableObject {
         }
     }
 
+    /// Remote Control #195: a recognized Up/Down HOLD supersedes the
+    /// short-press flip its press-down queued (the 0.25s hold threshold
+    /// beats this 300ms debounce, so the cancel always lands first).
+    @MainActor
+    func cancelPendingChannelChange() {
+        pendingChannelChangeTask?.cancel()
+        pendingChannelChangeTask = nil
+        pendingChannelStep = 0
+    }
+
     /// Tune the previously-playing channel (last-channel "zap back"). Immediate
     /// (bypasses the 300ms flip accumulate) so a decisive zap isn't swallowed;
     /// the tune re-captures the outgoing channel, so a second zap toggles

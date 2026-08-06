@@ -927,6 +927,16 @@ struct MultiviewContainerView: View {
                 onEnded: { stopScrubHold() }
             )
         )
+        // Remote Control #195: mapped long-press slots on the bare player.
+        // Up/Down holds (0.25s, under the 300ms flip debounce) and Select
+        // hold (0.35s). Left/Right holds stay with ScrubHoldDetector, whose
+        // ineligible path dispatches leftLong/rightLong (startScrubHold).
+        .background(
+            PlayerLongPressDetector(
+                isEnabled: barePlayerState,
+                onBegan: { type in handlePlayerLongPress(type) }
+            )
+        )
         .onChange(of: chromeState.isVisible) { _, visible in
             if visible {
                 // v1.7.x: when chrome appears, programmatically move
@@ -1534,13 +1544,52 @@ struct MultiviewContainerView: View {
         scrubHoldTask?.cancel()
         dpadScrub.holdActive = true
         scrubHoldTask = Task { @MainActor in
+            var stepped = false
             while !Task.isCancelled {
                 if chromeState.isVisible { chromeState.reportInteraction() }
-                guard dpadScrub.step(dir, store: store) else { break }
+                guard dpadScrub.step(dir, store: store) else {
+                    #if os(tvOS)
+                    // Remote Control #195: a hold with NO scrubbable mode
+                    // (plain live, rewind off) dispatches the mapped
+                    // leftLong/rightLong instead (default: hold-Left =
+                    // minimize to guide, hold-Right = program info). Only
+                    // on the very first step - a scrub that ran and hit
+                    // its edge must not suddenly minimize the player.
+                    if !stepped, barePlayerState {
+                        let slot: RemoteSlot = dir < 0 ? .leftLong : .rightLong
+                        executePlayerAction(RemoteControlStore.shared.playerAction(slot))
+                    }
+                    #endif
+                    break
+                }
+                stepped = true
                 try? await Task.sleep(nanoseconds: 150_000_000)
             }
         }
     }
+
+    #if os(tvOS)
+    /// Remote Control #195: mapped Up/Down/Select long-press dispatch.
+    /// The Up/Down short-press flip queues behind a 300ms debounce; a
+    /// recognized hold (0.25s) that actually EXECUTES its action cancels
+    /// the pending flip so a hold never also surfs. An unrunnable mapped
+    /// action (e.g. openSearch, which has no tvOS surface) leaves the
+    /// pending flip alone, degrading to the short behavior.
+    private func handlePlayerLongPress(_ type: UIPress.PressType) {
+        let slot: RemoteSlot
+        switch type {
+        case .upArrow: slot = .upLong
+        case .downArrow: slot = .downLong
+        case .select: slot = .okLong
+        default: return
+        }
+        let action = RemoteControlStore.shared.playerAction(slot)
+        guard action != .none else { return }
+        if executePlayerAction(action), slot == .upLong || slot == .downLong {
+            nowPlaying.cancelPendingChannelChange()
+        }
+    }
+    #endif
 
     private func stopScrubHold() {
         scrubHoldTask?.cancel()
