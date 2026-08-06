@@ -3058,13 +3058,40 @@ final class NowPlayingManager: ObservableObject {
 
     /// Tune the previously-playing channel (last-channel "zap back"). Immediate
     /// (bypasses the 300ms flip accumulate) so a decisive zap isn't swallowed;
-    /// `startPlaying` re-captures the outgoing channel, so a second zap toggles
+    /// the tune re-captures the outgoing channel, so a second zap toggles
     /// back to where you were.
     @MainActor
     func zapToPreviousChannel() {
         guard let prevID = previousChannelID,
               let target = ChannelStore.shared.channels.first(where: { $0.id == prevID }) else { return }
-        let headers = ChannelStore.shared.activeServer?.authHeaders ?? ["Accept": "*/*"]
+        tuneDirect(target)
+    }
+
+    /// Remote Control #195: direct in-place tune to [target] from the player
+    /// overlays (Channels / Recently Watched) and the last-channel zap. Same
+    /// engine path as `flushPendingChannelChange`: unified playback swaps the
+    /// sole tile's content in place (no teardown blackdrop), falling back to
+    /// a session rebuild when the swap can't target a tile; legacy playback
+    /// routes through `startPlaying`. `startPlaying` always runs for the
+    /// manager bookkeeping (banner, recents, last-played, zap memory).
+    @MainActor
+    func tuneDirect(_ target: ChannelDisplayItem) {
+        guard target.id != playingItem?.id else { return }
+        let server = ChannelStore.shared.activeServer
+        let headers = server?.authHeaders ?? ["Accept": "*/*"]
+        if PlaybackFeatureFlags.useUnifiedPlayback {
+            let store = MultiviewStore.shared
+            let didSwap: Bool = {
+                guard store.tiles.count == 1,
+                      let tileID = store.audioTileID else { return false }
+                return store.swapTileContent(tileID: tileID, to: target, server: server)
+            }()
+            if !didSwap {
+                debugLog("[TuneDirect] swap path unavailable; rebuilding session for \(target.name)")
+                PlayerSession.shared.exit()
+                PlayerSession.shared.enterMultiview(seeding: target, server: server)
+            }
+        }
         startPlaying(target, headers: headers, isLive: true, wakeChrome: false)
     }
 

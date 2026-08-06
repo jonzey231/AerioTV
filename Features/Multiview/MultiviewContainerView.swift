@@ -213,6 +213,16 @@ struct MultiviewContainerView: View {
     @AppStorage("appBehaviorsAppleTVChannelFlip")
     private var appleTVChannelFlip = true
 
+    #if os(tvOS)
+    /// Remote Control #195: the player's Left-press "Channels" overlay
+    /// (Apple GH #54 OSD side-menu) and the "Recently Watched" overlay.
+    /// Both were fully built and waiting for a host; presses are
+    /// suppressed at the container level while either is up (the
+    /// overlays own their focus + Back).
+    @State private var showChannelsOverlay = false
+    @State private var showRecentsOverlay = false
+    #endif
+
     var body: some View {
         // N=1 treatment — "this is effectively PlayerView" — is
         // gated on the unified-playback feature flag. Without the
@@ -847,49 +857,47 @@ struct MultiviewContainerView: View {
                 }
                 return
             }
-            // v1.6.15: Apple TV up/down channel-change. Gated on:
-            //   1. Single-stream playback (N=1, full-screen). At N>=2
-            //      up/down is grid navigation, not a channel-flip.
-            //   2. Player NOT minimized — when shrunk to corner the
-            //      remote belongs to the guide behind, not the player.
-            //   3. Chrome is HIDDEN. When the user has summoned chrome
-            //      via Menu/Back, up/down should navigate to the
-            //      Options / Record / Add Stream pills below the tile,
-            //      not flip channels behind their back. Pressing
-            //      Menu/Back again hides chrome and re-enables flip.
-            //   4. v1.7.x: user-toggleable via Settings → App
-            //      Behaviors → Apple TV Remote. Default ON to
-            //      preserve the post-v1.6.15 behaviour; users who
-            //      hit accidental D-pad presses during playback
-            //      can disable the flip without losing other
-            //      remote behaviours.
-            //   Up = next channel (higher number), Down = previous —
-            //   matches the IPTV remote idiom (inverse of guide-list
-            //   scroll direction).
-            if appleTVChannelFlip,
-               store.tiles.count == 1,
-               store.catchupTile == nil,   // no channel-flip in a replay
-               !nowPlaying.isMinimized,
-               !chromeState.isVisible,
-               // A scrub HUD on screen reads as "player controls" even
-               // though chromeState is hidden - up/down while the user
-               // is mid-scrub must not yank the channel out from under
-               // them (user report 2026-07-10).
-               !dpadScrub.active {
-                if direction == .up {
-                    nowPlaying.changeChannel(direction: +1)
-                    return
-                } else if direction == .down {
-                    nowPlaying.changeChannel(direction: -1)
-                    return
+            // Remote Control #195: on the BARE fullscreen live player
+            // (sole tile, no replay, chrome hidden, no scrub, no
+            // overlay/sheet) the short-press D-pad slots resolve
+            // through the user's remote map instead of the old
+            // hardcoded scheme. Default map: Up/Down = channel surf,
+            // Left = Channels overlay (Apple GH #54), Right =
+            // last-channel zap. The pre-initiative behaviour lives on
+            // as `RemoteControlMap.legacyScheme` slot values a user
+            // can restore per-slot in Settings > Remote Control.
+            #if os(tvOS)
+            if barePlayerState {
+                let slot: RemoteSlot? = {
+                    switch direction {
+                    case .up: return .upShort
+                    case .down: return .downShort
+                    case .left: return .leftShort
+                    case .right: return .rightShort
+                    @unknown default: return nil
+                    }
+                }()
+                if let slot {
+                    let action = RemoteControlStore.shared.playerAction(slot)
+                    // Honor the pre-map App Behaviors flip toggle: users
+                    // who turned the Apple TV channel flip OFF keep
+                    // up/down inert even under the default map (the
+                    // toggle predates the map and still syncs).
+                    let flipSuppressed = (action == .channelUp || action == .channelDown)
+                        && !appleTVChannelFlip
+                    if !flipSuppressed, executePlayerAction(action) {
+                        return
+                    }
                 }
             }
-            // D-pad left/right with the chrome hidden = timeline scrub
-            // (task #147 milestone 2): one shared implementation for
-            // live rewind and catch-up. With the chrome hidden the tile
-            // has no left/right focus neighbour, so these presses
-            // always land here. Falls through (rewind off on plain
-            // live) to the focus-indicator wake below.
+            #endif
+            // D-pad left/right = direct timeline step while a REPLAY is
+            // on (catch-up always scrubs, matching Android) or a scrub
+            // is already engaged (HUD up). Plain-live scrub entry moved
+            // to hold-Left/Right (ScrubHoldDetector below) when the
+            // map assigns short-Left/Right elsewhere; remapping
+            // leftShort/rightShort back to seek restores the old
+            // single-press behaviour.
             if store.tiles.count == 1,
                !nowPlaying.isMinimized,
                !chromeState.isVisible,
@@ -1079,6 +1087,13 @@ struct MultiviewContainerView: View {
                 withAnimation(.spring(response: 0.35)) {
                     NowPlayingManager.shared.expand()
                 }
+            } else if barePlayerState,
+                      RemoteControlStore.shared.playerAction(.playPause) != .playPause,
+                      executePlayerAction(RemoteControlStore.shared.playerAction(.playPause)) {
+                // Remote Control #195: a REMAPPED Play/Pause slot runs its
+                // mapped action on the bare player; the default (and any
+                // non-bare state: chrome up, N>1, replay) keeps the
+                // toggle below.
             } else if let toggle = store.audioProgressStore?.togglePauseAction {
                 DebugLogger.shared.log(
                     "[MV-Cmd] tvOS Play/Pause → toggle pause on audio tile",
@@ -1086,6 +1101,40 @@ struct MultiviewContainerView: View {
                 )
                 toggle()
                 chromeState.reportInteraction()
+            }
+        }
+        // Remote Control #195: host the player's Left-press overlays.
+        // ZStack overlay (not a cover) so the live picture stays
+        // underneath; each overlay owns its focus + Back, and
+        // `barePlayerState` going false suppresses the container-level
+        // press handling while one is up.
+        .overlay {
+            if showChannelsOverlay {
+                ChannelListOverlay(
+                    channels: ChannelStore.shared.channels,
+                    activeGroupToken: playerOverlayGroupSeed,
+                    allGroups: ChannelStore.shared.orderedGroups,
+                    onTune: { item in
+                        withAnimation(.easeInOut(duration: 0.2)) { showChannelsOverlay = false }
+                        nowPlaying.tuneDirect(item)
+                    },
+                    onDismiss: {
+                        withAnimation(.easeInOut(duration: 0.2)) { showChannelsOverlay = false }
+                    }
+                )
+                .transition(.opacity)
+            }
+            if showRecentsOverlay {
+                RecentChannelsOverlay(
+                    onTune: { item in
+                        withAnimation(.easeInOut(duration: 0.2)) { showRecentsOverlay = false }
+                        nowPlaying.tuneDirect(item)
+                    },
+                    onDismiss: {
+                        withAnimation(.easeInOut(duration: 0.2)) { showRecentsOverlay = false }
+                    }
+                )
+                .transition(.opacity)
             }
         }
         #endif
@@ -1331,6 +1380,87 @@ struct MultiviewContainerView: View {
     /// outage. Shared by the `.connectionIssueChanged` notification handler and
     /// the become-sole `.onChange(of: tiles.count)` path so both raise the
     /// identical outage chrome (2026-07-13 review).
+    #if os(tvOS)
+    /// Remote Control #195: true when the sole live tile owns the D-pad
+    /// (mirror of Android's dpadVerticalCaptured model). Mapped short-press
+    /// actions apply ONLY on the bare fullscreen live player: any chrome,
+    /// sheet, overlay, scrub HUD, replay, or the mini state hands the
+    /// presses back to normal focus traversal.
+    private var barePlayerState: Bool {
+        store.tiles.count == 1
+            && store.catchupTile == nil
+            && !nowPlaying.isMinimized
+            && !chromeState.isVisible
+            && !dpadScrub.active
+            && !showChannelsOverlay
+            && !showRecentsOverlay
+            && !showAddSheet && !showTVOptions
+            && !showRecordSheet && !showExitConfirmation
+    }
+
+    /// Group seed for the Channels overlay: the watched channel's own group
+    /// (falls back to All). Overlay-local from there - browsing never
+    /// re-filters the guide behind the player.
+    private var playerOverlayGroupSeed: String {
+        if let group = nowPlaying.playingItem?.group, !group.isEmpty {
+            return group
+        }
+        return "All"
+    }
+
+    /// Remote Control #195: the centralized PlayerRemoteAction dispatcher.
+    /// Returns false for actions this surface can't run (the caller then
+    /// falls through to the legacy handling / focus wake).
+    @discardableResult
+    private func executePlayerAction(_ action: PlayerRemoteAction) -> Bool {
+        switch action {
+        case .channelUp:
+            nowPlaying.changeChannel(direction: +1)
+            return true
+        case .channelDown:
+            nowPlaying.changeChannel(direction: -1)
+            return true
+        case .lastChannel:
+            nowPlaying.zapToPreviousChannel()
+            return true
+        case .channelList:
+            withAnimation(.easeInOut(duration: 0.2)) { showChannelsOverlay = true }
+            return true
+        case .recentChannels:
+            withAnimation(.easeInOut(duration: 0.2)) { showRecentsOverlay = true }
+            return true
+        case .toggleControls:
+            chromeState.reportInteraction()
+            return true
+        case .showProgramInfo:
+            // Re-arm the tune-in banner (channel info card + hint chips).
+            nowPlaying.streamStartedToken = UUID()
+            return true
+        case .optionsMenu:
+            showTVOptions = true
+            return true
+        case .minimizeToGuide:
+            withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() }
+            return true
+        case .playPause:
+            guard let toggle = store.audioProgressStore?.togglePauseAction else { return false }
+            toggle()
+            chromeState.reportInteraction()
+            return true
+        case .seekForward:
+            return dpadScrub.step(+1, store: store)
+        case .seekBackward:
+            return dpadScrub.step(-1, store: store)
+        default:
+            // subtitles / audioTracks / aspectRatio / record / sleepTimer /
+            // openSearch / restartProgram / jumpToLive / stopPlayback: no
+            // bare-player surface yet - the press falls through unhandled
+            // rather than silently half-working.
+            return false
+        }
+    }
+    #endif
+
     private func summonConnectionIssueChrome() {
         chromeState.setPinned(true, reason: .connectionIssue)
         chromeState.reportInteraction()
