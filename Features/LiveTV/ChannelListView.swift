@@ -733,18 +733,25 @@ struct ChannelListView: View {
                         onEnded: { NotificationCenter.default.post(name: .guideLeftHoldEnded, object: nil) }
                     )
                 )
-                // Hold Right to close the corner mini-player (Android TV parity).
-                // Only armed while a mini is minimized on screen, so ordinary
-                // Right navigation in the guide is untouched the rest of the time.
+                // Hold Right: dispatched by the mapped guide rightLong action
+                // (#196). The default (closeMiniPlayer) keeps the old arming
+                // gate - only meaningful while a mini is minimized - so
+                // ordinary Right navigation is untouched; any other mapped
+                // action arms whenever the guide is up.
                 .background(
                     GuideLongPressRightDetector(
-                        isEnabled: nowPlaying.isActive && nowPlaying.isMinimized,
+                        isEnabled: {
+                            let action = RemoteControlStore.shared.guideAction(.rightLong)
+                            if action == .closeMiniPlayer {
+                                return nowPlaying.isActive && nowPlaying.isMinimized
+                            }
+                            return action != .none
+                        }(),
                         onBegan: {
                             NotificationCenter.default.post(name: .guideRightHoldBegan, object: nil)
-                            // Full session teardown (see the guide's twin):
-                            // on the unified path nowPlaying.stop() alone
-                            // orphaned the PlayerSession-owned mini.
-                            withAnimation(.spring(response: 0.35)) { PlayerSession.shared.exit() }
+                            GuideRemoteDispatch.perform(
+                                RemoteControlStore.shared.guideAction(.rightLong)
+                            )
                         },
                         onEnded: {
                             NotificationCenter.default.post(name: .guideRightHoldEnded, object: nil)
@@ -752,17 +759,27 @@ struct ChannelListView: View {
                     )
                 )
                 .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldBegan)) { _ in
-                    // Jump focus to "All" and pin it there for the duration of the
-                    // hold so the still-held Left can't overshoot into the leading
-                    // Guide/Search/List controls.
-                    leftHoldPinningAll = true
-                    groupPillFocused = "All"
-                    leftHoldSafetyTask?.cancel()
-                    leftHoldSafetyTask = Task { @MainActor in
-                        // Backstop in case the release event is missed, so focus
-                        // is never permanently locked on "All".
-                        try? await Task.sleep(nanoseconds: 2_500_000_000)
-                        if !Task.isCancelled { leftHoldPinningAll = false }
+                    // #196: hold-Left dispatches by the mapped action. The
+                    // focus-pin below runs for EVERY hold (not just
+                    // focusGroupPills): whatever the action did, the
+                    // still-held Left must not overshoot into the leading
+                    // Guide/Search/List controls, and pinning "All" is the
+                    // established parking spot for the press duration.
+                    let action = RemoteControlStore.shared.guideAction(.leftLong)
+                    GuideRemoteDispatch.perform(action)
+                    // Timeline jumps keep the grid focused via
+                    // retargetFocusToViewportColumn; only the pill action
+                    // needs the focus pin.
+                    if action == .focusGroupPills {
+                        leftHoldPinningAll = true
+                        groupPillFocused = "All"
+                        leftHoldSafetyTask?.cancel()
+                        leftHoldSafetyTask = Task { @MainActor in
+                            // Backstop in case the release event is missed, so focus
+                            // is never permanently locked on "All".
+                            try? await Task.sleep(nanoseconds: 2_500_000_000)
+                            if !Task.isCancelled { leftHoldPinningAll = false }
+                        }
                     }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldEnded)) { _ in

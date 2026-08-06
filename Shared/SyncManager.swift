@@ -1478,6 +1478,13 @@ extension Notification.Name {
     /// EPG forward after the mini closes.
     static let guideRightHoldBegan = Notification.Name("guideRightHoldBegan")
     static let guideRightHoldEnded = Notification.Name("guideRightHoldEnded")
+    /// Remote Control #196: mapped guide actions dispatched from the hold
+    /// handlers in ChannelListView into the guide grid. `guideTimelineJump`
+    /// carries userInfo["hours"] (Double, signed: negative = earlier);
+    /// `guidePageStep` carries userInfo["step"] (Int, signed channel rows).
+    static let guideTimelineJump = Notification.Name("guideTimelineJump")
+    static let guideJumpToNow = Notification.Name("guideJumpToNow")
+    static let guidePageStep = Notification.Name("guidePageStep")
     /// Posted by `ChannelStore.primeXMLTVFromURL` after it has
     /// finished the XMLTV parse AND written category-enriched
     /// entries into EPGCache via `GuideStore.seedEPGCache`. Any

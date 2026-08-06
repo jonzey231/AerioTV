@@ -3131,6 +3131,14 @@ struct EPGGuideView: View {
                 }
                 #endif
             }
+            #if os(tvOS)
+            // Remote Control #196: mapped guide actions posted by
+            // GuideRemoteDispatch (hold-Left / hold-Right / hold-Select
+            // handlers). Receivers ride a background child - even three
+            // slim modifiers appended directly pushed this already-huge
+            // body over the type-checker's budget.
+            .background(guideRemoteReceivers(proxy: proxy))
+            #endif
             // EPG-search jump: consume a pending guide target (set by
             // SearchView) and scroll to that channel + program time.
             // Warm path (guide already on screen) and cold path (guide
@@ -3449,6 +3457,65 @@ struct EPGGuideView: View {
     /// very top channel frequently has none), scan forward from it, then
     /// anywhere, for the first channel that DOES. This stops focus from bailing
     /// to the List toggle (the "scroll to top focused the List button" bug).
+    // Remote Control #196: mapped guide-action handlers (posted by
+    // GuideRemoteDispatch from the hold-press sites).
+
+    /// The notification receivers as an invisible background child, so the
+    /// main body chain gains exactly one modifier.
+    private func guideRemoteReceivers(proxy: ScrollViewProxy) -> some View {
+        Color.clear
+            .onReceive(
+                NotificationCenter.default.publisher(for: .guideTimelineJump),
+                perform: handleTimelineJump
+            )
+            .onReceive(
+                NotificationCenter.default.publisher(for: .guideJumpToNow)
+            ) { _ in handleJumpToNow() }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .guidePageStep)
+            ) { note in handlePageStep(note, proxy: proxy) }
+    }
+
+    /// Timeline jump by userInfo["hours"] (signed; negative = earlier).
+    /// Same pan + clamp + focus-retarget as the short-press arrows.
+    private func handleTimelineJump(_ note: Notification) {
+        guard let hours = note.userInfo?["hours"] as? Double else { return }
+        withAnimation(.easeOut(duration: 0.3)) {
+            if hours < 0 {
+                horizontalOffset = min(0, horizontalOffset + pixelsPerHour * -hours)
+            } else {
+                horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * hours)
+            }
+        }
+        retargetFocusToViewportColumn()
+    }
+
+    private func handleJumpToNow() {
+        reAnchorTimelineToNow()
+        retargetFocusToViewportColumn()
+    }
+
+    /// Page the focused row by userInfo["step"] channels (signed, clamped).
+    /// Same resolve/scroll pattern as the EPG-search jump.
+    private func handlePageStep(_ note: Notification, proxy: ScrollViewProxy) {
+        guard let step = note.userInfo?["step"] as? Int, step != 0 else { return }
+        let currentIdx = focusedProgramID
+            .flatMap { channelID(ofProgram: $0) }
+            .flatMap { id in channels.firstIndex(where: { $0.id == id }) } ?? 0
+        let targetIdx = max(0, min(channels.count - 1, currentIdx + step))
+        guard targetIdx != currentIdx, targetIdx < channels.count else { return }
+        let targetChannel = channels[targetIdx]
+        withAnimation(.easeInOut(duration: 0.25)) {
+            proxy.scrollTo(targetChannel.id, anchor: .center)
+        }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            if let target = resolveFocusProgramID(preferringChannel: targetChannel.id) {
+                focusedProgramID = target
+            }
+        }
+    }
+
     private func resolveFocusProgramID(preferringChannel channelID: String?) -> String? {
         if let channelID, let pid = focusTargetProgramID(forChannel: channelID) {
             return pid
@@ -4507,11 +4574,16 @@ private struct GuideProgramButton: View {
                 }
             }
             .onLongPressGesture(minimumDuration: 0.35) {
-                // Guide "Select (hold)" slot. The confirmationDialog below IS
-                // the program menu (okLong = .programInfo by default); a user
-                // who maps the slot to Do Nothing suppresses it.
-                if RemoteControlStore.shared.guideAction(.okLong) != .none {
+                // Guide "Select (hold)" slot, dispatched BY ACTION VALUE
+                // (#196). The confirmationDialog below IS the program menu
+                // (okLong = .programInfo by default); any other mapped
+                // action runs through the shared dispatcher, and Do
+                // Nothing suppresses the press entirely.
+                let action = RemoteControlStore.shared.guideAction(.okLong)
+                if action == .programInfo {
                     showCtxDialog = true
+                } else {
+                    GuideRemoteDispatch.perform(action)
                 }
             }
             .confirmationDialog(prog.title,

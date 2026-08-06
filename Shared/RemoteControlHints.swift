@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// Human copy for the on-screen gesture hint chips, derived from the EFFECTIVE
 /// remote map so a remapped button never advertises a stale gesture.
@@ -83,3 +84,65 @@ enum RemoteControlHints {
         return "Hold Left = \(phrase)"
     }
 }
+
+#if os(tvOS)
+/// Remote Control #196: shared dispatcher for the guide-context actions
+/// reachable from more than one press site (hold-Left / hold-Right in
+/// ChannelListView, hold-Select in EPGGuideView). Grid moves post the
+/// notifications EPGGuideView observes; mini-player actions run directly
+/// against the shared singletons. Returns false for actions the CALLER
+/// owns locally (focusGroupPills pin-All, programInfo menu, none) so the
+/// call site keeps its canonical behavior for them.
+@MainActor
+enum GuideRemoteDispatch {
+    /// Hold gestures page in coarse steps: 2.5 hours matches the pre-map
+    /// guide history jump users already know.
+    static let timelineJumpHours = 2.5
+    /// Channel rows a pageUp/pageDown hold moves by.
+    static let pageStepRows = 5
+
+    @discardableResult
+    static func perform(_ action: GuideRemoteAction) -> Bool {
+        switch action {
+        case .timelineBack:
+            post(.guideTimelineJump, ["hours": -timelineJumpHours])
+            return true
+        case .timelineForward:
+            post(.guideTimelineJump, ["hours": timelineJumpHours])
+            return true
+        case .jumpToNow:
+            post(.guideJumpToNow)
+            return true
+        case .jumpToTop:
+            post(.guideScrollToTop)
+            return true
+        case .pageUp:
+            post(.guidePageStep, ["step": -pageStepRows])
+            return true
+        case .pageDown:
+            post(.guidePageStep, ["step": pageStepRows])
+            return true
+        case .resumePlayer:
+            guard NowPlayingManager.shared.isActive,
+                  NowPlayingManager.shared.isMinimized else { return false }
+            withAnimation(.spring(response: 0.35)) {
+                NowPlayingManager.shared.expand()
+            }
+            return true
+        case .closeMiniPlayer:
+            guard NowPlayingManager.shared.isActive,
+                  NowPlayingManager.shared.isMinimized else { return false }
+            // Full session teardown: on the unified path a bare
+            // NowPlayingManager.stop() orphans the PlayerSession-owned mini.
+            withAnimation(.spring(response: 0.35)) { PlayerSession.shared.exit() }
+            return true
+        case .focusGroupPills, .programInfo, .openSearch, .none:
+            return false
+        }
+    }
+
+    private static func post(_ name: Notification.Name, _ userInfo: [String: Any]? = nil) {
+        NotificationCenter.default.post(name: name, object: nil, userInfo: userInfo)
+    }
+}
+#endif

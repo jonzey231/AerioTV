@@ -4802,10 +4802,25 @@ struct MainTabView: View {
             handleMenuPress()
         }
         .onPlayPauseCommand {
+            #if os(tvOS)
+            // Remote Control #196: the guide-context playPause slot
+            // (default resumePlayer = expand the corner mini). A remap
+            // dispatches its action; Do Nothing suppresses the press.
+            if nowPlaying.isMinimized {
+                let action = RemoteControlStore.shared.guideAction(.playPause)
+                if action == .resumePlayer {
+                    debugLog("🎮 Play/Pause pressed: expand mini player to full screen")
+                    withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
+                } else {
+                    GuideRemoteDispatch.perform(action)
+                }
+            }
+            #else
             if nowPlaying.isMinimized {
                 debugLog("🎮 Play/Pause pressed: expand mini player to full screen")
                 withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
             }
+            #endif
         }
         .onReceive(NotificationCenter.default.publisher(for: .stopPlaybackForBackground)) { _ in
             if nowPlaying.isActive {
