@@ -263,12 +263,56 @@ final class LiveRewindBuffer: @unchecked Sendable {
         self.tailWallMs = sessionStartMs
     }
 
+    // Splice overlap trimmer (Android parity: AerioTV-Android 60f4476,
+    // GH #51). Dispatcharr serves a joining connection the last
+    // new_client_behind_seconds (~5s default) as an instant burst, so
+    // every reconnect used to append a duplicate region with a backwards
+    // PTS jump - the demuxer chews through it as visual artifacts and
+    // A/V desync when playback crosses the splice. On a discontinuity we
+    // snapshot a fingerprint of the last [overlapRun] packet hashes and
+    // DISCARD the new connection's packets until that run reappears -
+    // the splice then continues bit-exactly. Streaming, nothing held
+    // back; bounded by [overlapSearchCap] bytes / [overlapSearchMs] so a
+    // server with join replay disabled costs at most a small
+    // packet-aligned gap.
+    static let overlapRun = 16
+    static let overlapSearchCap = 8 * 1024 * 1024
+    static let overlapSearchMs: Int64 = 3_000
+    private var recentHashes: [Int32] = []
+    private var spliceTarget: [Int32]?
+    private var discardActive = false
+    private var matchLen = 0
+    private var discardedBytes = 0
+    private var discardStartMs: Int64 = 0
+
     /// The NEXT appended bytes come from a fresh connection: drop the
-    /// packet-fragment carry and re-scan for TS sync.
+    /// packet-fragment carry and re-scan for TS sync, then arm the
+    /// overlap trimmer when the head has a usable fingerprint (a run of
+    /// near-identical packets - nulls, repeated PAT/PMT - would
+    /// false-match almost anywhere, hence the variety check).
     func markDiscontinuity() {
         lock.lock(); defer { lock.unlock() }
         carry.removeAll(keepingCapacity: true)
         needResync = true
+        if recentHashes.count >= Self.overlapRun, Set(recentHashes).count >= 4 {
+            spliceTarget = recentHashes
+        } else {
+            spliceTarget = nil
+        }
+        discardActive = spliceTarget != nil
+        matchLen = 0
+        discardedBytes = 0
+        discardStartMs = 0
+    }
+
+    /// FNV-1a over one 188-byte packet at [offset] in [buf].
+    private static func packetHash(_ buf: Data, _ offset: Int) -> Int32 {
+        var h: Int32 = -2128831035
+        let base = buf.startIndex + offset
+        for i in 0..<tsPacket {
+            h = (h ^ Int32(buf[base + i])) &* 16777619
+        }
+        return h
     }
 
     func append(_ data: Data) {
@@ -289,6 +333,46 @@ final class LiveRewindBuffer: @unchecked Sendable {
         carry = whole < merged.count ? merged.subdata(in: whole..<merged.count) : Data()
         guard whole > 0 else { return }
 
+        var from = 0
+        if discardActive, let target = spliceTarget {
+            // Splice trimmer: hash packets and discard until the head
+            // fingerprint run completes; the region before it is the
+            // server's replay of content the buffer already holds.
+            if discardStartMs == 0 { discardStartMs = now }
+            var p = 0
+            var found = false
+            while p < whole {
+                let h = Self.packetHash(merged, p)
+                if h == target[matchLen] {
+                    matchLen += 1
+                } else if h == target[0] {
+                    matchLen = 1
+                } else {
+                    matchLen = 0
+                }
+                p += Self.tsPacket
+                if matchLen == target.count {
+                    found = true
+                    break
+                }
+            }
+            if found {
+                discardActive = false
+                spliceTarget = nil
+                debugLog("[REWIND] splice overlap trimmed (\(discardedBytes + p) bytes)")
+                from = p
+                guard from < whole else { return }
+            } else {
+                discardedBytes += whole
+                if discardedBytes > Self.overlapSearchCap || now - discardStartMs > Self.overlapSearchMs {
+                    discardActive = false
+                    spliceTarget = nil
+                    debugLog("[REWIND] splice fingerprint not found; spliced with a gap after discarding \(discardedBytes) bytes")
+                }
+                return
+            }
+        }
+
         if handle == nil || now - currentSegStartMs >= Self.segmentMs {
             rollSegmentLocked(now: now)
         }
@@ -299,8 +383,17 @@ final class LiveRewindBuffer: @unchecked Sendable {
         // buffer self-closes; the reader EOFs and the player's relay
         // recovery takes over.
         do {
-            if let h = handle { try h.write(contentsOf: merged.prefix(whole)) }
+            if let h = handle {
+                try h.write(contentsOf: merged.subdata(in: from..<whole))
+            }
             headWallMs = now
+            // Keep the head fingerprint fresh for the next discontinuity.
+            var p = from
+            while p < whole {
+                recentHashes.append(Self.packetHash(merged, p))
+                if recentHashes.count > Self.overlapRun { recentHashes.removeFirst() }
+                p += Self.tsPacket
+            }
         } catch {
             debugLog("[REWIND] segment write failed (\(error)); closing buffer")
             closed = true
