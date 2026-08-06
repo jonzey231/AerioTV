@@ -1268,7 +1268,7 @@ struct AddToMultiviewSheet: View {
     ) async {
         guard !resolvingIDs.contains(id) else { return }
         let server = activeServer
-        let headers = activeServerHeaders
+        var headers = activeServerHeaders
 
         // Thermal refusal: same gate as the channel path's `tryAdd`.
         if multiviewStore.isThermallyStressed {
@@ -1286,6 +1286,14 @@ struct AddToMultiviewSheet: View {
                                      userAgent: server.effectiveUserAgent,
                                      authMode: server.dispatcharrHeaderMode)
             resolvedURL = (try? await api.resolveFinalURLForPlayback(proxyURL)) ?? proxyURL
+            // Audit #38 parity (Android ee06e17): never replay the API key
+            // to a session URL that resolved OFF the server's own hosts.
+            // User-Agent stays; it carries no secret.
+            if !api.isOwnHost(resolvedURL) {
+                headers = headers.filter {
+                    $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
+                }
+            }
         }
 
         commitAddVOD(

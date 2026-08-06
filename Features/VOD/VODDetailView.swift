@@ -1040,6 +1040,16 @@ struct VODDetailView: View {
                                      authMode: server.dispatcharrHeaderMode)
             resolvedURL = (try? await api.resolveFinalURLForPlayback(url)) ?? url
             isResolvingURL = false
+            // Audit #38 parity (Android ee06e17): a session URL that resolved
+            // OFF the server's own hosts plays without auth headers - the
+            // one-time session handle needs none, and the API key must never
+            // be replayed to a foreign host. User-Agent stays (some upstreams
+            // gate on it; it carries no secret).
+            if !api.isOwnHost(resolvedURL) {
+                playingHeaders = playingHeaders.filter {
+                    $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
+                }
+            }
         }
 
         // v1.6.18 — tear down any active live stream before mounting

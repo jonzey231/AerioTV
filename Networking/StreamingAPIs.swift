@@ -2598,6 +2598,23 @@ struct DispatcharrAPI {
         return out
     }
 
+    /// True when [url] points at one of the user's OWN server hosts (the
+    /// fetch-time base plus every configured server's public + LAN host).
+    /// The auth boundary for playback URLs: Dispatcharr's 301 hands back a
+    /// one-time session URL that needs no further auth, so anything that
+    /// resolved OFF the server's own hosts must never receive the API key
+    /// (Android parity: AerioTV-Android ee06e17, audit finding #38 - a
+    /// hostile server response or cleartext-LAN MITM could otherwise
+    /// bounce the key to an arbitrary public third-party host, which
+    /// `validateAbsoluteURL` deliberately permits for playback).
+    func isOwnHost(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        if let own = URL(string: baseURL)?.host?.lowercased(), host == own {
+            return true
+        }
+        return VODService.knownOwnHosts().contains(host)
+    }
+
     /// Resolve Dispatcharr proxy URLs that redirect to a session-based path.
     /// Some media players (and some CDN/proxy setups) behave better when given the final URL up-front.
     func resolveFinalURLForPlayback(_ url: URL) async throws -> URL {
@@ -2610,7 +2627,15 @@ struct DispatcharrAPI {
             req.httpMethod = "GET"
             req.setValue("bytes=0-0", forHTTPHeaderField: "Range")
             req.setValue("*/*", forHTTPHeaderField: "Accept")
-            headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+            // Auth rides only to the server's own hosts; a foreign hop
+            // (already vetted against private/loopback ranges below) gets
+            // an anonymous probe - session URLs need no auth, and the API
+            // key must never be replayed off-origin.
+            if isOwnHost(current) {
+                headers.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+            } else {
+                req.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            }
 
             // Prevent URLSession from auto-following so we can capture the redirected Location.
             let (data, response) = try await session.data(for: req, delegate: RedirectBlocker())
