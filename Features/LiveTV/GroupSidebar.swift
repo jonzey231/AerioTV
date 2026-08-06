@@ -96,17 +96,24 @@ struct GroupSidebarPanel: View {
     let selectedToken: String
     let onSelect: (String) -> Void
     let onDismiss: () -> Void
+    /// Android-parity live preview: fires as D-pad focus lands on a row
+    /// (the HOST debounces and applies the group behind the sidebar).
+    /// Nil = no preview (the player overlay's group stage stays
+    /// commit-on-OK only).
+    let onRowFocused: ((String) -> Void)?
 
     @FocusState private var focusedToken: String?
 
     init(groups: [String],
          selectedToken: String,
          onSelect: @escaping (String) -> Void,
-         onDismiss: @escaping () -> Void) {
+         onDismiss: @escaping () -> Void,
+         onRowFocused: ((String) -> Void)? = nil) {
         self.groups = groups
         self.selectedToken = selectedToken
         self.onSelect = onSelect
         self.onDismiss = onDismiss
+        self.onRowFocused = onRowFocused
     }
 
     /// The row that should receive focus + be scrolled into view. Mirrors the
@@ -155,6 +162,9 @@ struct GroupSidebarPanel: View {
                 // closure the pane passes down.
                 .onExitCommand { onDismiss() }
                 .onAppear { assertInitialFocus(using: proxy) }
+                .onChange(of: focusedToken) { _, token in
+                    if let token { onRowFocused?(token) }
+                }
             }
         }
         .frame(width: panelWidth)
@@ -205,17 +215,27 @@ struct GuideGroupSidebarPane: View {
     let selectedToken: String
     let onSelect: (String) -> Void
     let onDismiss: () -> Void
+    /// Android-parity preview + commit split: `onPreview` fires per focused
+    /// row (host debounces + applies the group live behind the pane);
+    /// `onCommit` is Right-out-of-the-rail = KEEP the previewed group and
+    /// close. Nil keeps the legacy Right-cancels behavior.
+    let onPreview: ((String) -> Void)?
+    let onCommit: (() -> Void)?
 
     @Namespace private var sidebarFocusNS
 
     init(groups: [String],
          selectedToken: String,
          onSelect: @escaping (String) -> Void,
-         onDismiss: @escaping () -> Void) {
+         onDismiss: @escaping () -> Void,
+         onPreview: ((String) -> Void)? = nil,
+         onCommit: (() -> Void)? = nil) {
         self.groups = groups
         self.selectedToken = selectedToken
         self.onSelect = onSelect
         self.onDismiss = onDismiss
+        self.onPreview = onPreview
+        self.onCommit = onCommit
     }
 
     var body: some View {
@@ -224,7 +244,8 @@ struct GuideGroupSidebarPane: View {
                 groups: groups,
                 selectedToken: selectedToken,
                 onSelect: onSelect,
-                onDismiss: onDismiss
+                onDismiss: onDismiss,
+                onRowFocused: onPreview
             )
             .padding(.vertical, 24)
             .padding(.leading, 20)
@@ -241,10 +262,13 @@ struct GuideGroupSidebarPane: View {
         }
         .frame(maxHeight: .infinity)
         // Right has no focusable target inside the vertical rail, so the move
-        // bubbles here and steps back out to the grid. Up/Down are consumed by
-        // row-to-row focus movement and never reach this handler.
+        // bubbles here and steps back out to the grid. With the preview flow
+        // wired, Right COMMITS the previewed group (Android parity: OK or
+        // Right keeps it, Back reverts); the legacy host keeps Right=cancel.
+        // Up/Down are consumed by row-to-row focus movement and never reach
+        // this handler.
         .onMoveCommand { direction in
-            if direction == .right { onDismiss() }
+            if direction == .right { (onCommit ?? onDismiss)() }
         }
         .onExitCommand { onDismiss() }
     }

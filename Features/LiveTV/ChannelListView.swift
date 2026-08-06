@@ -212,6 +212,12 @@ struct ChannelListView: View {
     // the iPad guide); the tvOS-only behavior is gated inside the members below.
     @State private var guideSidebarOpen = false
     @State private var guideSidebarReturnProgramID: String?
+    /// #196 sidebar preview: the group active when the sidebar OPENED, so
+    /// Back can revert a live preview. Nil while the sidebar is closed.
+    @State private var guideSidebarOriginalGroup: String?
+    /// 90ms preview debounce (Android parity) so D-pad travel through the
+    /// rail doesn't re-filter the grid on every row.
+    @State private var guideSidebarPreviewTask: Task<Void, Never>?
     @ObservedObject private var remoteStore = RemoteControlStore.shared
 
     /// Sidebar-mode active (tvOS only): hides the pills row + arms short-Left
@@ -671,14 +677,42 @@ struct ChannelListView: View {
                     // Docked group sidebar (Group Selection: Sidebar Menu). The
                     // guide shifts right beside it; Right/Back close it.
                     if guideSidebarOpen {
+                        // #196 Android-parity semantics: focusing a row
+                        // PREVIEWS its group live behind the pane (90ms
+                        // debounce); OK or Right COMMITS and closes; Back
+                        // reverts to the group the sidebar opened with.
                         GuideGroupSidebarPane(
                             groups: ["All"] + visibleGroups,
                             selectedToken: selectedGroup,
                             onSelect: { token in
+                                guideSidebarPreviewTask?.cancel()
                                 selectedGroup = token
-                                closeGuideSidebar(rebind: true)
+                                closeGuideSidebar(
+                                    rebind: token != guideSidebarOriginalGroup
+                                )
                             },
-                            onDismiss: { closeGuideSidebar(rebind: false) }
+                            onDismiss: {
+                                guideSidebarPreviewTask?.cancel()
+                                if let origin = guideSidebarOriginalGroup,
+                                   origin != selectedGroup {
+                                    selectedGroup = origin
+                                }
+                                closeGuideSidebar(rebind: false)
+                            },
+                            onPreview: { token in
+                                guideSidebarPreviewTask?.cancel()
+                                guideSidebarPreviewTask = Task { @MainActor in
+                                    try? await Task.sleep(nanoseconds: 90_000_000)
+                                    guard !Task.isCancelled else { return }
+                                    selectedGroup = token
+                                }
+                            },
+                            onCommit: {
+                                guideSidebarPreviewTask?.cancel()
+                                closeGuideSidebar(
+                                    rebind: selectedGroup != guideSidebarOriginalGroup
+                                )
+                            }
                         )
                         .transition(.move(edge: .leading))
                         .focusSection()
@@ -707,6 +741,9 @@ struct ChannelListView: View {
                             sidebarOpen: guideSidebarOpen,
                             onRequestGroupSidebar: { programID in
                                 guideSidebarReturnProgramID = programID
+                                // #196: remember the group for the Back-revert
+                                // of a live preview.
+                                guideSidebarOriginalGroup = selectedGroup
                                 withAnimation(.easeOut(duration: 0.28)) { guideSidebarOpen = true }
                             }
                         )
