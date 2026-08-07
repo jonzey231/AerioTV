@@ -1240,6 +1240,191 @@ struct CompanionControlFAB: View {
 
 /// Lists discovered AerioTV Android TVs; pick one -> connect (remembered token
 /// auto-authenticates), or the TV shows a 6-digit code entered inline here.
+// MARK: - Unified sectioned output picker (task #225)
+
+/// Discovered Google Cast devices for the unified picker. The SDK's
+/// GCKUICastButton owns its own modal chooser; the sectioned sheet needs the
+/// raw device list, so this thin wrapper mirrors GCKDiscoveryManager into
+/// SwiftUI. Listener callbacks arrive on the main thread per the Cast SDK
+/// contract; the Task hop keeps that assumption out of the type system the
+/// same way AerioCastController's own observers do.
+final class CastDeviceList: NSObject, ObservableObject, GCKDiscoveryManagerListener {
+    @Published private(set) var devices: [GCKDevice] = []
+
+    private var manager: GCKDiscoveryManager {
+        GCKCastContext.sharedInstance().discoveryManager
+    }
+
+    func start() {
+        manager.add(self)
+        manager.startDiscovery()
+        reload()
+    }
+
+    func stop() {
+        manager.remove(self)
+    }
+
+    private func reload() {
+        let m = manager
+        var list: [GCKDevice] = []
+        for i in 0..<m.deviceCount { list.append(m.device(at: i)) }
+        devices = list
+    }
+
+    func didUpdateDeviceList() {
+        // Cast SDK delivers listener callbacks on the main thread (SDK
+        // contract), so the @Published mutation in reload() is main-safe
+        // without an executor hop.
+        reload()
+    }
+}
+
+/// Task #225: ONE sectioned output picker replacing the separate Cast /
+/// AirPlay / Control-a-TV chrome buttons (Android CastControls.kt "Cast to"
+/// dialog twin, plus the iOS-only AirPlay section). Fixed section order:
+///
+///   "AerioTV Remote" - companion devices (full native player on the TV,
+///                      no codec limits)
+///   "Google Cast"    - Cast SDK devices (web receiver, Dispatcharr-only)
+///   "AirPlay"        - hands off to the system route sheet
+///
+/// A section renders only when its transport is currently usable for the
+/// playing content -- the host passes the same gates the three buttons used.
+/// Transports are mutually exclusive (Android parity): picking one tears the
+/// other down first.
+struct CastPickerSheet: View {
+    /// Cast section gate: devices may exist AND the channel is basic-castable.
+    let showGoogleCast: Bool
+    /// AirPlay section gate: the session rides AVPlayer (video routes exist).
+    let showAirPlay: Bool
+
+    @ObservedObject private var companion = CompanionClient.shared
+    @ObservedObject private var castController = AerioCastController.shared
+    @StateObject private var castDevices = CastDeviceList()
+    @Environment(\.dismiss) private var dismiss
+    @State private var code = ""
+
+    var body: some View {
+        NavigationStack {
+            List {
+                // Active connection first, with its teardown action (the
+                // Android dialog's "Stop casting" / "Disconnect TV" buttons).
+                if castController.isCasting {
+                    Section {
+                        Button(role: .destructive) {
+                            castController.stopCasting()
+                        } label: {
+                            Label("Stop casting", systemImage: "stop.circle")
+                        }
+                    }
+                }
+                if companion.isControlling {
+                    Section {
+                        Button(role: .destructive) {
+                            companion.disconnect()
+                        } label: {
+                            Label("Disconnect TV", systemImage: "stop.circle")
+                        }
+                    }
+                }
+                if case .needsPairing(let name) = companion.conn {
+                    Section("Enter the code shown on \(name ?? "the TV")") {
+                        TextField("6-digit code", text: $code)
+                            .keyboardType(.numberPad)
+                            .font(.title3.monospaced())
+                        Button("Pair") {
+                            companion.submitPairingCode(code)
+                            code = ""
+                        }
+                        .disabled(code.trimmingCharacters(in: .whitespaces).count < 6)
+                    }
+                } else if case .connecting(let name) = companion.conn {
+                    Section {
+                        HStack {
+                            ProgressView()
+                            Text("Connecting to \(name ?? "TV")…").padding(.leading, 8)
+                        }
+                    }
+                }
+                if !companion.devices.isEmpty {
+                    Section("AerioTV Remote") {
+                        ForEach(companion.devices) { tv in
+                            Button {
+                                // One remote target at a time (Android parity).
+                                castController.stopCasting()
+                                companion.connect(to: tv)
+                            } label: {
+                                Label(tv.name, systemImage: "tv")
+                            }
+                        }
+                    }
+                }
+                if showGoogleCast {
+                    Section("Google Cast") {
+                        if castDevices.devices.isEmpty {
+                            Text("Searching for devices…")
+                                .foregroundStyle(.secondary)
+                        }
+                        ForEach(castDevices.devices, id: \.deviceID) { device in
+                            Button {
+                                if !companion.isControlling { companion.disconnect() }
+                                GCKCastContext.sharedInstance().sessionManager
+                                    .startSession(with: device)
+                            } label: {
+                                Label(device.friendlyName ?? "Cast device",
+                                      systemImage: "sparkles.tv")
+                            }
+                        }
+                    }
+                }
+                if showAirPlay {
+                    Section("AirPlay") {
+                        Button {
+                            dismiss()
+                            // The system route sheet replaces this one; see
+                            // AirPlayMenuTrigger for the hidden-picker detail.
+                            AirPlayMenuTrigger.present()
+                        } label: {
+                            Label("Choose AirPlay output…", systemImage: "airplay.video")
+                        }
+                    }
+                }
+                if companion.devices.isEmpty && !showGoogleCast && !showAirPlay {
+                    Text("No AerioTV devices found. Open AerioTV on your TV, then check again.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .navigationTitle(
+                castController.isCasting || companion.isControlling ? "Connected" : "Cast to"
+            )
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") {
+                        // Cancel an in-flight / unpaired companion attempt so
+                        // it doesn't stay retained + spinning after the sheet
+                        // is gone; a fully connected session is left alone.
+                        if !companion.isControlling { companion.disconnect() }
+                        dismiss()
+                    }
+                }
+            }
+        }
+        .onAppear { if showGoogleCast { castDevices.start() } }
+        .onDisappear { castDevices.stop() }
+        // Freshly connected on either transport -> the picker's job is done;
+        // the remote cover (HomeView) takes over.
+        .onChange(of: companion.isControlling) { _, controlling in
+            if controlling { dismiss() }
+        }
+        .onChange(of: castController.state) { _, state in
+            if case .connected = state { dismiss() }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
 struct CompanionPickerSheet: View {
     @ObservedObject private var companion = CompanionClient.shared
     @Environment(\.dismiss) private var dismiss

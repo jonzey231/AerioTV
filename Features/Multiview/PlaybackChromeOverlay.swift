@@ -86,7 +86,22 @@ struct PlaybackChromeOverlay: View {
     /// GH #33 companion remote: gates the "Control a TV" button on mDNS
     /// discovery of an open AerioTV Android TV app.
     @ObservedObject private var companionClient = CompanionClient.shared
-    @State private var showCompanionPicker = false
+    @State private var showOutputPicker = false
+
+    /// Task #225 section gates for the unified output picker; the same
+    /// conditions the three separate buttons used (see the button site).
+    private var castPickerCastGate: Bool {
+        castController.state != .unavailable
+            && webCastStreamURL(store.tiles.first?.streamURL) != nil
+    }
+    private var castPickerAirPlayGate: Bool {
+        store.sessionEngine.isAVPlayer
+    }
+    private var castPickerCompanionGate: Bool {
+        guard !companionClient.devices.isEmpty,
+              let tile = store.tiles.first else { return false }
+        return CompanionClient.androidChannelID(for: tile.item) != nil
+    }
     #endif
 
     // v1.6.15: removed `verticalSizeClass` + `isiPhonePortrait` —
@@ -248,65 +263,39 @@ struct PlaybackChromeOverlay: View {
                 if UIDevice.current.userInterfaceIdiom == .phone {
                     landscapeButton_iOS
                 }
-                // GH #33 basic cast: GCKUICastButton (SDK owns discovery + the
-                // device picker). Shown only when cast devices exist AND the
-                // playing channel is basic-castable (Dispatcharr /proxy/ts/
-                // source -- webCastStreamURL returns nil otherwise; loading a
-                // non-castable channel black-screens the receiver, Android
-                // review 2026-07-15). Session start/teardown is handled at
-                // HomeView scope (it owns the local-player swap).
-                if castController.state != .unavailable,
-                   webCastStreamURL(store.tiles.first?.streamURL) != nil {
-                    CastButton()
-                        .frame(width: 30, height: 30)
-                        .padding(11)
-                        .background(
-                            Circle()
-                                .fill(.ultraThinMaterial)
-                                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
-                        )
-                }
-                // GH #33 AirPlay: VIDEO AirPlay exists only on the AVPlayer
-                // engine (mpv frames never leave the GPU), so the route picker
-                // appears exactly when this session rides AVPlayer -- which,
-                // with engine auto-detect default-on, is every HLS-capable
-                // channel. mpv sessions keep the audio-only AirPlay entry in
-                // the overflow menu.
-                if store.sessionEngine.isAVPlayer {
-                    AirPlayButton()
-                        .frame(width: 30, height: 30)
-                        .padding(11)
-                        .background(
-                            Circle()
-                                .fill(.ultraThinMaterial)
-                                .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
-                        )
-                }
-                // GH #33 companion remote: control an OPEN AerioTV Android TV
-                // app over the LAN (mDNS + WebSocket; full native player on the
-                // TV, so no codec limits -- unlike basic cast). Shown when an
-                // AerioTV TV is discovered AND the playing channel's identity
-                // translates (Dispatcharr channels share the server uuid).
-                if !companionClient.devices.isEmpty,
-                   let tile = store.tiles.first,
-                   CompanionClient.androidChannelID(for: tile.item) != nil {
+                // Task #225: ONE sectioned output picker replaces the three
+                // separate Cast / AirPlay / Control-a-TV buttons. The old
+                // per-transport gates become section gates inside the sheet:
+                // - Google Cast: devices exist AND the channel is basic-
+                //   castable (Dispatcharr /proxy/ts/ source; loading a
+                //   non-castable channel black-screens the receiver).
+                // - AirPlay: VIDEO routes exist only on the AVPlayer engine
+                //   (mpv frames never leave the GPU); mpv sessions keep the
+                //   audio-only AirPlay entry in the overflow menu.
+                // - AerioTV Remote: an AerioTV TV is discovered AND the
+                //   playing channel's identity translates.
+                // Session start/teardown stays at HomeView scope.
+                if castPickerCastGate || castPickerAirPlayGate || castPickerCompanionGate {
                     Button {
                         chromeState.reportInteraction()
-                        showCompanionPicker = true
+                        showOutputPicker = true
                     } label: {
                         ZStack {
                             Circle()
                                 .fill(.ultraThinMaterial)
                                 .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
-                            Image(systemName: "tv.and.mediabox")
+                            Image(systemName: "airplay.video")
                                 .font(.system(size: 18, weight: .semibold))
                                 .foregroundStyle(.white)
                         }
                         .frame(width: 52, height: 52)
                     }
-                    .accessibilityLabel("Control a TV")
-                    .sheet(isPresented: $showCompanionPicker) {
-                        CompanionPickerSheet()
+                    .accessibilityLabel("Cast or AirPlay")
+                    .sheet(isPresented: $showOutputPicker) {
+                        CastPickerSheet(
+                            showGoogleCast: castPickerCastGate,
+                            showAirPlay: castPickerAirPlayGate
+                        )
                     }
                 }
                 #endif
