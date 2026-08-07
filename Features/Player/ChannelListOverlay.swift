@@ -232,9 +232,10 @@ struct ChannelListOverlay: View {
                             activeGroup = token
                             sidebarOpen = false
                         },
-                        // Back/Menu inside the rail (its own .onExitCommand)
-                        // steps back to the list without changing the group.
-                        onDismiss: { sidebarOpen = false }
+                        // Back/Menu inside the rail closes the WHOLE overlay
+                        // (Logan 2026-08-06: Right steps out one layer at a
+                        // time; Back always exits fully).
+                        onDismiss: { onDismiss() }
                     )
                     // The panel itself doesn't handle Right (only the guide
                     // pane does); add it here so Right steps back out of the
@@ -250,11 +251,9 @@ struct ChannelListOverlay: View {
             .padding(.leading, 48)
             .padding(.vertical, 40)
         }
-        // Two-stage close: while the sidebar is open, its own .onExitCommand
-        // consumes Back first (returns to the list), so this root handler is
-        // only reached with the LIST showing — Back there dismisses the whole
-        // overlay. onDismiss is therefore called only when the list itself
-        // dismisses; the host owns what that teardown does.
+        // Back closes the whole overlay from ANY stage (Logan 2026-08-06:
+        // Right is the layer-by-layer step-out; Back always exits fully).
+        // The sidebar rail's own .onExitCommand forwards here too.
         .onExitCommand { onDismiss() }
         .onAppear { focusFirstRow() }
         .onChange(of: sidebarOpen) { _, open in
@@ -314,6 +313,12 @@ struct ChannelListOverlay: View {
                     .onMoveCommand { direction in
                         if direction == .left && !sidebarOpen {
                             sidebarOpen = true
+                        }
+                        // Logan 2026-08-06: Right steps OUT one layer at
+                        // every stage. From the list (no sidebar) the next
+                        // layer out is the player itself.
+                        if direction == .right && !sidebarOpen {
+                            onDismiss()
                         }
                     }
                     .onChange(of: activeGroup) { _, _ in

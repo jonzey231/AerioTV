@@ -1602,6 +1602,26 @@ struct MultiviewContainerView: View {
             "[MV-Cmd] tvOS Menu source=\(source) | showTVOptions=\(showTVOptions) showStreamInfo=\(showStreamInfo) isMinimized=\(nowPlaying.isMinimized) chromeVisible=\(chromeState.isVisible) tiles=\(store.tiles.count) fullscreenTile=\(store.fullscreenTileID ?? "nil") relocating=\(store.relocatingTileID ?? "nil")",
             category: "Playback", level: .info
         )
+        // Remote Control #195 overlays FIRST: Back closes the whole
+        // Channels/Recents overlay from any stage (Logan 2026-08-06:
+        // Right steps out one layer at a time, Back exits fully).
+        // Handled here as well as in the overlay's own .onExitCommand
+        // because the press can also arrive through the MainTabView
+        // relay (.playerBackPress) when focus hasn't settled inside
+        // the overlay - the ladder below didn't know the overlays
+        // existed, which read as a completely dead Back button (ATV
+        // repro 2026-08-06).
+        if showChannelsOverlay || showRecentsOverlay {
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: player overlay open → close it",
+                category: "Playback", level: .info
+            )
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showChannelsOverlay = false
+                showRecentsOverlay = false
+            }
+            return
+        }
         // v1.6.15.x: Stream Info overlay catches Back BEFORE the
         // Options-panel branch. Stream Info is opened FROM the
         // Options panel and persists after the panel dismisses, so
