@@ -338,19 +338,25 @@ final class PressCatcherView: UIView {
 /// the hierarchy, so it lives only while the guide (which mounts this view) is
 /// shown. Modeled on PlayerView's `.leftArrow` long-press recognizer.
 struct GuideLongPressLeftDetector: UIViewRepresentable {
-    /// Fires once when the Left hold crosses the 0.5s threshold (jump to "All").
+    /// Hold threshold. 0.5s for the mapped guide action; sidebar mode passes
+    /// ~0.32s so the docked group menu opens snappily (the Android twin moved
+    /// off the OS ~500ms long-press for the same reason, Logan 2026-08-06).
+    var minimumPressDuration: TimeInterval = 0.5
+    /// Fires once when the Left hold crosses the threshold (jump to "All").
     let onBegan: () -> Void
     /// Fires when the Left press is released (stop pinning focus to "All").
     let onEnded: () -> Void
 
     func makeUIView(context: Context) -> LeftHoldHostView {
         let v = LeftHoldHostView()
+        v.minimumPressDuration = minimumPressDuration
         v.onLeftHoldBegan = onBegan
         v.onLeftHoldEnded = onEnded
         v.isUserInteractionEnabled = false   // passthrough; never steals focus/taps
         return v
     }
     func updateUIView(_ uiView: LeftHoldHostView, context: Context) {
+        uiView.minimumPressDuration = minimumPressDuration
         uiView.onLeftHoldBegan = onBegan
         uiView.onLeftHoldEnded = onEnded
     }
@@ -366,6 +372,9 @@ struct GuideLongPressLeftDetector: UIViewRepresentable {
 final class LeftHoldHostView: UIView, UIGestureRecognizerDelegate {
     var onLeftHoldBegan: (() -> Void)?
     var onLeftHoldEnded: (() -> Void)?
+    var minimumPressDuration: TimeInterval = 0.5 {
+        didSet { recognizer?.minimumPressDuration = minimumPressDuration }
+    }
     private weak var attachedWindow: UIWindow?
     private var recognizer: UILongPressGestureRecognizer?
 
@@ -377,7 +386,7 @@ final class LeftHoldHostView: UIView, UIGestureRecognizerDelegate {
         guard let window, recognizer == nil else { return }
         let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleLeftHold(_:)))
         lp.allowedPressTypes = [NSNumber(value: UIPress.PressType.leftArrow.rawValue)]
-        lp.minimumPressDuration = 0.5
+        lp.minimumPressDuration = minimumPressDuration
         // #42 Part 1: consume the press once the long-press is recognized so the
         // still-held Left's "click" does not resolve into the guide on release
         // (which scrolled the EPG timeline). Short Left (< 0.5s) never recognizes

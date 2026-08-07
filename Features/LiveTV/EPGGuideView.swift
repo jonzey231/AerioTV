@@ -2958,20 +2958,13 @@ struct EPGGuideView: View {
                 guard focusedProgramID != nil else { return }
                 switch direction {
                 case .left:
-                    #if os(tvOS)
-                    // Sidebar mode: a short-Left on the now column (timeline not
-                    // panned into history) opens the docked group sidebar
-                    // instead of scrolling earlier. A HOLD-Left is consumed by
-                    // the window-level LeftHoldHostView before this fires, so a
-                    // hold can never also open the sidebar. Once browsing
-                    // history, short-Left keeps paging earlier.
-                    if RemoteControlStore.shared.useGroupSidebar, !sidebarOpen,
-                       let fpid = focusedProgramID, let request = onRequestGroupSidebar,
-                       !timelineIsAwayFromNow() {
-                        request(fpid)
-                        return
-                    }
-                    #endif
+                    // Sidebar mode used to open the docked group menu on a
+                    // short-Left at the now column. REVERSED per Logan
+                    // 2026-08-06 (matching his Android ruling the same day):
+                    // hold-Left opens the sidebar (window-level detector ->
+                    // .guideOpenGroupSidebar) and a single Left is ALWAYS
+                    // plain navigation, because the tap-opens scheme made the
+                    // EPG history left of "now" unreachable in sidebar mode.
                     withAnimation(.easeOut(duration: 0.3)) {
                         horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
                     }
@@ -3478,6 +3471,17 @@ struct EPGGuideView: View {
             .onReceive(
                 NotificationCenter.default.publisher(for: .guidePageStep)
             ) { note in handlePageStep(note, proxy: proxy) }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .guideOpenGroupSidebar)
+            ) { _ in
+                // Sidebar mode's hold-Left (Logan 2026-08-06 ruling): the
+                // host posts, we answer with the focused programme so the
+                // sidebar knows where to restore focus on dismiss.
+                guard RemoteControlStore.shared.useGroupSidebar, !sidebarOpen,
+                      let fpid = focusedProgramID,
+                      let request = onRequestGroupSidebar else { return }
+                request(fpid)
+            }
     }
 
     /// Timeline jump by userInfo["hours"] (signed; negative = earlier).

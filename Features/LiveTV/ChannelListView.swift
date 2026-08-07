@@ -766,6 +766,11 @@ struct ChannelListView: View {
                 #if os(tvOS)
                 .background(
                     GuideLongPressLeftDetector(
+                        // Sidebar mode opens the group menu on this hold, so it
+                        // gets the snappier ~0.32s threshold (Android twin's
+                        // SIDEBAR_HOLD_OPEN_MS; the OS-style 0.5s read as a
+                        // slow open on device, Logan 2026-08-06).
+                        minimumPressDuration: guideSidebarSelectorActive ? 0.32 : 0.5,
                         onBegan: { NotificationCenter.default.post(name: .guideLeftHoldBegan, object: nil) },
                         onEnded: { NotificationCenter.default.post(name: .guideLeftHoldEnded, object: nil) }
                     )
@@ -796,6 +801,17 @@ struct ChannelListView: View {
                     )
                 )
                 .onReceive(NotificationCenter.default.publisher(for: .guideLeftHoldBegan)) { _ in
+                    // Sidebar mode owns hold-Left (Logan 2026-08-06, ported
+                    // from the Android ruling): the hold opens the docked
+                    // group menu and a single Left stays plain navigation so
+                    // the EPG history left of "now" is reachable. The mapped
+                    // leftLong action applies only in pills mode.
+                    if guideSidebarSelectorActive {
+                        if !guideSidebarOpen {
+                            NotificationCenter.default.post(name: .guideOpenGroupSidebar, object: nil)
+                        }
+                        return
+                    }
                     // #196: hold-Left dispatches by the mapped action. The
                     // focus-pin below runs for EVERY hold (not just
                     // focusGroupPills): whatever the action did, the

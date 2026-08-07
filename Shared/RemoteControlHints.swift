@@ -72,14 +72,24 @@ enum RemoteControlHints {
         }
     }
 
-    /// The guide's hold-Left chip; nil when the slot is unmapped.
+    /// The guide's hold-Left chip; nil when the slot is unmapped. Sidebar
+    /// mode owns the hold (Logan 2026-08-06 ruling), so the chip advertises
+    /// the group menu instead of whatever the map says.
+    @MainActor
     static func guideHoldLeftHint(_ map: RemoteControlMap) -> String? {
+        if RemoteControlStore.shared.useGroupSidebar {
+            return "Hold left on remote to open channel groups."
+        }
         guard let phrase = guidePhrase(map.guideAction(.leftLong)) else { return nil }
         return "Hold left on remote to \(phrase)."
     }
 
     /// Terse form for the compact combined guide nav chip: "Hold Left = X".
+    @MainActor
     static func guideHoldLeftShort(_ map: RemoteControlMap) -> String? {
+        if RemoteControlStore.shared.useGroupSidebar {
+            return "Hold Left = groups"
+        }
         guard let phrase = guidePhrase(map.guideAction(.leftLong)) else { return nil }
         return "Hold Left = \(phrase)"
     }

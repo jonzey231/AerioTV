@@ -1485,6 +1485,10 @@ extension Notification.Name {
     static let guideTimelineJump = Notification.Name("guideTimelineJump")
     static let guideJumpToNow = Notification.Name("guideJumpToNow")
     static let guidePageStep = Notification.Name("guidePageStep")
+    /// Sidebar mode's hold-Left (Logan 2026-08-06 ruling, Android twin):
+    /// posted by ChannelListView's hold handler; EPGGuideView answers with
+    /// the focused programme id via its onRequestGroupSidebar callback.
+    static let guideOpenGroupSidebar = Notification.Name("guideOpenGroupSidebar")
     /// Posted by `ChannelStore.primeXMLTVFromURL` after it has
     /// finished the XMLTV parse AND written category-enriched
     /// entries into EPGCache via `GuideStore.seedEPGCache`. Any
