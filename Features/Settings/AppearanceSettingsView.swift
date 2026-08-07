@@ -346,123 +346,70 @@ struct AppearanceSettingsView: View {
 
                 // MARK: Color Theme
                 Section {
-                    ForEach(AppTheme.allCases, id: \.self) { t in
-                        Button {
-                            theme.setTheme(t)
-                        } label: {
-                            HStack(spacing: 14) {
-                                Circle()
-                                    .fill(t.accentPrimary)
-                                    .frame(width: 22, height: 22)
-                                    .overlay(Circle().stroke(Color.borderMedium, lineWidth: 1))
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(t.displayName)
-                                        .font(.bodyMedium)
-                                        .foregroundColor(.textPrimary)
-                                    Text(themeSubtitle(t))
-                                        .font(.labelSmall)
-                                        .foregroundColor(.textTertiary)
+                    // Phase 5 (plan A2 density): iPad shows the themes as a
+                    // two-column tile grid; iPhone keeps the stacked rows.
+                    if UIDevice.current.userInterfaceIdiom == .pad {
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10),
+                                            GridItem(.flexible(), spacing: 10)],
+                                  spacing: 10) {
+                            ForEach(AppTheme.allCases, id: \.self) { t in
+                                Button {
+                                    theme.setTheme(t)
+                                } label: {
+                                    themeRowLabel(t)
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 12)
+                                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                            .fill(Color.cardBackground))
                                 }
-
-                                Spacer()
-
-                                if theme.selectedTheme == t {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
+                                .buttonStyle(.plain)
                             }
                         }
-                        .listRowBackground(Color.cardBackground)
-                    }
-
-                    // Appearance mode (Dark / Light / System) — a surface
-                    // luminance axis orthogonal to the hue/identity themes
-                    // above. Defaults to Dark; selecting a theme never
-                    // changes the mode, and vice versa.
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Appearance")
-                            .font(.bodyMedium).foregroundColor(.textPrimary)
-                        Picker("Appearance", selection: Binding(
-                            get: { theme.appearanceMode },
-                            set: { theme.setAppearanceMode($0) }
-                        )) {
-                            ForEach(AppearanceMode.allCases, id: \.self) { mode in
-                                Text(mode.displayName).tag(mode)
+                        // Keep outer tiles clear of the List's section
+                        // corner mask, which otherwise re-rounds the last
+                        // row's corner tiles (Logan's report: Light tile
+                        // corners uneven).
+                        .padding(6)
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets())
+                    } else {
+                        ForEach(AppTheme.allCases, id: \.self) { t in
+                            Button {
+                                theme.setTheme(t)
+                            } label: {
+                                themeRowLabel(t)
                             }
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: theme.appearanceMode) { _, _ in
-                            SyncManager.shared.pushPreferencesImmediate()
+                            .listRowBackground(Color.cardBackground)
                         }
                     }
-                    .tint(theme.accent)
-                    .listRowBackground(Color.cardBackground)
 
-                    // Custom accent color toggle
-                    Toggle(isOn: $theme.useCustomAccent) {
-                        HStack(spacing: 10) {
-                            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                .fill(Color(hex: theme.customAccentHex))
-                                .frame(width: 22, height: 22)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
-                                        .stroke(Color.borderMedium, lineWidth: 1)
-                                )
-                            Text("Custom Accent Color")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
-                        }
+                    // iPhone keeps the mode/accent rows in this section
+                    // (shipped canon). iPad moves them to their own section
+                    // below so the last theme tile ends its own pill
+                    // instead of visually fusing with the Appearance card
+                    // (Logan's report 2026-08-04).
+                    if UIDevice.current.userInterfaceIdiom != .pad {
+                        appearanceModeAndAccentRows
                     }
-                    .tint(theme.accent)
-                    .listRowBackground(Color.cardBackground)
-
-                    if theme.useCustomAccent {
-                        // Native system color picker — tap the swatch to open the full picker
-                        #if os(iOS)
-                        ColorPicker(
-                            selection: Binding(
-                                get: { Color(hex: theme.customAccentHex) },
-                                set: { theme.customAccentHex = $0.toHex() }
-                            ),
-                            supportsOpacity: false
-                        ) {
-                            Text("Accent Color")
-                                .font(.bodyMedium).foregroundColor(.textPrimary)
-                        }
-                        .listRowBackground(Color.cardBackground)
-                        #endif
-
-                        // Hex field for power users who want to paste a specific value
-                        HStack {
-                            Text("Hex")
-                                .font(.bodyMedium).foregroundColor(.textSecondary)
-                            Spacer()
-                            TextField("2DD4BF", text: Binding(
-                                get: { theme.customAccentHex },
-                                set: { newValue in
-                                    let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
-                                    let cleaned = newValue.filter { allowed.contains($0) }.uppercased()
-                                    theme.customAccentHex = String(cleaned.prefix(6))
-                                }
-                            ))
-                                .font(.monoSmall)
-                                .foregroundColor(.textPrimary)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 90)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.characters)
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-
                 } header: {
                     Text("Color Theme").sectionHeaderStyle()
                 } footer: {
-                    Text("Colors used throughout the app.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
+                    if UIDevice.current.userInterfaceIdiom != .pad {
+                        Text("Colors used throughout the app.")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
                 }
                 .listSectionSeparator(.hidden)
+
+                if UIDevice.current.userInterfaceIdiom == .pad {
+                    Section {
+                        appearanceModeAndAccentRows
+                    } footer: {
+                        Text("Colors used throughout the app.")
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                    }
+                    .listSectionSeparator(.hidden)
+                }
 
                 // MARK: Liquid Glass
                 Section {
@@ -641,11 +588,30 @@ struct AppearanceSettingsView: View {
                 // extra buckets + a Custom editor without cluttering
                 // the default Settings view.
                 Section {
-                    ForEach(CategoryColor.defaultBuckets, id: \.rawValue) { cat in
-                        CategoryColorPickerRow(category: cat)
-                            .listRowBackground(Color.cardBackground)
-                            .disabled(!enableCategoryColors)
-                            .opacity(enableCategoryColors ? 1.0 : 0.4)
+                    if UIDevice.current.userInterfaceIdiom == .pad {
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10),
+                                            GridItem(.flexible(), spacing: 10)],
+                                  spacing: 10) {
+                            ForEach(CategoryColor.defaultBuckets, id: \.rawValue) { cat in
+                                CategoryColorPickerRow(category: cat)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 6)
+                                    .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                        .fill(Color.cardBackground))
+                                    .disabled(!enableCategoryColors)
+                                    .opacity(enableCategoryColors ? 1.0 : 0.4)
+                            }
+                        }
+                        .padding(6)
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets())
+                    } else {
+                        ForEach(CategoryColor.defaultBuckets, id: \.rawValue) { cat in
+                            CategoryColorPickerRow(category: cat)
+                                .listRowBackground(Color.cardBackground)
+                                .disabled(!enableCategoryColors)
+                                .opacity(enableCategoryColors ? 1.0 : 0.4)
+                        }
                     }
 
                     NavigationLink {
@@ -699,6 +665,118 @@ struct AppearanceSettingsView: View {
             // tints stuck on the previous theme. Keying the List
             // identity to the active theme forces a clean rebuild.
             .id("appearance-list-\(theme.selectedTheme.rawValue)-\(theme.appearanceMode.rawValue)-\(theme.useCustomAccent ? theme.customAccentHex : "preset")")
+    }
+
+    /// Appearance mode (Dark / Light / System) + custom accent rows.
+    /// One definition, hosted inline in the Color Theme section on
+    /// iPhone and in a standalone section on iPad.
+    @ViewBuilder
+    private var appearanceModeAndAccentRows: some View {
+        // Appearance mode — a surface luminance axis orthogonal to the
+        // hue/identity themes. Defaults to Dark; selecting a theme never
+        // changes the mode, and vice versa.
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Appearance")
+                .font(.bodyMedium).foregroundColor(.textPrimary)
+            Picker("Appearance", selection: Binding(
+                get: { theme.appearanceMode },
+                set: { theme.setAppearanceMode($0) }
+            )) {
+                ForEach(AppearanceMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: theme.appearanceMode) { _, _ in
+                SyncManager.shared.pushPreferencesImmediate()
+            }
+        }
+        .tint(theme.accent)
+        .listRowBackground(Color.cardBackground)
+
+        // Custom accent color toggle
+        Toggle(isOn: $theme.useCustomAccent) {
+            HStack(spacing: 10) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(Color(hex: theme.customAccentHex))
+                    .frame(width: 22, height: 22)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .stroke(Color.borderMedium, lineWidth: 1)
+                    )
+                Text("Custom Accent Color")
+                    .font(.bodyMedium).foregroundColor(.textPrimary)
+            }
+        }
+        .tint(theme.accent)
+        .listRowBackground(Color.cardBackground)
+
+        if theme.useCustomAccent {
+            // Native system color picker — tap the swatch to open the full picker
+            #if os(iOS)
+            ColorPicker(
+                selection: Binding(
+                    get: { Color(hex: theme.customAccentHex) },
+                    set: { theme.customAccentHex = $0.toHex() }
+                ),
+                supportsOpacity: false
+            ) {
+                Text("Accent Color")
+                    .font(.bodyMedium).foregroundColor(.textPrimary)
+            }
+            .listRowBackground(Color.cardBackground)
+            #endif
+
+            // Hex field for power users who want to paste a specific value
+            HStack {
+                Text("Hex")
+                    .font(.bodyMedium).foregroundColor(.textSecondary)
+                Spacer()
+                TextField("2DD4BF", text: Binding(
+                    get: { theme.customAccentHex },
+                    set: { newValue in
+                        let allowed: Set<Character> = Set("0123456789ABCDEFabcdef")
+                        let cleaned = newValue.filter { allowed.contains($0) }.uppercased()
+                        theme.customAccentHex = String(cleaned.prefix(6))
+                    }
+                ))
+                    .font(.monoSmall)
+                    .foregroundColor(.textPrimary)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 90)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.characters)
+            }
+            .listRowBackground(Color.cardBackground)
+        }
+    }
+
+    /// The theme row content shared by the iPhone stacked rows and the
+    /// iPad tile grid (Phase 5).
+    private func themeRowLabel(_ t: AppTheme) -> some View {
+        HStack(spacing: 14) {
+            Circle()
+                .fill(t.accentPrimary)
+                .frame(width: 22, height: 22)
+                .overlay(Circle().stroke(Color.borderMedium, lineWidth: 1))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(t.displayName)
+                    .font(.bodyMedium)
+                    .foregroundColor(.textPrimary)
+                Text(themeSubtitle(t))
+                    .font(.labelSmall)
+                    .foregroundColor(.textTertiary)
+            }
+
+            Spacer()
+
+            if theme.selectedTheme == t {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(theme.accent)
+            }
+        }
     }
 
     /// iOS scale-slider row. Single horizontal HStack shared by the

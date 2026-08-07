@@ -4,7 +4,7 @@
 //
 //  Google Cast iOS SENDER (GH #33). iPhone/iPad only (the Cast SDK has no tvOS
 //  sender), so the whole file is #if os(iOS). Casts to the SAME receiver app id
-//  (76DC0564) the Android sender uses. That id is a CUSTOM WEB RECEIVER
+//  (46B79062) the Android sender uses. That id is a CUSTOM WEB RECEIVER
 //  (receiver.html on the repo's gh-pages; bare castMediaElement video, AerioTV
 //  idle screen + fading channel banner), so the load carries a directly
 //  playable contentURL: the Dispatcharr fMP4+AAC URL
@@ -26,9 +26,15 @@ import SwiftUI
 /// Receiver application id registered + published in the Google Cast SDK
 /// Developer Console (same id the Android sender targets).
 enum AerioCast {
-    // 76DC0564 = the CURRENT console app (custom web receiver). The original
-    // CFFD302F app was DELETED 2026-07-15 (console can't change receiver type).
-    static let receiverAppID = "76DC0564"
+    // 46B79062 = the CURRENT console app (custom web receiver), re-registered
+    // 2026-08-05 after the 76DC0564 registration VANISHED from the console
+    // (cause unknown; Logan did not delete it - it broke cast for every user
+    // on the 1.8.4/0.4.3 builds, task #224). The original CFFD302F app was
+    // DELETED 2026-07-15 (console can't change receiver type). If this id
+    // ever changes again, also update Info.plist NSBonjourServices
+    // (_<id>._googlecast._tcp) and Android local.properties
+    // CAST_RECEIVER_APP_ID.
+    static let receiverAppID = "46B79062"
 
     /// customData contract shared with the Android receiver.
     static let keyMediaID = "aerioMediaId"
@@ -192,7 +198,7 @@ final class AerioCastController: NSObject, ObservableObject {
         // rides in customData; entity is an opaque app-specific identifier.
         let builder = GCKMediaInformationBuilder(entity: content.mediaID)
         builder.streamType = isVOD ? .buffered : .live
-        // The custom WEB receiver (76DC0564) plays contentURL directly: the
+        // The custom WEB receiver (46B79062) plays contentURL directly: the
         // Dispatcharr fMP4+AAC rewrite. Its LOAD interceptor normalizes LIVE
         // duration to -1, so no duration is set here.
         builder.contentURL = content.webCastURL

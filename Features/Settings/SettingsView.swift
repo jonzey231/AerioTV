@@ -62,6 +62,13 @@ struct SettingsView: View {
     @StateObject private var dismissStack = SettingsDismissStack()
     #endif
 
+    #if os(iOS)
+    // Phase 4 (plan A2): iPad split-view state. Optional so a cleared
+    // selection falls back to Playlists.
+    @Environment(\.horizontalSizeClass) private var hSizeClass
+    @State private var padSelection: SettingsRoute? = .category(.playlists)
+    #endif
+
     var body: some View {
         // Menu-button routing on tvOS:
         //
@@ -106,6 +113,9 @@ struct SettingsView: View {
             .onChange(of: navPath.count) { _, _ in
                 syncIsSubviewPushed()
             }
+            .onChange(of: tvFocusInDetail) { _, _ in
+                syncIsSubviewPushed()
+            }
             .onReceive(dismissStack.$depth) { _ in
                 syncIsSubviewPushed()
             }
@@ -118,7 +128,14 @@ struct SettingsView: View {
                 popRequested = false
             }
         #else
-        NavigationStack { settingsContent }
+        // Phase 4 (plan A2): explicit idiom fork rather than trusting
+        // NavigationSplitView's collapse heuristics, so the iPhone view
+        // tree stays byte-identical.
+        if UIDevice.current.userInterfaceIdiom == .pad && hSizeClass == .regular {
+            padSplitRoot
+        } else {
+            NavigationStack { settingsContent }
+        }
         #endif
     }
 
@@ -128,7 +145,11 @@ struct SettingsView: View {
     /// value actually changes (avoids invalidating MainTabView on
     /// every navPath mutation of the same emptiness).
     private func syncIsSubviewPushed() {
-        let pushed = !navPath.isEmpty || dismissStack.depth > 0
+        // Phase 3: focus sitting in the detail pane counts as "pushed" so
+        // MainTabView routes Menu here; performOnePop then returns focus to
+        // the rail instead of popping navigation. The Menu-swallow contract
+        // with MainTabView is preserved, not replaced (plan A3).
+        let pushed = !navPath.isEmpty || dismissStack.depth > 0 || tvFocusInDetail
         if isSubviewPushed != pushed {
             isSubviewPushed = pushed
         }
@@ -142,6 +163,11 @@ struct SettingsView: View {
             dismissStack.popTop()
         } else if !navPath.isEmpty {
             navPath.removeLast()
+        } else if tvFocusInDetail {
+            // Nothing pushed: Menu in the detail pane returns focus to the
+            // rail. Menu in the rail keeps falling through to MainTabView's
+            // default (exit toward the tab bar).
+            railReturnToken += 1
         }
     }
     #endif
@@ -152,7 +178,7 @@ struct SettingsView: View {
                 Color.appBackground.ignoresSafeArea()
 
                 #if os(tvOS)
-                tvOSContent
+                tvSplitRoot
                 #else
                 List {
                     // MARK: - Playlists Section
@@ -539,31 +565,31 @@ struct SettingsView: View {
             #endif
             .toolbarBackground(Color.appBackground, for: .navigationBar)
             #if os(tvOS)
-            .navigationDestination(for: String.self) { route in
+            .navigationDestination(for: SettingsRoute.self) { route in
                 switch route {
-                case "appearance":      AppearanceSettingsView()
-                case "app-behaviors":   AppBehaviorsSettingsView()
-                case "remote-control":  RemoteControlSettingsView()
-                case "multiview":       MultiviewSettingsView()
-                case "network":         NetworkSettingsView()
-                case "dvr-settings": DVRSettingsView()
-                case "sync-categories": SyncCategoriesSettingsView()
-                case "developer":  DeveloperSettingsView()
-                case "edit-server":
-                    if let server = serverToEdit {
+                case .category(.appearance):     AppearanceSettingsView()
+                case .category(.appBehaviors):   AppBehaviorsSettingsView()
+                case .category(.remoteControl):  RemoteControlSettingsView()
+                case .category(.multiview):      MultiviewSettingsView()
+                case .category(.network):        NetworkSettingsView()
+                case .category(.dvr):            DVRSettingsView()
+                case .category(.syncCategories): SyncCategoriesSettingsView()
+                case .category(.developer):      DeveloperSettingsView()
+                // Phase 3 pane hosts; nothing pushes these yet.
+                case .category(.playlists), .category(.sync), .category(.about):
+                    EmptyView()
+                case .editServer(let id):
+                    // The route carries the server id, so editing the SAME
+                    // server twice in a row just pushes a fresh route value.
+                    // This deletes the old serverToEdit onChange bridge and
+                    // its onDisappear-reset re-push hack.
+                    if let server = servers.first(where: { $0.id == id }) {
                         EditServerPage(server: server)
-                            // Reset serverToEdit when this page pops, so editing
-                            // the SAME server again is a real nil -> server change
-                            // that re-fires the .onChange push below. Without it,
-                            // serverToEdit stayed set to that server, the second
-                            // Edit tap was a no-op change, and the page never
-                            // pushed (you had to edit a different server first).
-                            // EditServerPage only calls dismiss() (no navPath
-                            // sub-routes or sheets), so onDisappear fires solely
-                            // on the real pop, never spuriously.
-                            .onDisappear { serverToEdit = nil }
                     }
-                default:           EmptyView()
+                case .server, .myRecordings:
+                    // Rail/sidebar targets from Phase 3 on; ServerDetailView
+                    // and MyRecordingsView remain classic pushes today.
+                    EmptyView()
                 }
             }
             #endif
@@ -589,13 +615,7 @@ struct SettingsView: View {
             } message: {
                 Text("This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
             }
-            #if os(tvOS)
-            .onChange(of: serverToEdit) { _, server in
-                if let server {
-                    navPath.append("edit-server")
-                }
-            }
-            #else
+            #if !os(tvOS)
             .sheet(item: $serverToEdit) { server in
                 EditServerSheet(server: server)
             }
@@ -692,16 +712,10 @@ struct SettingsView: View {
     // MARK: - Active Server
 
     private func setActiveServer(_ server: ServerConnection) {
-        // GH #22 (Android parity): switching sources stops whatever the OLD
-        // source is still playing (corner mini on tvOS, minimized/PiP on
-        // iOS). Playing stale content from a server the user just switched
-        // away from was wrong on its own, and on Android the equivalent
-        // leftover session latch caused dead tunes after the switch.
-        PlayerSession.shared.stop()
-        for s in servers { s.isActive = false }
-        server.isActive = true
-        try? modelContext.save()
-        SyncManager.shared.pushServers(servers)
+        // Delegates to the shared routine (ServerDetailView.swift) so the
+        // root activation and the detail page's Set Active row stay in
+        // lockstep (GH #22 stop-old-source behavior included).
+        performSetActiveServer(server, servers: Array(servers), modelContext: modelContext)
     }
 
     // MARK: - Reorder helpers (v1.6.17)
@@ -741,227 +755,656 @@ struct SettingsView: View {
         SyncManager.shared.pushServers(ordered)
     }
 
+    // MARK: - iPad split root (Phase 4, plan A2)
+
+    #if os(iOS)
+    private var padSplitRoot: some View {
+        // Hand-rolled split (plan A2 risk R4 fallback): NavigationSplitView
+        // on the iOS 27 SDK proposes the SCREEN width to its detail column
+        // inside a TabView, so List-backed panes overflowed the column and
+        // clipped at the right edge (verified on the iPad Pro; a frame cap
+        // and spacer centering both failed the same way). The HStack gives
+        // the detail column its true width, like the tvOS rail.
+        HStack(spacing: 0) {
+            padSidebar
+                .frame(width: 340)
+            NavigationStack {
+                padDetail(for: padSelection ?? .category(.playlists))
+                    .background(Color.appBackground.ignoresSafeArea())
+            }
+            // Rekey the stack on selection change so pages pushed from a
+            // pane (playlist detail, Sync Categories) pop when the user
+            // picks another sidebar item; otherwise the push stays on top
+            // of the swapped pane (observed on device).
+            .id(padSelection)
+        }
+        .background(Color.appBackground.ignoresSafeArea())
+        // Presentations duplicated from the iPhone chain (only one idiom
+        // branch is mounted, so they never double-present). Candidate for
+        // a shared modifier in Phase 5.
+        .sheet(isPresented: $showAddServer) {
+            NavigationStack { AddServerView(onSave: { _ in }) }
+        }
+        .sheet(item: $serverToEdit) { server in
+            EditServerSheet(server: server)
+        }
+        .alert("Delete Playlist?", isPresented: $showDeleteAlert) {
+            Button("Delete", role: .destructive) {
+                if let server = serverToDelete {
+                    performServerCascadeDelete(server, servers: Array(servers), modelContext: modelContext)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will remove \"\(serverToDelete?.name ?? "this playlist")\" from the app. Your server data will not be affected.")
+        }
+        .alert("Clear iCloud Data?", isPresented: $showClearICloudConfirm) {
+            Button("Clear", role: .destructive) {
+                debugLog("🔵 Clear iCloud Data confirmed")
+                SyncManager.shared.clearAllICloudData(localServers: servers)
+                clearICloudConfirmationVisible = true
+                Task {
+                    try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    await MainActor.run { clearICloudConfirmationVisible = false }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Wipes synced playlists, preferences, watch progress, and credentials from iCloud. This device's data is preserved. iCloud Sync stays enabled — your local state will replace whatever was on iCloud the next time the app pushes.")
+        }
+        .overlay(alignment: .bottom) {
+            if clearICloudConfirmationVisible {
+                Text("iCloud data cleared")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(.bottom, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeInOut(duration: 0.25), value: clearICloudConfirmationVisible)
+    }
+
+    /// Sidebar: Playlists as an ordinary item (matching the tvOS rail
+    /// ruling of 2026-08-04 and Android tablet, superseding the Rev 2
+    /// embed-playlist-rows design), then the categories in the frozen
+    /// order. Remote Control stays hidden until #195.
+    /// One sidebar row: the selectionContrast flag flips the row to
+    /// white-on-accent while it sits on the selection pill (Logan's
+    /// feedback 2026-08-04: the accent-tinted subtitle was unreadable
+    /// on the accent fill).
+    private func padSidebarRow(_ dest: SettingsDestination, icon: String,
+                               iconColor: Color, title: String,
+                               subtitle: String?) -> some View {
+        let selected = padSelection == .category(dest)
+        return Button {
+            padSelection = .category(dest)
+        } label: {
+            SettingsRow(icon: icon, iconColor: iconColor,
+                        title: title, subtitle: subtitle,
+                        selectionContrast: selected)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .fill(selected ? theme.accent : Color.clear))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var padSidebar: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Settings")
+                    .font(.title2.weight(.bold))
+                    .foregroundColor(.textPrimary)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 14)
+
+                padSidebarRow(.playlists, icon: "rectangle.stack.fill", iconColor: .accentPrimary,
+                              title: "Playlists",
+                              subtitle: servers.first(where: { $0.isActive })?.name)
+
+                Text("App Settings")
+                    .font(.title3.weight(.semibold))
+                    .foregroundColor(.textSecondary)
+                    .padding(.horizontal, 14)
+                    .padding(.top, 18)
+                    .padding(.bottom, 6)
+
+                padSidebarRow(.appearance, icon: "paintbrush.fill", iconColor: .accentPrimary,
+                              title: "Appearance", subtitle: "Theme, scale & category colors")
+                padSidebarRow(.appBehaviors, icon: "switch.2", iconColor: .accentPrimary,
+                              title: "App Behaviors", subtitle: "Default tab, launch & gestures")
+                padSidebarRow(.multiview, icon: "rectangle.split.2x2.fill", iconColor: .accentPrimary,
+                              title: "Multiview", subtitle: "Audio focus, tile spacing & corners")
+                padSidebarRow(.network, icon: "network", iconColor: .accentSecondary,
+                              title: "Network", subtitle: "Timeout, buffer & background refresh")
+
+                Divider()
+                    .background(Color.borderSubtle)
+                    .padding(.vertical, 12)
+
+                padSidebarRow(.sync, icon: "icloud.fill", iconColor: .accentPrimary,
+                              title: "Sync", subtitle: "iCloud sync & categories")
+                padSidebarRow(.dvr, icon: "record.circle", iconColor: .red,
+                              title: "DVR", subtitle: "Recordings, buffers & storage")
+                padSidebarRow(.developer, icon: "ladybug.fill", iconColor: .accentSecondary,
+                              title: "Developer", subtitle: "Debug logging & diagnostics")
+                padSidebarRow(.about, icon: "info.circle.fill", iconColor: .accentPrimary,
+                              title: "About", subtitle: "Version & links")
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 24)
+            .padding(.bottom, 24)
+        }
+        // Logan's ruling 2026-08-04: no gray panel behind the sidebar.
+        // Plain scrollable column on the app background, with a hairline
+        // break at the trailing edge marking where the sidebar ends.
+        .background(Color.appBackground)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Color.borderSubtle)
+                .frame(width: 1)
+                .ignoresSafeArea()
+        }
+    }
+
+    @ViewBuilder
+    private func padDetail(for route: SettingsRoute) -> some View {
+        switch route {
+        case .category(.playlists):      padPlaylistsPane
+        case .category(.appearance):     AppearanceSettingsView()
+        case .category(.appBehaviors):   AppBehaviorsSettingsView()
+        case .category(.multiview):      MultiviewSettingsView()
+        case .category(.network):        NetworkSettingsView()
+        case .category(.dvr):            DVRSettingsView()
+        case .category(.syncCategories): SyncCategoriesSettingsView()
+        case .category(.developer):      DeveloperSettingsView()
+        case .category(.sync):           padSyncPane
+        case .category(.about):          padAboutPane
+        case .server(let id):
+            if let server = servers.first(where: { $0.id == id }) {
+                ServerDetailView(server: server)
+            } else {
+                Color.appBackground
+            }
+        case .category(.remoteControl), .editServer, .myRecordings:
+            // RemoteControlSettingsView is tvOS-only (its sidebar row is
+            // hidden until #195); the pushes never target a pane.
+            Color.appBackground
+        }
+    }
+
+    /// Playlists pane: the iPhone root's playlist section as a detail
+    /// page. Rows push ServerDetailView on the detail stack.
+    private var padPlaylistsPane: some View {
+        List {
+            Section {
+                if servers.isEmpty {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 8) {
+                            Image(systemName: "list.and.film")
+                                .font(.system(size: 28))
+                                .foregroundColor(.textTertiary)
+                            Text("No playlists added")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textTertiary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.vertical, 20)
+                    .listRowBackground(Color.cardBackground)
+                } else {
+                    ForEach(servers) { server in
+                        NavigationLink(destination: ServerDetailView(server: server)) {
+                            ServerListRow(server: server,
+                                          onSetActive: servers.count > 1 ? { setActiveServer(server) } : nil)
+                        }
+                        .buttonStyle(PressableButtonStyle())
+                        .listRowBackground(Color.cardBackground)
+                        .contextMenu {
+                            Button { serverToEdit = server } label: {
+                                Label("Edit", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                serverToDelete = server
+                                showDeleteAlert = true
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                    .onMove(perform: moveServers)
+                }
+
+                Button {
+                    showAddServer = true
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(LinearGradient.accentGradient)
+                        Text("Add Playlist")
+                            .font(.bodyMedium)
+                            .foregroundColor(.accentPrimary)
+                    }
+                }
+                .buttonStyle(PressableButtonStyle())
+                .listRowBackground(Color.cardBackground)
+            } footer: {
+                if !servers.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Tap ○ to set the active playlist", systemImage: "checkmark.circle")
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                        Label("Long press to edit or delete", systemImage: "hand.tap")
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                        if servers.count > 1 {
+                            Label("Touch and hold, then drag to reorder", systemImage: "arrow.up.arrow.down")
+                                .font(.labelSmall)
+                                .foregroundColor(.textTertiary)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .navigationTitle("Playlists")
+        .navigationBarTitleDisplayMode(.inline)
+        // No EditButton (Logan's ruling 2026-08-04): long-press covers
+        // edit/delete via the context menu, and long-press drag reorders
+        // directly through .onMove without edit mode.
+    }
+
+    /// Sync pane: the iPhone root's Sync section as a detail page
+    /// (same rows, same copy).
+    private var padSyncPane: some View {
+        List {
+            Section {
+                Toggle(isOn: $iCloudSyncEnabled) {
+                    SettingsRow(icon: "icloud.fill", iconColor: .accentPrimary,
+                                title: "iCloud Sync",
+                                subtitle: "Sync playlists, preferences, and watch progress")
+                }
+                .tint(ThemeManager.shared.accent)
+                .onChange(of: iCloudSyncEnabled) { _, enabled in
+                    SyncManager.shared.syncSettingChanged(enabled: enabled)
+                }
+
+                if iCloudSyncEnabled {
+                    Button {
+                        debugLog("🔵 Sync Now tapped")
+                        SyncManager.shared.pushServers(servers, immediate: true)
+                        SyncManager.shared.pushPreferencesImmediate()
+                        if let ctx = WatchProgressManager.modelContext,
+                           let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
+                            SyncManager.shared.pushWatchProgress(all, immediate: true)
+                        }
+                        SyncManager.shared.pushReminders(immediate: true)
+                    } label: {
+                        SettingsRow(icon: "arrow.triangle.2.circlepath.icloud",
+                                    iconColor: .accentPrimary,
+                                    title: "Sync Now",
+                                    subtitle: syncLastDate > 0
+                                        ? "Last synced \(lastSyncedString)"
+                                        : "Push all data to iCloud now")
+                    }
+                    .buttonStyle(PressableButtonStyle())
+                }
+
+                NavigationLink(destination: SyncCategoriesSettingsView()) {
+                    SettingsRow(icon: "slider.horizontal.3",
+                                iconColor: .accentPrimary,
+                                title: "Sync Categories",
+                                subtitle: "Choose what syncs across your devices")
+                }
+                .buttonStyle(PressableButtonStyle())
+
+                Button(role: .destructive) {
+                    showClearICloudConfirm = true
+                } label: {
+                    SettingsRow(icon: "trash.circle.fill",
+                                iconColor: .statusLive,
+                                title: "Clear iCloud Data",
+                                subtitle: "Wipe synced playlists, preferences, watch progress, and credentials from iCloud")
+                }
+                .buttonStyle(PressableButtonStyle())
+            } footer: {
+                Text("Playlists, preferences, and VOD watch progress sync across all devices signed into the same Apple ID. Credentials are stored securely in iCloud Keychain.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+            .listRowBackground(Color.cardBackground)
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .navigationTitle("Sync")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// About pane: the iPhone root's About section as a detail page.
+    private var padAboutPane: some View {
+        List {
+            Section {
+                infoRow("Device",          value: aboutDevice)
+                    .listRowBackground(Color.cardBackground)
+                infoRow("System",          value: aboutSystem)
+                    .listRowBackground(Color.cardBackground)
+                infoRow("App Version",     value: aboutVersion)
+                    .listRowBackground(Color.cardBackground)
+                infoRow("First Installed", value: aboutInstallDate)
+                    .listRowBackground(Color.cardBackground)
+                infoRow("Last Updated",    value: aboutUpdateDate)
+                    .listRowBackground(Color.cardBackground)
+
+                Button {
+                    UIPasteboard.general.string = aboutCopyText
+                    copiedAbout = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        copiedAbout = false
+                    }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: copiedAbout ? "checkmark.circle.fill" : "doc.on.doc")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
+                        Text(copiedAbout ? "Copied!" : "Copy to Clipboard")
+                            .font(.bodyMedium)
+                            .foregroundColor(copiedAbout ? .accentPrimary : .textSecondary)
+                        Spacer()
+                    }
+                }
+                .buttonStyle(PressableButtonStyle())
+                .listRowBackground(Color.cardBackground)
+
+                Link(destination: URL(string: "https://github.com/jonzey231/AerioTV")!) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "link")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.textSecondary)
+                        Text("Developer Website")
+                            .font(.bodyMedium)
+                            .foregroundColor(.textSecondary)
+                        Spacer()
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.system(size: 12))
+                            .foregroundColor(.textTertiary)
+                    }
+                }
+                .listRowBackground(Color.cardBackground)
+
+                Link(destination: URL(string: "https://github.com/jonzey231/AerioTV/issues")!) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.bubble")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.textSecondary)
+                        Text("Report an Issue")
+                            .font(.bodyMedium)
+                            .foregroundColor(.textSecondary)
+                        Spacer()
+                        Image(systemName: "arrow.up.right.square")
+                            .font(.system(size: 12))
+                            .foregroundColor(.textTertiary)
+                    }
+                }
+                .listRowBackground(Color.cardBackground)
+            } footer: {
+                Text("In loving memory of Jesse Mann aka EPG Guru")
+                    .font(.footnote)
+                    .italic()
+                    .foregroundColor(.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .scrollContentBackground(.hidden)
+        .navigationTitle("About")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+    #endif
+
     // MARK: - tvOS Settings Layout
 
     #if os(tvOS)
-    private var tvOSContent: some View {
+    // MARK: - Phase 3 two-pane root (rail + detail)
+
+    /// Pane selection for the rail. Defaults to Appearance until onAppear
+    /// promotes the first playlist (plan: the detail pane is never empty).
+    @State private var tvSelection: SettingsRoute = .category(.playlists)
+    /// True while focus is in the detail pane; drives the Menu semantics.
+    @State private var tvFocusInDetail = false
+    /// Incremented to order the split view to put focus back on the rail.
+    @State private var railReturnToken = 0
+    private var tvRailItems: [TVSettingsRailItem] {
+        var items: [TVSettingsRailItem] = []
+        // Playlists is an ordinary tab: its pane lists the playlists like
+        // every other category (user ruling 2026-08-04, replacing the
+        // short-lived in-rail disclosure group). The subtitle surfaces
+        // the active playlist without entering the pane.
+        items.append(TVSettingsRailItem(
+            id: "playlists",
+            route: .category(.playlists),
+            label: "Playlists",
+            icon: "rectangle.stack.fill",
+            iconColor: .accentPrimary,
+            subtitle: servers.first(where: { $0.isActive })?.name))
+        items.append(TVSettingsRailItem(
+            id: "appearance", route: .category(.appearance), label: "Appearance",
+            icon: "paintbrush.fill", iconColor: .accentPrimary, subtitle: "Theme, scale & category colors"))
+        items.append(TVSettingsRailItem(
+            id: "app-behaviors", route: .category(.appBehaviors), label: "App Behaviors",
+            icon: "switch.2", iconColor: .accentPrimary, subtitle: "Default tab, launch & gestures"))
+        // Remote Control (#195/#196): live now that the player executor,
+        // overlays, and guide dispatch all run the map.
+        items.append(TVSettingsRailItem(
+            id: "remote-control", route: .category(.remoteControl), label: "Remote Control",
+            icon: "av.remote", iconColor: .accentPrimary, subtitle: "Customize what the Siri Remote buttons do"))
+        items.append(TVSettingsRailItem(
+            id: "multiview", route: .category(.multiview), label: "Multiview",
+            icon: "rectangle.split.2x2.fill", iconColor: .accentPrimary, subtitle: "Audio focus, tile spacing & corners"))
+        items.append(TVSettingsRailItem(
+            id: "network", route: .category(.network), label: "Network",
+            icon: "network", iconColor: .accentSecondary, subtitle: "Timeout, buffer & background refresh"))
+        items.append(TVSettingsRailItem(
+            id: "sync", route: .category(.sync), label: "Sync",
+            icon: "icloud.fill", iconColor: .accentPrimary, subtitle: "iCloud sync & categories"))
+        items.append(TVSettingsRailItem(
+            id: "dvr", route: .category(.dvr), label: "DVR",
+            icon: "record.circle", iconColor: .red, subtitle: "Recordings, buffers & storage"))
+        items.append(TVSettingsRailItem(
+            id: "developer", route: .category(.developer), label: "Developer",
+            icon: "ladybug.fill", iconColor: .accentSecondary, subtitle: "Debug logging & diagnostics"))
+        items.append(TVSettingsRailItem(
+            id: "about", route: .category(.about), label: "About",
+            icon: "info.circle.fill", iconColor: .accentPrimary, subtitle: "Version & links"))
+        return items
+    }
+
+    private var tvSplitRoot: some View {
+        TVSettingsSplitView(
+            items: tvRailItems,
+            selection: $tvSelection,
+            focusInDetail: $tvFocusInDetail,
+            railReturnToken: railReturnToken
+        ) { route in
+            tvDetailPane(for: route)
+        }
+    }
+
+    @ViewBuilder
+    private func tvDetailPane(for route: SettingsRoute) -> some View {
+        switch route {
+        case .server(let id):
+            if let server = servers.first(where: { $0.id == id }) {
+                ServerDetailView(server: server)
+            } else {
+                // Playlist was deleted out from under the selection.
+                Color.appBackground
+            }
+        case .category(.playlists):      tvPlaylistsPane
+        case .category(.appearance):     AppearanceSettingsView()
+        case .category(.appBehaviors):   AppBehaviorsSettingsView()
+        case .category(.remoteControl):  RemoteControlSettingsView()
+        case .category(.multiview):      MultiviewSettingsView()
+        case .category(.network):        NetworkSettingsView()
+        case .category(.dvr):            DVRSettingsView()
+        case .category(.syncCategories): SyncCategoriesSettingsView()
+        case .category(.developer):      DeveloperSettingsView()
+        case .category(.sync):           tvSyncPane
+        case .category(.about):          tvAboutPane
+        case .editServer, .myRecordings: Color.appBackground
+        }
+    }
+
+    /// The Playlists pane: the legacy root's playlist section as a detail
+    /// pane. Rows push ServerDetailView (classic push); the long-press
+    /// context menu keeps switch/reorder/edit/delete.
+    private var tvPlaylistsPane: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-
-                // MARK: Playlists
-                tvSettingsHeader("Playlists")
-                VStack(spacing: 8) {
-                    if servers.isEmpty {
-                        HStack {
-                            Spacer()
-                            VStack(spacing: 12) {
-                                Image(systemName: "list.and.film")
-                                    .font(.system(size: 36))
-                                    .foregroundColor(.textSecondary)
-                                Text("No playlists added")
-                                    .font(.bodyMedium)
-                                    .foregroundColor(.textSecondary)
-                            }
-                            Spacer()
+            VStack(alignment: .leading, spacing: 8) {
+                if servers.isEmpty {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 12) {
+                            Image(systemName: "list.and.film")
+                                .font(.system(size: 36))
+                                .foregroundColor(.textSecondary)
+                            Text("No playlists added")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textSecondary)
                         }
-                        .padding(.vertical, 28)
-                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(Color.cardBackground))
-                    } else {
-                        ForEach(servers) { server in
-                            TVSettingsNavRow(destination: ServerDetailView(server: server).trackedAsClassicSettingsChild()) {
-                                // Only offer the "set active" radio when there's
-                                // more than one playlist — with one playlist
-                                // it's always the active one, so the circle is
-                                // noise.
-                                ServerListRow(server: server,
-                                              onSetActive: servers.count > 1 ? { setActiveServer(server) } : nil)
-                            }
-                            .contextMenu {
-                                // "Use This Playlist" — primary tvOS
-                                // path for switching between playlists.
-                                // The on-row "○ → ●" checkmark button
-                                // exists but uses
-                                // `TVNoHighlightButtonStyle()` and
-                                // sits inside the outer
-                                // `TVSettingsNavRow`'s
-                                // `NavigationLink`, which consumes
-                                // every tap to push the detail view —
-                                // so tvOS focus never reaches the
-                                // checkmark and users had no way to
-                                // switch playlists from the list.
-                                // Adding the action to the long-press
-                                // context menu (which tvOS users
-                                // already know to use for Edit /
-                                // Delete) lets them activate without
-                                // touching the row's primary tap
-                                // behaviour.
-                                if servers.count > 1 {
-                                    Button {
-                                        setActiveServer(server)
-                                    } label: {
-                                        if server.isActive {
-                                            Label("Active Playlist", systemImage: "checkmark.circle.fill")
-                                        } else {
-                                            Label("Use This Playlist", systemImage: "checkmark.circle")
-                                        }
-                                    }
-                                    .disabled(server.isActive)
-
-                                    // v1.6.17 — Move Up / Move Down in
-                                    // the tvOS context menu. The Siri
-                                    // Remote can't drag rows, and the
-                                    // existing context-menu pattern is
-                                    // where users already go for Edit /
-                                    // Delete, so reorder lives there too.
-                                    let idx = servers.firstIndex(where: { $0.id == server.id }) ?? 0
-                                    if idx > 0 {
-                                        Button {
-                                            moveServer(from: idx, by: -1)
-                                        } label: {
-                                            Label("Move Up", systemImage: "arrow.up")
-                                        }
-                                    }
-                                    if idx < servers.count - 1 {
-                                        Button {
-                                            moveServer(from: idx, by: 1)
-                                        } label: {
-                                            Label("Move Down", systemImage: "arrow.down")
-                                        }
-                                    }
-                                }
-                                Button { serverToEdit = server } label: {
-                                    Label("Edit", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    serverToDelete = server
-                                    showDeleteAlert = true
+                        Spacer()
+                    }
+                    .padding(.vertical, 28)
+                    .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.cardBackground))
+                } else {
+                    ForEach(servers) { server in
+                        TVSettingsNavRow(destination: ServerDetailView(server: server).trackedAsClassicSettingsChild()) {
+                            ServerListRow(server: server,
+                                          onSetActive: servers.count > 1 ? { setActiveServer(server) } : nil)
+                        }
+                        .contextMenu {
+                            if servers.count > 1 {
+                                Button {
+                                    setActiveServer(server)
                                 } label: {
-                                    Label("Delete", systemImage: "trash")
+                                    if server.isActive {
+                                        Label("Active Playlist", systemImage: "checkmark.circle.fill")
+                                    } else {
+                                        Label("Use This Playlist", systemImage: "checkmark.circle")
+                                    }
                                 }
+                                .disabled(server.isActive)
+
+                                let idx = servers.firstIndex(where: { $0.id == server.id }) ?? 0
+                                if idx > 0 {
+                                    Button {
+                                        moveServer(from: idx, by: -1)
+                                    } label: {
+                                        Label("Move Up", systemImage: "arrow.up")
+                                    }
+                                }
+                                if idx < servers.count - 1 {
+                                    Button {
+                                        moveServer(from: idx, by: 1)
+                                    } label: {
+                                        Label("Move Down", systemImage: "arrow.down")
+                                    }
+                                }
+                            }
+                            Button { navPath.append(SettingsRoute.editServer(server.id)) } label: {
+                                Label("Edit", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                serverToDelete = server
+                                showDeleteAlert = true
+                            } label: {
+                                Label("Delete", systemImage: "trash")
                             }
                         }
                     }
-                    TVSettingsActionRow(icon: "plus.circle.fill",
-                                        label: "Add Playlist",
-                                        isAccent: true) {
-                        showAddServer = true
-                    }
+                }
+                TVSettingsActionRow(icon: "plus.circle.fill",
+                                    label: "Add Playlist",
+                                    isAccent: true) {
+                    showAddServer = true
                 }
                 if !servers.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        // The "Tap ○" hint that used to live here was
-                        // misleading on tvOS — the checkmark button
-                        // is rendered but the focus engine can't
-                        // reach it through the outer NavigationLink.
-                        // Long-press is the actual path now (set
-                        // active / edit / delete all live there).
-                        Label("Long press for options: switch playlist, edit, or delete", systemImage: "hand.tap")
-                            .font(.system(size: 24, weight: .medium))
-                            .foregroundColor(.textPrimary.opacity(0.7))
-                    }
-                    .padding(.top, 12)
-                    .padding(.bottom, 6)
+                    Label("Long press for options: switch playlist, edit, or delete", systemImage: "hand.tap")
+                        .font(.system(size: 24, weight: .medium))
+                        .foregroundColor(.textPrimary.opacity(0.7))
+                        .padding(.top, 12)
+                }
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 40)
+        }
+    }
+
+    /// The Sync pane: the root-inline iCloud toggles moved into a pane
+    /// (Rev 2 canon amendment 2 — layout only, same copy and order),
+    /// followed by the Sync Categories nav row exactly as the root had it.
+    private var tvSyncPane: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                TVSettingsToggleRow(
+                    icon: "icloud.fill",
+                    iconColor: .accentPrimary,
+                    title: "iCloud Sync",
+                    subtitle: "Sync playlists, preferences, and watch progress",
+                    isOn: $iCloudSyncEnabled
+                ) { enabled in
+                    SyncManager.shared.syncSettingChanged(enabled: enabled)
                 }
 
-                // MARK: App Settings
-                tvSettingsHeader("App Settings").padding(.top, 36)
-                VStack(spacing: 8) {
-                    TVSettingsNavButton(label: "Appearance", icon: "paintbrush.fill",
-                                        iconColor: .accentPrimary, subtitle: "Theme, scale & category colors") {
-                        navPath.append("appearance")
-                    }
-                    TVSettingsNavButton(label: "App Behaviors", icon: "switch.2",
-                                        iconColor: .accentPrimary, subtitle: "Default tab, launch & gestures") {
-                        navPath.append("app-behaviors")
-                    }
-                    // Remote Control (#195/#196): live now that the player
-                    // executor, overlays, and guide dispatch all run the map.
-                    TVSettingsNavButton(label: "Remote Control", icon: "av.remote",
-                                        iconColor: .accentPrimary, subtitle: "Customize what the Siri Remote buttons do") {
-                        navPath.append("remote-control")
-                    }
-                    TVSettingsNavButton(label: "Multiview", icon: "rectangle.split.2x2.fill",
-                                        iconColor: .accentPrimary, subtitle: "Audio focus, tile spacing & corners") {
-                        navPath.append("multiview")
-                    }
-                    TVSettingsNavButton(label: "Network", icon: "network",
-                                        iconColor: .accentSecondary, subtitle: "Timeout, buffer & background refresh") {
-                        navPath.append("network")
-                    }
-                }
-
-                // MARK: Sync
-                tvSettingsHeader("Sync").padding(.top, 36)
-                VStack(spacing: 8) {
-                    TVSettingsToggleRow(
-                        icon: "icloud.fill",
-                        iconColor: .accentPrimary,
-                        title: "iCloud Sync",
-                        subtitle: "Sync playlists, preferences, and watch progress",
-                        isOn: $iCloudSyncEnabled
-                    ) { enabled in
-                        SyncManager.shared.syncSettingChanged(enabled: enabled)
-                    }
-
-                    if iCloudSyncEnabled {
-                        TVSettingsActionRow(
-                            icon: "arrow.triangle.2.circlepath.icloud",
-                            label: syncLastDate > 0
-                                ? "Sync Now  ·  Last synced \(lastSyncedString)"
-                                : "Sync Now"
-                        ) {
-                            SyncManager.shared.pushServers(servers, immediate: true)
-                            SyncManager.shared.pushPreferencesImmediate()
-                            if let ctx = WatchProgressManager.modelContext,
-                               let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
-                                SyncManager.shared.pushWatchProgress(all, immediate: true)
-                            }
-                            // v1.6.17 — also push reminders so toggling
-                            // a category back on can be followed by a
-                            // one-tap "push everything."
-                            SyncManager.shared.pushReminders(immediate: true)
-                        }
-                    }
-                    // v1.6.17 — granular per-category sync controls.
-                    // Stays accessible even when iCloudSyncEnabled is off
-                    // so the per-category Delete actions work for stale-
-                    // state cleanup before re-enabling sync.
-                    TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild()) {
-                        SettingsRow(icon: "slider.horizontal.3",
-                                    iconColor: .accentPrimary,
-                                    title: "Sync Categories",
-                                    subtitle: "Choose what syncs across your devices")
-                    }
-                    // v1.6.12: destructive — wipe iCloud-side state.
-                    // Always offered (even when Sync is currently off)
-                    // so a user who toggled Sync off can still purge
-                    // stale cloud state without re-enabling first.
+                if iCloudSyncEnabled {
                     TVSettingsActionRow(
-                        icon: "trash.circle.fill",
-                        label: "Clear iCloud Data",
-                        isDestructive: true
+                        icon: "arrow.triangle.2.circlepath.icloud",
+                        label: syncLastDate > 0
+                            ? "Sync Now  ·  Last synced \(lastSyncedString)"
+                            : "Sync Now"
                     ) {
-                        showClearICloudConfirm = true
+                        SyncManager.shared.pushServers(servers, immediate: true)
+                        SyncManager.shared.pushPreferencesImmediate()
+                        if let ctx = WatchProgressManager.modelContext,
+                           let all = try? ctx.fetch(FetchDescriptor<WatchProgress>()) {
+                            SyncManager.shared.pushWatchProgress(all, immediate: true)
+                        }
+                        SyncManager.shared.pushReminders(immediate: true)
                     }
                 }
-
-                // MARK: DVR
-                tvSettingsHeader("DVR").padding(.top, 36)
-                TVSettingsNavButton(label: "DVR", icon: "record.circle",
-                                    iconColor: .red, subtitle: "Recordings, buffers & storage") {
-                    navPath.append("dvr-settings")
+                TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild()) {
+                    SettingsRow(icon: "slider.horizontal.3",
+                                iconColor: .accentPrimary,
+                                title: "Sync Categories",
+                                subtitle: "Choose what syncs across your devices")
                 }
-
-                // MARK: Developer
-                tvSettingsHeader("Developer").padding(.top, 36)
-                TVSettingsNavButton(label: "Developer", icon: "ladybug.fill",
-                                    iconColor: .accentSecondary, subtitle: "Debug logging & diagnostics") {
-                    navPath.append("developer")
+                TVSettingsActionRow(
+                    icon: "trash.circle.fill",
+                    label: "Clear iCloud Data",
+                    isDestructive: true
+                ) {
+                    showClearICloudConfirm = true
                 }
+            }
+            .padding(.horizontal, 40)
+            .padding(.vertical, 40)
+        }
+    }
 
-                // MARK: About
-                tvSettingsHeader("About").padding(.top, 36)
+    /// The About pane: the root About rows plus the memorial line
+    /// (Rev 2 canon amendment 2 — layout only).
+    private var tvAboutPane: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
                 VStack(spacing: 0) {
                     tvAboutRow("Device",          value: aboutDevice)
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
@@ -973,9 +1416,6 @@ struct SettingsView: View {
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
                     tvAboutRow("Last Updated",    value: aboutUpdateDate)
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
-                    // Android parity P2: these two were inert text rows the
-                    // user had to retype from a truncated label. Now focusable
-                    // rows that present a scannable QR (no browser on tvOS).
                     tvAboutLinkRow("Developer Website", urlString: "https://github.com/jonzey231/AerioTV")
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
                     tvAboutLinkRow("Report an Issue",   urlString: "https://github.com/jonzey231/AerioTV/issues/new")
@@ -990,9 +1430,8 @@ struct SettingsView: View {
                     .foregroundColor(.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.top, 12)
-
             }
-            .padding(.horizontal, 80)
+            .padding(.horizontal, 40)
             .padding(.vertical, 40)
         }
         .sheet(item: $tvQRLink) { link in
@@ -1000,15 +1439,9 @@ struct SettingsView: View {
         }
     }
 
+
     /// Non-nil presents the About-row QR sheet.
     @State private var tvQRLink: TVQRLink?
-
-    private func tvSettingsHeader(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 30, weight: .semibold))
-            .foregroundColor(.textPrimary)
-            .padding(.bottom, 12)
-    }
 
     private func tvAboutRow(_ label: String, value: String) -> some View {
         HStack {
@@ -1135,3249 +1568,4 @@ private struct TVQRLinkSheet: View {
 ///
 /// Internal (not private) so DVR / Developer / Appearance settings pages
 /// can reuse the same focus treatment for uniform tvOS UI.
-struct TVSettingsNavRow<Destination: View, Content: View>: View {
-    let destination: Destination
-    let content: Content
-    @FocusState private var isFocused: Bool
-
-    init(destination: Destination, @ViewBuilder content: () -> Content) {
-        self.destination = destination
-        self.content = content()
-    }
-
-    var body: some View {
-        NavigationLink(destination: destination) {
-            content
-                .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 6)
-                .background(tvSettingsCardBG(isFocused))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: isFocused)
-    }
-}
-
-/// Button-based nav row that pushes onto a NavigationPath instead of using NavigationLink.
-/// This ensures the TabView's .onExitCommand can properly manage back navigation.
-struct TVSettingsNavButton: View {
-    let label: String
-    let icon: String
-    let iconColor: Color
-    let subtitle: String
-    let action: () -> Void
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        Button(action: action) {
-            SettingsRow(icon: icon, iconColor: iconColor, title: label, subtitle: subtitle)
-                .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 6)
-                .background(tvSettingsCardBG(isFocused))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: isFocused)
-    }
-}
-
-/// Plain action row (Add Playlist, Copy to Clipboard, etc.)
-/// with the same teal card highlight on focus.
-struct TVSettingsActionRow: View {
-    let icon: String
-    let label: String
-    var isAccent: Bool = false
-    var isDestructive: Bool = false
-    let action: () -> Void
-    @FocusState private var isFocused: Bool
-
-    private var tint: Color {
-        if isDestructive { return .red }
-        if isAccent { return .accentPrimary }
-        return .textPrimary
-    }
-
-    private var iconTint: Color {
-        if isDestructive { return .red }
-        if isAccent { return .accentPrimary }
-        return .textSecondary
-    }
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 16) {
-                Image(systemName: icon)
-                    .font(.system(size: 26))
-                    .foregroundColor(iconTint)
-                Text(label)
-                    .font(.system(size: 26, weight: .medium))
-                    .foregroundColor(tint)
-                Spacer()
-            }
-            .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 6)
-            .background(tvSettingsCardBG(isFocused))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: isFocused)
-    }
-}
-
-/// Selection row for "pick one of many" settings lists (Color Theme,
-/// Default Tab, buffer pickers, etc.) — shows an accent checkmark on
-/// the selected option and uses the same teal card highlight on focus.
-/// Supports an optional icon, leading badge (e.g. theme swatch), and
-/// subtitle.
-struct TVSettingsSelectionRow<Leading: View>: View {
-    let label: String
-    var subtitle: String? = nil
-    let isSelected: Bool
-    let action: () -> Void
-    @ViewBuilder let leading: () -> Leading
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 16) {
-                leading()
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(label)
-                        .font(.system(size: 26, weight: .medium))
-                        .foregroundColor(.textPrimary)
-                    if let subtitle {
-                        Text(subtitle)
-                            .font(.system(size: 20))
-                            .foregroundColor(.textSecondary)
-                    }
-                }
-                Spacer()
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 22, weight: .semibold))
-                        .foregroundColor(.accentPrimary)
-                }
-            }
-            .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 6)
-            .background(tvSettingsCardBG(isFocused))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: isFocused)
-    }
-}
-
-extension TVSettingsSelectionRow where Leading == EmptyView {
-    init(label: String, subtitle: String? = nil,
-         isSelected: Bool, action: @escaping () -> Void) {
-        self.label = label
-        self.subtitle = subtitle
-        self.isSelected = isSelected
-        self.action = action
-        self.leading = { EmptyView() }
-    }
-}
-
-/// Convenience initializer that takes a leading SF Symbol string instead
-/// of a custom view (covers the common case).
-extension TVSettingsSelectionRow where Leading == AnyView {
-    init(icon: String, iconColor: Color = .accentPrimary,
-         label: String, subtitle: String? = nil,
-         isSelected: Bool, action: @escaping () -> Void) {
-        self.label = label
-        self.subtitle = subtitle
-        self.isSelected = isSelected
-        self.action = action
-        self.leading = {
-            AnyView(
-                Image(systemName: icon)
-                    .font(.system(size: 22))
-                    .foregroundColor(iconColor)
-                    .frame(width: 32)
-            )
-        }
-    }
-}
-
-/// Toggle row for tvOS — renders as a Button that flips a Bool on select,
-/// showing an "On / Off" indicator. Consistent with TVGroupToggleRow in ManageGroupsSheet.
-struct TVSettingsToggleRow: View {
-    let icon: String
-    let iconColor: Color
-    let title: String
-    let subtitle: String
-    @Binding var isOn: Bool
-    let onChange: (Bool) -> Void
-    @FocusState private var isFocused: Bool
-
-    var body: some View {
-        Button {
-            isOn.toggle()
-            onChange(isOn)
-        } label: {
-            HStack(spacing: 0) {
-                SettingsRow(icon: icon, iconColor: iconColor, title: title, subtitle: subtitle)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                // On/Off indicator — mirrors TVGroupToggleRow style
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(isOn ? iconColor : Color.textTertiary)
-                        .frame(width: 10, height: 10)
-                    Text(isOn ? "On" : "Off")
-                        .font(.system(size: 26, weight: .semibold))
-                        .foregroundColor(isOn
-                            ? (isFocused ? .white : iconColor)
-                            : (isFocused ? .white : .textTertiary))
-                }
-                .padding(.leading, 16)
-            }
-            .frame(minHeight: 80)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 6)
-            .background(tvSettingsCardBG(isFocused))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(TVNoHighlightButtonStyle())
-        .focused($isFocused)
-        .scaleEffect(isFocused ? 1.02 : 1.0)
-        .animation(.easeInOut(duration: 0.15), value: isFocused)
-    }
-}
-
-/// Teal-tinted card background shared by all tvOS settings row components.
-/// Internal so DVR / Developer / Appearance settings pages can reuse it.
-func tvSettingsCardBG(_ focused: Bool) -> some View {
-    RoundedRectangle(cornerRadius: 12, style: .continuous)
-        .fill(focused ? Color.accentPrimary.opacity(0.18) : Color.cardBackground)
-        .overlay {
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.accentPrimary.opacity(focused ? 0.65 : 0.10),
-                        lineWidth: focused ? 2.5 : 1)
-        }
-}
-#endif
-
-// MARK: - Server List Row
-struct ServerListRow: View {
-    let server: ServerConnection
-    var onSetActive: (() -> Void)? = nil
-
-    private var hasLANConfigured: Bool {
-        server.type != .m3uPlaylist && !server.localURL.isEmpty
-    }
-
-    private var isOnLAN: Bool {
-        hasLANConfigured && server.effectiveBaseURL != server.normalizedBaseURL
-    }
-
-    #if os(tvOS)
-    private let checkmarkSize: CGFloat = 28
-    private let iconBoxSize: CGFloat = 48
-    private let iconFontSize: CGFloat = 22
-    private let statusDotSize: CGFloat = 12
-    #else
-    private let checkmarkSize: CGFloat = 22
-    private let iconBoxSize: CGFloat = 36
-    private let iconFontSize: CGFloat = 16
-    private let statusDotSize: CGFloat = 8
-    #endif
-
-    var body: some View {
-        HStack(spacing: 14) {
-            // Active server indicator — tapping sets this server as the active one
-            if let onSetActive {
-                Button(action: onSetActive) {
-                    Image(systemName: server.isActive ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: checkmarkSize))
-                        .foregroundColor(server.isActive ? .accentPrimary : .textTertiary)
-                }
-                #if os(tvOS)
-                .buttonStyle(TVNoHighlightButtonStyle())
-                #else
-                .buttonStyle(.plain)
-                #endif
-            }
-
-            ZStack {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(server.type.color.opacity(0.2))
-                    .frame(width: iconBoxSize, height: iconBoxSize)
-                Image(systemName: server.type.systemIcon)
-                    .font(.system(size: iconFontSize, weight: .medium))
-                    .foregroundColor(server.type.color)
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(server.name)
-                    .font(.bodyMedium)
-                    .foregroundColor(.textPrimary)
-                HStack(spacing: 6) {
-                    ServerTypeBadge(type: server.type)
-                    if hasLANConfigured {
-                        LANWANBadge(isLAN: isOnLAN)
-                    }
-                    Text(server.effectiveBaseURL)
-                        .font(.monoSmall)
-                        .foregroundColor(.textTertiary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-
-            Spacer()
-
-            Circle()
-                .fill(server.isVerified ? Color.statusOnline : Color.textTertiary)
-                .frame(width: statusDotSize, height: statusDotSize)
-        }
-        #if os(tvOS)
-        .padding(.vertical, 16)
-        #else
-        .padding(.vertical, 4)
-        #endif
-    }
-}
-
-// MARK: - LAN / WAN Badge
-struct LANWANBadge: View {
-    let isLAN: Bool
-
-    #if os(tvOS)
-    private let iconSize: CGFloat = 14
-    private let textSize: CGFloat = 16
-    private let hPad: CGFloat = 8
-    private let vPad: CGFloat = 4
-    #else
-    private let iconSize: CGFloat = 8
-    private let textSize: CGFloat = 9
-    private let hPad: CGFloat = 5
-    private let vPad: CGFloat = 2
-    #endif
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: isLAN ? "wifi" : "globe")
-                .font(.system(size: iconSize, weight: .semibold))
-            Text(isLAN ? "LAN" : "WAN")
-                .font(.system(size: textSize, weight: .bold))
-        }
-        .foregroundColor(isLAN ? .statusOnline : .accentSecondary)
-        .padding(.horizontal, hPad)
-        .padding(.vertical, vPad)
-        .background(
-            Capsule()
-                .fill(isLAN ? Color.statusOnline.opacity(0.15) : Color.accentSecondary.opacity(0.15))
-        )
-    }
-}
-
-// MARK: - Settings Row
-struct SettingsRow: View {
-    let icon: String
-    let iconColor: Color
-    let title: String
-    var subtitle: String? = nil
-    /// Observe ThemeManager so the subtitle's `.textSecondary`
-    /// (computed as `theme.accent.opacity(0.65)`) re-evaluates on
-    /// theme changes. v1.6.8: parent SettingsView observes
-    /// ThemeManager too, but SwiftUI's List + UITableView cell
-    /// diff skips re-rendering a row's body unless one of its
-    /// observed inputs changes — and Settings rows are
-    /// constructed with the same prop values across themes
-    /// (icon name + title + subtitle string). Subscribing the
-    /// row directly forces a body refresh on every theme push,
-    /// which is what makes `.textSecondary` actually pick up the
-    /// new opacity-tinted accent.
-    @ObservedObject private var theme = ThemeManager.shared
-
-    #if os(tvOS)
-    private let iconBoxSize: CGFloat = 48
-    private let iconFontSize: CGFloat = 22
-    private let cornerRadius: CGFloat = 10
-    #else
-    private let iconBoxSize: CGFloat = 32
-    private let iconFontSize: CGFloat = 14
-    private let cornerRadius: CGFloat = 7
-    #endif
-
-    var body: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(iconColor.opacity(0.2))
-                    .frame(width: iconBoxSize, height: iconBoxSize)
-                Image(systemName: icon)
-                    .font(.system(size: iconFontSize, weight: .semibold))
-                    .foregroundColor(iconColor)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.bodyMedium)
-                    .foregroundColor(.textPrimary)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.bodySmall)
-                        .foregroundColor(.textSecondary)
-                }
-            }
-        }
-        #if os(tvOS)
-        .padding(.vertical, 14)
-        #else
-        .padding(.vertical, 2)
-        #endif
-    }
-}
-
-// MARK: - Server Detail View
-// MARK: - Shared playlist delete cascade
-
-/// Deletes a playlist and everything scoped to it: Keychain
-/// credentials, EPGProgram rows, WatchProgress rows, server-side
-/// Recording rows, in-memory VOD, and the iCloud copies. Shared by
-/// the Settings root list and the playlist detail page's Danger
-/// Zone so both delete paths stay in lockstep.
-@MainActor
-func performServerCascadeDelete(_ server: ServerConnection,
-                                servers: [ServerConnection],
-                                modelContext: ModelContext) {
-    let sid = server.id.uuidString
-    server.deleteCredentialsFromKeychain()
-    // Cascade: delete any EPGProgram rows scoped to this
-    // server so they don't orphan and get reused by a
-    // later server of a different type with different
-    // channel IDs. Without this, deleting an Xtream
-    // playlist and re-adding the same server via
-    // Dispatcharr API leaves stale XC EPG rows in
-    // SwiftData that loadFromCache would otherwise
-    // return, bypassing the network fetch and leaving
-    // the guide empty.
-    let epgDescriptor = FetchDescriptor<EPGProgram>(
-        predicate: #Predicate<EPGProgram> { $0.serverID == sid }
-    )
-    if let stale = try? modelContext.fetch(epgDescriptor) {
-        for p in stale { modelContext.delete(p) }
-        debugLog("🗑️ Deleted \(stale.count) orphaned EPGProgram rows for server \(sid)")
-    }
-    // v1.7.x: cascade delete WatchProgress rows
-    // scoped to this server so movie / series /
-    // recording resume positions don't orphan
-    // when the server is removed. Mirrors the
-    // EPGProgram cascade above. WatchProgress.
-    // serverID is Optional<String>; the SwiftData
-    // #Predicate `$0.serverID == sid` unwraps and
-    // matches only rows whose serverID is exactly
-    // `sid`, leaving legacy nil-serverID rows
-    // (pre-multi-server era) untouched. Same
-    // safety pattern the EPGProgram cascade uses.
-    let wpDescriptor = FetchDescriptor<WatchProgress>(
-        predicate: #Predicate<WatchProgress> { $0.serverID == sid }
-    )
-    if let stale = try? modelContext.fetch(wpDescriptor) {
-        for w in stale { modelContext.delete(w) }
-        debugLog("🗑️ Deleted \(stale.count) orphaned WatchProgress rows for server \(sid)")
-    }
-    // v1.7.x: cascade delete server-side Recording
-    // rows scoped to this server. These are
-    // Dispatcharr server-side recordings (rows
-    // where `localFilePath == nil` and
-    // `remoteRecordingID != nil`). After the
-    // server is removed, the row is useless: the
-    // Dispatcharr playback URL it references
-    // (`/api/channels/recordings/<id>/file/` or
-    // `/api/channels/recordings/<id>/hls/`) is
-    // unreachable, and `MyRecordingsView` would
-    // surface unplayable rows pointing at a
-    // server the user just deleted.
-    //
-    // Local recordings (rows where
-    // `localFilePath != nil`) are intentionally
-    // NOT cascaded. The user may have captured
-    // those locally on purpose and want to keep
-    // the `.ts` files in `Documents/Recordings/`
-    // even after the source server is removed.
-    // The `localFilePath == nil` predicate is
-    // the gate.
-    let recDescriptor = FetchDescriptor<Recording>(
-        predicate: #Predicate<Recording> {
-            $0.serverID == sid && $0.localFilePath == nil
-        }
-    )
-    if let stale = try? modelContext.fetch(recDescriptor) {
-        for r in stale { modelContext.delete(r) }
-        debugLog("🗑️ Deleted \(stale.count) orphaned server-side Recording rows for server \(sid)")
-    }
-    modelContext.delete(server)
-    try? modelContext.save()
-    // Issue #25: wipe in-memory VOD so On Demand stops
-    // showing the removed server's movies / series. Live
-    // already clears (ChannelStore.refresh re-runs on the
-    // server-list change), but VODStore's no-active-server
-    // path returns without clearing, so stale, unplayable
-    // entries lingered. The orchestrator re-fires on the
-    // allServers change and repopulates VOD for whatever
-    // server remains active (if any).
-    VODStore.shared.clear()
-    // Push updated list to iCloud (server removed)
-    SyncManager.shared.pushServers(servers.filter { $0.id != server.id })
-    // Push the post-cascade WatchProgress set to
-    // iCloud (immediate, not debounced) so the
-    // deletion replicates to other devices before
-    // they next pull. Without this, another device
-    // would re-introduce the orphaned rows on its
-    // next merge pass via the KVS payload.
-    if let remaining = try? modelContext.fetch(FetchDescriptor<WatchProgress>()) {
-        SyncManager.shared.pushWatchProgress(remaining, immediate: true)
-    }
-}
-
-struct ServerDetailView: View {
-    let server: ServerConnection
-    /// See SettingsView for the rationale — observing ThemeManager
-    /// makes every accent-tinted row in this detail page reactive to
-    /// theme changes (icons, status pills, action buttons).
-    @ObservedObject private var theme = ThemeManager.shared
-    @Query private var servers: [ServerConnection]
-    /// Used by the per-playlist "Refresh EPG Data" action so the
-    /// detached delete can grab a `ModelContainer` from this context.
-    @Environment(\.modelContext) private var modelContext
-    @State private var isTestingConnection = false
-    @State private var connectionResult: String? = nil
-    @State private var connectionSuccess = false
-    /// Per-playlist EPG-purge UX. v1.6.8: replaces the global
-    /// "Refresh EPG Data" action that used to live on
-    /// `AppearanceSettingsView`. Each playlist now owns its own
-    /// EPG-purge action so users with multiple servers can fix one
-    /// playlist's corrupted cache without nuking the others.
-    @State private var showPurgeConfirmation = false
-    @State private var isPurgingEPG = false
-    /// "Refresh Everything" (nuclear) UX. Unlike "Refresh EPG Data"
-    /// (which only purges this playlist's EPGProgram rows), this clears
-    /// EVERY cache: all guide data + the in-memory per-channel EPG actor
-    /// cache + all On Demand state, then reloads channels (so newly-added
-    /// channels appear), the guide, and On Demand from scratch. Added
-    /// after a user hit a stuck-guide state that survived "Refresh EPG
-    /// Data", clearing cache, and force-quitting repeatedly.
-    @State private var showRefreshAllConfirmation = false
-    @State private var isRefreshingAll = false
-    /// Cross-platform LAN-probe observer. `TVLANProbe` is the
-    /// (legacy-named) cross-platform reachability checker — see
-    /// `AerioApp.swift` for the rationale. Observing the singleton
-    /// lets ServerDetailView surface the last probe result on every
-    /// platform so users can see WHY the app thinks it's on LAN, plus
-    /// drive the "Refresh LAN Detection" button. The probe is the sole
-    /// LAN signal — there is no SSID / location dependence.
-    @ObservedObject private var tvLANProbe = TVLANProbe.shared
-    @State private var lanRefreshAcked = false
-    /// Unified playlist page (2026-07): edit is a top-right toolbar
-    /// button on iOS and the first Actions row on tvOS (a corner
-    /// button is off the D-pad path). Delete lives in Danger Zone.
-    @State private var editingServer: ServerConnection? = nil
-    @State private var showDeleteConfirm = false
-    @State private var isRefreshingPlaylist = false
-    @State private var playlistRefreshDone = false
-    @Environment(\.dismiss) private var dismiss
-
-    private var hasLANConfigured: Bool {
-        // LAN means "we have a localURL we can probe" on every
-        // platform. The TVLANProbe reachability check is the only
-        // signal that decides LAN vs WAN.
-        return server.type != .m3uPlaylist && !server.localURL.isEmpty
-    }
-
-    private var isOnLAN: Bool {
-        hasLANConfigured && server.effectiveBaseURL != server.normalizedBaseURL
-    }
-
-    var body: some View {
-        // The held `server` model can be deleted out from under this pushed
-        // detail view by an iCloud sync merge (SyncManager / AerioApp
-        // delete+recreate local ServerConnection rows on a remote merge). SwiftUI
-        // then re-renders this view and reading ANY @Persisted property
-        // (server.type, server.localURL, ...) traps in SwiftData with
-        // `_KKMDBackingData.getValue` assertion (TestFlight crash, 1.7.12). Guard
-        // on the detached model (modelContext goes nil after delete) BEFORE any
-        // persisted read, render an inert background, and pop.
-        Group {
-            if server.modelContext == nil {
-                Color.appBackground.ignoresSafeArea()
-            } else {
-                detailContent
-            }
-        }
-        .onChange(of: server.modelContext == nil) { _, deleted in
-            if deleted { dismiss() }
-        }
-    }
-
-    private var detailContent: some View {
-        ZStack {
-            Color.appBackground.ignoresSafeArea()
-            List {
-                Section {
-                    infoRow("Type", value: server.type.displayName)
-                    connectionURLRow("Remote URL", value: server.normalizedBaseURL,
-                                     isActiveRoute: !isOnLAN)
-                    if hasLANConfigured {
-                        connectionURLRow("Local URL", value: server.localURL,
-                                         isActiveRoute: isOnLAN)
-                    }
-                    if !server.username.isEmpty {
-                        infoRow("Username", value: server.username)
-                    }
-                    infoRow("Status", value: server.isVerified ? "Verified" : "Unverified")
-                    if let last = server.lastConnected {
-                        infoRow("Last Connected", value: last.formatted(.relative(presentation: .named)))
-                    }
-                    if server.isActive {
-                        infoRow("Channels", value: "\(ChannelStore.shared.channels.count)")
-                    }
-                    if !server.epgURL.isEmpty {
-                        infoRow("EPG", value: server.epgURL, isMonospaced: true)
-                    }
-                } header: {
-                    Text("Connection Details").sectionHeaderStyle()
-                } footer: {
-                    if hasLANConfigured {
-                        Text("A checkmark marks the connection in use right now. The local URL is used automatically whenever the server answers on your home network; run Refresh LAN Detection below after a network change.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
-                    }
-                }
-                .listRowBackground(Color.cardBackground)
-
-                Section {
-                    #if os(tvOS)
-                    // TV: a top-right toolbar button is off the D-pad
-                    // path, so editing is the first action row here
-                    // (same pattern as Android TV).
-                    NavigationLink(destination: EditServerPage(server: server).trackedAsClassicSettingsChild()) {
-                        HStack {
-                            Image(systemName: "pencil")
-                                .foregroundColor(.accentPrimary)
-                            Text("Edit Playlist")
-                                .foregroundColor(.accentPrimary)
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-                    #endif
-
-                    Button {
-                        Task { await testConnection() }
-                    } label: {
-                        HStack {
-                            if isTestingConnection {
-                                ProgressView().tint(.accentPrimary)
-                            } else {
-                                Image(systemName: "network")
-                                    .foregroundColor(.accentPrimary)
-                            }
-                            Text(isTestingConnection ? "Testing..." : "Test Connection")
-                                .foregroundColor(.accentPrimary)
-                        }
-                    }
-                    .listRowBackground(Color.cardBackground)
-
-                    if let result = connectionResult {
-                        HStack(spacing: 8) {
-                            Image(systemName: connectionSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
-                                .foregroundColor(connectionSuccess ? .statusOnline : .statusLive)
-                            Text(result)
-                                .font(.bodySmall)
-                                .foregroundColor(connectionSuccess ? .statusOnline : .statusLive)
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-
-                    // Re-fetch channels (and the guide) for the active
-                    // playlist. Parity with Android's "Refresh Playlist"
-                    // action; non-active playlists reload on activation,
-                    // so the row only shows for the active one.
-                    if server.isActive {
-                        Button {
-                            refreshPlaylist()
-                        } label: {
-                            HStack {
-                                if isRefreshingPlaylist {
-                                    ProgressView().tint(.accentPrimary)
-                                } else {
-                                    Image(systemName: playlistRefreshDone ? "checkmark.circle.fill" : "arrow.clockwise")
-                                        .foregroundColor(playlistRefreshDone ? .statusOnline : .accentPrimary)
-                                }
-                                Text(isRefreshingPlaylist ? "Refreshing…"
-                                     : playlistRefreshDone ? "Refreshed"
-                                     : "Refresh Playlist")
-                                    .foregroundColor(isRefreshingPlaylist ? .textSecondary
-                                                     : playlistRefreshDone ? .statusOnline : .accentPrimary)
-                            }
-                        }
-                        .disabled(isRefreshingPlaylist)
-                        .listRowBackground(Color.cardBackground)
-                    }
-
-                    if hasLANConfigured {
-                        Button {
-                            tvLANProbe.probe(servers: Array(servers))
-                        } label: {
-                            HStack(spacing: 8) {
-                                if tvLANProbe.isProbing {
-                                    ProgressView().tint(.accentPrimary).scaleEffect(0.8)
-                                } else {
-                                    Image(systemName: lanRefreshAcked ? "checkmark.circle.fill" : "wifi.circle")
-                                        .foregroundColor(lanRefreshAcked ? .statusOnline : .accentPrimary)
-                                }
-                                Text(tvLANProbe.isProbing ? "Probing…"
-                                     : lanRefreshAcked ? "Up to date"
-                                     : "Refresh LAN Detection")
-                                    .foregroundColor(tvLANProbe.isProbing ? .textSecondary
-                                                     : lanRefreshAcked ? .statusOnline : .accentPrimary)
-                            }
-                        }
-                        .disabled(tvLANProbe.isProbing)
-                        .listRowBackground(Color.cardBackground)
-                        .onChange(of: tvLANProbe.isProbing) { _, nowProbing in
-                            if !nowProbing {
-                                lanRefreshAcked = true
-                                Task {
-                                    try? await Task.sleep(for: .seconds(2))
-                                    lanRefreshAcked = false
-                                }
-                            }
-                        }
-                    }
-                } header: {
-                    Text("Actions").sectionHeaderStyle()
-                }
-
-                // MARK: EPG Cache (per-playlist)
-                //
-                // Per-playlist "nuke + re-fetch" action. Lives here
-                // (instead of a single global toggle in Appearance)
-                // so users with multiple playlists can scrub one
-                // playlist's corrupted guide data without touching
-                // the others. The SwiftData delete is filtered by
-                // `EPGProgram.serverID == server.id`, and we only
-                // call `ChannelStore.forceRefresh` when the purged
-                // playlist is the active one — purging a non-active
-                // playlist just clears the cache, and the next time
-                // the user activates it the normal load path will
-                // refetch fresh EPG data.
-                Section {
-                    Button(role: .destructive) {
-                        showPurgeConfirmation = true
-                    } label: {
-                        HStack(spacing: 10) {
-                            if isPurgingEPG {
-                                ProgressView().scaleEffect(0.8)
-                                    .frame(width: 14)
-                            } else {
-                                Image(systemName: "arrow.triangle.2.circlepath")
-                                    .font(.system(size: 14, weight: .semibold))
-                            }
-                            Text(isPurgingEPG ? "Refreshing EPG Data…" : "Refresh EPG Data")
-                                .font(.bodyMedium)
-                            Spacer()
-                        }
-                        .foregroundColor(isPurgingEPG ? .textSecondary : .statusWarning)
-                    }
-                    .listRowBackground(Color.cardBackground)
-                    .disabled(isPurgingEPG)
-                } header: {
-                    Text("EPG Cache").sectionHeaderStyle()
-                } footer: {
-                    Text(server.isActive
-                         ? "Clears this playlist's cached guide data and downloads it fresh from the server. Use this if program cells look wrong or are missing. Takes a few minutes on large playlists."
-                         : "Clears this playlist's cached guide data. The fresh fetch will run automatically the next time you make this playlist active.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-
-                // MARK: Refresh Everything (nuclear)
-                //
-                // The heavier sibling of "Refresh EPG Data". That action only
-                // purges this playlist's EPGProgram rows; if a channel or the
-                // guide gets wedged, stale state can survive in the in-memory
-                // EPGCache actor and the On Demand store. This button clears
-                // ALL of it and reloads from scratch, so a user never has to
-                // resort to force-quitting and clearing cache by hand.
-                Section {
-                    Button(role: .destructive) {
-                        showRefreshAllConfirmation = true
-                    } label: {
-                        HStack(spacing: 10) {
-                            if isRefreshingAll {
-                                ProgressView().scaleEffect(0.8)
-                                    .frame(width: 14)
-                            } else {
-                                Image(systemName: "arrow.clockwise.circle")
-                                    .font(.system(size: 14, weight: .semibold))
-                            }
-                            Text(isRefreshingAll ? "Refreshing Everything…" : "Refresh Everything")
-                                .font(.bodyMedium)
-                            Spacer()
-                        }
-                        .foregroundColor(isRefreshingAll ? .textSecondary : .statusWarning)
-                    }
-                    .listRowBackground(Color.cardBackground)
-                    .disabled(isRefreshingAll || isPurgingEPG)
-                } header: {
-                    Text("Full Refresh").sectionHeaderStyle()
-                } footer: {
-                    Text(server.isActive
-                         ? "Clears every cache (channels, guide data, and On Demand) and reloads this playlist from scratch. Use this if newly-added channels, guide data, or movies and shows are missing or stale after changes on the server."
-                         : "Clears every cache (channels, guide data, and On Demand). This playlist reloads automatically the next time you make it active.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-            
-                // MARK: Danger Zone
-                Section {
-                    Button(role: .destructive) {
-                        showDeleteConfirm = true
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: "trash")
-                                .font(.system(size: 14, weight: .semibold))
-                            Text("Delete Playlist")
-                                .font(.bodyMedium)
-                            Spacer()
-                        }
-                        .foregroundColor(.statusLive)
-                    }
-                    .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("Danger Zone").sectionHeaderStyle()
-                } footer: {
-                    Text("Removes this playlist and its credentials from this device. Your server data will not be affected.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-            }
-            #if os(iOS)
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            #else
-            .listStyle(.plain)
-            // v1.7.5: cap to a centered 1200pt column on tvOS so the
-            // detail rows do not stretch the full TV width (matches the
-            // server edit screen). The enclosing ZStack centers it.
-            .frame(maxWidth: 1200)
-            #endif
-        }
-        .navigationTitle(server.name)
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #endif
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
-        #if os(iOS)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button("Edit") { editingServer = server }
-                    .foregroundColor(.accentPrimary)
-            }
-        }
-        .sheet(item: $editingServer) { EditServerSheet(server: $0) }
-        #endif
-        .alert("Delete Playlist?", isPresented: $showDeleteConfirm) {
-            Button("Delete", role: .destructive) {
-                performServerCascadeDelete(server, servers: Array(servers), modelContext: modelContext)
-                dismiss()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will remove \"\(server.name)\" from the app. Your server data will not be affected.")
-        }
-        // Per-playlist EPG-purge confirmation. The action handler:
-        //   1. Always calls `GuideStore.shared.purgePrograms(for:…)`
-        //      to delete this playlist's EPGProgram rows on a
-        //      background context.
-        //   2. Only triggers `ChannelStore.shared.forceRefresh(...)`
-        //      when this playlist is the active one — refreshing a
-        //      non-active server would either no-op (forceRefresh
-        //      bails on non-active first(where:isActive)) or, worse,
-        //      hijack the user's currently-loaded data with a
-        //      different server's payload. For non-active purges we
-        //      just clear the cache and let the next activation
-        //      refetch normally.
-        .alert("Refresh EPG Data?", isPresented: $showPurgeConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Refresh", role: .destructive) {
-                Task {
-                    isPurgingEPG = true
-                    await GuideStore.shared.purgePrograms(
-                        for: server.id.uuidString,
-                        isActiveServer: server.isActive,
-                        modelContext: modelContext
-                    )
-                    // Also drop the in-memory per-channel "upcoming" actor
-                    // cache. Without this, purging the SwiftData rows still
-                    // left stale guide data sitting in EPGCache, so a wedged
-                    // guide could survive "Refresh EPG Data". (This is a
-                    // 30-minute in-memory cache that repopulates lazily, so
-                    // clearing it for all servers is harmless.)
-                    await EPGCache.shared.invalidateAll()
-                    if server.isActive {
-                        await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
-                    }
-                    isPurgingEPG = false
-                }
-            }
-        } message: {
-            Text(server.isActive
-                 ? "All cached guide data for \"\(server.name)\" will be cleared and reloaded from the server. This may take a few minutes on large playlists."
-                 : "All cached guide data for \"\(server.name)\" will be cleared. The next time you make this playlist active, fresh guide data will load automatically.")
-        }
-        // Refresh Everything: nuke every cache, then reload. Strictly more
-        // thorough than "Refresh EPG Data" so a wedged guide / missing
-        // channels can't survive it.
-        .alert("Refresh Everything?", isPresented: $showRefreshAllConfirmation) {
-            Button("Cancel", role: .cancel) {}
-            Button("Refresh", role: .destructive) {
-                Task {
-                    isRefreshingAll = true
-                    // 1. Purge ALL guide data: every EPGProgram row in
-                    //    SwiftData plus GuideStore's in-memory state and
-                    //    load-idempotency flags (via invalidateCache).
-                    await GuideStore.shared.purgeAllPrograms(modelContext: modelContext)
-                    // 2. Clear the per-channel "upcoming" actor cache.
-                    //    "Refresh EPG Data" leaves this in place, which is
-                    //    how stale guide data can survive that action.
-                    await EPGCache.shared.invalidateAll()
-                    // 3. Drop all On Demand (movies + series) state.
-                    VODStore.shared.clear()
-                    // 4. Reload from scratch for the active playlist:
-                    //    channels are re-fetched (newly-added channels
-                    //    appear), the guide is rebuilt and re-cached, and
-                    //    On Demand repopulates. Non-active playlists just
-                    //    keep the cleared state and reload on activation.
-                    if server.isActive {
-                        await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
-                        VODStore.shared.refresh(servers: Array(servers))
-                    }
-                    isRefreshingAll = false
-                }
-            }
-        } message: {
-            Text(server.isActive
-                 ? "Clears all cached channels, guide data, and On Demand, then reloads \"\(server.name)\" from scratch. Use this if channels or guide data are missing or stale. May take a few minutes on large playlists."
-                 : "Clears all cached channels, guide data, and On Demand. \"\(server.name)\" reloads automatically the next time you make it active.")
-        }
-    }
-
-    // MARK: - About computed properties
-
-    private var aboutDevice: String { DeviceInfo.modelName }
-
-    private var aboutSystem: String {
-#if canImport(UIKit)
-        return "\(UIDevice.current.systemName) \(UIDevice.current.systemVersion)"
-#else
-        let v = ProcessInfo.processInfo.operatingSystemVersion
-        return "macOS \(v.majorVersion).\(v.minorVersion).\(v.patchVersion)"
-#endif
-    }
-
-    private var aboutVersion: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
-        let build   = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
-        return "\(version) (\(build))"
-    }
-
-    private var aboutInstallDate: String { DeviceInfo.firstInstalledText }
-
-    private var aboutUpdateDate: String { DeviceInfo.lastUpdatedText }
-
-    private var aboutCopyText: String {
-        [
-            "AerioTV \(aboutVersion)",
-            "Device: \(aboutDevice)",
-            "System: \(aboutSystem)",
-            "First Installed: \(aboutInstallDate)",
-            "Last Updated: \(aboutUpdateDate)"
-        ].joined(separator: "\n")
-    }
-
-    /// Connection Details URL row: like `infoRow` but with a green
-    /// checkmark marking the route (LAN or WAN) currently in use.
-    private func connectionURLRow(_ label: String, value: String, isActiveRoute: Bool) -> some View {
-        HStack {
-            Text(label)
-                .font(.bodyMedium)
-                .foregroundColor(.textSecondary)
-            Spacer()
-            if isActiveRoute {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 13))
-                    .foregroundColor(.statusOnline)
-            }
-            Text(value)
-                .font(.monoSmall)
-                .foregroundColor(.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-    }
-
-    /// Android-parity "Refresh Playlist": re-fetch channels and the
-    /// guide for the active playlist without purging any caches.
-    private func refreshPlaylist() {
-        guard !isRefreshingPlaylist else { return }
-        isRefreshingPlaylist = true
-        Task {
-            await ChannelStore.shared.forceRefresh(servers: Array(servers), modelContext: modelContext)
-            isRefreshingPlaylist = false
-            playlistRefreshDone = true
-            try? await Task.sleep(for: .seconds(2))
-            playlistRefreshDone = false
-        }
-    }
-
-    private func infoRow(_ label: String, value: String, isMonospaced: Bool = false) -> some View {
-        HStack {
-            Text(label)
-                .font(.bodyMedium)
-                .foregroundColor(.textSecondary)
-            Spacer()
-            Text(value)
-                .font(isMonospaced ? .monoSmall : .bodyMedium)
-                .foregroundColor(.textPrimary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-    }
-
-    private func testConnection() async {
-        isTestingConnection = true
-        connectionResult = nil
-        do {
-            switch server.type {
-            case .xtreamCodes:
-                let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL, username: server.username, password: server.effectivePassword)
-                _ = try await api.verifyConnection()
-            case .dispatcharrAPI:
-                // Re-verify with the persisted auth mode as the
-                // starting hint — verifyConnection auto-falls-back if
-                // the server now wants a different shape (e.g. user
-                // upgraded Dispatcharr to a build with stricter auth).
-                let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                         auth: .apiKey(server.effectiveApiKey),
-                                         userAgent: server.effectiveUserAgent,
-                                         authMode: server.dispatcharrHeaderMode)
-                let info = try await api.verifyConnection()
-                // v1.6.20: persist the discovered auth shape so
-                // subsequent API calls and stream playback use it.
-                if let mode = info.discoveredAuthMode,
-                   mode.rawValue != server.dispatcharrAuthMode {
-                    server.dispatcharrAuthMode = mode.rawValue
-                    debugLog("SettingsView Test Connection: persisting auth mode .\(mode.rawValue) for \(server.name)")
-                    // Immediate cross-device push so other devices on
-                    // the same iCloud account inherit the working
-                    // shape without waiting for the next debounce.
-                    SyncManager.shared.pushServers(servers, immediate: true)
-                }
-                // v1.7.x: refresh the connected user's permission tier
-                // so the server-side Record / DVR affordances stay
-                // accurate if the account was promoted/demoted in
-                // Dispatcharr since it was first saved. Best-effort: a
-                // failed users/me fetch leaves the stored level
-                // unchanged. Re-fetch with the (possibly newly)
-                // discovered header shape.
-                let levelAPI = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                              auth: .apiKey(server.effectiveApiKey),
-                                              userAgent: server.effectiveUserAgent,
-                                              authMode: info.discoveredAuthMode ?? server.dispatcharrHeaderMode)
-                if let user = try? await levelAPI.fetchCurrentUser() {
-                    // effectiveUserLevel folds in is_superuser/is_staff
-                    // (legacy superusers carry level 0); the probe
-                    // settles OLD servers whose /me/ predates those
-                    // fields - see DispatcharrUser.effectiveUserLevel.
-                    var level = user.effectiveUserLevel
-                    if level < 10, await levelAPI.probeAdminAccess() { level = 10 }
-                    if level != server.dispatcharrUserLevel {
-                        server.dispatcharrUserLevel = level
-                        debugLog("SettingsView Test Connection: persisting user_level \(level) for \(server.name)")
-                        SyncManager.shared.pushServers(servers, immediate: true)
-                    }
-                }
-            case .m3uPlaylist:
-                guard let url = URL(string: server.baseURL) else { throw APIError.invalidURL }
-                let (_, response) = try await URLSession.shared.data(from: url)
-                guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-                    throw APIError.serverError((response as? HTTPURLResponse)?.statusCode ?? -1)
-                }
-            }
-            connectionSuccess = true
-            connectionResult = "Connection successful"
-        } catch let error as APIError {
-            connectionSuccess = false
-            connectionResult = error.errorDescription ?? "Unknown error"
-        } catch {
-            connectionSuccess = false
-            connectionResult = error.localizedDescription
-        }
-        isTestingConnection = false
-    }
-}
-
-// MARK: - Playlist List Row
-struct PlaylistListRow: View {
-    let playlist: M3UPlaylist
-
-    var body: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.accentPrimary.opacity(0.18))
-                    .frame(width: 36, height: 36)
-                Image(systemName: playlist.sourceType == .url ? "link" : "doc.fill")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(.accentPrimary)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(playlist.name)
-                    .font(.bodyMedium)
-                    .foregroundColor(.textPrimary)
-                HStack(spacing: 6) {
-                    Text("\(playlist.channelCount) channels")
-                        .font(.labelSmall)
-                        .foregroundColor(.textSecondary)
-                    if let refreshed = playlist.lastRefreshed {
-                        Text("·")
-                            .foregroundColor(.textTertiary)
-                        Text(refreshed, style: .relative)
-                            .font(.labelSmall)
-                            .foregroundColor(.textTertiary)
-                    }
-                }
-            }
-
-            Spacer()
-
-            Circle()
-                .fill(Color.statusOnline)
-                .frame(width: 8, height: 8)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-// AppearanceSettingsView is defined in AppearanceSettingsView.swift
-
-// MARK: - Edit Playlist Sheet
-struct EditPlaylistSheet: View {
-    @Bindable var playlist: M3UPlaylist
-    @Environment(\.dismiss) private var dismiss
-    /// See SettingsView for rationale.
-    @ObservedObject private var theme = ThemeManager.shared
-
-    var body: some View {
-        NavigationStack {
-            ZStack {
-                Color.appBackground.ignoresSafeArea()
-                Form {
-                    Section {
-                        TextField("Name", text: $playlist.name)
-                            .listRowBackground(Color.cardBackground)
-                        if playlist.sourceType == .url {
-                            TextField("URL", text: $playlist.urlString)
-                                .keyboardType(.URL)
-                                .autocorrectionDisabled()
-                                .textInputAutocapitalization(.never)
-                                .listRowBackground(Color.cardBackground)
-                        } else {
-                            HStack {
-                                Text("Source")
-                                    .foregroundColor(.textSecondary)
-                                Spacer()
-                                Text("Local file")
-                                    .foregroundColor(.textTertiary)
-                            }
-                            .listRowBackground(Color.cardBackground)
-                        }
-                    } header: {
-                        Text("Playlist Details").sectionHeaderStyle()
-                    }
-                }
-                #if os(iOS)
-                .scrollContentBackground(.hidden)
-                #endif
-            }
-            .navigationTitle("Edit Playlist")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbarBackground(Color.appBackground, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
-                        .foregroundColor(.accentPrimary)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Save") { dismiss() }
-                        .foregroundColor(.accentPrimary)
-                        .fontWeight(.semibold)
-                        .disabled(playlist.name.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            }
-        }
-    }
-}
-
-// MARK: - Edit Server Sheet
-struct EditServerSheet: View {
-    @Bindable var server: ServerConnection
-    @Environment(\.dismiss) private var dismiss
-    /// See SettingsView for rationale.
-    @ObservedObject private var theme = ThemeManager.shared
-
-    // XMLTV validation state for the Dispatcharr EPG Source row. Mirrors
-    // AddServerView's XMLTVTestState so the edit flow can also validate
-    // before save.
-    @State private var xmltvTestState: XMLTVEditTestState = .idle
-
-    enum XMLTVEditTestState: Equatable {
-        case idle
-        case testing
-        case success(Int)
-        case failure(String)
-    }
-
-    // v1.7.x: Direct Connect "Refresh Session" button state.
-    @State private var isRefreshingSession: Bool = false
-    @State private var sessionRefreshMessage: String? = nil
-    @State private var sessionRefreshSucceeded: Bool = false
-
-    /// v1.7.x (Round 1 review): credential mode is staged in
-    /// SwiftUI state instead of writing through to SwiftData
-    /// immediately. Pre-fix the picker used a Binding that wrote
-    /// `server.dispatcharrCredentialTypeRaw` directly, so flipping
-    /// the picker and then tapping Cancel still persisted the new
-    /// mode — leaving servers in a half-configured state if the
-    /// user explored the picker without intending to commit.
-    /// `nil` means "user hasn't touched the picker"; non-nil means
-    /// "staged change pending Save". Persisted in `commitEdits()`.
-    @State private var pendingCredentialType: DispatcharrCredentialType? = nil
-
-    /// v1.7.x: read view of the credential mode that respects any
-    /// staged change. Body switches on this so revealing the
-    /// alternate fields is immediate while the model write is
-    /// deferred to Save.
-    private var effectiveCredentialType: DispatcharrCredentialType {
-        pendingCredentialType ?? server.dispatcharrCredentialType
-    }
-
-    /// v1.7.x: binds the credential-mode segmented picker. Stages
-    /// the pick into `pendingCredentialType`; the actual SwiftData
-    /// write happens in `commitEdits()` if the user taps Save.
-    /// Tapping Cancel discards the staged value because it's
-    /// SwiftUI @State, not bound to the model.
-    private var directConnectModeBinding: Binding<DispatcharrCredentialType> {
-        Binding(
-            get: { effectiveCredentialType },
-            set: { newValue in
-                pendingCredentialType = newValue
-                // Clear the refresh-session message when the user
-                // pivots so a stale "Refreshed at 12:34" pill
-                // doesn't linger on the wrong mode.
-                sessionRefreshMessage = nil
-            }
-        )
-    }
-
-    /// v1.7.x: apply staged credential-mode change to the model.
-    /// Called from the Save action of the edit sheet. Keeps the
-    /// SwiftData write in one place so the no-op default (`""`
-    /// raw) is preserved when the user picks `.apiKey` (forward-
-    /// compat with older AerioTV builds receiving this server via
-    /// iCloud sync — they ignore unknown KVS keys).
-    private func commitCredentialModeIfStaged() {
-        guard let pending = pendingCredentialType else { return }
-        server.dispatcharrCredentialTypeRaw = (pending == .apiKey) ? "" : pending.rawValue
-        pendingCredentialType = nil
-    }
-
-    /// v1.7.x: render the cached api_key as `i_•••••cudvh13H1A`
-    /// (first 2 chars + dots + last 8). Long enough to identify if
-    /// it matches the one shown in Dispatcharr's admin UI; redacted
-    /// enough that a screenshot doesn't leak it. Mirrors how
-    /// 1Password and similar apps surface secrets.
-    private func maskedAPIKey(_ key: String) -> String {
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count > 12 else { return String(repeating: "•", count: trimmed.count) }
-        let prefix = trimmed.prefix(2)
-        let suffix = trimmed.suffix(8)
-        return "\(prefix)\(String(repeating: "•", count: 6))\(suffix)"
-    }
-
-    /// v1.7.x: force-refresh a Direct Connect server's JWT pair.
-    /// Performs a fresh login against /api/accounts/token/, then
-    /// re-fetches /api/accounts/users/me/ to update the cached
-    /// api_key (covers the admin-rotated-the-key case where Aerio's
-    /// Keychain copy is stale and downstream long-lived consumers
-    /// like mpv stream playback would 401).
-    @MainActor
-    private func refreshDirectConnectSession() async {
-        let username = server.username
-        let password = server.effectivePassword
-        let baseURL  = server.effectiveBaseURL
-        let userAgent = server.effectiveUserAgent
-        let serverID = server.id
-        guard !username.isEmpty, !password.isEmpty else {
-            sessionRefreshMessage = "Username and password required."
-            sessionRefreshSucceeded = false
-            return
-        }
-
-        isRefreshingSession = true
-        sessionRefreshMessage = nil
-        defer { isRefreshingSession = false }
-
-        do {
-            let pair = try await DispatcharrAPI.login(
-                baseURL: baseURL,
-                username: username,
-                password: password,
-                userAgent: userAgent
-            )
-            DispatcharrTokenStore.shared.store(
-                serverID: serverID,
-                access: pair.access,
-                refresh: pair.refresh
-            )
-
-            // Re-fetch the user record so we pick up any rotated
-            // api_key. Update the SwiftData record + Keychain so
-            // every downstream consumer sees the fresh value.
-            // v1.7.x (Round 1 review): differentiate the success
-            // message based on whether the api_key actually
-            // changed. Pre-fix the message was the same regardless,
-            // which made the button feel like a no-op even when it
-            // actively rescued a stale-Keychain situation.
-            let bearerAPI = DispatcharrAPI(baseURL: baseURL, auth: .bearer(pair.access))
-            var apiKeyRotated = false
-            if let user = try? await bearerAPI.fetchCurrentUser(),
-               !user.apiKey.isEmpty,
-               user.apiKey != server.effectiveApiKey {
-                server.apiKey = user.apiKey
-                SyncManager.shared.saveCredentialsSynced(for: server)
-                apiKeyRotated = true
-            }
-
-            sessionRefreshSucceeded = true
-            sessionRefreshMessage = apiKeyRotated
-                ? "Session refreshed. Cached API key updated."
-                : "Session refreshed. API key unchanged."
-        } catch let error as DispatcharrDirectConnectError {
-            sessionRefreshSucceeded = false
-            sessionRefreshMessage = error.errorDescription ?? "Refresh failed."
-        } catch {
-            sessionRefreshSucceeded = false
-            sessionRefreshMessage = error.localizedDescription
-        }
-    }
-
-    var body: some View {
-        // Guard against the server being deleted mid-edit by an iCloud sync merge
-        // (SwiftData detached-model crash; same root cause as ServerDetailView).
-        // Pop instead of reading @Persisted props off a detached model.
-        Group {
-            if server.modelContext == nil {
-                Color.appBackground.ignoresSafeArea()
-            } else {
-                editContent
-            }
-        }
-        .onChange(of: server.modelContext == nil) { _, deleted in
-            if deleted { dismiss() }
-        }
-    }
-
-    private var editContent: some View {
-        NavigationStack {
-            ZStack {
-                Color.appBackground.ignoresSafeArea()
-                #if os(tvOS)
-                tvOSEditContent
-                #else
-                iOSEditForm
-                #endif
-            }
-            .navigationTitle("Edit Playlist")
-            #if os(iOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
-            .toolbarBackground(Color.appBackground, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
-                        .foregroundColor(.accentPrimary)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Save") {
-                        // v1.7.x (Round 1 review): commit any
-                        // staged credential-mode change before
-                        // persisting credentials. Cancel skips
-                        // this step, so toggling the picker and
-                        // backing out leaves the model unchanged.
-                        commitCredentialModeIfStaged()
-                        SyncManager.shared.saveCredentialsSynced(for: server)
-                        dismiss()
-                    }
-                    .foregroundColor(.accentPrimary)
-                    .fontWeight(.semibold)
-                    .disabled(server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
-                              server.baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
-                }
-            }
-        }
-    }
-
-    // MARK: - iOS Form
-    #if os(iOS)
-    private var iOSEditForm: some View {
-        Form {
-            Section {
-                TextField("Name", text: $server.name)
-                    .listRowBackground(Color.cardBackground)
-                TextField("URL", text: $server.baseURL)
-                    .keyboardType(.URL)
-                    .autocorrectionDisabled()
-                    .textInputAutocapitalization(.never)
-                    .listRowBackground(Color.cardBackground)
-            } header: {
-                Text("Connection").sectionHeaderStyle()
-            }
-
-            if server.type == .xtreamCodes {
-                Section {
-                    TextField("Username", text: $server.username)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .listRowBackground(Color.cardBackground)
-                    SecureField("Password", text: $server.password)
-                        .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("Credentials").sectionHeaderStyle()
-                }
-                Section {
-                    TextField("Custom XMLTV URL (optional)",
-                              text: $server.xtreamXMLTVURL,
-                              prompt: Text(verbatim: "https://example.com/xmltv.xml"))
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("EPG Source").sectionHeaderStyle()
-                } footer: {
-                    Text("Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own. Leave blank to skip.")
-                }
-            } else if server.type == .dispatcharrAPI {
-                Section {
-                    // v1.7.x: credential mode picker. Mirrors
-                    // AddServerView's segmented control. Persists
-                    // the user's choice to
-                    // `dispatcharrCredentialTypeRaw` on the
-                    // SwiftData record so it syncs cross-device
-                    // via SyncManager.serialize.
-                    Picker("Sign-in method", selection: directConnectModeBinding) {
-                        Text("Username & Password").tag(DispatcharrCredentialType.usernamePassword)
-                        Text("API Key").tag(DispatcharrCredentialType.apiKey)
-                    }
-                    .pickerStyle(.segmented)
-                    .listRowBackground(Color.cardBackground)
-
-                    switch effectiveCredentialType {
-                    case .usernamePassword:
-                        TextField("Username", text: $server.username)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .listRowBackground(Color.cardBackground)
-                        SecureField("Password", text: $server.password)
-                            .listRowBackground(Color.cardBackground)
-                        // v1.7.x: same Dashboard-vs-XC password hint
-                        // as the Add Server flow. Surface here too so
-                        // existing servers being switched to
-                        // Username & Password (or whose user just
-                        // rotated their UI password) see the same
-                        // guidance without having to retrace through
-                        // onboarding.
-                        Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
-                            .font(.labelSmall)
-                            .foregroundColor(.textTertiary)
-                            .listRowBackground(Color.cardBackground)
-                        // Show the cached API key (read-only) so the
-                        // user can see it was fetched from
-                        // /api/accounts/users/me/ and is keeping
-                        // long-lived connections (mpv, logos)
-                        // working. Hidden in this row when empty
-                        // (e.g. server was just switched and warmup
-                        // hasn't completed yet).
-                        if !server.effectiveApiKey.isEmpty {
-                            HStack {
-                                Text("API Key (cached)")
-                                    .foregroundColor(.textTertiary)
-                                Spacer()
-                                Text(maskedAPIKey(server.effectiveApiKey))
-                                    .font(.system(.footnote, design: .monospaced))
-                                    .foregroundColor(.textSecondary)
-                            }
-                            .listRowBackground(Color.cardBackground)
-                        }
-                    case .apiKey:
-                        SecureField("Admin API Key", text: $server.apiKey)
-                            .autocorrectionDisabled()
-                            .textInputAutocapitalization(.never)
-                            .listRowBackground(Color.cardBackground)
-                    }
-
-                    // Refresh Session button — only shown in
-                    // Username & Password mode. Forces an immediate
-                    // /api/accounts/token/ login to refresh the JWT
-                    // pair AND re-fetches /api/accounts/users/me/
-                    // to update the cached api_key (covers the
-                    // server-side rotation case where an admin
-                    // rolled the key and Aerio's cached copy is
-                    // stale).
-                    if effectiveCredentialType == .usernamePassword {
-                        Button {
-                            Task { await refreshDirectConnectSession() }
-                        } label: {
-                            HStack(spacing: 6) {
-                                if isRefreshingSession {
-                                    ProgressView().tint(.accentPrimary).scaleEffect(0.8)
-                                } else {
-                                    Image(systemName: "arrow.clockwise")
-                                }
-                                Text(isRefreshingSession ? "Refreshing…" : "Refresh Session")
-                            }
-                            .font(.labelMedium.weight(.semibold))
-                            .foregroundColor(.accentPrimary)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(server.username.isEmpty
-                                  || server.effectivePassword.isEmpty
-                                  || isRefreshingSession)
-                        .listRowBackground(Color.cardBackground)
-                        if let msg = sessionRefreshMessage {
-                            Text(msg)
-                                .font(.labelSmall)
-                                .foregroundColor(sessionRefreshSucceeded ? .statusOnline : .statusLive)
-                                .listRowBackground(Color.cardBackground)
-                        } else {
-                            // v1.7.x (Round 1 review): caption
-                            // explaining when to tap. Pre-fix the
-                            // button was unlabeled and most users
-                            // would never know what it did.
-                            Text("Use if streaming or logos suddenly fail. Re-fetches the API key from your Dispatcharr account.")
-                                .font(.labelSmall)
-                                .foregroundColor(.textTertiary)
-                                .listRowBackground(Color.cardBackground)
-                        }
-                    }
-                } header: {
-                    Text("Authentication").sectionHeaderStyle()
-                }
-                Section {
-                    // `Text(verbatim:)` (not the implicit
-                    // `LocalizedStringKey` initializer) so the
-                    // placeholder URL renders as plain gray
-                    // placeholder text instead of getting
-                    // Markdown-auto-linkified into a blue
-                    // underlined hyperlink. The default
-                    // `Text("https://...")` initializer parses
-                    // its argument as a localized markdown
-                    // string and SwiftUI's data-detector turns
-                    // bare URL patterns into clickable
-                    // `[autolink]` references — same on iOS
-                    // and Mac Catalyst (user-reported v1.6.8).
-                    TextField("Custom XMLTV URL (optional)",
-                              text: $server.dispatcharrXMLTVURL,
-                              prompt: Text(verbatim: "https://example.com/xmltv.xml"))
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .listRowBackground(Color.cardBackground)
-                        .onChange(of: server.dispatcharrXMLTVURL) { _, _ in
-                            // Reset test result whenever the URL changes so
-                            // a stale "Valid" pill doesn't mislead the user.
-                            xmltvTestState = .idle
-                        }
-
-                    // Test button + status. Mirrors AddServerView's validation
-                    // affordance so editing a server feels consistent with
-                    // adding one.
-                    HStack(spacing: 10) {
-                        Button {
-                            Task { await testEditXMLTVURL() }
-                        } label: {
-                            HStack(spacing: 6) {
-                                if case .testing = xmltvTestState {
-                                    ProgressView().tint(.accentPrimary).scaleEffect(0.8)
-                                } else {
-                                    Image(systemName: "checkmark.seal")
-                                }
-                                Text("Test XMLTV URL")
-                            }
-                            .font(.labelMedium.weight(.semibold))
-                            .foregroundColor(.accentPrimary)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(editXMLTVTrimmed.isEmpty ||
-                                  { if case .testing = xmltvTestState { return true } else { return false } }())
-
-                        xmltvEditStatusPill
-
-                        Spacer(minLength: 0)
-                    }
-                    .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("EPG Source").sectionHeaderStyle()
-                } footer: {
-                    Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                }
-            } else if server.type == .m3uPlaylist {
-                Section {
-                    TextField("EPG URL (optional)", text: $server.epgURL)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("EPG Guide").sectionHeaderStyle()
-                }
-            }
-
-            if server.type != .m3uPlaylist {
-                Section {
-                    TextField("Local URL", text: $server.localURL)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("Local Network").sectionHeaderStyle()
-                } footer: {
-                    Text("Used automatically whenever the server is reachable on your local network. No setup needed. Leave blank to always use the main URL.")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                }
-            }
-
-            if server.type == .dispatcharrAPI {
-                Section {
-                    TextField("User-Agent", text: $server.customUserAgent,
-                              prompt: Text(DeviceInfo.defaultUserAgent))
-                        .autocorrectionDisabled()
-                        .textInputAutocapitalization(.never)
-                        .listRowBackground(Color.cardBackground)
-                    Button("Reset to Default") {
-                        server.customUserAgent = ""
-                    }
-                    .foregroundColor(.accentPrimary)
-                    .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("User-Agent").sectionHeaderStyle()
-                } footer: {
-                    Text("Shown in Dispatcharr's admin Stats panel to identify this device. Default: \(DeviceInfo.defaultUserAgent)")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                }
-            }
-
-            // v1.6.12: per-server VOD toggle. Only shown for server
-            // types that actually support VOD — M3U-only playlists
-            // don't carry it.
-            if server.supportsVOD {
-                Section {
-                    Toggle("Fetch On Demand from this playlist", isOn: $server.vodEnabled)
-                        .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("On Demand").sectionHeaderStyle()
-                } footer: {
-                    Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                }
-            }
-
-            // Catch-up: how far back guide data is retained. Bounds the
-            // "Previously aired" history in the List view and the
-            // replay window shown in the Guide.
-            Section {
-                Picker("Guide History", selection: $server.epgRetentionDays) {
-                    Text("1 day").tag(1)
-                    Text("3 days").tag(3)
-                    Text("7 days (default)").tag(7)
-                    Text("14 days").tag(14)
-                    Text("30 days").tag(30)
-                }
-                .listRowBackground(Color.cardBackground)
-            } header: {
-                Text("Guide History").sectionHeaderStyle()
-            } footer: {
-                Text("How many days of already-aired guide data to keep for this playlist. Past shows on channels with catch-up can be replayed from the guide. Longer history means a larger guide cache.")
-                    .font(.labelSmall)
-                    .foregroundColor(.textTertiary)
-            }
-
-            // Task #189 (Android parity): user-chosen Channel Profile.
-            if server.type == .dispatcharrAPI {
-                ChannelProfilePickerSection(server: server)
-            }
-
-            Section {
-                HStack {
-                    Text("Type")
-                        .foregroundColor(.textSecondary)
-                    Spacer()
-                    Text(server.type.displayName)
-                        .foregroundColor(.textTertiary)
-                }
-                .listRowBackground(Color.cardBackground)
-            } header: {
-                Text("Info").sectionHeaderStyle()
-            }
-        }
-        .scrollContentBackground(.hidden)
-    }
-    #endif
-
-    // MARK: - tvOS Layout
-    #if os(tvOS)
-    // EditServerSheet is never presented on tvOS -- editing goes through
-    // the pushed EditServerPage below. This stub only keeps the struct
-    // compiling for the tvOS target.
-    private var tvOSEditContent: some View { EmptyView() }
-    #endif
-
-    // MARK: - XMLTV Edit Test Helpers (iOS only — tvOS editor omits the button)
-
-    #if os(iOS)
-    private var editXMLTVTrimmed: String {
-        server.dispatcharrXMLTVURL.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    @ViewBuilder
-    private var xmltvEditStatusPill: some View {
-        switch xmltvTestState {
-        case .idle, .testing:
-            EmptyView()
-        case .success(let count):
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.statusOnline)
-                Text(count > 0 ? "Valid — \(count) programs" : "Valid XMLTV")
-                    .font(.labelSmall.weight(.semibold))
-                    .foregroundColor(.statusOnline)
-                    .lineLimit(1)
-            }
-        case .failure(let err):
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.circle.fill")
-                    .foregroundColor(.statusLive)
-                Text(err)
-                    .font(.labelSmall)
-                    .foregroundColor(.statusLive)
-                    .lineLimit(2)
-            }
-        }
-    }
-
-    @MainActor
-    private func testEditXMLTVURL() async {
-        let urlString = editXMLTVTrimmed
-        guard !urlString.isEmpty else { return }
-        guard let url = URL(string: urlString),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else {
-            xmltvTestState = .failure("URL must start with http:// or https://")
-            return
-        }
-        xmltvTestState = .testing
-        do {
-            let programs = try await XMLTVParser.fetchAndParse(url: url)
-            xmltvTestState = .success(programs.count)
-        } catch {
-            let raw = error.localizedDescription
-            let trimmed = raw.count > 120 ? String(raw.prefix(120)) + "…" : raw
-            xmltvTestState = .failure(trimmed.isEmpty ? "Couldn't parse as XMLTV" : trimmed)
-        }
-    }
-    #endif
-}
-
-
-// MARK: - tvOS Edit Server (full page, no modal)
-/// Task #189 (Android parity): "Channel Profile" section of the iOS/iPad
-/// edit form. Lists the Dispatcharr server's Channel Profiles
-/// (`/api/channels/profiles/`) and stores the user's pick on
-/// `server.dispatcharrSelectedProfileID` (nil = All Channels). The filter
-/// itself is applied fail-open at channel sync in
-/// `ChannelStore.fetchDispatcharr`. Mirrors Android
-/// EditPlaylistScreen's Channel Profile section.
-private struct ChannelProfilePickerSection: View {
-    @Bindable var server: ServerConnection
-    @State private var profiles: [DispatcharrAPI.ChannelProfileSummary] = []
-    @State private var loadFailed = false
-
-    var body: some View {
-        Section {
-            Picker("Channel Profile", selection: $server.dispatcharrSelectedProfileID) {
-                Text("All Channels").tag(Int?.none)
-                ForEach(profiles) { profile in
-                    Text("\(profile.name) (\(profile.channels.count) channels)")
-                        .tag(Int?.some(profile.id))
-                }
-            }
-            .listRowBackground(Color.cardBackground)
-        } header: {
-            Text("Channel Profile").sectionHeaderStyle()
-        } footer: {
-            Text(loadFailed
-                 ? "Couldn't load this server's Channel Profiles. All Channels stays in effect; check the connection and reopen this page to retry."
-                 : "Sync only the channels in a Dispatcharr Channel Profile. Changes apply on the next channel refresh.")
-                .font(.labelSmall)
-                .foregroundColor(.textTertiary)
-        }
-        .task { await loadProfiles() }
-    }
-
-    private func loadProfiles() async {
-        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
-                                 userAgent: server.effectiveUserAgent,
-                                 authMode: server.dispatcharrHeaderMode)
-        do {
-            profiles = try await api.listChannelProfiles()
-            loadFailed = false
-        } catch {
-            loadFailed = true
-            debugLog("[PROFILE-PICKER] listChannelProfiles failed: \(error.localizedDescription)")
-        }
-    }
-}
-
-
-#if os(tvOS)
-struct EditServerPage: View {
-    @Bindable var server: ServerConnection
-    @Environment(\.dismiss) private var dismiss
-    /// Task #189: Channel Profile picker state (Dispatcharr only).
-    @State private var channelProfiles: [DispatcharrAPI.ChannelProfileSummary] = []
-    @State private var channelProfilesLoadFailed = false
-
-    /// Task #189: one radio-style row of the Channel Profile picker.
-    /// id == nil is the "All Channels" row.
-    @ViewBuilder
-    private func channelProfileRow(name: String, count: Int?, id: Int?) -> some View {
-        Button {
-            server.dispatcharrSelectedProfileID = id
-        } label: {
-            HStack {
-                if let count {
-                    Text("\(name) (\(count) channels)")
-                        .font(.system(size: 28, weight: .medium))
-                } else {
-                    Text(name)
-                        .font(.system(size: 28, weight: .medium))
-                }
-                Spacer()
-                if server.dispatcharrSelectedProfileID == id {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 24, weight: .semibold))
-                        .foregroundColor(.accentPrimary)
-                }
-            }
-        }
-    }
-
-    /// Task #189: load the server's Channel Profiles for the picker.
-    private func loadChannelProfiles() async {
-        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
-                                 auth: .apiKey(server.effectiveApiKey),
-                                 userAgent: server.effectiveUserAgent,
-                                 authMode: server.dispatcharrHeaderMode)
-        do {
-            channelProfiles = try await api.listChannelProfiles()
-            channelProfilesLoadFailed = false
-        } catch {
-            channelProfilesLoadFailed = true
-            debugLog("[PROFILE-PICKER] tvOS listChannelProfiles failed: \(error.localizedDescription)")
-        }
-    }
-    /// See SettingsView. Tvos edit page uses accent-tinted Save
-    /// button + form field underlines; without this they freeze at
-    /// whichever theme was active when the page was first pushed.
-    @ObservedObject private var theme = ThemeManager.shared
-
-    // 2026-07 unification: the EPG Cache / Full Refresh actions moved
-    // to the playlist detail page (ServerDetailView), which tvOS now
-    // reaches the same way iOS does. This page is purely the edit form.
-
-    // v1.7.x: Direct Connect mode picker + Refresh Session button
-    // state. Mirrors EditServerSheet's iOS Form path so Apple TV
-    // users can switch credential modes after server creation
-    // without going to a different device. See `EditServerSheet`
-    // for the per-property doc.
-    @State private var pendingCredentialType: DispatcharrCredentialType? = nil
-    @State private var isRefreshingSession: Bool = false
-    @State private var sessionRefreshMessage: String? = nil
-    @State private var sessionRefreshSucceeded: Bool = false
-
-    private var effectiveCredentialType: DispatcharrCredentialType {
-        pendingCredentialType ?? server.dispatcharrCredentialType
-    }
-
-    private var directConnectModeBinding: Binding<DispatcharrCredentialType> {
-        Binding(
-            get: { effectiveCredentialType },
-            set: { newValue in
-                pendingCredentialType = newValue
-                sessionRefreshMessage = nil
-            }
-        )
-    }
-
-    private func commitCredentialModeIfStaged() {
-        guard let pending = pendingCredentialType else { return }
-        server.dispatcharrCredentialTypeRaw = (pending == .apiKey) ? "" : pending.rawValue
-        pendingCredentialType = nil
-    }
-
-    private func maskedAPIKey(_ key: String) -> String {
-        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count > 12 else { return String(repeating: "•", count: trimmed.count) }
-        let prefix = trimmed.prefix(2)
-        let suffix = trimmed.suffix(8)
-        return "\(prefix)\(String(repeating: "•", count: 6))\(suffix)"
-    }
-
-    @MainActor
-    private func refreshDirectConnectSession() async {
-        let username = server.username
-        let password = server.effectivePassword
-        let baseURL  = server.effectiveBaseURL
-        let userAgent = server.effectiveUserAgent
-        let serverID = server.id
-        guard !username.isEmpty, !password.isEmpty else {
-            sessionRefreshMessage = "Username and password required."
-            sessionRefreshSucceeded = false
-            return
-        }
-
-        isRefreshingSession = true
-        sessionRefreshMessage = nil
-        defer { isRefreshingSession = false }
-
-        do {
-            let pair = try await DispatcharrAPI.login(
-                baseURL: baseURL,
-                username: username,
-                password: password,
-                userAgent: userAgent
-            )
-            DispatcharrTokenStore.shared.store(
-                serverID: serverID,
-                access: pair.access,
-                refresh: pair.refresh
-            )
-            let bearerAPI = DispatcharrAPI(baseURL: baseURL, auth: .bearer(pair.access))
-            var apiKeyRotated = false
-            if let user = try? await bearerAPI.fetchCurrentUser(),
-               !user.apiKey.isEmpty,
-               user.apiKey != server.effectiveApiKey {
-                server.apiKey = user.apiKey
-                SyncManager.shared.saveCredentialsSynced(for: server)
-                apiKeyRotated = true
-            }
-            sessionRefreshSucceeded = true
-            sessionRefreshMessage = apiKeyRotated
-                ? "Session refreshed. Cached API key updated."
-                : "Session refreshed. API key unchanged."
-        } catch let error as DispatcharrDirectConnectError {
-            sessionRefreshSucceeded = false
-            sessionRefreshMessage = error.errorDescription ?? "Refresh failed."
-        } catch {
-            sessionRefreshSucceeded = false
-            sessionRefreshMessage = error.localizedDescription
-        }
-    }
-
-    var body: some View {
-        // Guard against the server being deleted mid-edit by an iCloud sync merge
-        // (SwiftData detached-model crash; same root cause as ServerDetailView).
-        // Pop instead of reading @Persisted props off a detached model.
-        Group {
-            if server.modelContext == nil {
-                Color.appBackground.ignoresSafeArea()
-            } else {
-                editContent
-            }
-        }
-        .onChange(of: server.modelContext == nil) { _, deleted in
-            if deleted { dismiss() }
-        }
-    }
-
-    private var editContent: some View {
-        ZStack {
-            Color.appBackground.ignoresSafeArea()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 32) {
-                    // Connection
-                    tvSection("Connection") {
-                        tvField("Name", text: $server.name)
-                        tvField("URL", text: $server.baseURL)
-                    }
-
-                    // Credentials
-                    if server.type == .xtreamCodes {
-                        tvSection("Credentials") {
-                            tvField("Username", text: $server.username)
-                            tvField("Password", text: $server.password, isSecure: true)
-                        }
-                        tvSection("EPG Source") {
-                            tvField("Custom XMLTV URL (optional)", text: $server.xtreamXMLTVURL)
-                            Text("Optional. Adds Sports/News/Movies/Kids color tints from this XMLTV feed's category tags. Xtream Codes doesn't expose categories on its own.")
-                                .font(.system(size: 22))
-                                .foregroundColor(.textTertiary)
-                                .padding(.top, 4)
-                        }
-                    } else if server.type == .dispatcharrAPI {
-                        Group {
-                            tvSection("Authentication") {
-                                // v1.7.x: credential mode picker on
-                                // tvOS Edit Server. The Apple TV
-                                // typing-burden is the primary reason
-                                // Direct Connect exists; the edit
-                                // screen needs to support switching
-                                // modes here too so users don't have
-                                // to go to a different device.
-                                Picker("Sign-in method", selection: directConnectModeBinding) {
-                                    Text("Username & Password").tag(DispatcharrCredentialType.usernamePassword)
-                                    Text("API Key").tag(DispatcharrCredentialType.apiKey)
-                                }
-                                .pickerStyle(.segmented)
-                                .padding(.vertical, 8)
-
-                                switch effectiveCredentialType {
-                                case .usernamePassword:
-                                    tvField("Username", text: $server.username)
-                                    tvField("Password", text: $server.password, isSecure: true)
-                                    // v1.7.x: Dashboard-vs-XC password
-                                    // hint mirrored on tvOS Edit Server
-                                    // (the legacy ScrollView+VStack path).
-                                    Text("Use your Dispatcharr Dashboard password (System → Users → Account tab), not your Dispatcharr XC password.")
-                                        .font(.system(size: 22))
-                                        .foregroundColor(.textTertiary)
-                                        .padding(.top, 4)
-                                    if !server.effectiveApiKey.isEmpty {
-                                        HStack {
-                                            Text("API Key (cached)")
-                                                .font(.system(size: 28, weight: .medium))
-                                                .foregroundColor(.textSecondary)
-                                            Spacer()
-                                            Text(maskedAPIKey(server.effectiveApiKey))
-                                                .font(.system(size: 22, design: .monospaced))
-                                                .foregroundColor(.textTertiary)
-                                        }
-                                        .padding(.vertical, 4)
-                                    }
-                                    Button {
-                                        Task { await refreshDirectConnectSession() }
-                                    } label: {
-                                        HStack(spacing: 8) {
-                                            if isRefreshingSession {
-                                                ProgressView().scaleEffect(0.8)
-                                            } else {
-                                                Image(systemName: "arrow.clockwise")
-                                            }
-                                            Text(isRefreshingSession ? "Refreshing…" : "Refresh Session")
-                                        }
-                                        .font(.system(size: 26, weight: .semibold))
-                                    }
-                                    .disabled(server.username.isEmpty
-                                              || server.effectivePassword.isEmpty
-                                              || isRefreshingSession)
-                                    .padding(.top, 6)
-                                    if let msg = sessionRefreshMessage {
-                                        Text(msg)
-                                            .font(.system(size: 22))
-                                            .foregroundColor(sessionRefreshSucceeded ? .statusOnline : .statusLive)
-                                            .padding(.top, 2)
-                                    } else {
-                                        Text("Use if streaming or logos suddenly fail. Re-fetches the API key from your Dispatcharr account.")
-                                            .font(.system(size: 22))
-                                            .foregroundColor(.textTertiary)
-                                            .padding(.top, 2)
-                                    }
-                                case .apiKey:
-                                    tvField("Admin API Key", text: $server.apiKey, isSecure: true)
-                                }
-                            }
-                            tvSection("EPG Source") {
-                                tvField("Custom XMLTV URL (optional)", text: $server.dispatcharrXMLTVURL)
-                                Text("EPG is loaded via Dispatcharr's REST API by default. This optional override is reserved for environments where you want AerioTV to fetch a different XMLTV feed directly. Leave blank for normal use.")
-                                    .font(.system(size: 22))
-                                    .foregroundColor(.textTertiary)
-                                    .padding(.top, 4)
-                            }
-                        }
-                    } else if server.type == .m3uPlaylist {
-                        tvSection("EPG Guide") {
-                            tvField("EPG URL (optional)", text: $server.epgURL)
-                        }
-                    }
-
-                    // Local Network
-                    if server.type != .m3uPlaylist {
-                        tvSection("Local Network") {
-                            tvField("Local URL", text: $server.localURL)
-                            Text("Used when the Apple TV detects the local server is reachable. Leave blank to always use the main URL.")
-                                .font(.system(size: 22))
-                                .foregroundColor(.textTertiary)
-                                .padding(.top, 4)
-                        }
-                    }
-
-                    // User-Agent (Dispatcharr only) -- parity with the
-                    // iOS edit sheet.
-                    if server.type == .dispatcharrAPI {
-                        tvSection("User-Agent") {
-                            tvField("User-Agent", text: $server.customUserAgent)
-                            Text("Shown in Dispatcharr's admin Stats panel to identify this device. Leave blank for default: \(DeviceInfo.defaultUserAgent)")
-                                .font(.system(size: 22))
-                                .foregroundColor(.textTertiary)
-                                .padding(.top, 4)
-                        }
-                    }
-
-                    // On Demand (per-server VOD toggle). Previously this
-                    // and Guide History only existed on the iOS edit
-                    // sheet; Apple TV users had no way to change them.
-                    if server.supportsVOD {
-                        tvSection("On Demand") {
-                            Toggle("Fetch On Demand from this playlist", isOn: $server.vodEnabled)
-                                .font(.system(size: 28, weight: .medium))
-                                .foregroundColor(.textPrimary)
-                                .padding(.vertical, 4)
-                            Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
-                                .font(.system(size: 22))
-                                .foregroundColor(.textTertiary)
-                                .padding(.top, 4)
-                        }
-                    }
-
-                    // Guide History (catch-up retention)
-                    tvSection("Guide History") {
-                        Picker("Guide History", selection: $server.epgRetentionDays) {
-                            Text("1 day").tag(1)
-                            Text("3 days").tag(3)
-                            Text("7 days (default)").tag(7)
-                            Text("14 days").tag(14)
-                            Text("30 days").tag(30)
-                        }
-                        .pickerStyle(.segmented)
-                        Text("How many days of already-aired guide data to keep for this playlist. Past shows on channels with catch-up can be replayed from the guide. Longer history means a larger guide cache.")
-                            .font(.system(size: 22))
-                            .foregroundColor(.textTertiary)
-                            .padding(.top, 4)
-                    }
-
-                    // Task #189 (Android parity): user-chosen Channel
-                    // Profile. Radio-style rows (like Android's picker);
-                    // a segmented control can't hold N variable-length
-                    // profile names on tvOS.
-                    if server.type == .dispatcharrAPI {
-                        tvSection("Channel Profile") {
-                            channelProfileRow(name: "All Channels", count: nil, id: nil)
-                            ForEach(channelProfiles) { profile in
-                                channelProfileRow(name: profile.name,
-                                                  count: profile.channels.count,
-                                                  id: profile.id)
-                            }
-                            Text(channelProfilesLoadFailed
-                                 ? "Couldn't load this server's Channel Profiles. All Channels stays in effect; check the connection and reopen this page to retry."
-                                 : "Sync only the channels in a Dispatcharr Channel Profile. Changes apply on the next channel refresh.")
-                                .font(.system(size: 22))
-                                .foregroundColor(.textTertiary)
-                                .padding(.top, 4)
-                        }
-                        .task { await loadChannelProfiles() }
-                    }
-
-                    // Info
-                    tvSection("Info") {
-                        HStack {
-                            Text("Type")
-                                .font(.system(size: 28, weight: .medium))
-                                .foregroundColor(.textSecondary)
-                            Spacer()
-                            Text(server.type.displayName)
-                                .font(.system(size: 28))
-                                .foregroundColor(.textTertiary)
-                        }
-                        .padding(.vertical, 8)
-                    }
-
-                    // Save
-                    HStack {
-                        Spacer()
-                        Button {
-                            // v1.7.x (Round 1 review): commit any
-                            // staged credential-mode change before
-                            // persisting credentials. tvOS edit
-                            // surface mirrors iOS Save behavior.
-                            commitCredentialModeIfStaged()
-                            SyncManager.shared.saveCredentialsSynced(for: server)
-                            dismiss()
-                        } label: {
-                            Text("Save Changes")
-                                .font(.system(size: 28, weight: .semibold))
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 48)
-                                .padding(.vertical, 14)
-                                .background(LinearGradient.accentGradient)
-                                .clipShape(Capsule())
-                        }
-                        .buttonStyle(TVNoHighlightButtonStyle())
-                        .disabled(server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
-                                  server.baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
-                        Spacer()
-                    }
-                    .padding(.top, 16)
-                }
-                // v1.7.5: cap the content to a centered reading column
-                // instead of letting every row span the full 1920pt TV
-                // width (Archie field report: tvOS settings "look like
-                // stretched out iPhone/iPad screens"). 1200pt keeps the
-                // 28pt form text comfortably readable at couch distance
-                // with generous side margins, the conventional tvOS form
-                // proportion. The inner cap is left-aligned; the outer
-                // infinity-width frame centers that capped column.
-                .frame(maxWidth: 1200, alignment: .leading)
-                .padding(48)
-                .frame(maxWidth: .infinity)
-            }
-        }
-        .navigationTitle("Edit Playlist")
-        .toolbar(.hidden, for: .navigationBar)
-    }
-
-    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title.uppercased())
-                .font(.system(size: 22, weight: .bold))
-                .foregroundColor(.textTertiary)
-                .tracking(1)
-            VStack(spacing: 16) {
-                content()
-            }
-            .padding(24)
-            .background(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.cardBackground)
-            )
-        }
-    }
-
-    private func tvField(_ placeholder: String, text: Binding<String>, isSecure: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(placeholder)
-                .font(.system(size: 22, weight: .medium))
-                .foregroundColor(.textTertiary)
-            TVSettingsTextField(placeholder: placeholder, text: text, isSecure: isSecure)
-        }
-    }
-}
-
-// MARK: - Shared tvOS settings text field
-//
-// v1.7.5 (Archie field screenshot): the tvOS settings field helpers
-// (tvField / tvEditField) rolled their own bare TextField that forced a
-// light `.textPrimary` colour at all times. tvOS fills a FOCUSED TextField
-// with a solid white "platter" and expects dark text inside it, so our
-// light text became white-on-white and unreadable on the focused field.
-//
-// The app's standard field component, AppTextField, already solved this
-// exact bug in v1.6.21 and documented (see its tvOS notes) that the white
-// fill CANNOT be cleanly removed in pure SwiftUI - that needs a
-// UIViewRepresentable UITextField with custom focused-appearance overrides.
-// So rather than fight the system fill, we match AppTextField: switch the
-// text to dark when focused (readable against the white fill) and keep the
-// light colour when unfocused (readable against the dark elevatedBackground),
-// plus an accent border so the focused field is obvious. Every settings
-// field helper routes through this, so the fix lands on every server
-// add/edit screen at once and stays consistent with the onboarding fields.
-struct TVSettingsTextField: View {
-    let placeholder: String
-    @Binding var text: String
-    var isSecure: Bool = false
-    @State private var focused = false
-
-    var body: some View {
-        // The UIKit field (DarkFocusTextFieldRepresentable) is transparent and
-        // never paints the system white/gray focus platter; this view draws
-        // the resting box (elevatedBackground) and the accent focus border, so
-        // the field interior stays the same at rest and on focus - only the
-        // border changes.
-        DarkFocusTextFieldRepresentable(
-            text: $text,
-            placeholder: placeholder,
-            isSecure: isSecure,
-            onFocusChange: { focused = $0 }
-        )
-        .frame(height: 60)
-        .background(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color.elevatedBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(Color.accentPrimary.opacity(focused ? 1.0 : 0.0),
-                        lineWidth: focused ? 3 : 0)
-                .animation(.easeInOut(duration: 0.15), value: focused)
-        )
-    }
-}
-#endif
-
-// MARK: - Buffer size options
-private struct BufferOption: Identifiable {
-    let id: String
-    let label: String
-    let detail: String  // human-readable size
-    let cachingMs: Int  // VLC :network-caching value in milliseconds
-}
-private let bufferOptions: [BufferOption] = [
-    BufferOption(id: "small",   label: "Small",       detail: "300 ms — fast, stable networks",   cachingMs: 300),
-    BufferOption(id: "default", label: "Default",     detail: "1 second — recommended",           cachingMs: 1_000),
-    BufferOption(id: "large",   label: "Large",       detail: "3 seconds — unstable connections", cachingMs: 3_000),
-    BufferOption(id: "xlarge",  label: "Extra Large", detail: "8 seconds — very poor networks",   cachingMs: 8_000),
-]
-
-
-struct NetworkSettingsView: View {
-    @ObservedObject private var theme = ThemeManager.shared
-    @AppStorage("networkTimeout")          private var networkTimeout      = 15.0
-    @AppStorage("maxRetries")              private var maxRetries          = 3
-    @AppStorage("streamBufferSize")        private var streamBufferSize    = "default"
-    @AppStorage("epgWindowHours")           private var epgWindowHours      = 36          // default 36 hours
-    /// Tint EPG program cells by their category (Sports / Movies /
-    /// Kids / News). Mirrors the `CategoryColor.enabledKey` constant
-    /// — default `true`, so the category palette is on out of the box
-    /// and users who prefer the flat neutral cells can disable it here.
-    @AppStorage(CategoryColor.enabledKey)   private var enableCategoryColors = true
-    /// Companion toggle that extends the category palette from the EPG
-    /// guide cells to the Live TV channel cards. Opt-in and default off
-    /// so existing users don't suddenly see colored stripes appear on every row.
-    @AppStorage("tintChannelCards")         private var tintChannelCards     = false
-    /// User-controllable scale factor applied to the EPG grid layout
-    /// (cell width, row height, header height, pixels-per-hour, and
-    /// per-cell font sizes). Range 0.75…1.5 in 0.05 increments,
-    /// default 1.0 (today's "100%" sizing). Read by `EPGGuideView` and
-    /// `GuideProgramButton` via the same `"guideScale"` key. Only
-    /// surfaced on iPad and Mac — iPhone uses the list view, tvOS uses
-    /// the Siri Remote which makes a slider awkward.
-    @AppStorage("guideScale")              private var guideScale          = 1.0
-    @AppStorage("bgRefreshEnabled")        private var bgRefreshEnabled    = false
-    @AppStorage("bgRefreshType")           private var bgRefreshType       = "interval"  // "interval" or "time"
-    @AppStorage("bgRefreshIntervalMins")   private var bgRefreshInterval   = 1440        // 24 hours
-    @AppStorage("bgRefreshHour")           private var bgRefreshHour       = 8
-    @AppStorage("bgRefreshMinute")         private var bgRefreshMinute     = 0
-
-    // Converts stored hour/minute back to a Date for DatePicker binding
-    private var refreshTimeDateBinding: Binding<Date> {
-        Binding(
-            get: {
-                var comps = Calendar.current.dateComponents([.year, .month, .day], from: Date())
-                comps.hour   = bgRefreshHour
-                comps.minute = bgRefreshMinute
-                return Calendar.current.date(from: comps) ?? Date()
-            },
-            set: { date in
-                let comps      = Calendar.current.dateComponents([.hour, .minute], from: date)
-                bgRefreshHour   = comps.hour   ?? 8
-                bgRefreshMinute = comps.minute ?? 0
-            }
-        )
-    }
-
-    var body: some View {
-        ZStack {
-            Color.appBackground.ignoresSafeArea()
-            #if os(tvOS)
-            tvOSBody
-            #else
-            iOSBody
-            #endif
-        }
-        .navigationTitle("Network")
-        #if os(iOS)
-        .navigationBarTitleDisplayMode(.inline)
-        #else
-        .toolbar(.hidden, for: .navigationBar)
-        #endif
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
-    }
-
-    // MARK: - tvOS Body
-    // Uses the shared TVSettings* components so focus highlights match
-    // Appearance / DVR / Developer / top-level Settings uniformly. The
-    // previous implementation was a bare List + Button rows which on
-    // tvOS only rendered the default thin system focus ring.
-    #if os(tvOS)
-    private var tvOSBody: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 32) {
-                tvSection("Request Timeout") {
-                    ForEach([5, 10, 15, 30, 60], id: \.self) { secs in
-                        TVSettingsSelectionRow(
-                            label: "\(secs) seconds",
-                            isSelected: Int(networkTimeout) == secs,
-                            action: { networkTimeout = Double(secs) }
-                        )
-                    }
-                }
-
-                tvSection("Buffer Size") {
-                    ForEach(bufferOptions) { opt in
-                        TVSettingsSelectionRow(
-                            label: opt.label,
-                            subtitle: opt.detail,
-                            isSelected: streamBufferSize == opt.id,
-                            action: { streamBufferSize = opt.id }
-                        )
-                    }
-                }
-
-                tvSection("EPG Window") {
-                    let options: [(label: String, hours: Int)] = [
-                        ("6 hours",  6),
-                        ("12 hours", 12),
-                        ("24 hours", 24),
-                        ("36 hours", 36),
-                        ("48 hours", 48),
-                        ("72 hours", 72),
-                        ("All available", 0),
-                    ]
-                    ForEach(options, id: \.hours) { opt in
-                        TVSettingsSelectionRow(
-                            label: opt.label,
-                            isSelected: epgWindowHours == opt.hours,
-                            action: { epgWindowHours = opt.hours }
-                        )
-                    }
-                }
-
-                // Category-colour palette + EPG cache controls moved
-                // to `AppearanceSettingsView` in v1.6.8 — Settings →
-                // App Settings → Appearance — alongside the theme +
-                // scale sliders, since they're all visual concerns.
-            }
-            // v1.7.5: centered 1200pt reading column (matches EditServerPage).
-            .frame(maxWidth: 1200, alignment: .leading)
-            .padding(48)
-            .frame(maxWidth: .infinity)
-        }
-    }
-
-    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title.uppercased())
-                .font(.system(size: 22, weight: .bold))
-                .foregroundColor(.textTertiary)
-                .tracking(1)
-                .padding(.leading, 20)
-            VStack(alignment: .leading, spacing: 8) {
-                content()
-            }
-        }
-    }
-    #endif
-
-    // MARK: - iOS Body
-
-    #if os(iOS)
-    private var iOSBody: some View {
-        List {
-                // MARK: Connection
-                Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Request Timeout")
-                                .font(.bodyMedium)
-                                .foregroundColor(.textPrimary)
-                            Spacer()
-                            Text("\(Int(networkTimeout))s")
-                                .font(.monoSmall)
-                                .foregroundColor(theme.accent)
-                        }
-                        Slider(value: $networkTimeout, in: 5...60, step: 5)
-                            .tint(theme.accent)
-                    }
-                    .listRowBackground(Color.cardBackground)
-
-                    Stepper("Max Retries: \(maxRetries)", value: $maxRetries, in: 0...10)
-                        .listRowBackground(Color.cardBackground)
-                } header: {
-                    Text("Connection").sectionHeaderStyle()
-                } footer: {
-                    Text("Adjust timeouts if you have a slow connection.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-
-                // MARK: Buffer Size
-                Section {
-                    ForEach(bufferOptions) { opt in
-                        Button {
-                            streamBufferSize = opt.id
-                        } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(opt.label)
-                                        .font(.bodyMedium)
-                                        .foregroundColor(.textPrimary)
-                                    Text(opt.detail)
-                                        .font(.labelSmall)
-                                        .foregroundColor(.textSecondary)
-                                }
-                                Spacer()
-                                if streamBufferSize == opt.id {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-                } header: {
-                    Text("Buffer Size").sectionHeaderStyle()
-                } footer: {
-                    Text("Controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-
-                // MARK: EPG Window
-                Section {
-                    let options: [(label: String, hours: Int)] = [
-                        ("6 hours",  6),
-                        ("12 hours", 12),
-                        ("24 hours", 24),
-                        ("36 hours", 36),
-                        ("48 hours", 48),
-                        ("72 hours", 72),
-                        ("All available", 0),
-                    ]
-                    ForEach(options, id: \.hours) { opt in
-                        Button {
-                            epgWindowHours = opt.hours
-                        } label: {
-                            HStack {
-                                Text(opt.label)
-                                    .font(.bodyMedium)
-                                    .foregroundColor(.textPrimary)
-                                Spacer()
-                                if epgWindowHours == opt.hours {
-                                    Image(systemName: "checkmark")
-                                        .font(.system(size: 14, weight: .semibold))
-                                        .foregroundColor(theme.accent)
-                                }
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-                } header: {
-                    Text("EPG Window").sectionHeaderStyle()
-                } footer: {
-                    Text("How far ahead to download program guide data. Larger windows take longer to download but show more upcoming programs.")
-                        .font(.labelSmall).foregroundColor(.textTertiary)
-                }
-
-                // Category-colour palette + EPG cache controls moved
-                // to `AppearanceSettingsView` in v1.6.8 — Settings →
-                // App Settings → Appearance. They were originally
-                // here under Network, then briefly had their own
-                // top-level "Guide Display" page; consolidating into
-                // Appearance removes the duplication and matches the
-                // user's mental model (visual customisation in one
-                // place).
-
-                // MARK: Background Refresh
-                Section {
-                    Toggle(isOn: $bgRefreshEnabled) {
-                        HStack(spacing: 10) {
-                            Image(systemName: "arrow.clockwise.circle.fill")
-                                .foregroundColor(theme.accent)
-                                .font(.system(size: 18))
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Background Refresh")
-                                    .font(.bodyMedium).foregroundColor(.textPrimary)
-                                Text("Update EPG & playlists automatically")
-                                    .font(.labelSmall).foregroundColor(.textSecondary)
-                            }
-                        }
-                    }
-                    .tint(theme.accent)
-                    .listRowBackground(Color.cardBackground)
-
-                    if bgRefreshEnabled {
-                        // Refresh type picker
-                        Picker("Refresh by", selection: $bgRefreshType) {
-                            Text("Every…").tag("interval")
-                            Text("At time").tag("time")
-                        }
-                        .pickerStyle(.segmented)
-                        .listRowBackground(Color.cardBackground)
-
-                        if bgRefreshType == "interval" {
-                            // Interval picker
-                            let intervals: [(label: String, mins: Int)] = [
-                                ("15 minutes", 15), ("30 minutes", 30),
-                                ("1 hour", 60),     ("2 hours", 120),
-                                ("4 hours", 240),   ("8 hours", 480),
-                                ("12 hours", 720),  ("24 hours", 1440),
-                            ]
-                            ForEach(intervals, id: \.mins) { item in
-                                Button {
-                                    bgRefreshInterval = item.mins
-                                } label: {
-                                    HStack {
-                                        Text(item.label)
-                                            .font(.bodyMedium).foregroundColor(.textPrimary)
-                                        Spacer()
-                                        if bgRefreshInterval == item.mins {
-                                            Image(systemName: "checkmark")
-                                                .foregroundColor(theme.accent)
-                                                .font(.system(size: 14, weight: .semibold))
-                                        }
-                                    }
-                                }
-                                .listRowBackground(Color.cardBackground)
-                            }
-                        } else {
-                            // Specific time picker (12-hour format with AM/PM)
-                            #if os(iOS)
-                            DatePicker(
-                                "Refresh at",
-                                selection: refreshTimeDateBinding,
-                                displayedComponents: .hourAndMinute
-                            )
-                            .datePickerStyle(.graphical)
-                            .environment(\.locale, Locale(identifier: "en_US"))
-                            .tint(theme.accent)
-                            .foregroundColor(.textPrimary)
-                            .listRowBackground(Color.cardBackground)
-                            #endif
-                        }
-                    }
-                } header: {
-                    Text("Background Refresh").sectionHeaderStyle()
-                } footer: {
-                    if bgRefreshEnabled {
-                        let desc = bgRefreshType == "interval"
-                            ? "Refresh every \(intervalLabel(bgRefreshInterval))."
-                            : "Refresh daily at \(timeLabel(hour: bgRefreshHour, minute: bgRefreshMinute))."
-                        Text("\(desc) iOS may delay or skip background refreshes to preserve battery.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
-                    } else {
-                        Text("Automatically refresh channel lists and guide data while the app is in the background.")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
-                    }
-                }
-            }
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-    }
-    #endif
-
-    private func intervalLabel(_ mins: Int) -> String {
-        if mins < 60 { return "\(mins) minutes" }
-        let h = mins / 60
-        return h == 1 ? "1 hour" : "\(h) hours"
-    }
-
-    private func timeLabel(hour: Int, minute: Int) -> String {
-        let h12 = hour == 0 ? 12 : (hour > 12 ? hour - 12 : hour)
-        let ampm = hour < 12 ? "AM" : "PM"
-        return String(format: "%d:%02d %@", h12, minute, ampm)
-    }
-}
-
-// MARK: - Category Color Picker Row (iOS only)
-//
-// One row in Settings → Appearance (Palette section) that binds a SwiftUI
-// `ColorPicker` to the hex-string stored at the bucket's
-// `storageKey`. The binding converts between `Color` (what
-// ColorPicker speaks) and the hex string (what UserDefaults
-// persists). `@AppStorage` observes the underlying key, so any
-// open guide view re-renders its cells the moment the user lifts
-// their finger off the ColorPicker's eyedropper — no apply
-// button needed.
-//
-// tvOS is intentionally excluded: the system ColorPicker on tvOS
-// is awkward (two-axis hue/saturation grid with Siri Remote
-// trackpad). We surface only the on/off toggle there and point
-// users to iPhone/iPad for palette customisation.
-#if os(iOS)
-struct CategoryColorPickerRow: View {
-    let category: ProgramCategory
-
-    /// Bound to the UserDefaults-backed hex string via
-    /// `@AppStorage`. When the user picks a new colour in the
-    /// system picker, SwiftUI writes it here (as hex), which in
-    /// turn triggers every observer of the same key to re-render
-    /// — including every `GuideProgramButton.cellBackground`
-    /// via the existing `@AppStorage` wiring on the cell.
-    @AppStorage private var storedHex: String
-
-    init(category: ProgramCategory) {
-        self.category = category
-        // Seed the @AppStorage with the category's default hex
-        // when the key is missing, so the ColorPicker shows the
-        // current effective colour on first render. Writing the
-        // default here is fine because `.onChange` is idempotent
-        // and `resetPaletteToDefaults()` removes the key
-        // explicitly.
-        self._storedHex = AppStorage(
-            wrappedValue: category.defaultHex,
-            category.storageKey
-        )
-    }
-
-    /// Two-way bridge between the hex string (persistence) and
-    /// `Color` (ColorPicker's required binding type).
-    private var colorBinding: Binding<Color> {
-        Binding(
-            get: { Color(hex: storedHex) },
-            set: { newColor in
-                let hex = newColor.toHex()
-                // Skip no-op writes to avoid a pointless
-                // UserDefaults change notification that would
-                // still trigger observers.
-                if hex != storedHex { storedHex = hex }
-            }
-        )
-    }
-
-    var body: some View {
-        ColorPicker(selection: colorBinding, supportsOpacity: false) {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color(hex: storedHex).opacity(0.22))
-                        .frame(width: 36, height: 36)
-                    Image(systemName: category.sfSymbol)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(Color(hex: storedHex))
-                }
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(category.displayName)
-                        .font(.bodyMedium)
-                        .foregroundColor(.textPrimary)
-                    Text("Default: #\(category.defaultHex)")
-                        .font(.labelSmall)
-                        .foregroundColor(.textTertiary)
-                }
-            }
-        }
-        // Palette picks are deliberate user actions — push to iCloud
-        // right away instead of waiting for the 60-second debounced
-        // preferences push. Same rationale as FavoritesStore: force-
-        // quitting the app inside the debounce window would otherwise
-        // drop the change on the floor and the next launch would
-        // re-import the stale palette from KVS.
-        .onChange(of: storedHex) { _, _ in
-            SyncManager.shared.pushPreferencesImmediate()
-        }
-    }
-}
-#endif
-
-// MARK: - More Categories View
-//
-// Disclosure target for "Add more categories" in the Appearance
-// settings screen (Palette section). Presents the seven additional
-// built-in buckets
-// (Documentary / Drama / Comedy / Reality / Educational / Sci-Fi /
-// Music) with an enable toggle + color picker on each row, plus a
-// "Custom" navigation link for user-defined category → color
-// mappings. Default buckets stay on the parent screen.
-#if os(iOS)
-struct MoreCategoriesView: View {
-    @ObservedObject private var theme = ThemeManager.shared
-    /// Bumped whenever a toggle flips so SwiftUI re-renders the
-    /// disabled-state opacity + the upstream summary row. Writes
-    /// to UserDefaults go through `CategoryColor.setBucketEnabled`
-    /// which doesn't fire an @AppStorage notification (the key is
-    /// dynamic), so we nudge the view manually.
-    @State private var enabledRevision: Int = 0
-
-    var body: some View {
-        List {
-            Section {
-                ForEach(CategoryColor.additionalBuckets, id: \.rawValue) { cat in
-                    additionalBucketRow(cat)
-                        .listRowBackground(Color.cardBackground)
-                }
-            } header: {
-                Text("Additional Buckets").sectionHeaderStyle()
-            } footer: {
-                Text("Toggle a bucket on to include its aliases in the matcher. Defaults cover Sports, Movies, Kids, and News — these are extras for feeds that heavily tag Documentary, Drama, Sitcoms, etc.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
-            }
-
-            Section {
-                NavigationLink {
-                    CustomCategoriesView()
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: "paintbrush.fill")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.accentPrimary)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Custom").font(.bodyMedium).foregroundColor(.textPrimary)
-                            Text("Define your own category strings and colors")
-                                .font(.labelSmall).foregroundColor(.textTertiary)
-                        }
-                        Spacer()
-                        Text("\(CategoryColor.loadCustomCategories().count)")
-                            .font(.labelSmall).foregroundColor(.textTertiary)
-                    }
-                }
-                .listRowBackground(Color.cardBackground)
-            } header: {
-                Text("User-Defined").sectionHeaderStyle()
-            } footer: {
-                Text("Custom entries are checked before the built-in buckets, so you can override a match like \"Horror\" or \"Cooking\" with your own color even if a built-in bucket would have caught it.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
-            }
-        }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .background(Color.appBackground)
-        .navigationTitle("More Categories")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
-    }
-
-    @ViewBuilder
-    private func additionalBucketRow(_ cat: ProgramCategory) -> some View {
-        let isOn = Binding(
-            get: { CategoryColor.isBucketEnabled(cat) },
-            set: { newValue in
-                CategoryColor.setBucketEnabled(cat, newValue)
-                enabledRevision &+= 1
-                SyncManager.shared.pushPreferencesImmediate()
-            }
-        )
-        Toggle(isOn: isOn) {
-            HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(cat.baseColor.opacity(isOn.wrappedValue ? 0.8 : 0.3))
-                        .frame(width: 28, height: 28)
-                    Image(systemName: cat.sfSymbol)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(cat.displayName)
-                        .font(.bodyMedium)
-                        .foregroundColor(.textPrimary)
-                    // "Customize color" shown regardless of toggle
-                    // state — the user reported that hiding it on
-                    // off made the nav-link feel like it "disappeared"
-                    // after flipping the toggle off. Users are free
-                    // to edit the color even when the bucket isn't
-                    // actively matching; this just pre-stages the
-                    // color for when they eventually enable it.
-                    NavigationLink {
-                        SingleCategoryColorEditor(category: cat)
-                    } label: {
-                        Text("Customize color")
-                            .font(.labelSmall)
-                            .foregroundColor(.accentPrimary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-        .tint(theme.accent)
-    }
-}
-
-// MARK: - Single Category Color Editor
-//
-// Standalone color picker for one additional bucket, reached via
-// the "Customize color" label inside MoreCategoriesView. Mirrors
-// the CategoryColorPickerRow behaviour — same hex + color well +
-// reset + sync — but in its own screen so the toggles list above
-// stays scannable.
-struct SingleCategoryColorEditor: View {
-    let category: ProgramCategory
-    @State private var storedHex: String = ""
-
-    private var currentColor: Binding<Color> {
-        Binding(
-            get: { Color(hex: storedHex.isEmpty ? category.defaultHex : storedHex) },
-            set: { newColor in
-                let hex = newColor.toHex()
-                storedHex = hex
-                category.setCustomHex(hex)
-                SyncManager.shared.pushPreferencesImmediate()
-            }
-        )
-    }
-
-    var body: some View {
-        List {
-            Section {
-                ColorPicker(category.displayName, selection: currentColor, supportsOpacity: false)
-                    .listRowBackground(Color.cardBackground)
-                HStack {
-                    Text("Hex")
-                        .foregroundColor(.textSecondary)
-                    Spacer()
-                    Text(storedHex.isEmpty ? category.defaultHex : storedHex)
-                        .font(.monoSmall)
-                        .foregroundColor(.textTertiary)
-                }
-                .listRowBackground(Color.cardBackground)
-
-                Button(role: .destructive) {
-                    category.setCustomHex(nil)
-                    storedHex = ""
-                    SyncManager.shared.pushPreferencesImmediate()
-                } label: {
-                    HStack {
-                        Image(systemName: "arrow.uturn.backward")
-                            .font(.system(size: 14, weight: .semibold))
-                        Text("Reset to Default")
-                    }
-                    .foregroundColor(.statusWarning)
-                }
-                .listRowBackground(Color.cardBackground)
-            } footer: {
-                Text("Applies wherever a program's category matches one of this bucket's aliases in the EPG (see alias list in CategoryColor.swift).")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
-            }
-        }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .background(Color.appBackground)
-        .navigationTitle(category.displayName)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
-        .onAppear {
-            storedHex = UserDefaults.standard.string(forKey: category.storageKey) ?? ""
-        }
-    }
-}
-
-// MARK: - Custom Categories View
-//
-// User-defined string → color mappings. Each entry is a case-
-// insensitive substring matched against the program's raw
-// `<category>` value, with its own hex. Custom entries win over
-// built-in buckets (see `CategoryColor.customHex(for:)`). Stored
-// as a JSON array in UserDefaults under
-// `CategoryColor.customCategoriesKey` and mirrored via SyncManager.
-struct CustomCategoriesView: View {
-    @State private var entries: [CategoryColor.CustomCategory] = []
-    @State private var showAddSheet = false
-    @ObservedObject private var theme = ThemeManager.shared
-
-    var body: some View {
-        List {
-            if entries.isEmpty {
-                Section {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("No custom categories yet")
-                            .font(.bodyMedium)
-                            .foregroundColor(.textPrimary)
-                        Text("Tap + above to add a match string (e.g. \"Horror\") and pick a color. Custom entries win over the built-in buckets.")
-                            .font(.labelSmall)
-                            .foregroundColor(.textTertiary)
-                    }
-                    .padding(.vertical, 4)
-                    .listRowBackground(Color.cardBackground)
-                }
-            } else {
-                Section {
-                    ForEach(entries) { entry in
-                        NavigationLink {
-                            CustomCategoryEditor(
-                                entry: entry,
-                                onSave: { updated in
-                                    if let idx = entries.firstIndex(where: { $0.id == updated.id }) {
-                                        entries[idx] = updated
-                                        persist()
-                                    }
-                                },
-                                onDelete: {
-                                    entries.removeAll { $0.id == entry.id }
-                                    persist()
-                                }
-                            )
-                        } label: {
-                            HStack(spacing: 12) {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(Color(hex: entry.hex))
-                                    .frame(width: 28, height: 28)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(entry.match)
-                                        .font(.bodyMedium)
-                                        .foregroundColor(.textPrimary)
-                                    Text(entry.hex)
-                                        .font(.monoSmall)
-                                        .foregroundColor(.textTertiary)
-                                }
-                                Spacer()
-                            }
-                        }
-                        .listRowBackground(Color.cardBackground)
-                    }
-                    .onDelete { indexSet in
-                        entries.remove(atOffsets: indexSet)
-                        persist()
-                    }
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .background(Color.appBackground)
-        .navigationTitle("Custom Categories")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    showAddSheet = true
-                } label: {
-                    Image(systemName: "plus")
-                }
-            }
-        }
-        .sheet(isPresented: $showAddSheet) {
-            NavigationStack {
-                CustomCategoryEditor(
-                    entry: CategoryColor.CustomCategory(match: "", hex: "FF5722"),
-                    isNew: true,
-                    onSave: { new in
-                        entries.append(new)
-                        persist()
-                        showAddSheet = false
-                    },
-                    onDelete: { showAddSheet = false }
-                )
-            }
-        }
-        .onAppear {
-            entries = CategoryColor.loadCustomCategories()
-        }
-    }
-
-    private func persist() {
-        CategoryColor.saveCustomCategories(entries)
-        SyncManager.shared.pushPreferencesImmediate()
-    }
-}
-
-// MARK: - Custom Category Editor
-//
-// Used both for adding a new entry (presented as a sheet from the
-// "+" toolbar button) and editing an existing one (pushed as a
-// nav link). Validates the match string is non-empty before save;
-// hex is always valid because it comes from ColorPicker.
-struct CustomCategoryEditor: View {
-    @State var entry: CategoryColor.CustomCategory
-    var isNew: Bool = false
-    let onSave: (CategoryColor.CustomCategory) -> Void
-    let onDelete: () -> Void
-
-    @Environment(\.dismiss) private var dismiss
-    @ObservedObject private var theme = ThemeManager.shared
-
-    private var colorBinding: Binding<Color> {
-        Binding(
-            get: { Color(hex: entry.hex) },
-            set: { entry.hex = $0.toHex() }
-        )
-    }
-
-    var body: some View {
-        List {
-            Section {
-                TextField("Match string (e.g. Horror)", text: $entry.match)
-                    .listRowBackground(Color.cardBackground)
-                    .autocorrectionDisabled()
-                ColorPicker("Color", selection: colorBinding, supportsOpacity: false)
-                    .listRowBackground(Color.cardBackground)
-                HStack {
-                    Text("Hex")
-                        .foregroundColor(.textSecondary)
-                    Spacer()
-                    Text(entry.hex)
-                        .font(.monoSmall)
-                        .foregroundColor(.textTertiary)
-                }
-                .listRowBackground(Color.cardBackground)
-            } footer: {
-                Text("Matching is case-insensitive and uses `contains` — entering \"Horror\" will colour any program whose XMLTV category includes the word horror.")
-                    .font(.labelSmall).foregroundColor(.textTertiary)
-            }
-
-            if !isNew {
-                Section {
-                    Button(role: .destructive) {
-                        onDelete()
-                        dismiss()
-                    } label: {
-                        HStack {
-                            Image(systemName: "trash")
-                            Text("Delete")
-                        }
-                        .foregroundColor(.statusLive)
-                    }
-                    .listRowBackground(Color.cardBackground)
-                }
-            }
-        }
-        .listStyle(.insetGrouped)
-        .scrollContentBackground(.hidden)
-        .background(Color.appBackground)
-        .navigationTitle(isNew ? "New Custom Category" : "Edit Category")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Color.appBackground, for: .navigationBar)
-        .toolbar {
-            if isNew {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Cancel") { dismiss() }
-                }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(isNew ? "Add" : "Save") {
-                    let trimmed = entry.match.trimmingCharacters(in: .whitespaces)
-                    guard !trimmed.isEmpty else { return }
-                    var saved = entry
-                    saved.match = trimmed
-                    onSave(saved)
-                    dismiss()
-                }
-                .disabled(entry.match.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-        }
-    }
-}
-#endif
-
-#if os(tvOS)
-// MARK: - tvOS Menu-button pop support
-//
-// MainTabView's `.onExitCommand { handleMenuPress() }` on the outer
-// TabView intercepts every Menu press before the inner NavigationStack
-// (or any per-destination `.onExitCommand`) can react. That's the
-// documented behaviour on tvOS and the reason
-// `isVODDetailPushed`/`vodNavPopRequested` exist for the VOD detail
-// pane. Settings needs the same pattern: MainTabView must know when a
-// Settings subview is pushed, and it must have a way to request a pop
-// from the outside. We expose both via bindings (see SettingsView's
-// `isSubviewPushed` / `popRequested`).
-//
-// Pop sources we have to cover:
-//   1. `navPath` pushes — Appearance, Network, DVR, Developer,
-//      Edit Server. `navPath.count > 0` detects these;
-//      `navPath.removeLast()` pops them.
-//   2. Classic `NavigationLink(destination:)` pushes — ServerDetailView
-//      (from the Settings root via TVSettingsNavRow) and
-//      MyRecordingsView (pushed from inside DVRSettingsView via
-//      TVSettingsNavRow). These bypass `navPath` entirely, so we track
-//      them with a LIFO stack of dismiss actions registered on appear
-//      and unregistered on disappear.
-//
-// When MainTabView sets `popRequested = true`, SettingsView prefers
-// popping the classic stack first (LIFO, innermost wins) and falls
-// back to `navPath.removeLast()` when the classic stack is empty.
-
-@MainActor
-final class SettingsDismissStack: ObservableObject {
-    /// LIFO stack of registered classic-pushed destinations. Keyed by
-    /// a per-view UUID so we can unregister reliably even if appears
-    /// and disappears interleave during a transition.
-    private var entries: [(id: UUID, dismiss: () -> Void)] = []
-
-    /// Mirrors `entries.count`. Published so SettingsView can react
-    /// via `.onReceive`.
-    @Published fileprivate(set) var depth: Int = 0
-
-    func register(id: UUID, dismiss: @escaping () -> Void) {
-        // Replace any existing entry for this id so re-registrations
-        // (e.g. onAppear firing again after a view re-mount) don't
-        // duplicate. Keep stack order stable by leaving the position.
-        if let idx = entries.firstIndex(where: { $0.id == id }) {
-            entries[idx] = (id, dismiss)
-        } else {
-            entries.append((id, dismiss))
-        }
-        depth = entries.count
-    }
-
-    func unregister(id: UUID) {
-        entries.removeAll { $0.id == id }
-        depth = entries.count
-    }
-
-    /// Pops the innermost registered destination (LIFO). Safe no-op
-    /// when empty.
-    func popTop() {
-        guard let last = entries.last else { return }
-        last.dismiss()
-    }
-}
-
-/// Registers the view with the parent SettingsView's
-/// `SettingsDismissStack` on appear so the Menu-button handler can
-/// pop it even though it was pushed via classic `NavigationLink`
-/// (which bypasses `navPath`).
-struct TrackClassicSettingsChild: ViewModifier {
-    @EnvironmentObject var stack: SettingsDismissStack
-    @Environment(\.dismiss) private var dismiss
-    @State private var id = UUID()
-
-    func body(content: Content) -> some View {
-        content
-            .onAppear {
-                stack.register(id: id) { dismiss() }
-            }
-            .onDisappear {
-                stack.unregister(id: id)
-            }
-    }
-}
-
-extension View {
-    /// Attach to a classic-`NavigationLink(destination:)` destination
-    /// pushed within SettingsView's tvOS NavigationStack so the Menu
-    /// button can pop it via the `popRequested` binding.
-    func trackedAsClassicSettingsChild() -> some View {
-        modifier(TrackClassicSettingsChild())
-    }
-}
-#endif
+#endif  // Phase 1 split: closes a block that spanned the extraction cut

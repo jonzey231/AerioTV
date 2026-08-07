@@ -1832,6 +1832,21 @@ struct ChannelDisplayItem: Identifiable, Equatable {
     let categoryOrder: Int
     var streamURL: URL?
     var streamURLs: [URL]
+    /// GH #59: the provider's own row position, when that ordering is more
+    /// trustworthy than `number`.
+    ///
+    /// Set only for Xtream playlists served by a Dispatcharr backend. Its XC
+    /// emulation cannot express decimal channel numbers, so it remaps them to
+    /// collision-free integers server-side (`_xc_live_streams_setup` in
+    /// `apps/output/views.py`): a lineup of 1.1/1.2/1.3/2/3/4 arrives as
+    /// 1/5/6/2/3/4, and sorting on that scatters subchannels to the end of the
+    /// list — the "subchannels are not appearing" report. Dispatcharr does
+    /// emit the list `.order_by("effective_channel_number")` though, so the
+    /// ROW ORDER still carries the truth the numbers lost.
+    ///
+    /// `nil` everywhere else, so real Xtream panels and M3U keep sorting by
+    /// channel number exactly as before.
+    var panelOrder: Int? = nil
     var tvgID: String? = nil
     /// Dispatcharr-only: the channel's server-side UUID string.
     /// Needed as an EPG-matching key because Dispatcharr's Dummy

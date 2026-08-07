@@ -2012,6 +2012,84 @@ final class ChannelStore: ObservableObject {
         return Double(collected) ?? Double.greatestFiniteMagnitude
     }
 
+    // MARK: - GH #59: Dispatcharr-behind-Xtream channel numbering
+
+    /// What we decided to do with a Dispatcharr-backed XC playlist's numbers.
+    private struct XCNumbering {
+        /// Sort on the panel's row order rather than on `num`.
+        var trustRowOrder = false
+        /// Indices (into the raw stream array) whose `num` we will NOT show.
+        var suppressed: Set<Int> = []
+    }
+
+    /// Detects an Xtream playlist that is really a Dispatcharr server and works
+    /// out which of its channel numbers are safe to display.
+    ///
+    /// Dispatcharr's XC emulation cannot express decimal channel numbers. It
+    /// remaps every fractional one to the nearest FREE integer server-side
+    /// (`_xc_live_streams_setup`, `apps/output/views.py`), so a lineup of
+    /// 1.1/1.2/1.3/2/3/4 reaches us as 1/5/6/2/3/4. Sorting on that scatters
+    /// the subchannels to the end of the list, which is what users report as
+    /// "subchannels are not appearing". The decimals are destroyed before they
+    /// leave the server, so no client can recover them.
+    ///
+    /// What survives is the ROW ORDER: Dispatcharr emits the list
+    /// `.order_by("effective_channel_number")`. So we sort on row order and
+    /// blank the numbers we can prove are wrong.
+    ///
+    /// "Provably wrong" is deliberately conservative: a row is suppressed only
+    /// when some LATER row carries a SMALLER number. Because the rows are in
+    /// true channel-number order, such a row cannot be holding its own real
+    /// number. That catches 5 and 6 above and never blanks a number that is
+    /// consistent with everything after it. It is not a complete classifier -
+    /// a lineup where a subchannel happens to land on a free low integer (1.2
+    /// taking "2" when there is no real channel 2) is indistinguishable from
+    /// a genuine channel and keeps its number. We accept showing an occasional
+    /// wrong-but-plausible number over blanking correct ones.
+    ///
+    /// Detection costs no extra request: Dispatcharr always serves logos from
+    /// `/api/channels/logos/<id>/cache/`. Real Xtream panels never match, so
+    /// they keep sorting by channel number exactly as before.
+    ///
+    /// Note this only touches DISPLAY. `tvgID` keeps the panel's
+    /// `epg_channel_id`, which Dispatcharr derives from the same remapped
+    /// integer it uses in its XMLTV output (`apps/output/epg.py`), so EPG
+    /// matching stays self-consistent and unaffected.
+    private func dispatcharrXCNumbering(for streams: [XtreamStream]) -> XCNumbering {
+        guard streams.count > 1 else { return XCNumbering() }
+        let looksLikeDispatcharr = streams.contains { s in
+            guard let icon = s.streamIcon else { return false }
+            return icon.contains("/api/channels/logos/") && icon.hasSuffix("/cache/")
+        }
+        guard looksLikeDispatcharr else { return XCNumbering() }
+
+        var result = XCNumbering()
+        result.trustRowOrder = true
+
+        // Suffix minimum: smallestAfter[i] is the smallest number appearing
+        // strictly after row i. A row whose own number exceeds it is out of
+        // order relative to the panel's own sorting, so its number is not its
+        // own. Channels the panel sent without a number never suppress.
+        let nums: [Double?] = streams.map { s -> Double? in
+            guard let raw = s.channelNumber else { return nil }
+            return Double(raw)
+        }
+        var smallestAfter = [Double](repeating: .greatestFiniteMagnitude, count: nums.count)
+        var running = Double.greatestFiniteMagnitude
+        for i in stride(from: nums.count - 1, through: 0, by: -1) {
+            smallestAfter[i] = running
+            if let n = nums[i] { running = min(running, n) }
+        }
+        for (i, maybeNum) in nums.enumerated() {
+            guard let n = maybeNum else { continue }
+            if n > smallestAfter[i] { result.suppressed.insert(i) }
+        }
+        if !result.suppressed.isEmpty {
+            debugLog("📺 XC/Dispatcharr numbering: row order trusted, \(result.suppressed.count) of \(streams.count) channel numbers blanked (server remapped decimal subchannels)")
+        }
+        return result
+    }
+
     private func sortChannels(_ items: [ChannelDisplayItem], groupOrder: [String]) -> [ChannelDisplayItem] {
         // Belt-and-suspenders dedup: drop EXACT-duplicate streams before
         // sorting. A messy provider can return two rows that resolve to
@@ -2034,6 +2112,14 @@ final class ChannelStore: ObservableObject {
         // the same display position.
         let idx = Dictionary(groupOrder.enumerated().map { ($1, $0) },
                              uniquingKeysWith: { first, _ in first })
+        // GH #59: when the provider's row order is more trustworthy than its
+        // channel numbers (Dispatcharr behind Xtream — see
+        // `dispatcharrXCNumbering`), sort on that and skip the numeric compare
+        // entirely. Sorting by number here is exactly what displaced decimal
+        // subchannels to the end of the list.
+        if deduped.contains(where: { $0.panelOrder != nil }) {
+            return deduped.sorted { ($0.panelOrder ?? Int.max) < ($1.panelOrder ?? Int.max) }
+        }
         return deduped.sorted {
             let n0 = numericChannelValue($0.number), n1 = numericChannelValue($1.number)
             if n0 != n1 { return n0 < n1 }
@@ -2191,6 +2277,9 @@ final class ChannelStore: ObservableObject {
         let usedCatIDs = Set(streams.compactMap { $0.categoryID })
         var groupOrder = categories.filter { usedCatIDs.contains($0.id) }.map { $0.name }
         if streams.contains(where: { ($0.categoryID ?? "").isEmpty }) { groupOrder.append("Uncategorized") }
+        // GH #59: decide up-front whether this panel's `num` field can be
+        // trusted. See `dispatcharrXCNumbering` for the full reasoning.
+        let numbering = dispatcharrXCNumbering(for: streams)
         let items: [ChannelDisplayItem] = streams.enumerated().compactMap { (i, s) in
             let urls = xAPI.streamURLs(for: s); guard let primary = urls.first else { return nil }
             let catName = categories.first(where: { $0.id == s.categoryID })?.name ?? "Uncategorized"
@@ -2198,12 +2287,16 @@ final class ChannelStore: ObservableObject {
                 id: String(s.streamID), name: s.name,
                 // GH #59: keep the panel's channel number verbatim (decimal
                 // subchannels like "6.1" included); list index only when the
-                // panel sent nothing.
-                number: s.channelNumber ?? String(i + 1),
+                // panel sent nothing. On a Dispatcharr-backed XC playlist a
+                // number the server demonstrably remapped is blanked instead
+                // (`numbering.suppressed`) — better to show nothing than a
+                // number belonging to a different channel.
+                number: numbering.suppressed.contains(i) ? "" : (s.channelNumber ?? String(i + 1)),
                 logoURL: s.streamIcon.flatMap { URL(string: $0) },
                 group: catName,
                 categoryOrder: catOrder[s.categoryID ?? ""] ?? Int.max,
-                streamURL: primary, streamURLs: urls)
+                streamURL: primary, streamURLs: urls,
+                panelOrder: numbering.trustRowOrder ? i : nil)
             // Carry the Xtream epg_channel_id as the tvg-id so the bulk
             // xmltv.php guide can match `<programme channel="...">` back to
             // this channel through the same path M3U/Dispatcharr use.

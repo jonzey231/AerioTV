@@ -608,7 +608,7 @@ struct DeveloperSettingsView: View {
     private var tvOSBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                tvSection("Logging") {
+                SettingsSection("Logging", style: .plain) {
                     TVSettingsToggleRow(
                         icon: debugLoggingEnabled ? "ladybug.fill" : "ladybug",
                         iconColor: debugLoggingEnabled ? .accentPrimary : .textSecondary,
@@ -629,7 +629,7 @@ struct DeveloperSettingsView: View {
                     ) { _ in }
                 }
 
-                tvSection("Experimental") {
+                SettingsSection("Experimental", style: .plain) {
                     TVSettingsToggleRow(
                         icon: unifiedPlayback ? "rectangle.stack.fill" : "rectangle.stack",
                         iconColor: unifiedPlayback ? .accentPrimary : .textSecondary,
@@ -662,7 +662,7 @@ struct DeveloperSettingsView: View {
                 }
 
                 if debugLoggingEnabled || (logger.logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
-                    tvSection("Log File") {
+                    SettingsSection("Log File", style: .plain) {
                         tvLogSizeCard
                             .task { refreshLogSize() }
 
@@ -707,7 +707,7 @@ struct DeveloperSettingsView: View {
                     }
                 }
 
-                tvSection("What's Captured") {
+                SettingsSection("What's Captured", style: .plain) {
                     tvLogCategoryCard
                 }
             }
@@ -801,18 +801,6 @@ struct DeveloperSettingsView: View {
         }
     }
 
-    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title.uppercased())
-                .font(.system(size: 22, weight: .bold))
-                .foregroundColor(.textTertiary)
-                .tracking(1)
-                .padding(.leading, 20)
-            VStack(alignment: .leading, spacing: 8) {
-                content()
-            }
-        }
-    }
     #endif
 
     // MARK: - Helpers

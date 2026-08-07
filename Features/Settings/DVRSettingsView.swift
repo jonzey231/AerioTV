@@ -65,6 +65,10 @@ struct DVRSettingsView: View {
         .navigationTitle("DVR")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
+        #else
+        // Pane views own their layout; without this the nav bar renders a
+        // "DVR" header inside the pane and shifts the content down.
+        .toolbar(.hidden, for: .navigationBar)
         #endif
         .alert("Delete All Local Recordings?", isPresented: $showClearConfirmation) {
             Button("Delete", role: .destructive) { clearAllLocalRecordings() }
@@ -268,7 +272,7 @@ struct DVRSettingsView: View {
     private var tvOSBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 32) {
-                tvSection("Start Early (Pre-Roll)") {
+                SettingsSection("Start Early (Pre-Roll)", style: .plain) {
                     ForEach([0, 5, 10, 15, 30], id: \.self) { mins in
                         TVSettingsSelectionRow(
                             label: mins == 0 ? "None" : "\(mins) minutes",
@@ -287,7 +291,7 @@ struct DVRSettingsView: View {
                     )
                 }
 
-                tvSection("End Late (Post-Roll)") {
+                SettingsSection("End Late (Post-Roll)", style: .plain) {
                     ForEach([0, 5, 10, 15, 30, 60], id: \.self) { mins in
                         TVSettingsSelectionRow(
                             label: mins == 0 ? "None" : "\(mins) minutes",
@@ -307,7 +311,7 @@ struct DVRSettingsView: View {
                 }
 
                 if isDispatcharr, canRecordToServer, let server = activeServer {
-                    tvSection("Recording Destination") {
+                    SettingsSection("Recording Destination", style: .plain) {
                         TVSettingsSelectionRow(
                             icon: "server.rack",
                             label: "Dispatcharr server",
@@ -331,7 +335,7 @@ struct DVRSettingsView: View {
                     }
                 }
 
-                tvSection("Local Storage") {
+                SettingsSection("Local Storage", style: .plain) {
                     tvStorageCard
                     // tvOS treats all app storage as purgeable: under
                     // severe storage pressure the system can evict app
@@ -344,7 +348,7 @@ struct DVRSettingsView: View {
                         .padding(.top, 4)
                 }
 
-                tvSection("Behavior") {
+                SettingsSection("Behavior", style: .plain) {
                     TVSettingsToggleRow(
                         icon: "bolt.fill",
                         iconColor: .yellow,
@@ -354,7 +358,7 @@ struct DVRSettingsView: View {
                     ) { _ in }
                 }
 
-                tvSection("Recordings") {
+                SettingsSection("Recordings", style: .plain) {
                     TVSettingsNavRow(destination: MyRecordingsView().trackedAsClassicSettingsChild()) {
                         SettingsRow(icon: "film.stack", iconColor: .red,
                                     title: "My Recordings",
@@ -362,7 +366,7 @@ struct DVRSettingsView: View {
                     }
                 }
 
-                tvSection("Danger Zone") {
+                SettingsSection("Danger Zone", style: .plain) {
                     TVSettingsActionRow(
                         icon: "trash.fill",
                         label: "Delete All Local Recordings",
@@ -446,18 +450,6 @@ struct DVRSettingsView: View {
         )
     }
 
-    private func tvSection(_ title: String, @ViewBuilder content: () -> some View) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(title.uppercased())
-                .font(.system(size: 22, weight: .bold))
-                .foregroundColor(.textTertiary)
-                .tracking(1)
-                .padding(.leading, 20)
-            VStack(alignment: .leading, spacing: 8) {
-                content()
-            }
-        }
-    }
     #endif
 
     // MARK: - Helpers

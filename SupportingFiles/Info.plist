@@ -96,7 +96,7 @@
 	<string>AerioTV needs local network access to connect to your media server on your home network.</string>
 	<!-- Google Cast (GH #33) discovery. iOS 14+ requires the cast Bonjour
 	     services to be declared or GCKUICastButton finds no devices. The
-	     app-id-specific service (_76DC0564._googlecast._tcp) speeds discovery of
+	     app-id-specific service (_46B79062._googlecast._tcp) speeds discovery of
 	     our receiver; the generic _googlecast._tcp is the fallback. The
 	     companion-remote service (_aeriotv._tcp) lets the phone discover open
 	     AerioTV Android-TV apps for the LAN remote (GH #33 second-screen).
@@ -104,7 +104,7 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_googlecast._tcp</string>
-		<string>_76DC0564._googlecast._tcp</string>
+		<string>_46B79062._googlecast._tcp</string>
 		<string>_aeriotv._tcp</string>
 	</array>
 	<key>UIApplicationSceneManifest</key>
