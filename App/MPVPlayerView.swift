@@ -1583,6 +1583,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             var wakeupRetain: Unmanaged<Coordinator>?  // Balances passRetained in setupMPV
             var isShuttingDown = false
             var hwdecFallbackApplied = false
+            /// Task #56: one-shot re-assert of videotoolbox-copy after mpv
+            /// falls back to SOFTWARE decode. The fallback is permanent in
+            /// mpv, but on live TS the trigger is usually transient (dirty
+            /// mid-GOP join data poisoning the VT session, upstream mpv
+            /// #9085/#9690); one retry after the next keyframe window
+            /// recovers hardware decode. A genuinely VT-hostile stream gets
+            /// exactly one extra attempt, then stays software.
+            var hwdecReassertDone = false
             var isInBackground = false
             var autoPausedOnBackground = false
             // Live Rewind flags live in the locked state: they are
@@ -1659,7 +1667,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         }
 
         private func resetHwdecFallbackApplied() {
-            withPlaybackStateLock { $0.hwdecFallbackApplied = false }
+            withPlaybackStateLock {
+                $0.hwdecFallbackApplied = false
+                $0.hwdecReassertDone = false
+            }
+        }
+
+        /// Task #56: claim the one-shot software->hardware retry.
+        private func claimHwdecReassertIfNeeded() -> Bool {
+            withPlaybackStateLock { state in
+                guard !state.hwdecReassertDone else { return false }
+                state.hwdecReassertDone = true
+                return true
+            }
         }
 
         private func claimHwdecFallbackIfNeeded() -> Bool {
@@ -4813,7 +4833,20 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // videotoolbox-copy retry in the log-message handler
             // (below, ~line 1338) is a secondary safety net for
             // "Initializing texture for hardware decoding failed".
-            checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "90"))
+            // Task #56 revision: 90 was tuned as "a ~3s GOP at 30fps", but
+            // the 4K HEVC HDR channels this ceiling exists to protect run
+            // 50/60fps -- at 60fps, 90 frames is only 1.5s, LESS than a
+            // typical 2-5s broadcast GOP, so a routine mid-GOP join tripped
+            // the ceiling before the first keyframe ever arrived and parked
+            // 4K playback in software decode permanently (the #56 failure
+            // signature; MPVKit/FFmpeg version bumps verified irrelevant).
+            // 300 covers a 5s GOP at 60fps. The cost on a genuinely
+            // VT-incompatible stream is a longer doomed-attempt window, but
+            // Apple silicon hardware-decodes all HEVC Main/Main10 broadcast
+            // profiles, so that case is theoretical; the hwdec-current
+            // observer's one-shot re-assert (task #56) also backstops any
+            // fallback that does happen.
+            checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "300"))
             // Cap libavcodec decode threads. Matters only on the
             // software-decode fallback path (hardware VT decode
             // doesn't use lavc threads). With 2–4 concurrent tiles
@@ -6924,6 +6957,29 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     #if DEBUG
                     debugLog("[MPV-DECODE] \(streamTag) hwdec-current: \(prev) → \(value) at +\(String(format: "%.0f", elapsedMs))ms from setup")
                     #endif
+                    // Task #56: mpv's software fallback is PERMANENT, but on
+                    // live TS the usual trigger is transient join garbage
+                    // (pre-keyframe HEVC data poisoning the VideoToolbox
+                    // session -- upstream mpv #9085/#9690; MPVKit/FFmpeg
+                    // bumps do not fix it, verified against n8.1.2). When
+                    // hardware decode drops to software, schedule ONE
+                    // re-assert of videotoolbox-copy 3s later -- past the
+                    // next keyframe on any sane broadcast GOP -- so 4K HEVC
+                    // HDR channels recover hardware decode instead of
+                    // burning CPU in 4K software decode forever. One-shot
+                    // per stream: a genuinely VT-hostile stream retries
+                    // once, fails again, and stays software.
+                    let fellBackToSoftware = value == "no"
+                        && lastHwdecCurrentObserved.hasPrefix("videotoolbox")
+                    if fellBackToSoftware, isLive, claimHwdecReassertIfNeeded() {
+                        debugLog("[MPV-DECODE] \(streamTag) hw→software fallback on live stream; scheduling one videotoolbox-copy re-assert in 3s (task #56)")
+                        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 3) { [weak self] in
+                            guard let self, let current = self.mpv, current == mpv,
+                                  !self.withPlaybackStateLock({ $0.isShuttingDown }) else { return }
+                            debugLog("[MPV-DECODE] \(self.streamTag) re-asserting videotoolbox-copy after software fallback")
+                            mpv_set_property_string(current, "hwdec", "videotoolbox-copy")
+                        }
+                    }
                     lastHwdecCurrentObserved = value
                 }
 
