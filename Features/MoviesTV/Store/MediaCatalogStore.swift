@@ -27,6 +27,78 @@ final class MediaCatalogStore {
     /// which case callers must keep using the live-fetch path.
     var isAvailable: Bool { ingest != nil }
 
+    // MARK: - Ingest already-fetched data
+
+    /// Persist what VODStore JUST fetched, with no additional network calls.
+    ///
+    /// This is the orchestrator's path, and it exists because the obvious
+    /// alternative is wrong: calling `refresh(server:)` after the VOD phases
+    /// re-fetches the entire library a second time. On the real 4,787-movie /
+    /// 2,437-series library that doubled the launch fetch and timed out
+    /// (measured on the tvOS simulator, 2026-08-08). The data is already in
+    /// memory and already correct, so the catalog just mirrors it.
+    ///
+    /// Items are grouped by their own serverID, so a multi-server setup lands
+    /// in the right per-server rows even though VODStore aggregates them.
+    /// Categories are derived from the grouped items rather than VODStore's
+    /// global category list, which would otherwise leak one server's category
+    /// names onto another.
+    func ingestFetched(movies: [VODDisplayItem], series: [VODDisplayItem]) async {
+        guard let ingest else { return }
+        guard !movies.isEmpty || !series.isEmpty else {
+            // Say so explicitly. Silence here is indistinguishable from "the
+            // catalog never ran", which cost a diagnosis cycle when the VOD
+            // fetch itself failed upstream and left both arrays empty.
+            debugLog("[MediaCatalog] nothing to mirror (VOD fetch returned no items)")
+            return
+        }
+        MediaCatalogSignal.shared.setSyncing(true)
+        defer { if inFlight.isEmpty { MediaCatalogSignal.shared.setSyncing(false) } }
+
+        let moviesByServer = Dictionary(grouping: movies.compactMap(\.movie), by: { $0.serverID })
+        for (serverID, group) in moviesByServer {
+            let key = serverID.uuidString
+            let libraries = librariesFromItems(group.map(\.categoryName), type: "movie", serverID: key)
+            do {
+                let count = try await ingest.ingestMovies(group, serverID: key,
+                                                          libraryByCategory: libraries)
+                try await ingest.markSyncFinished(serverID: key, mediaType: "movie",
+                                                  localCount: count, full: true)
+                debugLog("[MediaCatalog] mirrored \(count) movies for server \(key.prefix(8))")
+            } catch {
+                debugLog("[MediaCatalog] movie mirror failed: \(error.localizedDescription)")
+            }
+        }
+
+        let seriesByServer = Dictionary(grouping: series.compactMap(\.series), by: { $0.serverID })
+        for (serverID, group) in seriesByServer {
+            let key = serverID.uuidString
+            let libraries = librariesFromItems(group.map(\.categoryName), type: "series", serverID: key)
+            do {
+                let count = try await ingest.ingestSeries(group, serverID: key,
+                                                          libraryByCategory: libraries)
+                try await ingest.markSyncFinished(serverID: key, mediaType: "series",
+                                                  localCount: count, full: true)
+                debugLog("[MediaCatalog] mirrored \(count) series for server \(key.prefix(8))")
+            } catch {
+                debugLog("[MediaCatalog] series mirror failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func librariesFromItems(_ categoryNames: [String],
+                                    type: String,
+                                    serverID: String) -> [String: LibraryDeriver.Library] {
+        var map: [String: LibraryDeriver.Library] = [:]
+        for name in Set(categoryNames) {
+            map[name] = LibraryDeriver.parse(categoryName: name,
+                                             categoryType: type,
+                                             serverID: serverID,
+                                             isPersonal: false)
+        }
+        return map
+    }
+
     // MARK: - Refresh
 
     /// Refresh one server's movies and series into the catalog.

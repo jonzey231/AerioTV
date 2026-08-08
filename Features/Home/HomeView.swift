@@ -4475,9 +4475,11 @@ struct MainTabView: View {
     /// peak memory of the fetch step for no user-visible gain this early.
     private func ingestCatalog(servers: [ServerConnection]) async {
         guard MediaCatalogStore.shared.isAvailable else { return }
-        for server in servers where server.vodEnabled {
-            await MediaCatalogStore.shared.refresh(server: server.snapshot)
-        }
+        // Mirror what the VOD phases just fetched instead of fetching again.
+        // A second sweep of the real library (4,787 movies + 2,437 series)
+        // doubled the launch fetch and timed out.
+        await MediaCatalogStore.shared.ingestFetched(movies: vodStore.movies,
+                                                     series: vodStore.series)
     }
 
     #if os(iOS)
