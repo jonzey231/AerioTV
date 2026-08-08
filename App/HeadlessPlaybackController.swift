@@ -51,7 +51,41 @@ final class PlaybackEngineRegistry {
 final class HeadlessPlaybackController {
     static let shared = HeadlessPlaybackController()
 
-    private var engine: HeadlessEngine?
+    /// The active engine. A two-case enum instead of a shared protocol ON
+    /// PURPOSE: a @MainActor protocol conformance infers main-actor isolation
+    /// onto the conforming class, which planted a runtime isolation assert
+    /// inside HeadlessMPVAudioEngine's private-queue setup path and crashed
+    /// the app on every CarPlay channel tap (EXC_BREAKPOINT in
+    /// dispatch_assert_queue, found 2026-08-08 in the CarPlay Simulator).
+    private enum Engine {
+        case mpv(HeadlessMPVAudioEngine)
+        case avPlayer(HeadlessAVPlayerEngine)
+
+        @MainActor func play(url: URL, headers: [String: String]) {
+            switch self {
+            case .mpv(let e): e.play(url: url, headers: headers)
+            case .avPlayer(let e): e.play(url: url, headers: headers)
+            }
+        }
+        @MainActor func setPaused(_ paused: Bool) {
+            switch self {
+            case .mpv(let e): e.setPaused(paused)
+            case .avPlayer(let e): e.setPaused(paused)
+            }
+        }
+        @MainActor func stop() {
+            switch self {
+            case .mpv(let e): e.stop()
+            case .avPlayer(let e): e.stop()
+            }
+        }
+        var isAVPlayer: Bool {
+            if case .avPlayer = self { return true }
+            return false
+        }
+    }
+
+    private var engine: Engine?
     private var currentItemID: String?
     private var isPaused = false
     /// Whether the connected car session can present video (CarPlay video
@@ -131,7 +165,7 @@ final class HeadlessPlaybackController {
         // The remux engine is deliberately excluded: its loopback server
         // suspends when the app backgrounds, which is the norm in a car.
         let wantsAVPlayer = videoCapable && resolved.engine == .avPlayerDirectHLS
-        if let current = engine, (current is HeadlessAVPlayerEngine) != wantsAVPlayer {
+        if let current = engine, current.isAVPlayer != wantsAVPlayer {
             current.stop()
             engine = nil
         }
@@ -142,7 +176,7 @@ final class HeadlessPlaybackController {
 
         // Reuse the engine instance across channel flips to avoid
         // audio-session bounce; create it on the first start.
-        let eng: HeadlessEngine
+        let eng: Engine
         if let existing = engine {
             eng = existing
         } else if wantsAVPlayer {
@@ -151,9 +185,9 @@ final class HeadlessPlaybackController {
                 Task { @MainActor in self?.handleAVPlayerFailure(message) }
             }
             debugLog("[CarPlay-Headless] engine=AVPlayer (video-capable car, direct HLS)")
-            eng = av
+            eng = .avPlayer(av)
         } else {
-            eng = HeadlessMPVAudioEngine()
+            eng = .mpv(HeadlessMPVAudioEngine())
         }
         engine = eng
         currentItemID = item.id
@@ -212,10 +246,10 @@ final class HeadlessPlaybackController {
     /// session degrades to audio instead of dead air. One-way for the current
     /// channel; the next channel flip re-evaluates video eligibility.
     private func handleAVPlayerFailure(_ message: String) {
-        guard engine is HeadlessAVPlayerEngine, let resolved = lastResolved else { return }
+        guard let current = engine, current.isAVPlayer, let resolved = lastResolved else { return }
         debugLog("[CarPlay-Headless] AVPlayer failed (\(message)); falling back to mpv audio")
-        engine?.stop()
-        let eng = HeadlessMPVAudioEngine()
+        current.stop()
+        let eng = Engine.mpv(HeadlessMPVAudioEngine())
         engine = eng
         eng.play(url: resolved.routeURL, headers: resolved.headers)
     }
@@ -242,17 +276,6 @@ final class HeadlessPlaybackController {
     }
 }
 
-/// The two headless engines behind `HeadlessPlaybackController`: mpv for
-/// audio-only car sessions, AVPlayer for video-capable ones. Requirements are
-/// main-actor because the controller drives them from the main actor; the mpv
-/// engine satisfies them with nonisolated methods (it serialises internally).
-@MainActor
-protocol HeadlessEngine: AnyObject {
-    func play(url: URL, headers: [String: String])
-    func setPaused(_ paused: Bool)
-    func stop()
-}
-
 /// Minimal audio-only libmpv instance for headless CarPlay playback. Mirrors
 /// the pre-init subset of `MPVPlayerView.Coordinator.setupMPV` that matters for
 /// audio: `vo=libmpv`, `profile=fast`, `vid=no` (no video pipeline, no GL
@@ -260,7 +283,7 @@ protocol HeadlessEngine: AnyObject {
 /// HTTP UA/headers, then `loadfile`. All handle access is serialised on one
 /// private queue; `@unchecked Sendable` because that queue — not the type
 /// system — provides the isolation for the C handle.
-final class HeadlessMPVAudioEngine: HeadlessEngine, @unchecked Sendable {
+final class HeadlessMPVAudioEngine: @unchecked Sendable {
     private var mpv: OpaquePointer?
     private let queue = DispatchQueue(label: "app.molinete.aerio.headless.mpv")
     /// The URL of the current load, for the one-shot retry below.
@@ -409,7 +432,7 @@ final class HeadlessMPVAudioEngine: HeadlessEngine, @unchecked Sendable {
 /// Only ever fed direct-HLS URLs (`.avPlayerDirectHLS`), the same
 /// device-verified path the in-app AVPlayer engine defaults to.
 @MainActor
-final class HeadlessAVPlayerEngine: HeadlessEngine {
+final class HeadlessAVPlayerEngine {
     private var player: AVPlayer?
     private var statusObservation: NSKeyValueObservation?
     private var externalObservation: NSKeyValueObservation?

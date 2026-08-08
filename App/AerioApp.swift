@@ -664,6 +664,13 @@ final class TVLANProbe: ObservableObject {
     // `ServerConnection.isOnLANNetwork` for the `detected` bool)
 
     private static let detectedKey = "tvosLANDetected"
+
+    /// The persisted last-probe verdict, readable without touching the
+    /// singleton. The CarPlay scene delegate compares this before/after its
+    /// own probe to decide whether channel URLs must be rebuilt.
+    static var persistedLANDetected: Bool {
+        UserDefaults.standard.bool(forKey: detectedKey)
+    }
     private static let timestampKey = "tvosLastProbeTimestamp"
     private static let hostKey = "tvosLastProbeHost"
     private static let latencyKey = "tvosLastProbeLatencyMS"

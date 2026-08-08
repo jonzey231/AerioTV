@@ -102,10 +102,6 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     private func hydrateChannelsIfNeeded() {
         // Every bail is logged: the cold-car empty-list report hinged on
         // knowing which of these guards fired, and none of them said a word.
-        guard ChannelStore.shared.channels.isEmpty else {
-            debugLog("[CarPlay] hydrate: skip, \(ChannelStore.shared.channels.count) channels already loaded")
-            return
-        }
         guard !ChannelStore.shared.isLoading else {
             debugLog("[CarPlay] hydrate: skip, load already in flight")
             return
@@ -120,8 +116,28 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             debugLog("[CarPlay] hydrate: FAIL, 0 servers fetched from SwiftData")
             return
         }
-        debugLog("[CarPlay] hydrate: starting standalone refresh with \(servers.count) servers")
-        ChannelStore.shared.refresh(servers: servers)
+
+        let hadChannels = !ChannelStore.shared.channels.isEmpty
+        let lanBefore = TVLANProbe.persistedLANDetected
+        debugLog("[CarPlay] hydrate: servers=\(servers.count) hadChannels=\(hadChannels) lanBefore=\(lanBefore)")
+        Task { @MainActor in
+            // THE 2026-08-07 real-car failure: the LAN/WAN routing flag is
+            // persisted from the LAST probe (usually "home, LAN reachable"),
+            // and the probe itself only ever ran from the phone UI scene. A
+            // cold car connect on cellular therefore built every channel and
+            // stream URL against the unreachable LAN host - channels never
+            // loaded, and nothing played. Seed the probe with OUR servers
+            // (RootView may never run in a car-only launch), await a
+            // definitive answer, then (re)build channels with correctly
+            // routed URLs. Also covers the phone-was-open-at-home case: a
+            // connect re-probes and rebuilds when the network flipped.
+            TVLANProbe.shared.probe(servers: servers)
+            let lanNow = await TVLANProbe.shared.reprobeAndWait()
+            debugLog("[CarPlay] hydrate: LAN probe -> \(lanNow) (was \(lanBefore))")
+            if !hadChannels || lanNow != lanBefore {
+                ChannelStore.shared.refresh(servers: servers)
+            }
+        }
     }
 
     /// Refresh the CarPlay lists in place whenever the channel list changes

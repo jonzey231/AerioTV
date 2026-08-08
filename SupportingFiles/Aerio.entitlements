@@ -4,8 +4,14 @@
 <dict>
 	<key>com.apple.developer.carplay-audio</key>
 	<true/>
-	<key>com.apple.developer.carplay-video</key>
-	<true/>
+	<!-- com.apple.developer.carplay-video is GRANTED on the App ID but
+	     deliberately NOT claimed here: on iOS 27 beta, a video-entitled app
+	     fails to attach its CarPlay template scene on standard (non-video)
+	     head units - blank screen, ExcUserFault in the system CarPlay
+	     process. Verified by A/B/A install flip-flop in the CarPlay
+	     Simulator 2026-08-08. Re-add only after Apple fixes the beta or a
+	     video-capable head unit proves out, and retest a standard unit. -->
+
 	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
 	<string>$(TeamIdentifierPrefix)app.molinete.aerio</string>
 </dict>
