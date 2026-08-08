@@ -78,6 +78,14 @@
 		5A17E5D00000000000A007 /* MediaCatalogContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A005 /* MediaCatalogContainer.swift */; };
 		5A17E5D00000000000A009 /* LibraryDeriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A008 /* LibraryDeriver.swift */; };
 		5A17E5D00000000000A00A /* LibraryDeriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A008 /* LibraryDeriver.swift */; };
+		5A17E5D00000000000B101 /* MoviesTVRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B100 /* MoviesTVRootView.swift */; };
+		5A17E5D00000000000B102 /* MoviesTVRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B100 /* MoviesTVRootView.swift */; };
+		5A17E5D00000000000B105 /* HomeRowsBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B104 /* HomeRowsBuilder.swift */; };
+		5A17E5D00000000000B106 /* HomeRowsBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B104 /* HomeRowsBuilder.swift */; };
+		5A17E5D00000000000B109 /* MediaShelfRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B108 /* MediaShelfRow.swift */; };
+		5A17E5D00000000000B10A /* MediaShelfRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B108 /* MediaShelfRow.swift */; };
+		5A17E5D00000000000B10D /* MediaHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B10C /* MediaHomeView.swift */; };
+		5A17E5D00000000000B10E /* MediaHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B10C /* MediaHomeView.swift */; };
 		5A17E5D00000000000A00C /* DispatcharrMediaLibraryAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A00B /* DispatcharrMediaLibraryAdapter.swift */; };
 		5A17E5D00000000000A00D /* DispatcharrMediaLibraryAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A00B /* DispatcharrMediaLibraryAdapter.swift */; };
 		5A17E5D00000000000A101 /* CatalogIngestActor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A100 /* CatalogIngestActor.swift */; };
@@ -342,6 +350,10 @@
 		5A17E5D00000000000A002 /* MediaCatalogModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCatalogModels.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A005 /* MediaCatalogContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCatalogContainer.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A008 /* LibraryDeriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryDeriver.swift; sourceTree = "<group>"; };
+		5A17E5D00000000000B100 /* MoviesTVRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoviesTVRootView.swift; sourceTree = "<group>"; };
+		5A17E5D00000000000B104 /* HomeRowsBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeRowsBuilder.swift; sourceTree = "<group>"; };
+		5A17E5D00000000000B108 /* MediaShelfRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaShelfRow.swift; sourceTree = "<group>"; };
+		5A17E5D00000000000B10C /* MediaHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaHomeView.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A00B /* DispatcharrMediaLibraryAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrMediaLibraryAdapter.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A100 /* CatalogIngestActor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogIngestActor.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A103 /* MediaCatalogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCatalogStore.swift; sourceTree = "<group>"; };
@@ -874,9 +886,21 @@
 		5A17E5D0000000000000B001 /* MoviesTV */ = {
 			isa = PBXGroup;
 			children = (
+				5A17E5D00000000000B100 /* MoviesTVRootView.swift */,
+				5A17E5D0000000000000B0A0 /* Home */,
 				5A17E5D0000000000000B002 /* Store */,
 			);
 			path = MoviesTV;
+			sourceTree = "<group>";
+		};
+		5A17E5D0000000000000B0A0 /* Home */ = {
+			isa = PBXGroup;
+			children = (
+				5A17E5D00000000000B104 /* HomeRowsBuilder.swift */,
+				5A17E5D00000000000B10C /* MediaHomeView.swift */,
+				5A17E5D00000000000B108 /* MediaShelfRow.swift */,
+			);
+			path = Home;
 			sourceTree = "<group>";
 		};
 		5A17E5D0000000000000B002 /* Store */ = {
@@ -1240,6 +1264,10 @@
 				5A17E5D00000000000A101 /* CatalogIngestActor.swift in Sources */,
 				5A17E5D00000000000A00C /* DispatcharrMediaLibraryAdapter.swift in Sources */,
 				5A17E5D00000000000A009 /* LibraryDeriver.swift in Sources */,
+				5A17E5D00000000000B101 /* MoviesTVRootView.swift in Sources */,
+				5A17E5D00000000000B105 /* HomeRowsBuilder.swift in Sources */,
+				5A17E5D00000000000B109 /* MediaShelfRow.swift in Sources */,
+				5A17E5D00000000000B10D /* MediaHomeView.swift in Sources */,
 				5A17E5D00000000000A006 /* MediaCatalogContainer.swift in Sources */,
 				5A17E5D00000000000A003 /* MediaCatalogModels.swift in Sources */,
 				5A17E5D0000000000000C001 /* VODStore.swift in Sources */,
@@ -1358,6 +1386,10 @@
 				5A17E5D00000000000A102 /* CatalogIngestActor.swift in Sources */,
 				5A17E5D00000000000A00D /* DispatcharrMediaLibraryAdapter.swift in Sources */,
 				5A17E5D00000000000A00A /* LibraryDeriver.swift in Sources */,
+				5A17E5D00000000000B102 /* MoviesTVRootView.swift in Sources */,
+				5A17E5D00000000000B106 /* HomeRowsBuilder.swift in Sources */,
+				5A17E5D00000000000B10A /* MediaShelfRow.swift in Sources */,
+				5A17E5D00000000000B10E /* MediaHomeView.swift in Sources */,
 				5A17E5D00000000000A007 /* MediaCatalogContainer.swift in Sources */,
 				5A17E5D00000000000A004 /* MediaCatalogModels.swift in Sources */,
 				5A17E5D0000000000000C002 /* VODStore.swift in Sources */,

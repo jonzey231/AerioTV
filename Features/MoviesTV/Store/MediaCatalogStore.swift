@@ -203,4 +203,42 @@ final class MediaCatalogStore {
         }
         return map
     }
+
+    // MARK: - Reads
+
+    /// Server-reported add times, keyed by "{serverID}|{sourceItemID}".
+    ///
+    /// Home's Recently Added shelves need real add times, and the display
+    /// models (VODMovie / VODSeries) do not carry one: only the catalog rows
+    /// do. This is a projection, not a full fetch, so it stays cheap enough to
+    /// run on the main actor when the catalog generation changes.
+    ///
+    /// An empty result is normal and harmless: before the first ingest
+    /// completes, or when the container failed to open, callers fall back to
+    /// alphabetical ordering rather than showing nothing.
+    func createdAtIndex() -> [String: Date] {
+        guard let container = MediaCatalogContainer.shared else { return [:] }
+        let context = ModelContext(container)
+        var index: [String: Date] = [:]
+
+        var movies = FetchDescriptor<CachedVODMovie>()
+        movies.propertiesToFetch = [\.serverID, \.sourceItemID, \.createdAt]
+        var seriesDesc = FetchDescriptor<CachedVODSeries>()
+        seriesDesc.propertiesToFetch = [\.serverID, \.sourceItemID, \.createdAt]
+
+        do {
+            for row in try context.fetch(movies) {
+                guard let created = row.createdAt else { continue }
+                index["\(row.serverID)|\(row.sourceItemID)"] = created
+            }
+            for row in try context.fetch(seriesDesc) {
+                guard let created = row.createdAt else { continue }
+                index["\(row.serverID)|\(row.sourceItemID)"] = created
+            }
+        } catch {
+            debugLog("[MediaCatalog] createdAt index failed: \(error.localizedDescription)")
+            return [:]
+        }
+        return index
+    }
 }

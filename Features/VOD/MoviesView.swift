@@ -564,12 +564,10 @@ struct MoviesView: View {
                 Spacer()
             } else {
                 ScrollView {
-                    // Continue Watching section
-                    ContinueWatchingSection(
-                        vodType: "movie",
-                        headers: dispatcharrHeaders,
-                        onPlay: { progress in resumeFromContinueWatching(progress) }
-                    )
+                    // Continue Watching lives on the Home section now, as one
+                    // merged rail across movies and episodes (dossier 5.3).
+                    // Keeping a second copy here would show the same cards in
+                    // two places and split the user's resume point between them.
 
                     LazyVGrid(columns: columns, spacing: gridRowSpacing) {
                         ForEach(filteredMovies) { item in

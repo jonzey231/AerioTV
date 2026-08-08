@@ -39,7 +39,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .servers:       return "Playlists & Servers"
-        case .watchProgress: return "VOD Watch Progress"
+        case .watchProgress: return "Movies & TV Watch Progress"
         case .reminders:     return "Reminders"
         case .preferences:   return "App Preferences"
         case .credentials:   return "Credentials"

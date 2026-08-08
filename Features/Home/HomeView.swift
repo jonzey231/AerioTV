@@ -2508,7 +2508,7 @@ enum AppTab: String, CaseIterable {
         case .liveTV:    return "Live TV"
         case .favorites: return "Favorites"
         case .dvr:       return "DVR"
-        case .onDemand:  return "On Demand"
+        case .onDemand:  return "Movies & TV"
         case .settings:  return "Settings"
         }
     }
@@ -3822,7 +3822,7 @@ struct MainTabView: View {
             // ingested) hides the tab entirely, matching the dynamic
             // behaviour of Favorites and DVR.
             if showVODTab {
-                OnDemandView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
+                MoviesTVRootView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
                     .tabItem { Label(AppTab.onDemand.title, systemImage: AppTab.onDemand.icon) }
                     .tag(AppTab.onDemand)
             }

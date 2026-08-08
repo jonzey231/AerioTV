@@ -435,8 +435,8 @@ struct ServerDetailView: View {
                     Text("Full Refresh").sectionHeaderStyle()
                 } footer: {
                     Text(server.isActive
-                         ? "Clears every cache (channels, guide data, and On Demand) and reloads this playlist from scratch. Use this if newly-added channels, guide data, or movies and shows are missing or stale after changes on the server."
-                         : "Clears every cache (channels, guide data, and On Demand). This playlist reloads automatically the next time you make it active.")
+                         ? "Clears every cache (channels, guide data, and Movies & TV) and reloads this playlist from scratch. Use this if newly-added channels, guide data, or movies and shows are missing or stale after changes on the server."
+                         : "Clears every cache (channels, guide data, and Movies & TV). This playlist reloads automatically the next time you make it active.")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
             
@@ -571,8 +571,8 @@ struct ServerDetailView: View {
             }
         } message: {
             Text(server.isActive
-                 ? "Clears all cached channels, guide data, and On Demand, then reloads \"\(server.name)\" from scratch. Use this if channels or guide data are missing or stale. May take a few minutes on large playlists."
-                 : "Clears all cached channels, guide data, and On Demand. \"\(server.name)\" reloads automatically the next time you make it active.")
+                 ? "Clears all cached channels, guide data, and Movies & TV, then reloads \"\(server.name)\" from scratch. Use this if channels or guide data are missing or stale. May take a few minutes on large playlists."
+                 : "Clears all cached channels, guide data, and Movies & TV. \"\(server.name)\" reloads automatically the next time you make it active.")
         }
     }
 

@@ -307,12 +307,12 @@ struct EditServerPage: View {
                     // and Guide History only existed on the iOS edit
                     // sheet; Apple TV users had no way to change them.
                     if server.supportsVOD {
-                        SettingsSection("On Demand", style: .eyebrowCard) {
-                            Toggle("Fetch On Demand from this playlist", isOn: $server.vodEnabled)
+                        SettingsSection("Movies & TV", style: .eyebrowCard) {
+                            Toggle("Fetch Movies & TV from this playlist", isOn: $server.vodEnabled)
                                 .font(.system(size: 28, weight: .medium))
                                 .foregroundColor(.textPrimary)
                                 .padding(.vertical, 4)
-                            Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
+                            Text("When off, this playlist's movies and TV shows aren't loaded into Movies & TV. Useful if you only want Live TV from this server, or if you have a second playlist that already provides them.")
                                 .font(.system(size: 22))
                                 .foregroundColor(.textTertiary)
                                 .padding(.top, 4)

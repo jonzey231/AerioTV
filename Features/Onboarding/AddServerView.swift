@@ -309,9 +309,9 @@ struct AddServerView: View {
     /// channel sync if they only want Live TV from this playlist.
     private var vodEnabledRow: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Toggle("Fetch On Demand from this playlist", isOn: $viewModel.vodEnabled)
+            Toggle("Fetch Movies & TV from this playlist", isOn: $viewModel.vodEnabled)
                 .tint(.accentPrimary)
-            Text("When off, this playlist's movies and TV shows are not loaded into the On Demand tab. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand. You can change this later in Settings.")
+            Text("When off, this playlist's movies and TV shows are not loaded into the Movies & TV tab. Useful if you only want Live TV from this server, or if you have a second playlist that already provides them. You can change this later in Settings.")
                 .font(.labelSmall)
                 .foregroundColor(.textTertiary)
         }

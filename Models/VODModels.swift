@@ -267,7 +267,11 @@ enum WatchProgressManager {
 // MARK: - Continue Watching Section (SwiftUI)
 
 struct ContinueWatchingSection: View {
-    let vodType: String   // "movie" or "episode"
+    /// "movie" or "episode" to scope the rail to one type (the per-grid rails),
+    /// or nil for the MERGED rail used by the Movies & TV Home section: movies
+    /// and episodes interleaved by last activity, deduped so a show appears once
+    /// rather than once per episode watched. See `HomeRowsBuilder`.
+    let vodType: String?
     var headers: [String: String] = [:]
     var onPlay: ((WatchProgress) -> Void)?
     /// Loaded series for the active server, used to resolve an episode's
@@ -288,7 +292,38 @@ struct ContinueWatchingSection: View {
     ) private var allProgress: [WatchProgress]
 
     private var items: [WatchProgress] {
-        allProgress.filter { $0.vodType == vodType }
+        guard let vodType else { return mergedItems }
+        return allProgress.filter { $0.vodType == vodType }
+    }
+
+    /// Merged Home rail. Ordering and per-series dedup live in `HomeRowsBuilder`
+    /// so the rules are unit-testable without a ModelContainer; this only maps
+    /// rows in and the chosen identities back out.
+    ///
+    /// Identity is `serverID|vodID`, not `vodID` alone: the same title can carry
+    /// progress from two different playlists, and collapsing those would show
+    /// one server's position on the other server's card.
+    private var mergedItems: [WatchProgress] {
+        let keyed = allProgress.map { (key: Self.progressKey($0), row: $0) }
+        let order = HomeRowsBuilder.continueWatching(
+            from: keyed.map { entry in
+                HomeRowsBuilder.ProgressSnapshot(
+                    videoID: entry.key,
+                    vodType: entry.row.vodType,
+                    seriesID: entry.row.seriesID,
+                    positionMs: entry.row.positionMs,
+                    durationMs: entry.row.durationMs,
+                    isFinished: entry.row.isFinished,
+                    updatedAt: entry.row.updatedAt
+                )
+            }
+        )
+        let byKey = Dictionary(keyed.map { ($0.key, $0.row) }, uniquingKeysWith: { first, _ in first })
+        return order.compactMap { byKey[$0] }
+    }
+
+    private static func progressKey(_ p: WatchProgress) -> String {
+        "\(p.serverID ?? "")|\(p.vodID)"
     }
 
     var body: some View {

@@ -477,12 +477,12 @@ struct EditServerSheet: View {
             // don't carry it.
             if server.supportsVOD {
                 Section {
-                    Toggle("Fetch On Demand from this playlist", isOn: $server.vodEnabled)
+                    Toggle("Fetch Movies & TV from this playlist", isOn: $server.vodEnabled)
                         .listRowBackground(Color.cardBackground)
                 } header: {
-                    Text("On Demand").sectionHeaderStyle()
+                    Text("Movies & TV").sectionHeaderStyle()
                 } footer: {
-                    Text("When off, this playlist's movies and TV shows aren't loaded into On Demand. Useful if you only want Live TV from this server, or if you have a second playlist that already provides On Demand.")
+                    Text("When off, this playlist's movies and TV shows aren't loaded into Movies & TV. Useful if you only want Live TV from this server, or if you have a second playlist that already provides them.")
                         .font(.labelSmall)
                         .foregroundColor(.textTertiary)
                 }
