@@ -8,12 +8,123 @@ import UIKit
 // AsyncImage can't send auth headers. Dispatcharr's /media/ endpoints are protected,
 // so we fetch with URLSession + the server's API key and cache in NSCache.
 
-private final class AuthImageCache: @unchecked Sendable {
+/// Two-level poster cache: an in-memory NSCache in front of a disk cache.
+///
+/// The memory tier was 300 images against libraries of 17,000+, so scrolling a
+/// grid evicted covers faster than it could show them and every scroll-back
+/// re-fetched over the network. Movies & TV leans much harder on posters (Home
+/// shelves plus grids plus detail heroes), so both tiers grow: 2,000 entries
+/// with a byte-cost ceiling in memory, and a write-through disk tier so covers
+/// survive relaunch entirely.
+///
+/// Nothing here changes WHICH requests are made or what headers they carry: the
+/// SSRF host gate in `AuthPosterImage` is untouched, and the disk tier only ever
+/// stores bytes that gate already allowed.
+final class AuthImageCache: @unchecked Sendable {
     static let shared = AuthImageCache()
+
     private let cache = NSCache<NSString, UIImage>()
-    private init() { cache.countLimit = 300 }
+    private let diskQueue = DispatchQueue(label: "app.molinete.aerio.postercache", qos: .utility)
+    private let directory: URL?
+
+    /// Roughly 192MB of decoded images; NSCache evicts by cost under pressure.
+    private static let memoryCostLimit = 192 * 1024 * 1024
+    private static let diskBudgetBytes: UInt64 = 512 * 1024 * 1024
+
+    private init() {
+        cache.countLimit = 2_000
+        cache.totalCostLimit = Self.memoryCostLimit
+
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        let dir = base?.appendingPathComponent("PosterCache", isDirectory: true)
+        if let dir {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        directory = dir
+        // One prune per launch is enough: the budget is a ceiling, not a target.
+        diskQueue.asyncAfter(deadline: .now() + 20) { [weak self] in self?.pruneDisk() }
+    }
+
     func image(for key: String) -> UIImage? { cache.object(forKey: key as NSString) }
-    func store(_ image: UIImage, for key: String) { cache.setObject(image, forKey: key as NSString) }
+
+    /// Memory hit only. Callers that miss should try `diskImage` before the
+    /// network, off the main actor.
+    func store(_ image: UIImage, for key: String) {
+        cache.setObject(image, forKey: key as NSString, cost: Self.cost(of: image))
+    }
+
+    /// Disk lookup, safe to call from any thread. Populates the memory tier on
+    /// a hit so the next scroll pass is instant.
+    func diskImage(for key: String) -> UIImage? {
+        guard let url = fileURL(for: key),
+              let data = try? Data(contentsOf: url),
+              let img = AerioImageDecoding.decode(data) else { return nil }
+        store(img, for: key)
+        // Touch so the LRU prune keeps what is actually being looked at.
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+        return img
+    }
+
+    /// Write-through. Fire-and-forget on a utility queue; a failed write just
+    /// means the next launch refetches.
+    func storeOnDisk(_ data: Data, for key: String) {
+        guard let url = fileURL(for: key) else { return }
+        diskQueue.async { try? data.write(to: url, options: .atomic) }
+    }
+
+    /// Wipe both tiers (Settings cache clear).
+    func clear() {
+        cache.removeAllObjects()
+        guard let directory else { return }
+        diskQueue.async {
+            try? FileManager.default.removeItem(at: directory)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+    }
+
+    private static func cost(of image: UIImage) -> Int {
+        let scale = image.scale
+        return Int(image.size.width * scale * image.size.height * scale * 4)
+    }
+
+    /// Filename derived from the URL, not the URL itself: poster URLs can carry
+    /// query credentials, and those must never become a filename on disk.
+    private func fileURL(for key: String) -> URL? {
+        guard let directory else { return nil }
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in key.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 0x100000001b3
+        }
+        return directory.appendingPathComponent(String(format: "%016llx", hash))
+    }
+
+    /// Oldest-first deletion until the directory fits the budget.
+    private func pruneDisk() {
+        guard let directory else { return }
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]
+        ) else { return }
+
+        var total: UInt64 = 0
+        var items: [(url: URL, date: Date, size: UInt64)] = []
+        for url in entries {
+            guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+                  let size = values.fileSize else { continue }
+            let date = values.contentModificationDate ?? .distantPast
+            total += UInt64(size)
+            items.append((url, date, UInt64(size)))
+        }
+        guard total > Self.diskBudgetBytes else { return }
+
+        for item in items.sorted(by: { $0.date < $1.date }) {
+            try? fm.removeItem(at: item.url)
+            total -= min(total, item.size)
+            if total <= Self.diskBudgetBytes { break }
+        }
+        debugLog("[PosterCache] pruned disk cache to \(total / 1024 / 1024)MB")
+    }
 }
 
 struct AuthPosterImage: View {
@@ -45,6 +156,17 @@ struct AuthPosterImage: View {
                 onImageLoaded?(cached.size)
                 return
             }
+            // Disk tier before the network: a relaunch should paint covers from
+            // local bytes instead of re-fetching the whole visible grid. Read
+            // off-main so a cold scroll never blocks a frame on file I/O.
+            if let fromDisk = await Task.detached(priority: .userInitiated, operation: {
+                AuthImageCache.shared.diskImage(for: key)
+            }).value {
+                guard !Task.isCancelled else { return }
+                uiImage = fromDisk
+                onImageLoaded?(fromDisk.size)
+                return
+            }
             var req = URLRequest(url: url, timeoutInterval: 20)
             // SECURITY: attach the server's credential headers ONLY when the
             // image is on one of the configured server's OWN hosts (public
@@ -70,6 +192,7 @@ struct AuthPosterImage: View {
                   // GH #61: decode accepts SVG artwork in addition to bitmaps.
                   let img = AerioImageDecoding.decode(data) else { return }
             AuthImageCache.shared.store(img, for: key)
+            AuthImageCache.shared.storeOnDisk(data, for: key)
             guard !Task.isCancelled else { return }
             uiImage = img
             onImageLoaded?(img.size)
