@@ -1,5 +1,6 @@
 #if canImport(CarPlay)
 import CarPlay
+import CoreMedia
 import UIKit
 import Combine
 import SwiftData
@@ -26,6 +27,20 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     private var favoritesTemplate: CPListTemplate?
     private var groupsTemplate: CPListTemplate?
     private var cancellables = Set<AnyCancellable>()
+    /// Session capabilities (CarPlay video support lives here). Created on
+    /// connect; `supportsVideoPlayback` is stable for the session per Apple,
+    /// only the moment-to-moment availability changes (handled by the system
+    /// dropping to audio-only while driving).
+    private var sessionConfiguration: CPSessionConfiguration?
+
+    /// True when this car session can present video (iOS 26.4+ car with the
+    /// video-in-car feature; requires our carplay-video entitlement).
+    private var carSupportsVideo: Bool {
+        if #available(iOS 26.4, *), let config = sessionConfiguration {
+            return config.supportsVideoPlayback
+        }
+        return false
+    }
 
     // MARK: - Scene Lifecycle
 
@@ -34,9 +49,14 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         didConnect interfaceController: CPInterfaceController
     ) {
         self.interfaceController = interfaceController
-        #if DEBUG
-        print("[CarPlay] didConnect: scene connected, channels=\(ChannelStore.shared.channels.count) hasFavorites=\(FavoritesStore.shared.hasFavorites)")
-        #endif
+        // Release-build visible (Logan's real-car session 2026-08-07 was a
+        // black box: every CarPlay log line was DEBUG-only print, so "channels
+        // never loaded in the car" could not be told apart from "process was
+        // never launched").
+        debugLog("[CarPlay] didConnect: channels=\(ChannelStore.shared.channels.count) hasFavorites=\(FavoritesStore.shared.hasFavorites) fgScene=\(HeadlessPlaybackController.hasForegroundPlayerScene())")
+
+        sessionConfiguration = CPSessionConfiguration(delegate: self)
+        debugLog("[CarPlay] session video support: \(carSupportsVideo)")
 
         // A car can be the only scene (phone app never opened), so mark the
         // session, default it to audio-only, hydrate channels if the store
@@ -64,6 +84,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         self.interfaceController = nil
         favoritesTemplate = nil
         groupsTemplate = nil
+        sessionConfiguration = nil
         cancellables.removeAll()
         NowPlayingManager.shared.isCarPlayConnected = false
         // Tear down any headless engine started for this car session (no-op if
@@ -79,12 +100,27 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// `ChannelStore.refresh`. `refresh` is idempotent, so a later phone-UI
     /// launch will not double-load.
     private func hydrateChannelsIfNeeded() {
-        guard ChannelStore.shared.channels.isEmpty,
-              !ChannelStore.shared.isLoading,
-              let container = AerioApp.sharedContainer else { return }
+        // Every bail is logged: the cold-car empty-list report hinged on
+        // knowing which of these guards fired, and none of them said a word.
+        guard ChannelStore.shared.channels.isEmpty else {
+            debugLog("[CarPlay] hydrate: skip, \(ChannelStore.shared.channels.count) channels already loaded")
+            return
+        }
+        guard !ChannelStore.shared.isLoading else {
+            debugLog("[CarPlay] hydrate: skip, load already in flight")
+            return
+        }
+        guard let container = AerioApp.sharedContainer else {
+            debugLog("[CarPlay] hydrate: FAIL, sharedContainer is nil (CarPlay scene connected before app init?)")
+            return
+        }
         let context = ModelContext(container)
         let servers = (try? context.fetch(FetchDescriptor<ServerConnection>())) ?? []
-        guard !servers.isEmpty else { return }
+        guard !servers.isEmpty else {
+            debugLog("[CarPlay] hydrate: FAIL, 0 servers fetched from SwiftData")
+            return
+        }
+        debugLog("[CarPlay] hydrate: starting standalone refresh with \(servers.count) servers")
         ChannelStore.shared.refresh(servers: servers)
     }
 
@@ -94,6 +130,17 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     private func observeChannelStore() {
         ChannelStore.shared.$channels
             .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshLists() }
+            }
+            .store(in: &cancellables)
+
+        // Rebuild rows when the playing channel changes so the isPlaying
+        // indicator and per-item playback configuration (play vs none on a
+        // video-capable car) track reality, not just list-build time.
+        NowPlayingManager.shared.$playingItem
+            .receive(on: RunLoop.main)
+            .removeDuplicates { $0?.id == $1?.id }
             .sink { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshLists() }
             }
@@ -288,8 +335,24 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             completion()
         }
 
-        if NowPlayingManager.shared.playingItem?.id == channel.id {
+        let isThisPlaying = NowPlayingManager.shared.playingItem?.id == channel.id
+        if isThisPlaying {
             item.isPlaying = true
+        }
+
+        // CarPlay video (iOS 26.4+): declare the item playable-as-video so a
+        // video-capable car presents the stream instead of audio-only Now
+        // Playing. Live TV: duration 0 = unknown/live per the API contract,
+        // so no progress bar is drawn. Action .play for selectable rows;
+        // .none for the row already playing (selecting it just opens Now
+        // Playing, it does not toggle pause).
+        if #available(iOS 26.4, *), carSupportsVideo {
+            item.playbackConfiguration = CPPlaybackConfiguration(
+                preferredPresentation: .video,
+                playbackAction: isThisPlaying ? .none : .play,
+                elapsedTime: .zero,
+                duration: .zero
+            )
         }
         return item
     }
@@ -332,12 +395,28 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         HeadlessPlaybackController.shared.start(
             item: channel,
             server: ChannelStore.shared.activeServer,
-            isLive: true
+            isLive: true,
+            videoCapable: carSupportsVideo
         )
 
         // Surface Now Playing (pushing it is allowed even though it cannot
         // be a tab).
         interfaceController?.pushTemplate(CPNowPlayingTemplate.shared, animated: true, completion: nil)
+    }
+}
+
+// MARK: - Session configuration delegate
+
+/// Required by `CPSessionConfiguration`'s designated initializer; both
+/// callbacks are optional and currently informational only, but the limited-UI
+/// one is logged because it is the signal that the car started driving
+/// (keyboards/lists restricted), which is also when video presentation stops.
+extension CarPlaySceneDelegate: CPSessionConfigurationDelegate {
+    nonisolated func sessionConfiguration(
+        _ sessionConfiguration: CPSessionConfiguration,
+        limitedUserInterfacesChanged limitedUserInterfaces: CPLimitableUserInterface
+    ) {
+        debugLog("[CarPlay] limited UI changed: rawValue=\(limitedUserInterfaces.rawValue)")
     }
 }
 
