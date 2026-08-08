@@ -5842,14 +5842,23 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// One-shot per tune; reset when a fresh relay route succeeds.
         private var liveRewindTailRetuneUsed = false
 
-        /// Relay error triage. A pause past the rewind depth evicts the
-        /// READER's position while the session itself stays healthy; one
-        /// re-tune at the buffer tail preserves rewind for that case.
+        /// Relay error triage, one-shot per tune. Where the re-tune lands
+        /// depends on where the VIEWER was (GH #67):
+        /// - At the live edge (not timeshifting): resume at the live head.
+        ///   The old unconditional tail re-tune yanked live viewers a full
+        ///   rewind-depth into the past when the reader faulted at ring
+        ///   wrap ("suddenly loops back 30 minutes", KTLA log 2026-07-29).
+        ///   Matches the snap-to-live philosophy of the long-pause unpause
+        ///   path.
+        /// - Timeshifted (scrubbed behind live): re-tune at the buffer
+        ///   tail, the closest surviving data when the reader's position
+        ///   was evicted (the case the tail re-tune was designed for).
         /// Anything else (or a second failure) is a genuinely sick relay
         /// and drops to the direct stream.
         private func relayErrorRecovery(reason: String) {
+            let engine = LiveRewindEngine.shared
             if !liveRewindTailRetuneUsed,
-               let buf = LiveRewindEngine.shared.bufferForReader, !buf.closed,
+               let buf = engine.bufferForReader, !buf.closed,
                // Only when the buffer actually HAS content: a cold-tune
                // failure (connection still priming, zero segments) has
                // nothing to re-tune into, and the extra attempt just
@@ -5857,11 +5866,23 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                // observation during the 500-at-prime tune).
                buf.headWallMs - buf.tailWallMs > 5_000 {
                 liveRewindTailRetuneUsed = true
-                LiveRewindEngine.shared.noteTimeshifting(true)
-                debugLog("[REWIND] relay error (\(reason)); one-shot re-tune at buffer tail")
-                mpvQueue.async { [weak self] in
-                    guard let self, let mpv = self.activeMPVHandle() else { return }
-                    self.mpvCommandAsync(mpv, ["loadfile", "aeriots://at/\(buf.tailWallMs + 2_000)", "replace"])
+                // Racy off-main read of a @Published Bool; a torn read just
+                // picks the other (still-reasonable) resume point.
+                let wasTimeshifting = engine.timeshifting
+                if wasTimeshifting {
+                    engine.noteTimeshifting(true)
+                    debugLog("[REWIND] relay error (\(reason)); one-shot re-tune at buffer tail")
+                    mpvQueue.async { [weak self] in
+                        guard let self, let mpv = self.activeMPVHandle() else { return }
+                        self.mpvCommandAsync(mpv, ["loadfile", "aeriots://at/\(buf.tailWallMs + 2_000)", "replace"])
+                    }
+                } else {
+                    engine.noteTimeshifting(false)
+                    debugLog("[REWIND] relay error (\(reason)); one-shot re-tune at live head")
+                    mpvQueue.async { [weak self] in
+                        guard let self, let mpv = self.activeMPVHandle() else { return }
+                        self.mpvCommandAsync(mpv, ["loadfile", "aeriots://live", "replace"])
+                    }
                 }
                 return
             }

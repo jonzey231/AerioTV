@@ -580,6 +580,16 @@ final class LiveRewindReader: @unchecked Sendable {
                         continue
                     }
                     segments = fresh
+                    // GH #67: re-sync the index into the FRESH list. Once the
+                    // ring starts evicting (rewind depth reached, ~30 min in)
+                    // every re-list shifts the array left; adopting `fresh`
+                    // while keeping the OLD index made segIndex drift off the
+                    // end, currentStart read -1, and the evicted-segment
+                    // guard above misfired -> reader error -> the player's
+                    // recovery re-tuned a LIVE viewer at the buffer tail, a
+                    // full rewind-depth into the past (KTLA log 2026-07-29,
+                    // "re-tune 1787s behind live" at the 35-minute mark).
+                    segIndex = freshIdx
                 }
             }
             if buffer.closed { return 0 }
