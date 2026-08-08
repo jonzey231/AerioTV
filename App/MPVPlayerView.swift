@@ -5399,20 +5399,33 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // that could latch the NEW tune off the relay). Genuine
                 // teardown never produces a fresh session, so this
                 // drains to the failure path in ~3s during shutdown.
-                var candidate = LiveRewindEngine.shared.bufferForReader
+                // The wait must also cover READER creation, not just session
+                // presence: a brand-new session's dir has ZERO segment files
+                // until the first bytes land, and LiveRewindReader init
+                // returns nil on an empty dir. The mini-to-fullscreen promote
+                // re-tunes on a WARM mpv that opens aeriots://live within
+                // ~100ms of startSession - faster than the first segment -
+                // so the old first-attempt-only reader init failed the open
+                // and latched the tune onto the direct stream (no pause or
+                // seek chrome; ATV log 2026-08-08 00:19, intermittent by
+                // timing).
+                var reader: LiveRewindReader? = nil
                 var waited = 0
-                while (candidate == nil || candidate!.closed), waited < 30 {
-                    // GH #60: mpv's C thread has no draining autorelease pool;
-                    // keep Foundation temporaries from pinning (see the reader).
-                    autoreleasepool {
-                        Thread.sleep(forTimeInterval: 0.1)
-                        waited += 1
-                        candidate = LiveRewindEngine.shared.bufferForReader
+                while reader == nil, waited < 30 {
+                    if let c = LiveRewindEngine.shared.bufferForReader, !c.closed {
+                        reader = LiveRewindReader(buffer: c, fromWallMs: fromWall)
+                    }
+                    if reader == nil {
+                        // GH #60: mpv's C thread has no draining autorelease
+                        // pool; keep Foundation temporaries from pinning.
+                        autoreleasepool {
+                            Thread.sleep(forTimeInterval: 0.1)
+                            waited += 1
+                        }
                     }
                 }
-                guard let buffer = candidate, !buffer.closed,
-                      let reader = LiveRewindReader(buffer: buffer, fromWallMs: fromWall) else {
-                    debugLog("[REWIND] aeriots open failed (no live session) uri=\(uri)")
+                guard let reader else {
+                    debugLog("[REWIND] aeriots open failed (no live session or no data within 3s) uri=\(uri)")
                     return Int32(MPV_ERROR_LOADING_FAILED.rawValue)
                 }
                 LiveRewindEngine.shared.noteReaderStart(reader.startWallMs)
