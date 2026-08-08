@@ -7737,11 +7737,19 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             if fps > 0 { applyDisplayCriteriaIfNeeded(fps: fps) }
             #endif
 
-            // Also grab initial volatile values
+            // Also grab initial volatile values.
+            //
+            // Stream Info "drops" = decoder drops + layer-late presents, NOT
+            // mpv's frame-drop-count: on the render-API path that VO counter
+            // overcounts wildly (ch 35 UHD 2026-08-07: ~120/15s with the
+            // panel verified at 50Hz and the layer presenting 1 late frame
+            // in 14400 - users read it as stutter that does not exist). The
+            // raw VO counter stays visible in the MPV-PERF debug log.
             var cacheDur: Double = 0; var avsync: Double = 0; var drops: Int64 = 0; var bitrate: Double = 0
             mpv_get_property(mpv, "demuxer-cache-duration", MPV_FORMAT_DOUBLE, &cacheDur)
             mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsync)
-            mpv_get_property(mpv, "frame-drop-count", MPV_FORMAT_INT64, &drops)
+            mpv_get_property(mpv, "decoder-frame-drop-count", MPV_FORMAT_INT64, &drops)
+            drops += lateFrameCount
             mpv_get_property(mpv, "demuxer-cache-state/raw-input-rate", MPV_FORMAT_DOUBLE, &bitrate)
 
             let info = StreamInfo(
@@ -7776,7 +7784,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             var drops: Int64 = 0; var bitrate: Double = 0; var fps: Double = 0
             mpv_get_property(mpv, "demuxer-cache-duration", MPV_FORMAT_DOUBLE, &cacheDur)
             mpv_get_property(mpv, "avsync", MPV_FORMAT_DOUBLE, &avsync)
-            mpv_get_property(mpv, "frame-drop-count", MPV_FORMAT_INT64, &drops)
+            // Viewer-meaningful drops (decoder + layer-late), not the
+            // overcounting VO frame-drop-count - see the initial populate.
+            mpv_get_property(mpv, "decoder-frame-drop-count", MPV_FORMAT_INT64, &drops)
+            drops += lateFrameCount
             mpv_get_property(mpv, "demuxer-cache-state/raw-input-rate", MPV_FORMAT_DOUBLE, &bitrate)
             mpv_get_property(mpv, "estimated-vf-fps", MPV_FORMAT_DOUBLE, &fps)
             // v1.7.4.x: `vo=libmpv` can leave estimated-vf-fps at 0 even
