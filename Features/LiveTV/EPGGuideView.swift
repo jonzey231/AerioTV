@@ -1236,17 +1236,52 @@ final class GuideStore: ObservableObject {
             }
         }
         let historyStart = Date().addingTimeInterval(-GuideStore.activeRetentionSeconds())
-        for url in urls.prefix(8) {
+        // Android's identical loop caused the 2026-08-08 Discord report: every
+        // EPG load downloaded up to EIGHT full upstream XMLTV feeds with no
+        // ceiling, so on a server whose feeds are large or slow the guide never
+        // populated and sat "syncing" forever. This is BONUS history, never the
+        // user's guide, so it runs on a strict budget: fewer sources, a ceiling
+        // per source, and a whole-phase deadline checked between sources.
+        let deadline = Date().addingTimeInterval(Self.upstreamEPGTotalBudget)
+        var layered = 0
+        for url in urls.prefix(Self.maxUpstreamEPGSources) {
+            if Date() >= deadline {
+                debugLog("📺 upstream-source layering: budget spent after \(layered) source(s); skipping \(min(urls.count, Self.maxUpstreamEPGSources) - layered) more")
+                break
+            }
             debugLog("📺 [EPG source=dispatcharr upstream-source] host=\(url.host ?? "?") historyDays=\(GuideStore.activeRetentionDays())")
-            await fetchXMLTVFromURL(url: url,
-                                    channels: channels,
-                                    windowStart: historyStart,
-                                    windowEnd: windowEnd,
-                                    extraTVGIDs: bridgedTVGIDs,
-                                    categoryServerID: server.id.uuidString,
-                                    replaceExisting: false)
+            // Per-source ceiling: one enormous or stalled feed must not hold the
+            // grid (which the user already has) hostage behind it.
+            let sourceTask = Task {
+                await fetchXMLTVFromURL(url: url,
+                                        channels: channels,
+                                        windowStart: historyStart,
+                                        windowEnd: windowEnd,
+                                        extraTVGIDs: bridgedTVGIDs,
+                                        categoryServerID: server.id.uuidString,
+                                        replaceExisting: false)
+            }
+            let watchdog = Task {
+                try? await Task.sleep(for: .seconds(Self.upstreamEPGPerSource))
+                if !sourceTask.isCancelled {
+                    debugLog("📺 upstream-source \(url.host ?? "?") exceeded \(Int(Self.upstreamEPGPerSource))s; skipping it")
+                    sourceTask.cancel()
+                }
+            }
+            await sourceTask.value
+            watchdog.cancel()
+            layered += 1
         }
     }
+
+    /// Upstream Dispatcharr XMLTV feeds layered for catch-up depth (task #210).
+    /// Was 8. Each is a FULL XMLTV download on every EPG load, and the value of
+    /// the fourth feed is negligible next to the cost of fetching it.
+    private static let maxUpstreamEPGSources = 3
+    /// Ceiling on ONE upstream feed.
+    private static let upstreamEPGPerSource: TimeInterval = 90
+    /// Ceiling on the whole layering phase; past this the grid ships as-is.
+    private static let upstreamEPGTotalBudget: TimeInterval = 180
 
     // MARK: - Xtream Codes
     private func fetchXtream(server: ServerConnection, channels: [ChannelDisplayItem],
