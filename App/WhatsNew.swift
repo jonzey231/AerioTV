@@ -57,6 +57,21 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.6",
+            title: "What's new in 1.8.6",
+            bullets: [
+                "Fixed the guide sitting empty with the sync indicator spinning forever. Pulling extra catch-up history from your server's guide sources now runs on a strict time budget instead of holding up the guide",
+                "Customizable Remote Control on Apple TV: remap what each Siri Remote button and hold does in the player and the guide, with hints that follow your mapping. Settings > Remote Control",
+                "Redesigned Settings: sidebar layout on Apple TV, split view on iPad, cleaner detail and edit flow everywhere",
+                "Hold Left in the TV guide for a docked channel-group menu with live preview",
+                "Mini-tune from the guide: Select tunes the channel in the corner mini-player, Select again goes fullscreen",
+                "Recording and reminder markers in the guide",
+                "One output button on iPhone and iPad for AerioTV Remote, Google Cast, and AirPlay",
+                "CarPlay: fixed a crash when picking a channel, and fixed the app reaching for your home server's local address while you are away from home"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.6")
+        ),
+        WhatsNewRelease(
             version: "1.8.4",
             title: "What's new in 1.8.4",
             bullets: [
