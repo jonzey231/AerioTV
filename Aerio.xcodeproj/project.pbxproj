@@ -80,6 +80,12 @@
 		5A17E5D00000000000A00A /* LibraryDeriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A008 /* LibraryDeriver.swift */; };
 		5A17E5D00000000000A00C /* DispatcharrMediaLibraryAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A00B /* DispatcharrMediaLibraryAdapter.swift */; };
 		5A17E5D00000000000A00D /* DispatcharrMediaLibraryAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A00B /* DispatcharrMediaLibraryAdapter.swift */; };
+		5A17E5D00000000000A101 /* CatalogIngestActor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A100 /* CatalogIngestActor.swift */; };
+		5A17E5D00000000000A102 /* CatalogIngestActor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A100 /* CatalogIngestActor.swift */; };
+		5A17E5D00000000000A104 /* MediaCatalogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A103 /* MediaCatalogStore.swift */; };
+		5A17E5D00000000000A105 /* MediaCatalogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A103 /* MediaCatalogStore.swift */; };
+		5A17E5D00000000000A107 /* VODSourceAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A106 /* VODSourceAdapter.swift */; };
+		5A17E5D00000000000A108 /* VODSourceAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A106 /* VODSourceAdapter.swift */; };
 		3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5957CC8A6CC0000B14ED47C5 /* HomeView.swift */; };
 		3C4D5E6F70891012ACE70020 /* NWHTTPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7000 /* NWHTTPClient.swift */; };
 		3C4D5E6F70891012ACE70021 /* HTTPRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F70891ACE7001 /* HTTPRouter.swift */; };
@@ -335,6 +341,9 @@
 		5A17E5D00000000000A005 /* MediaCatalogContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCatalogContainer.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A008 /* LibraryDeriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LibraryDeriver.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A00B /* DispatcharrMediaLibraryAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrMediaLibraryAdapter.swift; sourceTree = "<group>"; };
+		5A17E5D00000000000A100 /* CatalogIngestActor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogIngestActor.swift; sourceTree = "<group>"; };
+		5A17E5D00000000000A103 /* MediaCatalogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCatalogStore.swift; sourceTree = "<group>"; };
+		5A17E5D00000000000A106 /* VODSourceAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VODSourceAdapter.swift; sourceTree = "<group>"; };
 		5957CC8A6CC0000B14ED47C5 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		628C021FBBB1C5C00F6640EA /* TVServices.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = TVServices.framework; path = System/Library/Frameworks/TVServices.framework; sourceTree = SDKROOT; };
 		62C0C151EAA6394D32003217 /* DeviceInfo.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DeviceInfo.swift; sourceTree = "<group>"; };
@@ -520,6 +529,7 @@
 		5A17E5D0000000000000B003 /* VODSourceAdapters */ = {
 			isa = PBXGroup;
 			children = (
+				5A17E5D00000000000A106 /* VODSourceAdapter.swift */,
 				5A17E5D00000000000A00B /* DispatcharrMediaLibraryAdapter.swift */,
 			);
 			path = VODSourceAdapters;
@@ -868,6 +878,8 @@
 		5A17E5D0000000000000B002 /* Store */ = {
 			isa = PBXGroup;
 			children = (
+				5A17E5D00000000000A103 /* MediaCatalogStore.swift */,
+				5A17E5D00000000000A100 /* CatalogIngestActor.swift */,
 				5A17E5D00000000000A008 /* LibraryDeriver.swift */,
 				5A17E5D00000000000A005 /* MediaCatalogContainer.swift */,
 				5A17E5D0000000000000A001 /* VODStore.swift */,
@@ -1218,6 +1230,9 @@
 				EE1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
 				A8E322C238A7CE0B55BA3D4D /* AerioApp.swift in Sources */,
 				7D775CD7B45EE60B92377A6F /* HomeView.swift in Sources */,
+				5A17E5D00000000000A107 /* VODSourceAdapter.swift in Sources */,
+				5A17E5D00000000000A104 /* MediaCatalogStore.swift in Sources */,
+				5A17E5D00000000000A101 /* CatalogIngestActor.swift in Sources */,
 				5A17E5D00000000000A00C /* DispatcharrMediaLibraryAdapter.swift in Sources */,
 				5A17E5D00000000000A009 /* LibraryDeriver.swift in Sources */,
 				5A17E5D00000000000A006 /* MediaCatalogContainer.swift in Sources */,
@@ -1332,6 +1347,9 @@
 				FF1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
 				CF38B25676730E71C9AD497A /* AerioApp.swift in Sources */,
 				3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */,
+				5A17E5D00000000000A108 /* VODSourceAdapter.swift in Sources */,
+				5A17E5D00000000000A105 /* MediaCatalogStore.swift in Sources */,
+				5A17E5D00000000000A102 /* CatalogIngestActor.swift in Sources */,
 				5A17E5D00000000000A00D /* DispatcharrMediaLibraryAdapter.swift in Sources */,
 				5A17E5D00000000000A00A /* LibraryDeriver.swift in Sources */,
 				5A17E5D00000000000A007 /* MediaCatalogContainer.swift in Sources */,

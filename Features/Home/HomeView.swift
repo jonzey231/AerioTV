@@ -4460,7 +4460,24 @@ struct MainTabView: View {
         debugLog("🟢 [Orchestrator] phase 4 BEGIN: VOD series, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
         await vodStore.refreshSeriesAndWait(servers: allServers)
         debugLog("🟢 [Orchestrator] phase 4 done (series), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, series=\(vodStore.series.count)")
+        // Movies & TV phase 1: mirror what VOD just fetched into the persistent
+        // catalog. Runs LAST and off the critical path deliberately - nothing
+        // reads the catalog yet, and the ingest actor's own container means
+        // these writes cannot disturb the guide or any synced @Query. It exists
+        // now so the store is populated and measurable before the browse UI
+        // starts depending on it.
+        await ingestCatalog(servers: allServers)
         debugLog("🟢 [Orchestrator] END, total elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+    }
+
+    /// Mirror every VOD-capable server into the persistent Movies & TV catalog.
+    /// Sequential by design: two servers ingesting at once would double the
+    /// peak memory of the fetch step for no user-visible gain this early.
+    private func ingestCatalog(servers: [ServerConnection]) async {
+        guard MediaCatalogStore.shared.isAvailable else { return }
+        for server in servers where server.vodEnabled {
+            await MediaCatalogStore.shared.refresh(server: server.snapshot)
+        }
     }
 
     #if os(iOS)

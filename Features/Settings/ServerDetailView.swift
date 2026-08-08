@@ -90,6 +90,12 @@ func performServerCascadeDelete(_ server: ServerConnection,
     // allServers change and repopulates VOD for whatever
     // server remains active (if any).
     VODStore.shared.clear()
+    // The persisted catalog needs the same cascade: its rows outlive the
+    // process, so without this the removed server's movies and series would
+    // come back on the next launch (the in-memory clear above cannot reach
+    // them). Fire-and-forget: the delete is keyed by server and idempotent.
+    let removedServerID = server.id
+    Task { await MediaCatalogStore.shared.removeServer(removedServerID) }
     // Push updated list to iCloud (server removed)
     SyncManager.shared.pushServers(servers.filter { $0.id != server.id })
     // Push the post-cascade WatchProgress set to
@@ -546,8 +552,11 @@ struct ServerDetailView: View {
                     //    "Refresh EPG Data" leaves this in place, which is
                     //    how stale guide data can survive that action.
                     await EPGCache.shared.invalidateAll()
-                    // 3. Drop all On Demand (movies + series) state.
+                    // 3. Drop all On Demand (movies + series) state, in memory
+                    //    AND on disk, so "reload from scratch" really is from
+                    //    scratch and a stale catalog cannot repopulate it.
                     VODStore.shared.clear()
+                    await MediaCatalogStore.shared.removeServer(server.id)
                     // 4. Reload from scratch for the active playlist:
                     //    channels are re-fetched (newly-added channels
                     //    appear), the guide is rebuilt and re-cached, and
