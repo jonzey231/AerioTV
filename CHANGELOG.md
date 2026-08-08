@@ -1,5 +1,45 @@
 # Changelog
 
+## v1.8.5 - 2026-08-08
+
+### Added
+
+- **Customizable Remote Control (Apple TV).** Remap what each Siri Remote
+  button and hold does in the player and the guide, with per-context maps
+  and on-screen hints that follow your mapping. Settings > Remote Control.
+- **Redesigned Settings.** Sidebar layout on Apple TV, split view on iPad,
+  and a cleaner detail and edit flow everywhere.
+- **Guide group sidebar.** Hold Left in the TV guide to open a docked
+  channel-group menu with live preview while you browse.
+- **Channels overlay exit model.** In the live player, Left opens the
+  channel list and Left again opens groups; Right steps back out one
+  layer per press; Back closes the whole overlay.
+- **Mini-tune from the guide.** Selecting a channel tunes it in the corner
+  mini-player first; press Select again for fullscreen.
+- **Recording and reminder markers in the guide.** Red dot on cells with a
+  scheduled or in-progress recording, bell on cells with a reminder.
+- **Unified output picker (iPhone and iPad).** One button for AerioTV
+  Remote, Google Cast, and AirPlay, shown only when each is available.
+- **Dispatcharr Channel Profile picker** on playlist edit.
+- **Auto-rotate toggle** in App Behaviors (iPhone and iPad), default on.
+
+### Fixed
+
+- 4K HEVC live channels could permanently drop to software decode after a
+  mid-stream join; hardware decode now recovers automatically.
+- Frame-rate matching on Apple TV now actually switches the panel mode, so
+  50fps content no longer judders on a 60Hz mode with Match Content on.
+- Live Rewind could suddenly jump playback back 30 minutes once its buffer
+  filled (GH #67); rewind reconnect splices also no longer feed duplicated
+  data to the decoder.
+- Security: VOD session URLs that resolve to a different host than your
+  server no longer receive your API key.
+- Stream Info's drops readout now reflects real presentation drops instead
+  of an internal counter that overcounted.
+- Guide polish: hint pills no longer overlap the corner clock, the player
+  hint text no longer truncates, and guide badge pills no longer clip at
+  the bottom edge of cells.
+
 ## v1.7.11 - 2026-07-12
 
 ### Added
