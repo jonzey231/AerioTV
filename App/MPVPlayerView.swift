@@ -1898,8 +1898,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         // user's Settings > Video and Audio > Match Content setting, so
         // users who left matching off see no change.
         //
-        // Fullscreen single-stream only (tileID == nil): multiview tiles at
-        // mixed rates must not fight over the panel mode.
+        // Fullscreen single-stream only: multiview tiles at mixed rates
+        // must not fight over the panel mode. Under the unified player the
+        // sole fullscreen stream runs as a tile (tileID non-nil), so the
+        // gate is the live tile count, not tileID == nil -- that guard
+        // silently killed frame-rate matching on every live stream (Sky
+        // Sports UHD 50fps on a 60Hz panel, drops+stutter, 2026-08-07).
 
         /// Refresh rate last written to preferredDisplayCriteria. Written on
         /// main; read cross-queue only as a cheap dedup pre-check (a torn
@@ -1915,7 +1919,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         private static let canonicalVideoRates: [Double] = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60]
 
         private func applyDisplayCriteriaIfNeeded(fps: Double) {
-            guard tileID == nil, fps > 20, fps < 130 else { return }
+            guard fps > 20, fps < 130 else { return }
             guard let rate = Self.canonicalVideoRates.min(by: { abs($0 - fps) < abs($1 - fps) }),
                   abs(rate - fps) <= 0.75 else { return }
             // Only ever ask for the 50 / 59.94 / 60 class: 25 / 29.97 / 30
@@ -1936,8 +1940,25 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Cross-queue pre-check; the authoritative dedup re-runs on main.
             if abs(appliedDisplayRefreshRate - target) < 0.01 { return }
             DispatchQueue.main.async { [weak self] in
-                guard let self,
-                      let window = self.viewController?.viewIfLoaded?.window else { return }
+                guard let self else { return }
+                // `viewController` is only wired on iOS (the PiP path); on
+                // tvOS it is ALWAYS nil, which silently killed every
+                // criteria request since the representable rework (channel
+                // 35 UHD judder, 2026-08-07). tvOS is single-window - the
+                // foreground scene's key window is the right fallback.
+                let window: UIWindow? = self.viewController?.viewIfLoaded?.window
+                    ?? UIApplication.shared.connectedScenes
+                        .compactMap { $0 as? UIWindowScene }
+                        .first(where: { $0.activationState == .foregroundActive })?
+                        .keyWindow
+                guard let window else {
+                    debugLog("[MPV-DISPLAY] skipped \(target)Hz: no window available")
+                    return
+                }
+                // Solo fullscreen only: 2+ live tiles at mixed rates must
+                // not fight over the panel mode.
+                let tileCount = MainActor.assumeIsolated { MultiviewStore.shared.tiles.count }
+                guard tileCount <= 1 else { return }
                 let dm = window.avDisplayManager
                 if self.appliedDisplayManager === dm,
                    abs(self.appliedDisplayRefreshRate - target) < 0.01 { return }

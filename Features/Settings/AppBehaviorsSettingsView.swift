@@ -100,6 +100,16 @@ struct AppBehaviorsSettingsView: View {
     @AppStorage("appBehaviorsSkipLoadingScreen")
     private var skipLoadingScreen = false
 
+    #if os(iOS)
+    /// Auto-Rotate (Logan 2026-08-07): follow the device orientation in
+    /// the whole app. Default ON. When off, iPhone pins portrait and iPad
+    /// freezes in its current orientation; the player's fullscreen button
+    /// still forces landscape. Key read by `AppOrientationLock.base`;
+    /// device-local like the sibling appBehaviors* keys.
+    @AppStorage(AppOrientationLock.autoRotateKey)
+    private var autoRotate = true
+    #endif
+
     /// Auto-start the last-played channel in the corner mini-player
     /// on launch (iPad / tvOS only — iPhone keeps the bottom-sheet
     /// MiniPlayerBar paradigm without a corner box). Default OFF.
@@ -268,6 +278,33 @@ struct AppBehaviorsSettingsView: View {
                 Text(UIDevice.current.userInterfaceIdiom == .pad
                      ? "Skipping the loading screen may cause brief UI stutter while data loads. Resume picks up the last channel you watched in the corner mini-player; press Play/Pause to expand."
                      : "Skipping the loading screen may cause brief UI stutter while data loads.")
+                    .font(.labelSmall).foregroundColor(.textTertiary)
+            }
+            .listSectionSeparator(.hidden)
+
+            // MARK: Orientation (Logan 2026-08-07)
+            Section {
+                Toggle(isOn: $autoRotate) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Auto-rotate")
+                            .font(.bodyMedium)
+                            .foregroundColor(.textPrimary)
+                        Text(UIDevice.current.userInterfaceIdiom == .pad
+                             ? "Follow the device orientation. When off, AerioTV stays in its current orientation"
+                             : "Follow the device orientation. When off, AerioTV stays portrait")
+                            .font(.labelSmall)
+                            .foregroundColor(.textTertiary)
+                    }
+                }
+                .tint(theme.accent)
+                .listRowBackground(Color.cardBackground)
+                .onChange(of: autoRotate) { _, _ in
+                    AppOrientationLock.refreshBase()
+                }
+            } header: {
+                Text("Orientation").sectionHeaderStyle()
+            } footer: {
+                Text("The player's fullscreen button can still rotate into landscape either way.")
                     .font(.labelSmall).foregroundColor(.textTertiary)
             }
             .listSectionSeparator(.hidden)

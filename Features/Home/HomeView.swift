@@ -4077,26 +4077,18 @@ struct MainTabView: View {
             }
 
             // #42 Part 3: tvOS Menu/Back hints, top-left of the Live TV guide,
-            // below the syncing toast. Always shows the double-press-to-top hint;
-            // adds a resume hint above it when a mini-player is active.
+            // below the syncing toast. Compressed to at most TWO combined
+            // "gesture = result" lines (Logan 2026-08-07: the old stack of
+            // up to five sentence pills grew down over the guide's corner
+            // clock when the mini-player lines were showing).
             #if os(tvOS)
             if selectedTab == .liveTV && (!nowPlaying.isActive || nowPlaying.isMinimized) {
                 VStack {
                     VStack(alignment: .leading, spacing: 6) {
                         if nowPlaying.isActive && nowPlaying.isMinimized {
-                            guideMenuHint("Press Menu/Back or Play/Pause to resume playback.")
-                            guideMenuHint("Hold right on remote to close the mini player.")
+                            guideMenuHint("Back or Play/Pause = resume  ·  Hold Right = close mini player")
                         }
-                        guideMenuHint("Double Back returns to top channel")
-                        // Hold-Left copy DERIVED from the effective guide map
-                        // (default: browse earlier programs).
-                        if let holdLeft = RemoteControlHints.guideHoldLeftHint(RemoteControlStore.shared.map) {
-                            guideMenuHint(holdLeft)
-                        }
-                        // Sidebar mode adds a short-Left = groups affordance.
-                        if RemoteControlStore.shared.useGroupSidebar {
-                            guideMenuHint("Left on the current program = channel groups")
-                        }
+                        guideMenuHint(guideNavHintLine)
                     }
                     .padding(.leading, 16)
                     .padding(.top, isAnyBackgroundWork ? 52 : 12)
@@ -5527,6 +5519,8 @@ struct MainTabView: View {
     /// budget resets cleanly.
     #if os(tvOS)
     /// #42 Part 3: a small muted hint badge for the top-left of the Live TV guide.
+    /// Width cap raised 360 -> 560 for the combined "gesture = result" lines;
+    /// the top-left strip beside the centered nav pills has the room.
     @ViewBuilder
     private func guideMenuHint(_ text: String) -> some View {
         Text(text)
@@ -5534,10 +5528,24 @@ struct MainTabView: View {
             .foregroundColor(.white.opacity(0.55))
             .lineLimit(1)
             .truncationMode(.tail)
-            .frame(maxWidth: 360, alignment: .leading)
+            .frame(maxWidth: 560, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .background(Color.black.opacity(0.4).clipShape(Capsule()))
+    }
+
+    /// The guide's always-on nav hint, one compressed line. Hold-Left copy
+    /// DERIVED from the effective guide map; sidebar mode folds short-Left
+    /// and hold-Left into a single "Left / Hold Left = groups" part since
+    /// both stages open the group sidebar.
+    private var guideNavHintLine: String {
+        var parts = ["Double Back = top channel"]
+        if RemoteControlStore.shared.useGroupSidebar {
+            parts.append("Left / Hold Left = groups")
+        } else if let short = RemoteControlHints.guideHoldLeftShort(RemoteControlStore.shared.map) {
+            parts.append(short)
+        }
+        return parts.joined(separator: "  ·  ")
     }
     #endif
 
@@ -5902,11 +5910,13 @@ private struct ChannelInfoBanner: View {
             .font(.system(size: 15, weight: .medium))
             .foregroundColor(.white.opacity(0.55))
             // Keep hint chips to a single line + cap width so a long dynamic
-            // (remapped) label can't bleed across the card.
+            // (remapped) label can't bleed across the card. 360 truncated the
+            // default Left/Right line mid-sentence (Logan 2026-08-07); 560
+            // fits every stock line while still capping remapped runaways.
             .lineLimit(1)
             .truncationMode(.tail)
             .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: 360, alignment: .leading)
+            .frame(maxWidth: 560, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             // #42 Part 4: match the program info card's dark fill (black @ 0.72).

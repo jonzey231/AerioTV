@@ -100,8 +100,18 @@ private final class MainThreadWatchdog: @unchecked Sendable {
 /// AppDelegate reports `mask` and `apply` updates it before rotating.
 @MainActor
 enum AppOrientationLock {
-    /// Mask when nothing is forcing landscape: portrait on iPhone, all
-    /// orientations on iPad (so iPad follows the device naturally).
+    /// App Behaviors > Auto-Rotate (Logan 2026-08-07). Default ON keeps
+    /// the shipped follow-the-device behavior; OFF freezes the interface
+    /// (portrait on iPhone, current orientation on iPad so a landscape-
+    /// mounted iPad doesn't snap sideways). Device-local like the other
+    /// appBehaviors* keys. The player's fullscreen button still forces
+    /// landscape either way - it pins `.landscape` above this base.
+    static let autoRotateKey = "appBehaviorsAutoRotate"
+    static var autoRotateEnabled: Bool {
+        UserDefaults.standard.object(forKey: autoRotateKey) as? Bool ?? true
+    }
+
+    /// Mask when nothing is forcing landscape.
     static var base: UIInterfaceOrientationMask {
         // iPad free-rotates. iPhone allows device-driven rotation (portrait
         // + both landscapes) so the player follows the device again. Before
@@ -109,7 +119,25 @@ enum AppOrientationLock {
         // governed and the app auto-rotated; returning `.portrait` here
         // pinned it portrait and killed auto-rotate. `.allButUpsideDown`
         // restores it; the force-landscape toggle still pins `.landscape`.
-        UIDevice.current.userInterfaceIdiom == .pad ? .all : .allButUpsideDown
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            guard !autoRotateEnabled else { return .all }
+            return currentInterfaceOrientationMask ?? .all
+        }
+        return autoRotateEnabled ? .allButUpsideDown : .portrait
+    }
+
+    /// The foreground scene's current orientation as a single-orientation
+    /// mask, for the frozen-iPad case. Nil before any scene is live.
+    private static var currentInterfaceOrientationMask: UIInterfaceOrientationMask? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
+        switch scene?.interfaceOrientation {
+        case .portrait: return .portrait
+        case .portraitUpsideDown: return .portraitUpsideDown
+        case .landscapeLeft: return .landscapeLeft
+        case .landscapeRight: return .landscapeRight
+        default: return nil
+        }
     }
 
     /// The mask UIKit honors. Seeded to `.portrait` and corrected for the
@@ -147,6 +175,18 @@ enum AppOrientationLock {
     static func release() {
         guard isForcingLandscape else { return }
         apply(landscape: false)
+    }
+
+    /// Re-evaluate the at-rest mask after the Auto-Rotate toggle changes.
+    /// No-op while the player is forcing landscape - the release path
+    /// re-reads `base` and lands on the fresh setting anyway.
+    static func refreshBase() {
+        guard !isForcingLandscape else { return }
+        mask = base
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { _ in }
+        scene.keyWindow?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
     }
 }
 

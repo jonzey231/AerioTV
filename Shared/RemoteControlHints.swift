@@ -16,7 +16,9 @@ enum RemoteControlHints {
         case .toggleControls:   return "player controls"
         case .optionsMenu:      return "options"
         case .channelList:      return "the channel list"
-        case .recentChannels:   return "recently watched channels"
+        // "recently watched channels" made the combined Left/Right chip
+        // run past its width cap; the short form reads the same.
+        case .recentChannels:   return "recent channels"
         case .openSearch:       return "search"
         case .lastChannel:      return "the previous channel"
         case .minimizeToGuide:  return "the TV guide"

@@ -4374,6 +4374,7 @@ private struct GuideProgramButton: View {
                         .frame(width: 10, height: 10)
                 }
             }
+            .layoutPriority(1)
             // GH #34: the XMLTV <sub-title> (episode / sports-match name) is what
             // distinguishes same-title back-to-back programmes. Guarded against
             // the Dispatcharr paths that promote subTitle into description when
@@ -4384,6 +4385,7 @@ private struct GuideProgramButton: View {
                     .italic()
                     .foregroundColor(isFocused ? .white.opacity(0.85) : .textSecondary)
                     .lineLimit(1)
+                    .layoutPriority(1)
             }
             if !prog.description.isEmpty {
                 Text(prog.description)
@@ -4394,6 +4396,10 @@ private struct GuideProgramButton: View {
             // Time range + season/episode pill + feed badges, folded onto
             // one line so the height-limited cell doesn't gain a row.
             // Trailing badges clip first on narrow (short-duration) cells.
+            // layoutPriority(1): in the fixed-height cell the description
+            // (priority 0) must be what compresses -- without it, a long
+            // description left this row a partial sliver that .clipped()
+            // cut through the badges (Logan 2026-08-07 screenshot).
             HStack(spacing: 4) {
                 Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
                     .font(.system(size: 17))
@@ -4405,6 +4411,7 @@ private struct GuideProgramButton: View {
                                 isRepeat: prog.isRepeat, compact: true)
                 }
             }
+            .layoutPriority(1)
             #else
             HStack(spacing: 4) {
                 // Catch-up badge: aired + replayable from the archive.
@@ -4430,6 +4437,7 @@ private struct GuideProgramButton: View {
                         .frame(width: 6 * guideScale, height: 6 * guideScale)
                 }
             }
+            .layoutPriority(1)
             // GH #34: XMLTV <sub-title> (match/episode name), guarded against the
             // Dispatcharr promote-into-description case so it never double-prints.
             if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
@@ -4438,6 +4446,7 @@ private struct GuideProgramButton: View {
                     .italic()
                     .foregroundColor(.textSecondary)
                     .lineLimit(1)
+                    .layoutPriority(1)
             }
             if !prog.description.isEmpty {
                 Text(prog.description)
@@ -4448,11 +4457,18 @@ private struct GuideProgramButton: View {
             Text("\(shortTimeFormatter.string(from: prog.start)) - \(shortTimeFormatter.string(from: prog.end))")
                 .font(.system(size: 9 * guideScale))
                 .foregroundColor(.textTertiary)
+                .layoutPriority(1)
             // Season/episode pill + feed badges on their own row at the
             // bottom of the cell content. On the narrow iPhone/compact cell
             // they read too busy folded onto the time line, so the cell
             // stacks title -> description -> badges top-down.
+            // layoutPriority(1) on this row + the time line: the flexible
+            // description (priority 0) must absorb the height shortfall in
+            // the fixed-height cell -- without it these rows got a partial
+            // sliver and .clipped() cut the badge pills mid-glyph
+            // (Logan 2026-08-07 screenshot).
             compactBadgeRow
+                .layoutPriority(1)
             #endif
         }
         .padding(.leading, 8 + leadingClip)
