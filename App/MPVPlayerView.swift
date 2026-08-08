@@ -1986,6 +1986,22 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 debugLog("[MPV-DISPLAY] preferredDisplayCriteria \(target)Hz " +
                          "(measured \(String(format: "%.2f", fps))fps, " +
                          "matchingEnabled=\(dm.isDisplayCriteriaMatchingEnabled))")
+                // Verify the panel actually honored the request (Match
+                // Content HDMI re-handshakes take 1-2s), and hand the real
+                // rate to mpv: with display fps unknown ("display=0.0" in
+                // MPV-PERF) its framedrop estimator runs blind and the
+                // Stream Info drops counter counts phantom drops even when
+                // the layer presents every frame on time (ch 35 soak,
+                // 2026-08-07: late=1/14400 yet vo_drops +125/15s).
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self, weak window] in
+                    guard let self, let screen = window?.screen else { return }
+                    let hz = screen.maximumFramesPerSecond
+                    debugLog("[MPV-DISPLAY] panel reports \(hz)Hz 3s after criteria request")
+                    if let mpv = self.activeMPVHandle() {
+                        var d = Double(hz)
+                        mpv_set_property(mpv, "display-fps-override", MPV_FORMAT_DOUBLE, &d)
+                    }
+                }
             }
         }
 
