@@ -1226,7 +1226,7 @@ final class GuideStore: ObservableObject {
         }
         let explicit = server.dispatcharrXMLTVURL.trimmingCharacters(in: .whitespacesAndNewlines)
         var seen = Set<String>()
-        let urls: [URL] = sources.compactMap { src in
+        let candidates: [(sourceID: Int, url: URL)] = sources.compactMap { src in
             guard src.isActive ?? true,
                   src.sourceType == "xmltv",
                   src.hasChannels != false,
@@ -1236,22 +1236,47 @@ final class GuideStore: ObservableObject {
                   let scheme = u.scheme?.lowercased(),
                   scheme == "http" || scheme == "https",
                   seen.insert(raw).inserted else { return nil }
-            return u
+            return (src.id, u)
         }
-        guard !urls.isEmpty else { return }
-        // Bridge channels to the tvg_id the upstream feed keys by (same
-        // map the grid merge uses; see fetchDispatcharr). Failure just
-        // degrades matching to raw tvg_id / number / UUID.
-        var bridgedTVGIDs: [String: [String]] = [:]
-        if let epgMap = try? await api.getAllEPGData() {
-            for ch in channels {
-                guard let epgID = ch.dispatcharrEPGDataID,
-                      let tvg = epgMap[epgID], !tvg.isEmpty else { continue }
-                let key = tvg.lowercased()
-                if bridgedTVGIDs[key]?.contains(ch.id) != true {
-                    bridgedTVGIDs[key, default: []].append(ch.id)
-                }
+        guard !candidates.isEmpty else { return }
+        // GH #53: scope every feed to the channels Dispatcharr actually
+        // sourced FROM it. Previously all channels and all bridged keys went
+        // to every feed, so two providers reusing one tvg-id (common; the
+        // value is a broadcaster string, not a GUID) both wrote into the same
+        // channel. That is the second half of the FANSEAT report: named
+        // matches belonging to sibling channels turning up on `120 1`.
+        //
+        // Each EPGData row names both its tvg_id and its source, so
+        // source -> channels falls straight out of /api/epg/epgdata/. If that
+        // call fails there is nothing to scope BY, and layering wholesale is
+        // what caused the bug, so skip the pass entirely: this is bonus
+        // catch-up depth, never the user's guide.
+        guard let epgRows = try? await api.getAllEPGDataRows() else {
+            debugLog("📺 Dispatcharr upstream layering: epgdata unavailable, cannot scope feeds; skipping")
+            return
+        }
+        var sourceIDByEPGDataID: [Int: Int] = [:]
+        var tvgIDByEPGDataID: [Int: String] = [:]
+        for row in epgRows where !row.tvgID.isEmpty {
+            tvgIDByEPGDataID[row.id] = row.tvgID
+            if let src = row.epgSource { sourceIDByEPGDataID[row.id] = src }
+        }
+        var channelsBySource: [Int: [ChannelDisplayItem]] = [:]
+        var bridgedBySource: [Int: [String: [String]]] = [:]
+        for ch in channels {
+            guard let epgID = ch.dispatcharrEPGDataID,
+                  let sourceID = sourceIDByEPGDataID[epgID],
+                  let tvg = tvgIDByEPGDataID[epgID], !tvg.isEmpty else { continue }
+            channelsBySource[sourceID, default: []].append(ch)
+            let key = tvg.lowercased()
+            if bridgedBySource[sourceID]?[key]?.contains(ch.id) != true {
+                bridgedBySource[sourceID, default: [:]][key, default: []].append(ch.id)
             }
+        }
+        let urls = candidates.filter { channelsBySource[$0.sourceID]?.isEmpty == false }
+        guard !urls.isEmpty else {
+            debugLog("📺 Dispatcharr upstream layering: no feed supplies any loaded channel; nothing to layer")
+            return
         }
         let historyStart = Date().addingTimeInterval(-GuideStore.activeRetentionSeconds())
         // Android's identical loop caused the 2026-08-08 Discord report: every
@@ -1262,20 +1287,25 @@ final class GuideStore: ObservableObject {
         // per source, and a whole-phase deadline checked between sources.
         let deadline = Date().addingTimeInterval(Self.upstreamEPGTotalBudget)
         var layered = 0
-        for url in urls.prefix(Self.maxUpstreamEPGSources) {
+        for (sourceID, url) in urls.prefix(Self.maxUpstreamEPGSources) {
             if Date() >= deadline {
                 debugLog("📺 upstream-source layering: budget spent after \(layered) source(s); skipping \(min(urls.count, Self.maxUpstreamEPGSources) - layered) more")
                 break
             }
-            debugLog("📺 [EPG source=dispatcharr upstream-source] host=\(url.host ?? "?") historyDays=\(GuideStore.activeRetentionDays())")
+            let scopedChannels = channelsBySource[sourceID] ?? []
+            debugLog("📺 [EPG source=dispatcharr upstream-source] host=\(url.host ?? "?") scopedChannels=\(scopedChannels.count) historyDays=\(GuideStore.activeRetentionDays())")
             // Per-source ceiling: one enormous or stalled feed must not hold the
             // grid (which the user already has) hostage behind it.
             let sourceTask = Task {
+                // GH #53: scopedChannels, not every channel. The channel maps
+                // fetchXMLTVFromURL builds (tvg-id, number, UUID) are derived
+                // from this list, so a duplicate tvg-id in an unrelated feed
+                // has no channel here to land on.
                 await fetchXMLTVFromURL(url: url,
-                                        channels: channels,
+                                        channels: scopedChannels,
                                         windowStart: historyStart,
                                         windowEnd: windowEnd,
-                                        extraTVGIDs: bridgedTVGIDs,
+                                        extraTVGIDs: bridgedBySource[sourceID] ?? [:],
                                         categoryServerID: server.id.uuidString,
                                         replaceExisting: false)
             }
