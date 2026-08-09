@@ -57,6 +57,14 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.7",
+            title: "What's new in 1.8.7",
+            bullets: [
+                "The guide now appears as soon as your server sends it, instead of waiting behind large guide-history downloads. Deeper catch-up history still arrives; it fills in quietly in the background a minute or two later"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.7")
+        ),
+        WhatsNewRelease(
             version: "1.8.6",
             title: "What's new in 1.8.6",
             bullets: [

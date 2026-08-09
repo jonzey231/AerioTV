@@ -762,11 +762,29 @@ final class GuideStore: ObservableObject {
             // commit before fetchXMLTVFromURL writes `programs` (a
             // write between begin and end would be lost to the batch
             // re-assignment).
-            await layerDispatcharrUpstreamSources(
-                server: server,
-                channels: channels,
-                windowEnd: windowEnd
-            )
+            //
+            // NOT awaited (Discord reports 2026-08-08, verified against an
+            // affected server): awaiting here held fetchUpcoming - and the
+            // sync indicator, and the guide's first paint on a cold cache -
+            // hostage to downloads of multi-hundred-MB national XMLTV feeds.
+            // The grid is already committed at this point; the layering only
+            // ADDS history, and fetchXMLTVFromURL merges into `programs`
+            // per-source, so detaching changes nothing about correctness,
+            // only about who waits. Android shipped the same restructure
+            // (grid in 4.1s, 31,625 history rows merged 104s later in
+            // background, measured on the affected server).
+            if !upstreamLayeringInFlight {
+                upstreamLayeringInFlight = true
+                Task { [weak self] in
+                    guard let self else { return }
+                    await self.layerDispatcharrUpstreamSources(
+                        server: server,
+                        channels: channels,
+                        windowEnd: windowEnd
+                    )
+                    self.upstreamLayeringInFlight = false
+                }
+            }
         case .xtreamCodes:
             // Xtream: still need per-channel fetching with batches
             let initialBatchSize = 40
@@ -1273,6 +1291,11 @@ final class GuideStore: ObservableObject {
             layered += 1
         }
     }
+
+    /// True while a background upstream-layering pass is running. A refresh
+    /// mid-pass must not start a second one: the feeds are identical and the
+    /// downloads are enormous.
+    private var upstreamLayeringInFlight = false
 
     /// Upstream Dispatcharr XMLTV feeds layered for catch-up depth (task #210).
     /// Was 8. Each is a FULL XMLTV download on every EPG load, and the value of
