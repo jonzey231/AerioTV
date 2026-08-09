@@ -569,6 +569,44 @@ struct MoviesView: View {
                     .padding(.top, 60)
                 Spacer()
             } else {
+                #if os(tvOS)
+                alphaJumpGrid
+                #else
+                gridScroll
+                #endif
+            }
+        }
+    }
+
+    #if os(tvOS)
+    /// Grid with the alpha-jump rail down its left edge.
+    ///
+    /// The rail is a SIBLING of the scroll view inside one ScrollViewReader,
+    /// not an overlay: an overlay would float over grid column 0 and steal the
+    /// posters underneath it. Laying them out side by side is also what makes
+    /// D-pad Left out of column 0 land on the rail and Right return to the
+    /// grid, since each is its own focusSection.
+    ///
+    /// Hidden unless the sort is Title (a letter rail against a
+    /// rating-ordered grid jumps nowhere the letters predict) and unless
+    /// there is more than one bucket to jump between.
+    private var alphaJumpGrid: some View {
+        ScrollViewReader { proxy in
+            HStack(spacing: 0) {
+                let buckets = MediaGridQuery.alphaIndex(for: filteredMovies)
+                if browse.sort.supportsAlphaJump, buckets.count > 1 {
+                    AlphaJumpRail(buckets: buckets) { index in
+                        guard index >= 0, index < filteredMovies.count else { return }
+                        proxy.scrollTo(filteredMovies[index].id, anchor: .top)
+                    }
+                }
+                gridScroll
+            }
+        }
+    }
+    #endif
+
+    private var gridScroll: some View {
                 ScrollView {
                     // Continue Watching lives on the Home section now, as one
                     // merged rail across movies and episodes (dossier 5.3).
@@ -585,6 +623,8 @@ struct MoviesView: View {
                             #else
                             .buttonStyle(.plain)
                             #endif
+                            // Scroll target for the alpha-jump rail.
+                            .id(item.id)
                         }
                     }
                     .padding(16)
@@ -628,8 +668,6 @@ struct MoviesView: View {
                 // painting an opaque platter over that region.
                 .aerioContentUnderTabBar()
                 #endif
-            }
-        }
     }
 
     // MARK: - Empty / Error

@@ -362,6 +362,36 @@ struct TVShowsView: View {
                     .padding(.top, 60)
                 Spacer()
             } else {
+                #if os(tvOS)
+                alphaJumpGrid
+                #else
+                gridScroll
+                #endif
+            }
+        }
+    }
+
+    #if os(tvOS)
+    /// Grid with the alpha-jump rail down its left edge. Twin of MoviesView's;
+    /// see there for why the rail is a sibling of the scroll view rather than
+    /// an overlay, and why it is gated on Title sort.
+    private var alphaJumpGrid: some View {
+        ScrollViewReader { proxy in
+            HStack(spacing: 0) {
+                let buckets = MediaGridQuery.alphaIndex(for: filteredShows)
+                if browse.sort.supportsAlphaJump, buckets.count > 1 {
+                    AlphaJumpRail(buckets: buckets) { index in
+                        guard index >= 0, index < filteredShows.count else { return }
+                        proxy.scrollTo(filteredShows[index].id, anchor: .top)
+                    }
+                }
+                gridScroll
+            }
+        }
+    }
+    #endif
+
+    private var gridScroll: some View {
                 ScrollView {
                     // Continue Watching lives on the Home section now, as one
                     // merged rail across movies and episodes (dossier 5.3).
@@ -378,6 +408,8 @@ struct TVShowsView: View {
                             #else
                             .buttonStyle(.plain)
                             #endif
+                            // Scroll target for the alpha-jump rail.
+                            .id(item.id)
                         }
                     }
                     .padding(16)
@@ -420,8 +452,6 @@ struct TVShowsView: View {
                 // painting an opaque platter over that region.
                 .aerioContentUnderTabBar()
                 #endif
-            }
-        }
     }
 
     // MARK: - Empty / Error
