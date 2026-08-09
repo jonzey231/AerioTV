@@ -1844,14 +1844,23 @@ struct DispatcharrAPI {
     /// Callers should cache the result for the life of the EPG
     /// fetch (it doesn't change between bulk grid calls).
     func getAllEPGData() async throws -> [Int: String] {
-        let rows = try await fetchAllPages(DispatcharrEPGData.self,
-                                            firstPath: "/api/epg/epgdata/?page_size=500")
         var map: [Int: String] = [:]
+        let rows = try await getAllEPGDataRows()
         map.reserveCapacity(rows.count)
         for row in rows where !row.tvgID.isEmpty {
             map[row.id] = row.tvgID
         }
         return map
+    }
+
+    /// The same rows, unreduced. GH #53 needs each row's `epg_source`
+    /// as well as its `tvg_id`: an upstream XMLTV feed may only supply
+    /// programmes for the channels Dispatcharr actually sourced FROM
+    /// that feed, and `tvg_id` values (broadcaster strings, not GUIDs)
+    /// collide freely across unrelated providers.
+    func getAllEPGDataRows() async throws -> [DispatcharrEPGData] {
+        try await fetchAllPages(DispatcharrEPGData.self,
+                                firstPath: "/api/epg/epgdata/?page_size=500")
     }
 
     /// Fetches one program's rich detail (categories, rating, etc.)

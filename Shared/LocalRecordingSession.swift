@@ -276,8 +276,33 @@ final class LiveRewindBuffer: @unchecked Sendable {
     // server with join replay disabled costs at most a small
     // packet-aligned gap.
     static let overlapRun = 16
+
+    /// GH #55: byte cap on the overlap hunt, now used ONLY when the
+    /// stream carries no usable PCR.
+    ///
+    /// It used to be the primary bound and it was the bug (identical
+    /// code shipped on both platforms). The hunt discards as it scans,
+    /// so hitting the cap threw away 8 MiB of already-arrived video.
+    /// Destro706's Android logs on GH #55 show the fingerprint was
+    /// never once found and the cap was hit every time, always within
+    /// 436-1068 ms, i.e. the bytes arrive at 60-150 Mbps. That is a
+    /// server backlog burst, not live video: the join replay starts
+    /// BEHIND our head, so our head fingerprint lies in the burst's
+    /// future and can never appear, and we then binned several seconds
+    /// of good video and spliced a hard hole. The hole breaks PTS
+    /// continuity, which is the audio discontinuity storm in the logs.
     static let overlapSearchCap = 8 * 1024 * 1024
     static let overlapSearchMs: Int64 = 3_000
+
+    /// GH #55: seatbelt for the PCR-steered hunt. Its stop condition is
+    /// "the new connection's clock passed our head", which a real replay
+    /// always reaches, so this only fires on a runaway backlog or a
+    /// server that restamps its clock.
+    static let overlapPcrSearchMs: Int64 = 15_000
+
+    /// PCR is a 33-bit 90 kHz counter; it wraps roughly every 26.5 hours.
+    private static let pcrWrap: Int64 = 1 << 33
+
     private var recentHashes: [Int32] = []
     private var spliceTarget: [Int32]?
     private var discardActive = false
@@ -285,11 +310,27 @@ final class LiveRewindBuffer: @unchecked Sendable {
     private var discardedBytes = 0
     private var discardStartMs: Int64 = 0
 
+    // GH #55 PCR steering. The byte fingerprint only works when the new
+    // connection replays bit-identical bytes that our head lies inside;
+    // the stream's own clock says definitively whether incoming bytes
+    // sit behind our head (replay, discard) or past it (fresh, keep).
+    /// Last PCR committed to the buffer, 90 kHz base; -1 = none seen.
+    private var headPcr: Int64 = -1
+    /// PID that carried `headPcr`, so a second program on the same mux
+    /// cannot be mistaken for the clock being tracked.
+    private var headPcrPid = -1
+    private var spliceAnchorPcr: Int64 = -1
+    private var spliceAnchorPid = -1
+    /// Set once the discard scan sees any PCR on the anchor PID; while
+    /// false the byte cap is still the only available bound.
+    private var sawAnchorPcr = false
+
     /// The NEXT appended bytes come from a fresh connection: drop the
     /// packet-fragment carry and re-scan for TS sync, then arm the
-    /// overlap trimmer when the head has a usable fingerprint (a run of
-    /// near-identical packets - nulls, repeated PAT/PMT - would
-    /// false-match almost anywhere, hence the variety check).
+    /// overlap trimmer. Two independent stop signals are armed here: the
+    /// head fingerprint (a run of near-identical packets - nulls,
+    /// repeated PAT/PMT - would false-match almost anywhere, hence the
+    /// variety check) and the head's PCR.
     func markDiscontinuity() {
         lock.lock(); defer { lock.unlock() }
         carry.removeAll(keepingCapacity: true)
@@ -299,10 +340,22 @@ final class LiveRewindBuffer: @unchecked Sendable {
         } else {
             spliceTarget = nil
         }
-        discardActive = spliceTarget != nil
+        spliceAnchorPcr = headPcr
+        spliceAnchorPid = headPcrPid
+        sawAnchorPcr = false
+        // Either signal on its own is enough to trim.
+        discardActive = spliceTarget != nil || spliceAnchorPcr >= 0
         matchLen = 0
         discardedBytes = 0
         discardStartMs = 0
+    }
+
+    private func endDiscard() {
+        discardActive = false
+        spliceTarget = nil
+        spliceAnchorPcr = -1
+        spliceAnchorPid = -1
+        sawAnchorPcr = false
     }
 
     /// FNV-1a over one 188-byte packet at [offset] in [buf].
@@ -313,6 +366,44 @@ final class LiveRewindBuffer: @unchecked Sendable {
             h = (h ^ Int32(buf[base + i])) &* 16777619
         }
         return h
+    }
+
+    /// The 33-bit 90 kHz PCR base carried by this packet, or nil if it
+    /// has none. Layout: byte 3 bits 5-4 are adaptation_field_control; a
+    /// value of 2 or 3 means an adaptation field follows at byte 4 as
+    /// (length, flags, ...), and flag 0x10 puts the 48-bit PCR in the
+    /// next 6 bytes - 33 bits of base, 6 reserved, 9 of extension. Only
+    /// the base is needed to order two points in the same stream.
+    private static func packetPcr(_ buf: Data, _ offset: Int) -> Int64? {
+        let b = buf.startIndex + offset
+        guard buf[b] == 0x47 else { return nil }
+        let afc = (Int(buf[b + 3]) >> 4) & 0x03
+        guard afc == 2 || afc == 3 else { return nil }
+        let afLen = Int(buf[b + 4])
+        // Needs the flags byte plus 6 PCR bytes, and must stay inside
+        // the packet: a malformed length must not read into the next one.
+        guard afLen >= 7, 5 + afLen <= tsPacket else { return nil }
+        guard Int(buf[b + 5]) & 0x10 != 0 else { return nil }
+        return (Int64(buf[b + 6]) << 25)
+            | (Int64(buf[b + 7]) << 17)
+            | (Int64(buf[b + 8]) << 9)
+            | (Int64(buf[b + 9]) << 1)
+            | (Int64(buf[b + 10] & 0x80) >> 7)
+    }
+
+    private static func packetPid(_ buf: Data, _ offset: Int) -> Int {
+        let b = buf.startIndex + offset
+        return (Int(buf[b + 1] & 0x1F) << 8) | Int(buf[b + 2])
+    }
+
+    /// Signed distance a - b in 90 kHz ticks, tolerating the 33-bit wrap
+    /// (a stream that wraps mid-splice must not read as a 26-hour jump
+    /// backwards).
+    private static func pcrDelta(_ a: Int64, _ b: Int64) -> Int64 {
+        var d = a - b
+        if d > pcrWrap / 2 { d -= pcrWrap }
+        if d < -pcrWrap / 2 { d += pcrWrap }
+        return d
     }
 
     func append(_ data: Data) {
@@ -334,40 +425,82 @@ final class LiveRewindBuffer: @unchecked Sendable {
         guard whole > 0 else { return }
 
         var from = 0
-        if discardActive, let target = spliceTarget {
-            // Splice trimmer: hash packets and discard until the head
-            // fingerprint run completes; the region before it is the
-            // server's replay of content the buffer already holds.
+        if discardActive {
+            // Splice trimmer: discard the new connection's packets for
+            // as long as they are content the buffer already holds, then
+            // splice. Two stop signals, in priority order:
+            //
+            //  1. The byte fingerprint of our head. When the replay
+            //     really does contain our head, this splices bit-exactly.
+            //  2. The stream's own clock. Every PCR says where incoming
+            //     bytes sit relative to the head we committed; once one
+            //     passes the anchor, the connection has caught up and
+            //     everything from that packet on is material we do NOT
+            //     have, so the discard ends immediately.
+            //
+            // Signal 2 is what makes the common failure benign. If the
+            // server joins us at or ahead of our head there is no
+            // fingerprint to find, and the old byte cap responded by
+            // binning 8 MiB of arriving video and splicing a hole,
+            // turning a small genuine gap into a multi-second one.
+            //
+            // The anchor is the last PCR COMMITTED and the head can sit
+            // up to one PCR interval past it (~40-100 ms), so this can
+            // re-admit that much duplicate. A sub-frame overlap is a far
+            // better failure than a hole: the demuxer absorbs it,
+            // whereas a hole stalls the audio sink.
             if discardStartMs == 0 { discardStartMs = now }
             var p = 0
-            var found = false
+            var spliceAt: Int?
             while p < whole {
-                let h = Self.packetHash(merged, p)
-                if h == target[matchLen] {
-                    matchLen += 1
-                } else if h == target[0] {
-                    matchLen = 1
+                let packetStart = p
+                if let target = spliceTarget {
+                    let h = Self.packetHash(merged, p)
+                    if h == target[matchLen] {
+                        matchLen += 1
+                    } else if h == target[0] {
+                        matchLen = 1
+                    } else {
+                        matchLen = 0
+                    }
+                    p += Self.tsPacket
+                    if matchLen == target.count {
+                        debugLog("[REWIND] splice overlap trimmed (\(discardedBytes + p) bytes)")
+                        spliceAt = p
+                        break
+                    }
                 } else {
-                    matchLen = 0
+                    p += Self.tsPacket
                 }
-                p += Self.tsPacket
-                if matchLen == target.count {
-                    found = true
-                    break
+                if spliceAnchorPcr >= 0,
+                   let pcr = Self.packetPcr(merged, packetStart),
+                   spliceAnchorPid < 0 || Self.packetPid(merged, packetStart) == spliceAnchorPid {
+                    sawAnchorPcr = true
+                    let aheadMs = Self.pcrDelta(pcr, spliceAnchorPcr) / 90
+                    if aheadMs > 0 {
+                        debugLog("[REWIND] splice resynced on stream clock \(aheadMs)ms past head after discarding \(discardedBytes + packetStart) bytes")
+                        spliceAt = packetStart
+                        break
+                    }
                 }
             }
-            if found {
-                discardActive = false
-                spliceTarget = nil
-                debugLog("[REWIND] splice overlap trimmed (\(discardedBytes + p) bytes)")
-                from = p
+            if let at = spliceAt {
+                endDiscard()
+                from = at
                 guard from < whole else { return }
             } else {
                 discardedBytes += whole
-                if discardedBytes > Self.overlapSearchCap || now - discardStartMs > Self.overlapSearchMs {
-                    discardActive = false
-                    spliceTarget = nil
-                    debugLog("[REWIND] splice fingerprint not found; spliced with a gap after discarding \(discardedBytes) bytes")
+                let elapsed = now - discardStartMs
+                if sawAnchorPcr {
+                    // Steering by the clock: the replay is real and every
+                    // byte discarded is content we already hold.
+                    if elapsed > Self.overlapPcrSearchMs {
+                        endDiscard()
+                        debugLog("[REWIND] splice clock never passed the head in \(elapsed)ms (\(discardedBytes) bytes); splicing with a gap")
+                    }
+                } else if discardedBytes > Self.overlapSearchCap || elapsed > Self.overlapSearchMs {
+                    endDiscard()
+                    debugLog("[REWIND] splice found no head fingerprint and no stream clock within \(discardedBytes) bytes / \(elapsed)ms; splicing with a gap")
                 }
                 return
             }
@@ -387,11 +520,16 @@ final class LiveRewindBuffer: @unchecked Sendable {
                 try h.write(contentsOf: merged.subdata(in: from..<whole))
             }
             headWallMs = now
-            // Keep the head fingerprint fresh for the next discontinuity.
+            // Keep the head fingerprint and the head clock fresh for the
+            // next discontinuity.
             var p = from
             while p < whole {
                 recentHashes.append(Self.packetHash(merged, p))
                 if recentHashes.count > Self.overlapRun { recentHashes.removeFirst() }
+                if let pcr = Self.packetPcr(merged, p) {
+                    headPcr = pcr
+                    headPcrPid = Self.packetPid(merged, p)
+                }
                 p += Self.tsPacket
             }
         } catch {
