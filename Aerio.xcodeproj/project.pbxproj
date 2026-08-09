@@ -84,6 +84,10 @@
 		5A17E5D00000000000B106 /* HomeRowsBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B104 /* HomeRowsBuilder.swift */; };
 		5A17E5D00000000000B109 /* MediaShelfRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B108 /* MediaShelfRow.swift */; };
 		5A17E5D00000000000B10A /* MediaShelfRow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B108 /* MediaShelfRow.swift */; };
+		5A17E5D00000000000B121 /* MediaGridQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B120 /* MediaGridQuery.swift */; };
+		5A17E5D00000000000B122 /* MediaGridQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B120 /* MediaGridQuery.swift */; };
+		5A17E5D00000000000B125 /* AlphaJumpRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B124 /* AlphaJumpRail.swift */; };
+		5A17E5D00000000000B126 /* AlphaJumpRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B124 /* AlphaJumpRail.swift */; };
 		5A17E5D00000000000B10D /* MediaHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B10C /* MediaHomeView.swift */; };
 		5A17E5D00000000000B10E /* MediaHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B10C /* MediaHomeView.swift */; };
 		5A17E5D00000000000A00C /* DispatcharrMediaLibraryAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000A00B /* DispatcharrMediaLibraryAdapter.swift */; };
@@ -353,6 +357,8 @@
 		5A17E5D00000000000B100 /* MoviesTVRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MoviesTVRootView.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000B104 /* HomeRowsBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeRowsBuilder.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000B108 /* MediaShelfRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaShelfRow.swift; sourceTree = "<group>"; };
+		5A17E5D00000000000B120 /* MediaGridQuery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaGridQuery.swift; sourceTree = "<group>"; };
+		5A17E5D00000000000B124 /* AlphaJumpRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlphaJumpRail.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000B10C /* MediaHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaHomeView.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A00B /* DispatcharrMediaLibraryAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrMediaLibraryAdapter.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A100 /* CatalogIngestActor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogIngestActor.swift; sourceTree = "<group>"; };
@@ -887,10 +893,20 @@
 			isa = PBXGroup;
 			children = (
 				5A17E5D00000000000B100 /* MoviesTVRootView.swift */,
+				5A17E5D0000000000000B0A1 /* Browse */,
 				5A17E5D0000000000000B0A0 /* Home */,
 				5A17E5D0000000000000B002 /* Store */,
 			);
 			path = MoviesTV;
+			sourceTree = "<group>";
+		};
+		5A17E5D0000000000000B0A1 /* Browse */ = {
+			isa = PBXGroup;
+			children = (
+				5A17E5D00000000000B124 /* AlphaJumpRail.swift */,
+				5A17E5D00000000000B120 /* MediaGridQuery.swift */,
+			);
+			path = Browse;
 			sourceTree = "<group>";
 		};
 		5A17E5D0000000000000B0A0 /* Home */ = {
@@ -1266,6 +1282,8 @@
 				5A17E5D00000000000A009 /* LibraryDeriver.swift in Sources */,
 				5A17E5D00000000000B101 /* MoviesTVRootView.swift in Sources */,
 				5A17E5D00000000000B105 /* HomeRowsBuilder.swift in Sources */,
+				5A17E5D00000000000B121 /* MediaGridQuery.swift in Sources */,
+				5A17E5D00000000000B125 /* AlphaJumpRail.swift in Sources */,
 				5A17E5D00000000000B109 /* MediaShelfRow.swift in Sources */,
 				5A17E5D00000000000B10D /* MediaHomeView.swift in Sources */,
 				5A17E5D00000000000A006 /* MediaCatalogContainer.swift in Sources */,
@@ -1388,6 +1406,8 @@
 				5A17E5D00000000000A00A /* LibraryDeriver.swift in Sources */,
 				5A17E5D00000000000B102 /* MoviesTVRootView.swift in Sources */,
 				5A17E5D00000000000B106 /* HomeRowsBuilder.swift in Sources */,
+				5A17E5D00000000000B122 /* MediaGridQuery.swift in Sources */,
+				5A17E5D00000000000B126 /* AlphaJumpRail.swift in Sources */,
 				5A17E5D00000000000B10A /* MediaShelfRow.swift in Sources */,
 				5A17E5D00000000000B10E /* MediaHomeView.swift in Sources */,
 				5A17E5D00000000000A007 /* MediaCatalogContainer.swift in Sources */,
