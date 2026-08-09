@@ -50,7 +50,12 @@ struct MediaShelfRow: View {
                 header
 
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: cardSpacing) {
+                    // LazyHStack, not HStack: a plain stack instantiates every
+                    // card in the row up front, and each card's AuthPosterImage
+                    // then loads a full-size poster. Multiply that by the number
+                    // of rows on Home and an Apple TV is jetsammed before the
+                    // user has scrolled anywhere.
+                    LazyHStack(spacing: cardSpacing) {
                         ForEach(items) { item in
                             NavigationLink(value: item) {
                                 VODPosterCard(item: item, headers: headers)

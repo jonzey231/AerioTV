@@ -34,7 +34,10 @@ struct MediaHomeView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: sectionSpacing) {
+            // LazyVStack, not VStack: rows below the fold must not be built
+            // until they are approached. See MediaShelfRow for the other half
+            // of the same mistake.
+            LazyVStack(alignment: .leading, spacing: sectionSpacing) {
                 // Merged Continue Watching: vodType nil selects the merged rail.
                 ContinueWatchingSection(
                     vodType: nil,
@@ -98,10 +101,25 @@ struct MediaHomeView: View {
         let snapshots = (vodStore.movies + vodStore.series).map { item in
             let derived = library(for: item)
             let name = derived.displayName
+            // A PERSONAL library gets its own row. A provider catalog gets ONE
+            // row per server, not one per category.
+            //
+            // Grouping provider content by category was the original reading of
+            // "Recently Added per provider catalog", and it is wrong twice over:
+            // a stock server with a few hundred categories produced a few
+            // hundred rails, which is not a Home screen, and building them all
+            // is what killed the Apple TV. The dossier means one row per
+            // catalog, and a stock server is one catalog.
+            let key = derived.isPersonal
+                ? derived.key
+                : "provider|\(item.serverID.uuidString)"
+            let title = derived.isPersonal
+                ? (name.isEmpty ? "Recently Added" : name)
+                : "Recently Added"
             return HomeRowsBuilder.CatalogSnapshot(
                 item: item,
-                libraryKey: derived.key,
-                libraryDisplayName: name.isEmpty ? "Recently Added" : name,
+                libraryKey: key,
+                libraryDisplayName: title,
                 isPersonalLibrary: derived.isPersonal,
                 createdAt: createdAt["\(item.serverID.uuidString)|\(item.id)"]
             )
