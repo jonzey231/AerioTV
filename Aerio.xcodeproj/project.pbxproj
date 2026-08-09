@@ -87,6 +87,8 @@
 		5A17E5D00000000000B121 /* MediaGridQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B120 /* MediaGridQuery.swift */; };
 		5A17E5D00000000000B122 /* MediaGridQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B120 /* MediaGridQuery.swift */; };
 		5A17E5D00000000000B125 /* AlphaJumpRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B124 /* AlphaJumpRail.swift */; };
+		5A17E5D00000000000B129 /* MediaBrowseModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B128 /* MediaBrowseModel.swift */; };
+		5A17E5D00000000000B12A /* MediaBrowseModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B128 /* MediaBrowseModel.swift */; };
 		5A17E5D00000000000B126 /* AlphaJumpRail.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B124 /* AlphaJumpRail.swift */; };
 		5A17E5D00000000000B10D /* MediaHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B10C /* MediaHomeView.swift */; };
 		5A17E5D00000000000B10E /* MediaHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A17E5D00000000000B10C /* MediaHomeView.swift */; };
@@ -359,6 +361,7 @@
 		5A17E5D00000000000B108 /* MediaShelfRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaShelfRow.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000B120 /* MediaGridQuery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaGridQuery.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000B124 /* AlphaJumpRail.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlphaJumpRail.swift; sourceTree = "<group>"; };
+		5A17E5D00000000000B128 /* MediaBrowseModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaBrowseModel.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000B10C /* MediaHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaHomeView.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A00B /* DispatcharrMediaLibraryAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DispatcharrMediaLibraryAdapter.swift; sourceTree = "<group>"; };
 		5A17E5D00000000000A100 /* CatalogIngestActor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogIngestActor.swift; sourceTree = "<group>"; };
@@ -904,6 +907,7 @@
 			isa = PBXGroup;
 			children = (
 				5A17E5D00000000000B124 /* AlphaJumpRail.swift */,
+				5A17E5D00000000000B128 /* MediaBrowseModel.swift */,
 				5A17E5D00000000000B120 /* MediaGridQuery.swift */,
 			);
 			path = Browse;
@@ -1284,6 +1288,7 @@
 				5A17E5D00000000000B105 /* HomeRowsBuilder.swift in Sources */,
 				5A17E5D00000000000B121 /* MediaGridQuery.swift in Sources */,
 				5A17E5D00000000000B125 /* AlphaJumpRail.swift in Sources */,
+				5A17E5D00000000000B129 /* MediaBrowseModel.swift in Sources */,
 				5A17E5D00000000000B109 /* MediaShelfRow.swift in Sources */,
 				5A17E5D00000000000B10D /* MediaHomeView.swift in Sources */,
 				5A17E5D00000000000A006 /* MediaCatalogContainer.swift in Sources */,
@@ -1408,6 +1413,7 @@
 				5A17E5D00000000000B106 /* HomeRowsBuilder.swift in Sources */,
 				5A17E5D00000000000B122 /* MediaGridQuery.swift in Sources */,
 				5A17E5D00000000000B126 /* AlphaJumpRail.swift in Sources */,
+				5A17E5D00000000000B12A /* MediaBrowseModel.swift in Sources */,
 				5A17E5D00000000000B10A /* MediaShelfRow.swift in Sources */,
 				5A17E5D00000000000B10E /* MediaHomeView.swift in Sources */,
 				5A17E5D00000000000A007 /* MediaCatalogContainer.swift in Sources */,

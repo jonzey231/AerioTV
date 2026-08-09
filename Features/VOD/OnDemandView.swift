@@ -9,6 +9,11 @@ struct OnDemandView: View {
     @Binding var isDetailPushed: Bool
     @Binding var popRequested: Bool
 
+    /// Superseded by MoviesTVRootView in the Movies & TV rebuild; nothing
+    /// constructs this view any more. Kept compiling (rather than deleted in
+    /// the middle of a UI phase) so the removal is its own reviewable change.
+    @StateObject private var browse = MediaBrowseModel()
+
     @State private var segment = 0 // 0 = Movies, 1 = Series
 
     #if os(iOS)
@@ -91,6 +96,7 @@ struct OnDemandView: View {
                 if segment == 0 {
                     MoviesView(
                         vodStore: vodStore,
+                        browse: browse,
                         isPlaying: $isPlaying,
                         isDetailPushed: $isDetailPushed,
                         popRequested: $popRequested
@@ -98,6 +104,7 @@ struct OnDemandView: View {
                 } else {
                     TVShowsView(
                         vodStore: vodStore,
+                        browse: browse,
                         isPlaying: $isPlaying,
                         isDetailPushed: $isDetailPushed,
                         popRequested: $popRequested

@@ -203,6 +203,9 @@ struct AuthPosterImage: View {
 // MARK: - Movies View
 struct MoviesView: View {
     @ObservedObject var vodStore: VODStore
+    /// Shared with the pinned Sort pill in MoviesTVRootView, which lives
+    /// outside this view's NavigationStack.
+    @ObservedObject var browse: MediaBrowseModel
     @Query private var servers: [ServerConnection]
     @Binding var isPlaying: Bool
     @Binding var isDetailPushed: Bool
@@ -267,6 +270,9 @@ struct MoviesView: View {
 
     private var filteredMovies: [VODDisplayItem] {
         if !searchText.isEmpty {
+            // Search results keep relevance order (local matches first, then
+            // server hits): re-sorting them alphabetically would bury the thing
+            // the user just typed the name of.
             var combined = vodStore.movies.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
             let localIDs = Set(combined.map { $0.id })
             combined += vodStore.movieSearchResults.filter { !localIDs.contains($0.id) }
@@ -280,7 +286,7 @@ struct MoviesView: View {
                 return !hiddenGroups.contains(cat)
             }
         }
-        return result
+        return MediaGridQuery.apply(sort: browse.sort, to: result, seed: browse.randomSeed)
     }
 
     /// Whether the navigation stack is at root (no detail pushed).

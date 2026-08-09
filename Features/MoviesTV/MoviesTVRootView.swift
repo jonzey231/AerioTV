@@ -46,6 +46,11 @@ struct MoviesTVRootView: View {
     /// user somewhere else, the way a stored index would.
     @SceneStorage("moviesTV.section") private var storedSection: String = Section.home.rawValue
 
+    /// Sort state, owned here because the Sort control is pinned beside the
+    /// section pills (outside the grids' NavigationStacks) while the thing it
+    /// orders lives inside them.
+    @StateObject private var browse = MediaBrowseModel()
+
     private var section: Section {
         get { Section(rawValue: storedSection) ?? .home }
         nonmutating set { storedSection = newValue.rawValue }
@@ -92,6 +97,7 @@ struct MoviesTVRootView: View {
                 case .movies:
                     MoviesView(
                         vodStore: vodStore,
+                        browse: browse,
                         isPlaying: $isPlaying,
                         isDetailPushed: $isDetailPushed,
                         popRequested: $popRequested
@@ -99,6 +105,7 @@ struct MoviesTVRootView: View {
                 case .tvShows:
                     TVShowsView(
                         vodStore: vodStore,
+                        browse: browse,
                         isPlaying: $isPlaying,
                         isDetailPushed: $isDetailPushed,
                         popRequested: $popRequested
@@ -123,7 +130,47 @@ struct MoviesTVRootView: View {
                     }
                 )
             }
+            // Sort rides in the SAME pinned row as the sections rather than in
+            // a toolbar or behind a long-press: the dossier's 10-foot rule is
+            // that nothing which changes what you are looking at may be hidden
+            // behind an affordance you cannot see. Home is shelves with their
+            // own fixed ordering, so the control only appears on the grids.
+            if section != .home {
+                sortPill
+            }
         }
+    }
+
+    /// Sort as a pinned pill. Uses `Menu` with checkmark labels, the same
+    /// control the Live TV channel list already ships for its sort on both
+    /// platforms, so this is a proven focus surface on tvOS rather than a new
+    /// one invented for this screen.
+    private var sortPill: some View {
+        Menu {
+            ForEach(MediaSort.allCases) { candidate in
+                Button {
+                    browse.sort = candidate
+                } label: {
+                    if browse.sort == candidate {
+                        Label(candidate.label, systemImage: "checkmark")
+                    } else {
+                        Text(candidate.label)
+                    }
+                }
+            }
+        } label: {
+            #if os(tvOS)
+            Text(browse.sort.label)
+            #else
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.up.arrow.down")
+                Text(browse.sort.label)
+            }
+            #endif
+        }
+        #if os(tvOS)
+        .buttonStyle(MoviesTVSortPillStyle())
+        #endif
     }
 
     #if os(iOS)
@@ -150,6 +197,32 @@ struct MoviesTVRootView: View {
     }
     #endif
 }
+
+#if os(tvOS)
+/// Sort pill styling. Mirrors `DVRSegmentPillButtonStyle`'s unselected state so
+/// the control reads as a sibling of the section pills, and owns its focus
+/// visual through `isFocused` so tvOS never paints its squared platter over the
+/// capsule (see `feedback_tvos_focus_squared_platter`).
+private struct MoviesTVSortPillStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        let focused = isFocused
+        return configuration.label
+            .font(.system(size: 22, weight: .medium))
+            .foregroundColor(focused ? .white : .textSecondary)
+            .padding(.horizontal, 26)
+            .padding(.vertical, 13)
+            .background(Capsule().fill(Color.elevatedBackground))
+            .overlay(
+                Capsule().stroke(focused ? Color.accentPrimary : Color.clear, lineWidth: 2)
+            )
+            .scaleEffect(focused ? 1.05 : 1.0)
+            .opacity(focused ? 1.0 : 0.85)
+            .animation(.easeInOut(duration: 0.15), value: focused)
+    }
+}
+#endif
 
 /// Home wrapped in its own NavigationStack so poster taps push a detail exactly
 /// as they do from the grids, including the tab-bar hide/restore behaviour.
