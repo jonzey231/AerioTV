@@ -57,6 +57,15 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.8",
+            title: "What's new in 1.8.8",
+            bullets: [
+                "Fixed glitches and audio dropouts after pausing or rewinding live TV. When the app reconnected to your server it could throw away several seconds of video it had already received and leave a hole in the buffer, which is what broke the picture and sound where playback crossed that point",
+                "Guide accuracy on Direct Connect: channels that share a placeholder guide entry no longer show each other's schedule, and programmes from one guide provider no longer appear on another provider's channels"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.8")
+        ),
+        WhatsNewRelease(
             version: "1.8.7",
             title: "What's new in 1.8.7",
             bullets: [
