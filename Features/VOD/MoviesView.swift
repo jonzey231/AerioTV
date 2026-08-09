@@ -292,6 +292,16 @@ struct MoviesView: View {
     /// Whether the navigation stack is at root (no detail pushed).
     var isAtRoot: Bool { navPath.isEmpty }
 
+    /// tvOS raises the filter sheet from the pinned pill, which lives outside
+    /// this view; iOS still raises it from its own navigation-bar button.
+    private var filterSheetBinding: Binding<Bool> {
+        #if os(tvOS)
+        $browse.showFilter
+        #else
+        $showManageGroups
+        #endif
+    }
+
     var body: some View {
         NavigationStack(path: $navPath) {
             ZStack {
@@ -362,7 +372,7 @@ struct MoviesView: View {
                     vodStore.refreshMovies(servers: servers)
                 }
             }
-            .sheet(isPresented: $showManageGroups) {
+            .sheet(isPresented: filterSheetBinding) {
                 ManageGroupsSheet(
                     title: "Manage Groups",
                     allGroups: vodStore.movieCategories.map(\.name),
@@ -517,15 +527,10 @@ struct MoviesView: View {
                 }
 
                 Spacer()
-
-                Button {
-                    showManageGroups = true
-                } label: {
-                    Text("Filter")
-                        .font(.headlineSmall)
-                        .foregroundColor(.accentPrimary)
-                }
-                .buttonStyle(TVNoHighlightButtonStyle())
+                // Filter moved up to the pinned pill row beside Sort (A3):
+                // a control that changes what the grid shows should not sit at
+                // a different altitude from its sibling, nor scroll with the
+                // content it filters.
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)

@@ -137,9 +137,32 @@ struct MoviesTVRootView: View {
             // own fixed ordering, so the control only appears on the grids.
             if section != .home {
                 sortPill
+                #if os(tvOS)
+                filterPill
+                #endif
             }
         }
     }
+
+    #if os(tvOS)
+    /// Filter, pinned beside Sort. It already existed, but as a text button
+    /// tucked into the search bar below, where it sat at a different altitude
+    /// from the control it belongs with and was easy to miss. The dossier puts
+    /// both controls in the pinned row for the same reason: at 10 feet, the
+    /// things that change what you are looking at have to be visible without
+    /// hunting.
+    private var filterPill: some View {
+        Button {
+            browse.showFilter = true
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "line.3.horizontal.decrease")
+                Text("Filter")
+            }
+        }
+        .buttonStyle(MoviesTVSortPillStyle())
+    }
+    #endif
 
     /// Sort as a pinned pill. Uses `Menu` with checkmark labels, the same
     /// control the Live TV channel list already ships for its sort on both
@@ -159,14 +182,15 @@ struct MoviesTVRootView: View {
                 }
             }
         } label: {
-            #if os(tvOS)
-            Text(browse.sort.label)
-            #else
-            HStack(spacing: 6) {
+            // Labelled "Sort: Title", not bare "Title". Sitting in the same row
+            // as Home / Movies / TV Shows, a one-word pill reads as a fourth
+            // SECTION rather than as the control that orders the one you are
+            // in. The icon alone did not fix that at 10 feet, so the pill says
+            // what it does as well as what it is set to.
+            HStack(spacing: 8) {
                 Image(systemName: "arrow.up.arrow.down")
-                Text(browse.sort.label)
+                Text("Sort: \(browse.sort.label)")
             }
-            #endif
         }
         #if os(tvOS)
         .buttonStyle(MoviesTVSortPillStyle())

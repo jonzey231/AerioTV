@@ -29,6 +29,13 @@ final class MediaBrowseModel: ObservableObject {
     /// you scroll is unusable. Once per app run is the useful middle.
     let randomSeed: UInt64
 
+    /// Raised by the pinned Filter pill; the visible grid presents its own
+    /// filter sheet from it. Lives here for the same reason `sort` does: the
+    /// pill is outside the grids' NavigationStacks. Only one grid is in the
+    /// tree at a time (the root switches on section), so a single flag cannot
+    /// present two sheets at once.
+    @Published var showFilter = false
+
     init() {
         let stored = UserDefaults.standard.string(forKey: Self.sortKey)
         self.sort = stored.flatMap(MediaSort.init(rawValue:)) ?? .title
