@@ -400,6 +400,17 @@ struct VODDetailView: View {
     }
 
     // MARK: - Hero
+
+    /// tvOS gets roughly half the 1080p screen; every other platform keeps the
+    /// 280pt banner the phone layout was tuned around.
+    private var heroHeight: CGFloat {
+        #if os(tvOS)
+        520
+        #else
+        280
+        #endif
+    }
+
     private var heroSection: some View {
         ZStack(alignment: .bottomLeading) {
             // Backdrop or poster as hero.
@@ -430,11 +441,29 @@ struct VODDetailView: View {
             GeometryReader { geo in
                 AuthPosterImage(url: heroURL, headers: serverHeaders())
                     .aspectRatio(contentMode: .fill)
-                    .frame(width: geo.size.width, height: 280)
+                    .frame(width: geo.size.width, height: heroHeight)
                     .clipped()
             }
-            .frame(height: 280)
+            .frame(height: heroHeight)
+            #if os(tvOS)
+            // A3: the 10-foot hero is a backdrop you can read the room by,
+            // not a banner. 280pt was a quarter of a 1080p screen and read as
+            // a thumbnail from a sofa. Two scrims rather than one: the bottom
+            // gradient keeps the title legible as before, and a leading-edge
+            // scrim carries the text block that sits bottom-left, which a
+            // purely vertical gradient leaves floating over whatever the
+            // image happens to be doing on that side.
             .overlay(LinearGradient.heroOverlay)
+            .overlay(
+                LinearGradient(
+                    colors: [Color.appBackground.opacity(0.92), .clear],
+                    startPoint: .leading,
+                    endPoint: .center
+                )
+            )
+            #else
+            .overlay(LinearGradient.heroOverlay)
+            #endif
 
             HStack(alignment: .bottom, spacing: 14) {
                 // Small poster thumbnail
@@ -909,9 +938,41 @@ struct VODDetailView: View {
                 // Episode list
                 if selectedSeason < series.seasons.count {
                     let episodes = series.seasons[selectedSeason].episodes
+                    #if os(tvOS)
+                    // A3: episodes are a horizontal 16:9 shelf on tvOS, not a
+                    // vertical list. A list of wide rows makes the viewer page
+                    // down through a season one row at a time, while a shelf
+                    // puts a season's worth in reach of Left and Right and
+                    // matches how every other row on this platform behaves.
+                    //
+                    // LazyHStack, not HStack: each card loads a still, and a
+                    // long season instantiated up front is the same jetsam
+                    // risk MediaShelfRow documents.
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(spacing: 24) {
+                            ForEach(episodes) { ep in
+                                TVEpisodeCard(
+                                    ep: ep,
+                                    headers: serverHeaders(),
+                                    progress: progressByEpisodeID[ep.id]
+                                ) {
+                                    playEpisode(ep)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        // Focus scaling on the edge cards overflows the rail's
+                        // bounds; without vertical room the grown card clips.
+                        .padding(.vertical, 12)
+                    }
+                    // Own focus section so Down from the season pills lands on
+                    // the leftmost VISIBLE card rather than a geometric guess.
+                    .focusSection()
+                    #else
                     ForEach(episodes) { ep in
                         episodeRow(ep)
                     }
+                    #endif
                 }
             }
         }
@@ -1969,3 +2030,73 @@ extension VODStore {
         return hit
     }
 }
+
+#if os(tvOS)
+/// One episode as a 16:9 shelf card.
+///
+/// Sibling of `TVEpisodeRowButton`, which stays for the phone and pad layouts:
+/// a wide row reads well when you scroll vertically with a thumb, and badly
+/// when you traverse a season with a D-pad. The card carries the same three
+/// things the row did (still, identity, progress) in the shape the rest of the
+/// tvOS surfaces already use.
+///
+/// Focus visual is owned through `TVCardButtonStyle`, the same style the
+/// poster grids and Home shelves use, so an episode focuses like everything
+/// else on the platform rather than growing its own idiom.
+private struct TVEpisodeCard: View {
+    let ep: VODEpisode
+    let headers: [String: String]
+    let progress: WatchProgress?
+    let action: () -> Void
+
+    private let cardWidth: CGFloat = 340
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 10) {
+                ZStack(alignment: .bottom) {
+                    AuthPosterImage(url: ep.posterURL, headers: headers)
+                        .aspectRatio(contentMode: .fill)
+                        .frame(width: cardWidth, height: cardWidth * 9.0 / 16.0)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    // Resume bar, drawn only when there is something to resume.
+                    // Hidden at 0 so an untouched season is not a wall of empty
+                    // tracks.
+                    if let fraction = progressFraction, fraction > 0 {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Rectangle()
+                                    .fill(Color.white.opacity(0.25))
+                                Rectangle()
+                                    .fill(Color.accentPrimary)
+                                    .frame(width: geo.size.width * fraction)
+                            }
+                        }
+                        .frame(height: 5)
+                        .clipShape(Capsule())
+                        .padding(.horizontal, 8)
+                        .padding(.bottom, 8)
+                    }
+                }
+
+                Text("\(ep.episodeNumber). \(ep.title)")
+                    .font(.labelMedium)
+                    .foregroundColor(.textPrimary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: cardWidth, alignment: .leading)
+            }
+        }
+        .buttonStyle(TVCardButtonStyle())
+    }
+
+    /// Nil when the episode has no usable duration, so the bar is omitted
+    /// rather than drawn at a fraction of an unknown whole.
+    private var progressFraction: Double? {
+        guard let progress, progress.durationMs > 0 else { return nil }
+        return min(1.0, max(0.0, Double(progress.positionMs) / Double(progress.durationMs)))
+    }
+}
+#endif
