@@ -57,6 +57,20 @@ enum WhatsNewStore {
     /// summary on their next launch.
     static let releases: [WhatsNewRelease] = [
         WhatsNewRelease(
+            version: "1.8.9",
+            title: "What's new in 1.8.9",
+            bullets: [
+                "Xtream Codes playlists get their LIVE and NEW badges and category colours back. On servers reachable only over plain HTTP the full guide download was being blocked before it started, so the app quietly fell back to a smaller guide feed that carries no categories or badges at all",
+                "When you turn on iCloud Sync, AerioTV now asks what should come across before anything is pulled down, and each device chooses for itself. Your customised Apple TV remote button assignments are their own category and stay on the TV that made them, so a TV with a different remote no longer inherits the wrong map",
+                "Turning on sync as a brand-new user with nothing to restore now leaves sync switched on, so everything from that point forward keeps in step",
+                "The TV Guide has its own Manage Groups button again on Apple TV, next to the group pills and beside the Groups heading in the sidebar",
+                "Live Rewind now releases a channel's buffer as soon as you leave it instead of holding on to it, which could add up to gigabytes over an evening of channel surfing",
+                "A playlist that answers with an empty response is reported as an error instead of appearing as a playlist with no channels",
+                "Fixed the gesture hint in the top-left of the TV Guide running into the tab bar"
+            ],
+            releaseURL: URL(string: "https://github.com/jonzey231/AerioTV/releases/tag/v1.8.9")
+        ),
+        WhatsNewRelease(
             version: "1.8.8",
             title: "What's new in 1.8.8",
             bullets: [
