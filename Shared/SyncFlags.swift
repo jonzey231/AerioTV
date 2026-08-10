@@ -97,6 +97,17 @@ enum SyncCategory: String, CaseIterable, Identifiable {
 /// sync lane just like every other Bool preference.
 extension SyncCategory {
     static var allDefaultsKeys: [String] {
-        SyncCategory.allCases.map(\.defaultsKey)
+        // `remoteControl` is deliberately EXCLUDED: it is a per-device choice
+        // and must not ride the sync lane like the others.
+        //
+        // The whole point of the category (Discord: Glitzbr) is "this TV has a
+        // different remote from my other one". If the flag synced, turning it
+        // off on the odd TV out would propagate and turn it off on the main TV
+        // too, which then stops publishing its map - the opposite of what he
+        // asked for. Every other category is a genuinely account-wide
+        // preference, so they keep syncing.
+        SyncCategory.allCases
+            .filter { $0 != .remoteControl }
+            .map(\.defaultsKey)
     }
 }
