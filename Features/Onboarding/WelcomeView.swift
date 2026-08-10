@@ -5,6 +5,13 @@ struct WelcomeView: View {
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @ObservedObject private var syncManager = SyncManager.shared
 
+    /// Discord (Glitzbr): he turned iCloud sync on during setup and a
+    /// customised remote map from a different-generation Apple TV landed on
+    /// this one. By the time he found the Sync Categories screen the data had
+    /// already arrived, so the choice has to be offered BEFORE the first pull
+    /// - which is what this sheet does. Logan 2026-08-10.
+    @State private var showCategoryChooser = false
+
     var body: some View {
         ZStack {
             Color.appBackground.ignoresSafeArea()
@@ -64,10 +71,7 @@ struct WelcomeView: View {
                     TVOnboardingImportButton(
                         isEnabled: iCloudSyncEnabled,
                         isImporting: syncManager.isImporting,
-                        onTap: {
-                            iCloudSyncEnabled.toggle()
-                            SyncManager.shared.syncSettingChanged(enabled: iCloudSyncEnabled)
-                        }
+                        onTap: { toggleICloudSync() }
                     )
                     .padding(.bottom, 28)
 
@@ -165,6 +169,34 @@ struct WelcomeView: View {
             #endif
         }
         .navigationBarHidden(true)
+        .sheet(isPresented: $showCategoryChooser) {
+            OnboardingSyncCategoryChooser(
+                onContinue: {
+                    showCategoryChooser = false
+                    // Only NOW does anything come down: the categories the
+                    // user just chose are already written, and
+                    // syncSettingChanged is what kicks off the first pull.
+                    iCloudSyncEnabled = true
+                    SyncManager.shared.syncSettingChanged(enabled: true)
+                },
+                onCancel: {
+                    showCategoryChooser = false
+                    // Backing out leaves sync off entirely - nothing was
+                    // pulled, so there is nothing to undo.
+                }
+            )
+        }
+    }
+
+    /// Turning sync ON opens the chooser first and defers the pull until the
+    /// user confirms; turning it OFF is immediate.
+    private func toggleICloudSync() {
+        if iCloudSyncEnabled {
+            iCloudSyncEnabled = false
+            SyncManager.shared.syncSettingChanged(enabled: false)
+        } else {
+            showCategoryChooser = true
+        }
     }
 
     // MARK: - Default Live TV View Picker
@@ -174,8 +206,7 @@ struct WelcomeView: View {
     private var iCloudSyncToggle: some View {
         Button {
             guard !syncManager.isImporting else { return }
-            iCloudSyncEnabled.toggle()
-            SyncManager.shared.syncSettingChanged(enabled: iCloudSyncEnabled)
+            toggleICloudSync()
         } label: {
             HStack(spacing: 12) {
                 ZStack {
@@ -512,5 +543,107 @@ private struct FeaturePill: View {
                 .foregroundColor(.textPrimary)
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Onboarding Sync Category Chooser
+
+/// Shown the moment the user opts into iCloud sync during setup, BEFORE the
+/// first pull runs.
+///
+/// Discord (Glitzbr, 2026-08-10): he enabled sync on a second Apple TV and a
+/// remote button map customised for a different-generation remote came down
+/// with everything else. The per-category controls already existed, but they
+/// live in Settings, and by the time you go looking for them the data has
+/// already landed. Logan's call: ask during onboarding, when the answer still
+/// changes the outcome.
+///
+/// Everything defaults ON, so the common case is one press. The toggles write
+/// the same `syncEnabled.<rawValue>` defaults keys the Settings screen binds
+/// to - one source of truth, and a choice made here shows up there.
+struct OnboardingSyncCategoryChooser: View {
+    let onContinue: () -> Void
+    let onCancel: () -> Void
+
+    /// Local until Continue, so backing out cannot leave a half-applied set.
+    @State private var selection: [SyncCategory: Bool] = Dictionary(
+        uniqueKeysWithValues: SyncCategory.allCases.map { ($0, true) }
+    )
+
+    var body: some View {
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("What should come in from iCloud?")
+                            .font(.headlineLarge)
+                            .foregroundColor(.textPrimary)
+                        Text("You can change any of this later in Settings, and each device chooses for itself.")
+                            .font(.bodySmall)
+                            .foregroundColor(.textSecondary)
+                    }
+
+                    VStack(spacing: 0) {
+                        ForEach(SyncCategory.allCases) { category in
+                            Toggle(isOn: Binding(
+                                get: { selection[category] ?? true },
+                                set: { selection[category] = $0 }
+                            )) {
+                                HStack(spacing: 12) {
+                                    Image(systemName: category.icon)
+                                        .foregroundColor(.accentPrimary)
+                                        .frame(width: 24)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(category.displayName)
+                                            .font(.bodyMedium)
+                                            .foregroundColor(.textPrimary)
+                                        Text(category.subtitle)
+                                            .font(.bodySmall)
+                                            .foregroundColor(.textSecondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 10)
+                            if category != SyncCategory.allCases.last {
+                                Divider().background(Color.textTertiary.opacity(0.2))
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .fill(Color.elevatedBackground)
+                    )
+
+                    VStack(spacing: 10) {
+                        Button {
+                            // Commit BEFORE the caller starts the pull.
+                            for (category, isOn) in selection {
+                                UserDefaults.standard.set(isOn, forKey: category.defaultsKey)
+                            }
+                            onContinue()
+                        } label: {
+                            Text("Turn On iCloud Sync")
+                                .font(.headlineMedium)
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 48)
+                                .background(LinearGradient.accentGradient)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+
+                        Button("Not now", action: onCancel)
+                            .font(.bodyMedium)
+                            .foregroundColor(.textTertiary)
+                    }
+                }
+                .frame(maxWidth: 700)
+                .frame(maxWidth: .infinity)
+                .padding(24)
+            }
+        }
     }
 }

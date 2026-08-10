@@ -194,7 +194,12 @@ struct SyncCategoriesSettingsView: View {
 
     private var footerText: String {
         if iCloudSyncEnabled {
-            return "Each toggle controls whether this device pushes and pulls that category to iCloud. The category-toggle states themselves sync across your devices, so flipping one here will reach your other Apple-ID-signed-in devices. Use the Delete buttons to remove a category's cloud copy without affecting local data."
+            // Discord (Glitzbr) had to ask what actually triggers a sync,
+            // which means the answer was invisible. It is: a local change
+            // pushes itself a couple of seconds later, and an incoming change
+            // from another device is applied as soon as iCloud delivers it.
+            // Sync Now only forces the round trip early.
+            return "Syncing is automatic: a change you make here is sent a few seconds later, and a change from another device is applied as soon as iCloud delivers it. Sync Now on the previous screen just forces that round trip immediately.\n\nEach toggle controls whether this device pushes and pulls that category. The category-toggle states themselves sync across your devices, so flipping one here will reach your other Apple-ID-signed-in devices. Use the Delete buttons to remove a category's cloud copy without affecting local data."
         } else {
             return "iCloud Sync is off. Per-category toggles take effect when you re-enable Sync at the top. The Delete buttons still work — useful for scrubbing stale iCloud state before re-enabling Sync."
         }
