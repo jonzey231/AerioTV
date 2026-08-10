@@ -292,6 +292,19 @@ enum APIError: LocalizedError {
     case networkError(Error)
     case invalidResponse
     case timeout
+    /// A 2xx that carried nothing. Distinct from `.invalidResponse` because
+    /// the request succeeded at the HTTP level and the failure is entirely on
+    /// the server side, so the advice the user needs is different.
+    ///
+    /// Discord (di5cord20 + Matschi, 2026-08-09): a tuliprox Xtream Codes
+    /// playlist connects, verifies, saves and then shows ZERO channels, on
+    /// two different boxes, surviving force-close / cache clear / reboot,
+    /// while the same credentials load fully elsewhere. tuliprox answers ANY
+    /// m3u failure with an empty 204 (`backend/src/api/endpoints/m3u_api.rs`
+    /// maps its whole `Err` arm to `StatusCode::NO_CONTENT`), and 204 is
+    /// inside `200...299`, so the empty download read as a successful fetch
+    /// of an empty playlist. Nothing in the app could tell the user anything.
+    case emptyResponse(Int)
 
     var errorDescription: String? {
         switch self {
@@ -315,6 +328,11 @@ enum APIError: LocalizedError {
             return "Failed to parse server response: \(trimmed)"
         case .networkError(let e):  return "Network error: \(e.localizedDescription)"
         case .invalidResponse:      return "Unexpected response from server"
+        case .emptyResponse(let c):
+            if c == 204 {
+                return "The server accepted the request but returned no data (HTTP 204). That usually means it could not build the playlist for these credentials: check the username and password, and that this device is allowed to connect."
+            }
+            return "The server returned an empty response (HTTP \(c))"
         case .timeout:              return "Connection timed out"
         }
     }

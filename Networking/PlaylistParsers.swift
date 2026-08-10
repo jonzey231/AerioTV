@@ -200,6 +200,18 @@ struct M3UParser {
               (200...299).contains(http.statusCode) else {
             throw APIError.invalidResponse
         }
+        // A 2xx is not enough: the body has to contain something. See
+        // APIError.emptyResponse - a proxy that cannot build the playlist can
+        // report that as an empty 204, which lands inside 200...299 and used
+        // to parse into a perfectly healthy-looking zero-channel playlist.
+        // Server-agnostic on purpose. A legitimately empty source is not
+        // affected: an empty M3U is still "#EXTM3U", so zero bytes always
+        // means something went wrong upstream.
+        let bytes = (try? FileManager.default
+            .attributesOfItem(atPath: tempURL.path)[.size] as? Int) ?? nil
+        if http.statusCode == 204 || bytes == 0 {
+            throw APIError.emptyResponse(http.statusCode)
+        }
         return try parseFile(at: tempURL)
     }
 
