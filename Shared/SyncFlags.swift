@@ -66,6 +66,22 @@ enum SyncCategory: String, CaseIterable, Identifiable {
         }
     }
 
+    /// One-line form for the onboarding chooser. `subtitle` is reference
+    /// copy for the Settings page, where the user has gone looking for
+    /// detail and there is room to read it; on the setup sheet the same
+    /// strings wrapped to three lines each and turned a six-row list into a
+    /// wall of text (Logan 2026-08-10, Apple TV). Say what it is, move on.
+    var briefSubtitle: String {
+        switch self {
+        case .servers:       return "Playlists and server settings"
+        case .watchProgress: return "Where you left off in movies and shows"
+        case .reminders:     return "Program reminders you scheduled"
+        case .preferences:   return "Theme, layout, and Guide settings"
+        case .remoteControl: return "Your custom remote button assignments"
+        case .credentials:   return "Server passwords and API keys"
+        }
+    }
+
     /// Symbol shown in the Settings row.
     var icon: String {
         switch self {

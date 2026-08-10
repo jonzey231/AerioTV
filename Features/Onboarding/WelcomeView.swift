@@ -506,6 +506,115 @@ private struct TVOnboardingNavButton<Destination: View>: View {
     }
 }
 
+/// One category row in the onboarding "what should come in" sheet.
+///
+/// Deliberately NOT a raw SwiftUI `Toggle`. On tvOS a Toggle draws the
+/// system focus platter - a pale slab that washed out both the white title
+/// and the accent-tinted subtitle, so the focused row was the HARDEST one
+/// to read (Logan 2026-08-10, from Apple TV screenshots). It also centers
+/// its label's text, which is why the subtitles were centre-aligned under
+/// left-aligned titles.
+///
+/// Same shape as `TVOnboardingImportButton` above: own the focus visual via
+/// `tvOnboardingCardBG`, keep the text block left-aligned, and light the
+/// On/Off indicator white while focused so it reads against the fill.
+private struct TVOnboardingCategoryRow: View {
+    let category: SyncCategory
+    @Binding var isOn: Bool
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button { isOn.toggle() } label: {
+            HStack(spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.accentPrimary.opacity(0.15))
+                        .frame(width: 44, height: 44)
+                    Image(systemName: category.icon)
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(.accentPrimary)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(category.displayName)
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundColor(.textPrimary)
+                    Text(category.briefSubtitle)
+                        .font(.system(size: 18))
+                        .foregroundColor(.textSecondary)
+                }
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(isOn ? Color.accentPrimary : Color.textTertiary)
+                        .frame(width: 10, height: 10)
+                    Text(isOn ? "On" : "Off")
+                        .font(.system(size: 24, weight: .semibold))
+                        .foregroundColor(isOn
+                            ? (isFocused ? .white : .accentPrimary)
+                            : (isFocused ? .white : .textTertiary))
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+        }
+        .buttonStyle(TVNoHighlightButtonStyle())
+        .focused($isFocused)
+        .background(tvOnboardingCardBG(isFocused))
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Filled primary CTA for onboarding sheets. `.buttonStyle(.plain)` leaves
+/// tvOS free to stack its own pale platter behind the gradient; this owns
+/// the focus visual instead - the fill stays put and focus reads as a white
+/// border plus a small grow, so the white label never loses contrast.
+private struct TVOnboardingPrimaryButton: View {
+    let title: String
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 26, weight: .semibold))
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 64)
+                .background(LinearGradient.accentGradient)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.white.opacity(isFocused ? 0.9 : 0),
+                                      lineWidth: 3)
+                }
+        }
+        .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
+        .focused($isFocused)
+        .scaleEffect(isFocused ? 1.02 : 1.0)
+        .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
+/// Secondary text button ("Not now"). Same treatment as
+/// `TVOnboardingSkipButton` - tint on focus rather than letting tvOS drop a
+/// light pill behind dim grey text, which is what made it unreadable
+/// exactly when it was selected.
+private struct TVOnboardingTextButton: View {
+    let title: String
+    let action: () -> Void
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(title, action: action)
+            .font(.system(size: 22))
+            .foregroundColor(isFocused ? .accentPrimary : .textTertiary)
+            .buttonStyle(TVNoHighlightButtonStyle())
+            .focused($isFocused)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+
 /// "Skip for now" text button with subtle focus highlight.
 private struct TVOnboardingSkipButton: View {
     let action: () -> Void
@@ -584,47 +693,48 @@ struct OnboardingSyncCategoryChooser: View {
                             .foregroundColor(.textSecondary)
                     }
 
-                    VStack(spacing: 0) {
+                    // Rows sit directly on the sheet, each carrying its own
+                    // card. They used to be dividers inside ANOTHER rounded
+                    // card, which read as pills nested in a pill.
+                    VStack(spacing: 8) {
                         ForEach(SyncCategory.allCases) { category in
-                            Toggle(isOn: Binding(
+                            let binding = Binding(
                                 get: { selection[category] ?? true },
                                 set: { selection[category] = $0 }
-                            )) {
-                                HStack(spacing: 12) {
-                                    Image(systemName: category.icon)
-                                        .foregroundColor(.accentPrimary)
-                                        .frame(width: 24)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(category.displayName)
-                                            .font(.bodyMedium)
-                                            .foregroundColor(.textPrimary)
-                                        Text(category.subtitle)
-                                            .font(.bodySmall)
-                                            .foregroundColor(.textSecondary)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
-                                }
+                            )
+                            #if os(tvOS)
+                            TVOnboardingCategoryRow(category: category, isOn: binding)
+                            #else
+                            Toggle(isOn: binding) {
+                                SettingsRow(icon: category.icon,
+                                            iconColor: .accentPrimary,
+                                            title: category.displayName,
+                                            subtitle: category.briefSubtitle)
                             }
-                            .padding(.vertical, 10)
-                            if category != SyncCategory.allCases.last {
-                                Divider().background(Color.textTertiary.opacity(0.2))
-                            }
+                            .tint(.accentPrimary)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(Color.elevatedBackground)
+                            )
+                            #endif
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(Color.elevatedBackground)
-                    )
 
                     VStack(spacing: 10) {
-                        Button {
+                        let commit = {
                             // Commit BEFORE the caller starts the pull.
                             for (category, isOn) in selection {
                                 UserDefaults.standard.set(isOn, forKey: category.defaultsKey)
                             }
                             onContinue()
-                        } label: {
+                        }
+                        #if os(tvOS)
+                        TVOnboardingPrimaryButton(title: "Turn On iCloud Sync", action: commit)
+                        TVOnboardingTextButton(title: "Not now", action: onCancel)
+                        #else
+                        Button(action: commit) {
                             Text("Turn On iCloud Sync")
                                 .font(.headlineMedium)
                                 .foregroundColor(.white)
@@ -638,6 +748,7 @@ struct OnboardingSyncCategoryChooser: View {
                         Button("Not now", action: onCancel)
                             .font(.bodyMedium)
                             .foregroundColor(.textTertiary)
+                        #endif
                     }
                 }
                 .frame(maxWidth: 700)
