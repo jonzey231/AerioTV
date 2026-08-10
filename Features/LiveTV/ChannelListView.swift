@@ -712,7 +712,12 @@ struct ChannelListView: View {
                                 closeGuideSidebar(
                                     rebind: selectedGroup != guideSidebarOriginalGroup
                                 )
-                            }
+                            },
+                            // GH #57: sidebar mode hides the pill row, taking
+                            // the only Manage Groups entry with it. The pane's
+                            // header button restores it without a view switch.
+                            onManageGroups: { showManageGroups = true },
+                            hiddenGroupCount: hiddenGroups.count
                         )
                         .transition(.move(edge: .leading))
                         .focusSection()
@@ -1336,12 +1341,6 @@ struct ChannelListView: View {
                             .submitLabel(.search)
                     }
                 }
-                #else
-                ManageGroupsButton(
-                    action: { showManageGroups = true },
-                    hiddenCount: hiddenGroups.count
-                )
-                .disabled(leftHoldPinningAll)   // #42 Part 1: see Guide toggle above
                 #endif
 
                 // #45: collections placed at the beginning sit before "All".
@@ -1385,6 +1384,20 @@ struct ChannelListView: View {
                 ForEach(collectionsStore.endCollections) { c in
                     collectionPill(c)
                 }
+
+                // GH #57 (Logan 2026-08-10): on TV the round Manage Groups
+                // button sits AFTER the last group, not among the leading
+                // controls. Two reasons: it reads as an action ON the pill row
+                // rather than a fourth mode chip beside Guide/Search, and it
+                // leaves the leading run to the controls that #42's hold-Left
+                // deliberately skips past on its way to "All", so this button
+                // no longer needs to be de-focused during the hold.
+                #if os(tvOS)
+                ManageGroupsButton(
+                    action: { showManageGroups = true },
+                    hiddenCount: hiddenGroups.count
+                )
+                #endif
             }
             .padding(.horizontal, 16)
             #if os(tvOS)

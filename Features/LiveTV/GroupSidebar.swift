@@ -30,6 +30,11 @@ private let groupSidebarAllToken = "All"
 /// exact size + weight so the fitted width matches what actually renders.
 private let groupSidebarRowFontSize: CGFloat = 30
 
+/// Footprint of the header's `ManageGroupsButton` on tvOS: a 30pt symbol
+/// (~34pt wide as drawn) plus `TVManageGroupsButtonStyle`'s 7pt padding on
+/// each side, rounded up so the focus ring never clips at the panel edge.
+private let groupSidebarManageButtonWidth: CGFloat = 52
+
 /// Maps a group token to its sidebar display label: the "All" sentinel becomes
 /// "All Channels", every other token renders as-is.
 func groupSidebarLabel(_ token: String) -> String {
@@ -101,6 +106,14 @@ struct GroupSidebarPanel: View {
     /// Nil = no preview (the player overlay's group stage stays
     /// commit-on-OK only).
     let onRowFocused: ((String) -> Void)?
+    /// GH #57 (Logan 2026-08-10): round Manage Groups button to the right of
+    /// the "Groups" header. Sidebar mode hides the pill row, and with it the
+    /// only entry point into hide/reorder, so the sidebar has to carry its
+    /// own. Nil on the player's channel-list overlay, which is a transient
+    /// tuning surface with no settings affordances.
+    let onManageGroups: (() -> Void)?
+    /// Warning dot on that button when groups are currently hidden.
+    let hiddenGroupCount: Int
 
     @FocusState private var focusedToken: String?
 
@@ -108,12 +121,16 @@ struct GroupSidebarPanel: View {
          selectedToken: String,
          onSelect: @escaping (String) -> Void,
          onDismiss: @escaping () -> Void,
-         onRowFocused: ((String) -> Void)? = nil) {
+         onRowFocused: ((String) -> Void)? = nil,
+         onManageGroups: (() -> Void)? = nil,
+         hiddenGroupCount: Int = 0) {
         self.groups = groups
         self.selectedToken = selectedToken
         self.onSelect = onSelect
         self.onDismiss = onDismiss
         self.onRowFocused = onRowFocused
+        self.onManageGroups = onManageGroups
+        self.hiddenGroupCount = hiddenGroupCount
     }
 
     /// The row that should receive focus + be scrolled into view. Mirrors the
@@ -136,15 +153,38 @@ struct GroupSidebarPanel: View {
             return max(acc, w)
         }
         // 20pt row padding each side + a little breathing room past the text.
-        return min(max(widest + 44, 300), 620)
+        // GH #57: the header now carries the Manage Groups button beside the
+        // title, so a narrow group list must not squeeze it off the panel.
+        // Floor the fit at what that header actually needs.
+        let headerFont = UIFont.systemFont(ofSize: 22, weight: .semibold)
+        let headerTitle = ("Groups" as NSString)
+            .size(withAttributes: [.font: headerFont]).width
+        let headerFloor = onManageGroups == nil
+            ? 0
+            : 20 + headerTitle + 12 + groupSidebarManageButtonWidth + 20
+        return min(max(widest + 44, headerFloor, 300), 620)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Groups")
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundColor(.textSecondary)
-                .padding(.leading, 20)
+            HStack(spacing: 12) {
+                Text("Groups")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(.textSecondary)
+
+                // GH #57: the sidebar's own entry into hide/reorder. Sits in
+                // the header rather than the list so a D-pad Right out of a
+                // row still commits and leaves (the focus engine searches the
+                // focused row's own horizontal band, and this button is above
+                // every row); Up from the top row is what reaches it.
+                if let onManageGroups {
+                    ManageGroupsButton(
+                        action: onManageGroups,
+                        hiddenCount: hiddenGroupCount
+                    )
+                }
+            }
+            .padding(.leading, 20)
 
             ScrollViewReader { proxy in
                 ScrollView {
@@ -221,6 +261,10 @@ struct GuideGroupSidebarPane: View {
     /// close. Nil keeps the legacy Right-cancels behavior.
     let onPreview: ((String) -> Void)?
     let onCommit: (() -> Void)?
+    /// GH #57: opens Manage Groups from the header button. See
+    /// `GroupSidebarPanel.onManageGroups`.
+    let onManageGroups: (() -> Void)?
+    let hiddenGroupCount: Int
 
     @Namespace private var sidebarFocusNS
 
@@ -229,13 +273,17 @@ struct GuideGroupSidebarPane: View {
          onSelect: @escaping (String) -> Void,
          onDismiss: @escaping () -> Void,
          onPreview: ((String) -> Void)? = nil,
-         onCommit: (() -> Void)? = nil) {
+         onCommit: (() -> Void)? = nil,
+         onManageGroups: (() -> Void)? = nil,
+         hiddenGroupCount: Int = 0) {
         self.groups = groups
         self.selectedToken = selectedToken
         self.onSelect = onSelect
         self.onDismiss = onDismiss
         self.onPreview = onPreview
         self.onCommit = onCommit
+        self.onManageGroups = onManageGroups
+        self.hiddenGroupCount = hiddenGroupCount
     }
 
     var body: some View {
@@ -245,7 +293,9 @@ struct GuideGroupSidebarPane: View {
                 selectedToken: selectedToken,
                 onSelect: onSelect,
                 onDismiss: onDismiss,
-                onRowFocused: onPreview
+                onRowFocused: onPreview,
+                onManageGroups: onManageGroups,
+                hiddenGroupCount: hiddenGroupCount
             )
             .padding(.vertical, 24)
             .padding(.leading, 20)
