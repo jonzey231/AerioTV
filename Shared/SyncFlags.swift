@@ -31,6 +31,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
     case watchProgress
     case reminders
     case preferences
+    case remoteControl
     case credentials
 
     var id: String { rawValue }
@@ -42,6 +43,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
         case .watchProgress: return "VOD Watch Progress"
         case .reminders:     return "Reminders"
         case .preferences:   return "App Preferences"
+        case .remoteControl: return "Remote Button Map"
         case .credentials:   return "Credentials"
         }
     }
@@ -57,6 +59,8 @@ enum SyncCategory: String, CaseIterable, Identifiable {
             return "Upcoming-program reminders you scheduled from the EPG."
         case .preferences:
             return "Theme, appearance mode, accent color, default tab, refresh schedule, hidden groups, and Guide Display settings."
+        case .remoteControl:
+            return "Your customised Apple TV remote button assignments. Turn this off on a TV whose remote is a different model from your others."
         case .credentials:
             return "Server passwords and API keys, stored in iCloud Keychain."
         }
@@ -69,6 +73,7 @@ enum SyncCategory: String, CaseIterable, Identifiable {
         case .watchProgress: return "play.circle.fill"
         case .reminders:     return "bell.badge.fill"
         case .preferences:   return "gearshape.2.fill"
+        case .remoteControl: return "av.remote.fill"
         case .credentials:   return "key.fill"
         }
     }

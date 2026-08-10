@@ -26,6 +26,7 @@ struct SyncCategoriesSettingsView: View {
     @AppStorage(SyncCategory.watchProgress.defaultsKey) private var syncWatchProgress = true
     @AppStorage(SyncCategory.reminders.defaultsKey)     private var syncReminders = true
     @AppStorage(SyncCategory.preferences.defaultsKey)   private var syncPreferences = true
+    @AppStorage(SyncCategory.remoteControl.defaultsKey) private var syncRemoteControl = true
     @AppStorage(SyncCategory.credentials.defaultsKey)   private var syncCredentials = true
 
     /// The category whose Delete confirmation is currently being shown.
@@ -41,6 +42,7 @@ struct SyncCategoriesSettingsView: View {
         case .watchProgress: return $syncWatchProgress
         case .reminders:     return $syncReminders
         case .preferences:   return $syncPreferences
+        case .remoteControl: return $syncRemoteControl
         case .credentials:   return $syncCredentials
         }
     }

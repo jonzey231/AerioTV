@@ -428,6 +428,23 @@ final class SyncManager: ObservableObject {
                 NSUbiquitousKeyValueStore.default.synchronize()
                 debugLog("🔵 SyncManager.clearCloudCategory: cleared preferences KVS")
             }
+        case .remoteControl:
+            // The map lives INSIDE the preferences dictionary rather than
+            // under a KVS key of its own, so "delete from iCloud" here means
+            // rewriting that dictionary without the map entry. Removing
+            // prefKVSKey wholesale would take every other preference with it.
+            prefPushDebounce?.cancel(); prefPushDebounce = nil
+            let prefsKey = prefKVSKey
+            let mapKey = RemoteControlStore.mapKey
+            DispatchQueue.main.async {
+                let store = NSUbiquitousKeyValueStore.default
+                if var dict = store.dictionary(forKey: prefsKey) {
+                    dict.removeValue(forKey: mapKey)
+                    store.set(dict, forKey: prefsKey)
+                }
+                store.synchronize()
+                debugLog("🔵 SyncManager.clearCloudCategory: cleared remote map from preferences KVS")
+            }
         case .credentials:
             // Mirrors the credentials-only portion of clearAllICloudData.
             var keychainCleared = 0
@@ -628,6 +645,15 @@ final class SyncManager: ObservableObject {
             if ud.object(forKey: k) != nil { dict[k] = ud.bool(forKey: k) }
         }
 
+        // Remote button map rides its own category, so it is handled BEFORE
+        // the preferences gate: the two toggles are independent, and someone
+        // who turns off App Preferences but leaves Remote Button Map on should
+        // still get their map. The syncDataKeys loop below skips it.
+        if SyncCategory.remoteControl.isEnabled,
+           let v = ud.data(forKey: RemoteControlStore.mapKey) {
+            dict[RemoteControlStore.mapKey] = v
+        }
+
         // Granular gate: when "App Preferences" sync is off, push only the
         // toggle subset above and bail. The other devices' caches stay
         // whatever the user set them to locally.
@@ -642,7 +668,17 @@ final class SyncManager: ObservableObject {
         // Data-typed keys are mirrored through KVS as Data so
         // complex blobs like the custom-categories JSON list
         // round-trip intact across devices.
-        for k in syncDataKeys        { if let v = ud.data(forKey: k)        { dict[k] = v } }
+        //
+        // The remote button map is carved out under its own category
+        // (Discord: Glitzbr). It rode "App Preferences", so the only way to
+        // stop a customised map reaching a second Apple TV - one that is a
+        // different generation with a physically different remote - was to
+        // turn off preference sync wholesale and lose theme, default tab and
+        // everything else with it. See SyncCategory.remoteControl.
+        for k in syncDataKeys {
+            if k == RemoteControlStore.mapKey, !SyncCategory.remoteControl.isEnabled { continue }
+            if let v = ud.data(forKey: k) { dict[k] = v }
+        }
         for k in syncStringArrayKeys { if let v = ud.stringArray(forKey: k) { dict[k] = v } }
         for k in syncHiddenGroupKeys {
             if let data = ud.data(forKey: k),
@@ -761,6 +797,14 @@ final class SyncManager: ObservableObject {
             if let v = dict[k] as? Bool { ud.set(v, forKey: k) }
         }
 
+        // Remote button map rides its own category - applied before the
+        // preferences gate so the two toggles stay independent (mirrors the
+        // carve-out on the push side).
+        if SyncCategory.remoteControl.isEnabled,
+           let v = dict[RemoteControlStore.mapKey] as? Data {
+            ud.set(v, forKey: RemoteControlStore.mapKey)
+        }
+
         // Granular gate: when "App Preferences" sync is off on this device,
         // bail before applying the rest of the prefs payload. Local prefs
         // stay authoritative; the toggle flips above still propagated.
@@ -773,7 +817,13 @@ final class SyncManager: ObservableObject {
         for k in syncBoolKeys        { if let v = dict[k] as? Bool     { ud.set(v, forKey: k) } }
         for k in syncDoubleKeys      { if let v = dict[k] as? Double   { ud.set(v, forKey: k) } }
         for k in syncIntKeys         { if let v = dict[k] as? Int      { ud.set(v, forKey: k) } }
-        for k in syncDataKeys        { if let v = dict[k] as? Data     { ud.set(v, forKey: k) } }
+        // Remote button map is gated separately - see the matching carve-out
+        // on the push side. Applied here as well as pushed, so a TV that opts
+        // out both stops publishing its map AND stops accepting one.
+        for k in syncDataKeys {
+            if k == RemoteControlStore.mapKey, !SyncCategory.remoteControl.isEnabled { continue }
+            if let v = dict[k] as? Data { ud.set(v, forKey: k) }
+        }
         for k in syncStringArrayKeys { if let v = dict[k] as? [String] { ud.set(v, forKey: k) } }
         for k in syncHiddenGroupKeys {
             if let arr = dict[k] as? [String],
