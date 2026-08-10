@@ -4083,18 +4083,21 @@ struct MainTabView: View {
             // clock when the mini-player lines were showing).
             #if os(tvOS)
             if selectedTab == .liveTV && (!nowPlaying.isActive || nowPlaying.isMinimized) {
-                VStack {
+                // GeometryReader so the width budget tracks the real container
+                // rather than a hard-coded point value that goes stale.
+                GeometryReader { geo in
+                    let budget = guideHintWidthBudget(geo.size.width)
                     VStack(alignment: .leading, spacing: 6) {
                         if nowPlaying.isActive && nowPlaying.isMinimized {
-                            guideMenuHint("Back or Play/Pause = resume  ·  Hold Right = close mini player")
+                            guideMenuHint("Play/Pause = resume · Hold Right = close mini",
+                                          budget: budget)
                         }
-                        guideMenuHint(guideNavHintLine)
+                        guideMenuHint(guideNavHintLine, budget: budget)
                     }
                     .padding(.leading, 16)
                     .padding(.top, isAnyBackgroundWork ? 52 : 12)
-                    Spacer()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .zIndex(1)
                 .allowsHitTesting(false)
             }
@@ -5519,33 +5522,60 @@ struct MainTabView: View {
     /// budget resets cleanly.
     #if os(tvOS)
     /// #42 Part 3: a small muted hint badge for the top-left of the Live TV guide.
-    /// Width cap raised 360 -> 560 for the combined "gesture = result" lines;
-    /// the top-left strip beside the centered nav pills has the room.
+    ///
+    /// [budget] is a HARD width cap, not a guess - see `guideHintWidthBudget`.
+    /// Overflow wraps to a second line rather than truncating: there is ample
+    /// empty height between the nav bar and the guide's time axis, so wrapping
+    /// keeps the whole hint readable where an ellipsis would eat it.
     @ViewBuilder
-    private func guideMenuHint(_ text: String) -> some View {
+    private func guideMenuHint(_ text: String, budget: CGFloat) -> some View {
         Text(text)
             .font(.system(size: 15, weight: .medium))
             .foregroundColor(.white.opacity(0.55))
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .frame(maxWidth: 560, alignment: .leading)
+            .lineLimit(2)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: budget, alignment: .leading)
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .background(Color.black.opacity(0.4).clipShape(Capsule()))
     }
 
+    /// Width the corner hints may occupy, so they can never slide under the
+    /// tab bar (Logan 2026-08-10: the pill grew into it).
+    ///
+    /// The tvOS tab bar is a system-drawn `TabView` bar - unlike Android's own
+    /// bar it cannot be measured with a PreferenceKey - but it IS centered, so
+    /// the gutter is `(container - barWidth) / 2` and we only need an upper
+    /// bound on `barWidth`. Measured on the ATV (1920pt screen, 1760pt
+    /// container after the 80pt tvOS safe area) the 4-tab bar is ~835pt, so
+    /// ~210pt per item; 230 is used here so the estimate always runs WIDE and
+    /// the budget errs small. Deriving it from the live tab count also means
+    /// the common 4-tab layout gets the room a fixed worst-case cap would have
+    /// thrown away. Anything still too long wraps inside the budget.
+    private func guideHintWidthBudget(_ containerWidth: CGFloat) -> CGFloat {
+        // Live TV + Settings are always present; the rest are conditional.
+        let visibleTabs = 2
+            + (showFavoritesTab ? 1 : 0)
+            + (showRecordingsTab ? 1 : 0)
+            + (showVODTab ? 1 : 0)
+        let barWidthCeiling = CGFloat(visibleTabs) * 230
+        let gutter = (containerWidth - barWidthCeiling) / 2
+        // Subtract the leading inset (16), the capsule's own horizontal
+        // padding (10 + 10), and a visible 24pt gap before the bar.
+        return max(240, gutter - 16 - 20 - 24)
+    }
+
     /// The guide's always-on nav hint, one compressed line. Hold-Left copy
-    /// DERIVED from the effective guide map; sidebar mode folds short-Left
-    /// and hold-Left into a single "Left / Hold Left = groups" part since
-    /// both stages open the group sidebar.
+    /// DERIVED from the effective guide map. Sidebar mode says plain
+    /// "Left = groups": short Left opens the sidebar there too, so spelling
+    /// out "Left / Hold Left" only made the pill longer.
     private var guideNavHintLine: String {
         var parts = ["Double Back = top channel"]
-        if RemoteControlStore.shared.useGroupSidebar {
-            parts.append("Left / Hold Left = groups")
-        } else if let short = RemoteControlHints.guideHoldLeftShort(RemoteControlStore.shared.map) {
+        if let short = RemoteControlHints.guideHoldLeftShort(RemoteControlStore.shared.map) {
             parts.append(short)
         }
-        return parts.joined(separator: "  ·  ")
+        return parts.joined(separator: " · ")
     }
     #endif
 

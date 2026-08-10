@@ -86,13 +86,34 @@ enum RemoteControlHints {
         return "Hold left on remote to \(phrase)."
     }
 
+    /// Terse phrases for the corner hint chip. `guidePhrase` is written for
+    /// full sentences ("browse earlier programs"); dropped verbatim into the
+    /// chip it pushed the pill under the centered tab bar, so the chip gets
+    /// its own two-or-three-word forms.
+    private static func guidePhraseShort(_ action: GuideRemoteAction) -> String? {
+        switch action {
+        case .timelineBack:     return "earlier"
+        case .timelineForward:  return "later"
+        case .focusGroupPills:  return "group pills"
+        case .pageUp:           return "page up"
+        case .pageDown:         return "page down"
+        case .jumpToNow:        return "now"
+        case .jumpToTop:        return "top channel"
+        case .resumePlayer:     return "player"
+        default:                return nil
+        }
+    }
+
     /// Terse form for the compact combined guide nav chip: "Hold Left = X".
+    /// In sidebar mode SHORT Left opens the sidebar too, so the chip says
+    /// plain "Left = groups" - "Left / Hold Left = groups" was true but ran
+    /// the pill into the tab bar for no extra information.
     @MainActor
     static func guideHoldLeftShort(_ map: RemoteControlMap) -> String? {
         if RemoteControlStore.shared.useGroupSidebar {
-            return "Hold Left = groups"
+            return "Left = groups"
         }
-        guard let phrase = guidePhrase(map.guideAction(.leftLong)) else { return nil }
+        guard let phrase = guidePhraseShort(map.guideAction(.leftLong)) else { return nil }
         return "Hold Left = \(phrase)"
     }
 }
