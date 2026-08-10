@@ -340,7 +340,7 @@ struct AppBehaviorsSettingsView: View {
                 } header: {
                     Text("Keep Available").sectionHeaderStyle()
                 } footer: {
-                    Text("How far back you can rewind the channel you are watching. Buffered video is removed about an hour after you leave a channel. \(depthEstimate(liveRewindDepthMinutes))")
+                    Text("How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
@@ -706,7 +706,7 @@ struct AppBehaviorsSettingsView: View {
                                 return m % 60 == 0 ? "\(m / 60)h" : "\(m)m"
                             }
                         )
-                        Text("How far back you can rewind the channel you are watching. Buffered video is removed about an hour after you leave a channel. \(depthEstimate(liveRewindDepthMinutes))")
+                        Text("How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))")
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.horizontal, 20)
