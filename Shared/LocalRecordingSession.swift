@@ -914,9 +914,32 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         task = nil
         urlSession?.invalidateAndCancel()
         urlSession = nil
+        let finished = activeBuffer
         activeBuffer?.close()
         activeBuffer = nil
         stateLock.unlock()
+        // Android parity (Discord: di5cord20, Formuler Z11, app storage past
+        // 3 GB). A closed session's directory is DEAD BYTES: `LiveRewindReader`
+        // is only ever constructed against the ACTIVE `LiveRewindBuffer`, and
+        // `startSession` always mints a fresh directory, so nothing can open a
+        // session again once it has ended. They were nevertheless kept for the
+        // full hour of `retentionMs` and measured against a budget that is
+        // "current usage plus free space above the floor" - not a ceiling at
+        // all on a device with room to spare. Every channel change therefore
+        // stranded up to a depth's worth of transport stream, and 30 minutes of
+        // HD runs to a gigabyte or two.
+        //
+        // Delete it as soon as the session ends. No feature is lost, because no
+        // feature could ever have used it; `reapAtLaunch` and the periodic
+        // sweep stay as the net for a process that dies mid-session, which is
+        // now the only way a directory survives. Done off the state lock: this
+        // is filesystem work and nothing else needs to wait for it.
+        if let dir = finished?.sessionDir {
+            DispatchQueue.global(qos: .utility).async {
+                try? FileManager.default.removeItem(at: dir)
+                debugLog("[REWIND] released buffer \(dir.lastPathComponent)")
+            }
+        }
         Task { @MainActor in
             self.windowTimer?.invalidate()
             self.windowTimer = nil
