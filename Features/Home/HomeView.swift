@@ -4899,27 +4899,7 @@ struct MainTabView: View {
             debugLog("🎮 [MT-INNER] .onExitCommand FIRED (tabContentView/TabView — focus was inside a tab)")
             handleMenuPress()
         }
-        .onPlayPauseCommand {
-            #if os(tvOS)
-            // Remote Control #196: the guide-context playPause slot
-            // (default resumePlayer = expand the corner mini). A remap
-            // dispatches its action; Do Nothing suppresses the press.
-            if nowPlaying.isMinimized {
-                let action = RemoteControlStore.shared.guideAction(.playPause)
-                if action == .resumePlayer {
-                    debugLog("🎮 Play/Pause pressed: expand mini player to full screen")
-                    withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
-                } else {
-                    GuideRemoteDispatch.perform(action)
-                }
-            }
-            #else
-            if nowPlaying.isMinimized {
-                debugLog("🎮 Play/Pause pressed: expand mini player to full screen")
-                withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
-            }
-            #endif
-        }
+        .onPlayPauseCommand { handlePlayPauseCommand() }
         .onReceive(NotificationCenter.default.publisher(for: .stopPlaybackForBackground)) { _ in
             if nowPlaying.isActive {
                 debugLog("🎮 Background: stopping playback")
@@ -5578,6 +5558,32 @@ struct MainTabView: View {
         return parts.joined(separator: " · ")
     }
     #endif
+
+    /// Play/Pause handler, pulled out of the `.onPlayPauseCommand` closure for
+    /// exactly the reason `handleMenuPress` below was: inline, it trips Swift's
+    /// type-inference budget ("unable to type-check this expression in
+    /// reasonable time"). Xcode 27's checker accepts it, 26.6's does not - and
+    /// App Store builds have to come from the RELEASE toolchain, so this has to
+    /// compile on 26.6. A plain method gets its own scope and the budget resets.
+    private func handlePlayPauseCommand() {
+        #if os(tvOS)
+        // Remote Control #196: the guide-context playPause slot
+        // (default resumePlayer = expand the corner mini). A remap
+        // dispatches its action; Do Nothing suppresses the press.
+        guard nowPlaying.isMinimized else { return }
+        let action = RemoteControlStore.shared.guideAction(.playPause)
+        if action == .resumePlayer {
+            debugLog("🎮 Play/Pause pressed: expand mini player to full screen")
+            withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
+        } else {
+            GuideRemoteDispatch.perform(action)
+        }
+        #else
+        guard nowPlaying.isMinimized else { return }
+        debugLog("🎮 Play/Pause pressed: expand mini player to full screen")
+        withAnimation(.spring(response: 0.35)) { nowPlaying.expand() }
+        #endif
+    }
 
     private func handleMenuPress() {
         debugLog("🎮 [HMP] handleMenuPress | isActive=\(nowPlaying.isActive) isMinimized=\(nowPlaying.isMinimized) isVODDetailPushed=\(isVODDetailPushed) isSettingsSubviewPushed=\(isSettingsSubviewPushed) selectedTab=\(selectedTab.rawValue) playerSession.mode=\(playerSession.mode)")

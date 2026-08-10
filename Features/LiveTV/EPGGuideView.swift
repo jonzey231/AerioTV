@@ -2559,6 +2559,19 @@ struct EPGGuideView: View {
     /// Catch-up: user-facing resolve failure (missing XC password,
     /// unsupported server, URL build failure), shown as an alert.
     @State private var catchupErrorMessage: String? = nil
+
+    /// Hoisted out of `.alert(isPresented:)`. Written inline there, the
+    /// `Binding(get:set:)` literal trips Swift's type-inference budget on Xcode
+    /// 26.6 ("unable to type-check this expression in reasonable time"); 27's
+    /// checker accepts it. App Store builds have to come from the RELEASE
+    /// toolchain, so this has to compile on 26.6. Naming the type is what makes
+    /// it cheap - the solver no longer has to infer it through the alert call.
+    private var catchupErrorAlertPresented: Binding<Bool> {
+        Binding(
+            get: { catchupErrorMessage != nil },
+            set: { if !$0 { catchupErrorMessage = nil } }
+        )
+    }
     #if os(iOS)
     /// GH #20 (Android parity): hide the iPhone tab bar while the guide
     /// scrolls down; any upward scroll reveals it (TabBarScrollTracker).
@@ -3157,9 +3170,7 @@ struct EPGGuideView: View {
                 )
             }
             .alert("Catch-up Unavailable",
-                   isPresented: Binding(
-                        get: { catchupErrorMessage != nil },
-                        set: { if !$0 { catchupErrorMessage = nil } })) {
+                   isPresented: catchupErrorAlertPresented) {
                 Button("OK", role: .cancel) { catchupErrorMessage = nil }
             } message: {
                 Text(catchupErrorMessage ?? "")
