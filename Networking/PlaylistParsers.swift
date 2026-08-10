@@ -377,7 +377,14 @@ final class XMLTVParser: NSObject, XMLParserDelegate {
 
         // Use a download task so the (possibly hundreds of MB)
         // compressed body lands on disk, not in a `Data` in RAM.
-        let (tempURL, response) = try await session.download(for: request)
+        //
+        // Via HTTPRouter, NOT `session.download` directly: a plain-HTTP
+        // Xtream server trips ATS (-1022) and this was the one fetch without
+        // the NWConnection fallback the rest of the app relies on, so the
+        // bulk xmltv.php guide never landed and the EPG quietly fell back to
+        // get_short_epg (no categories, no LIVE/NEW). See the note on
+        // `HTTPRouter.download(for:)`.
+        let (tempURL, response) = try await HTTPRouter.download(for: request, using: session)
         defer { try? FileManager.default.removeItem(at: tempURL) }
         guard let http = response as? HTTPURLResponse else {
             throw APIError.invalidResponse

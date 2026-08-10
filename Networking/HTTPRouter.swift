@@ -134,6 +134,40 @@ enum HTTPRouter {
         }
     }
 
+    /// `download(from:)` for callers that need to set headers (XMLTV feeds
+    /// behind Dispatcharr auth, custom User-Agents).
+    ///
+    /// The XMLTV fetch used to call `session.download(for:)` directly, which
+    /// meant it was the ONE large-body path with no NWConnection fallback. On
+    /// a plain-HTTP Xtream server that is fatal: ATS rejects the request with
+    /// -1022, the bulk `xmltv.php` guide never arrives, and the EPG silently
+    /// degrades to per-stream `get_short_epg`, which carries no `<category>`,
+    /// no `<new/>` and no `<live/>`. Symptom, from two users' logs
+    /// (2026-08-10): the guide populates but the LIVE/NEW badges and the
+    /// category colour-coding are missing on XC and fine on Dispatcharr.
+    static func download(for request: URLRequest,
+                         using session: URLSession = .shared) async throws -> (URL, URLResponse) {
+        if let url = request.url, shouldUseNWConnection(for: url) {
+            let (data, response) = try await NWHTTPClient.data(for: request,
+                                                               timeout: effectiveNWTimeout(for: request, using: session))
+            return (try spillToTempFile(data), response)
+        }
+        do {
+            return try await session.download(for: request)
+        } catch let error as NSError where shouldFallbackToNWConnection(error: error) {
+            let urlStr = request.url.map { DebugLogger.sanitize($0.absoluteString) } ?? "<unknown>"
+            debugLog("HTTPRouter: URLSession download failed for \(urlStr) (code=\(error.code) \(error.localizedDescription)) → NWConnection fallback")
+            do {
+                let (data, response) = try await NWHTTPClient.data(for: request,
+                                                                   timeout: effectiveNWTimeout(for: request, using: session))
+                return (try spillToTempFile(data), response)
+            } catch {
+                debugLog("HTTPRouter: NWConnection download fallback ALSO failed: \(error)")
+                throw error
+            }
+        }
+    }
+
     /// Spill an already-buffered body (the NWConnection fallback path) to a temp
     /// file so `download(from:)` returns a uniform `(URL, URLResponse)`.
     private static func spillToTempFile(_ data: Data) throws -> URL {
