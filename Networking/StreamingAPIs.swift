@@ -287,6 +287,18 @@ enum XtreamDateParser {
 enum APIError: LocalizedError {
     case invalidURL
     case unauthorized
+    /// HTTP 403 with the server's own explanation when it gave one.
+    ///
+    /// 401 and 403 used to collapse into `.unauthorized` on the Xtream path,
+    /// which then told EVERY user to fix a Dispatcharr Admin API Key -- advice
+    /// that is meaningless on a plain Xtream Codes playlist, where no API key
+    /// exists (Logan, 2026-08-11). Worse, it actively misdirects: the 403 that
+    /// prompted this was crx.watch's Cloudflare bot protection answering
+    /// `[Bot-Protection]: You are banned for repeated abuse`, i.e. the
+    /// credentials were perfect and the IP was blocked. 403 now carries the
+    /// server's reason. The Dispatcharr validator keeps throwing
+    /// `.unauthorized`, where the API-key advice is genuinely correct.
+    case forbidden(String?)
     case serverError(Int)
     case decodingError(Error)
     case networkError(Error)
@@ -310,6 +322,11 @@ enum APIError: LocalizedError {
         switch self {
         case .invalidURL:           return "Invalid server URL"
         case .unauthorized:         return "Invalid credentials — your API key was not found on the server. Go to Settings → your server → Admin API Key and verify it matches an Admin user's API Key in Dispatcharr → System → Users → Edit User → API & XC."
+        case .forbidden(let reason):
+            if let reason, !reason.isEmpty {
+                return "Access denied (403) — the server said: \(reason)"
+            }
+            return "Access denied (403) — the server refused this request. Your credentials may be fine: providers commonly return 403 when the plan does not cover this, or when they are rate-limiting or have blocked your IP."
         case .serverError(let c):
             switch c {
             case 404: return "Endpoint not found (404) — verify your server URL"
@@ -724,7 +741,21 @@ struct XtreamCodesAPI {
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         switch http.statusCode {
         case 200...299: break
-        case 401, 403: throw APIError.unauthorized
+        case 401: throw APIError.unauthorized
+        case 403:
+            // Surface the server's own words. Providers put the real reason in
+            // a short text/plain body ("banned for repeated abuse", "max
+            // connections reached"); paraphrasing it helps nobody, and
+            // asserting a cause we have not verified is how a Cloudflare ban
+            // got reported as a missing Dispatcharr API key.
+            var reason: String? = nil
+            if let data, !data.isEmpty,
+               let body = String(data: data.prefix(200), encoding: .utf8)?
+                   .trimmingCharacters(in: .whitespacesAndNewlines),
+               !body.isEmpty, !body.hasPrefix("<") {
+                reason = String(body.prefix(160))
+            }
+            throw APIError.forbidden(reason)
         default: throw APIError.serverError(http.statusCode)
         }
 

@@ -6102,6 +6102,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// that redacts these URLs everywhere else stays intact).
         private static func probeStreamURLForDiagnostics(_ url: URL) {
             guard DebugLogger.shared.isEnabled else { return }
+            // Local recordings and timeshift buffers are file:// URLs; probing
+            // them just logs "unsupported URL" noise.
+            guard let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https" else { return }
 
             func fingerprint(_ s: String) -> String {
                 var h: UInt64 = 0xcbf29ce484222325

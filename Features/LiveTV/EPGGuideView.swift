@@ -1372,16 +1372,59 @@ final class GuideStore: ObservableObject {
             }
         }
 
-        // Fetch with limited concurrency (max 3 concurrent) and 15s timeout per request
+        // Fetch with limited concurrency (max 3 concurrent) and 15s timeout per request.
+        //
+        // HARD CAP + CIRCUIT BREAKER (2026-08-11). This loop used to walk EVERY
+        // channel in the playlist. On a 14k-channel panel that is 14,263 API
+        // calls in one guide load, three at a time, for minutes on end. Measured
+        // on crx.watch: 14,264 get_short_epg requests in a single session, which
+        // tripped the provider's Cloudflare bot protection and got the user's IP
+        // banned outright -- the stream endpoint then answered every play with
+        // `403 [Bot-Protection]: You are banned for repeated abuse` while the
+        // (Cloudflare-fronted) API kept working, so it looked like a playback
+        // bug rather than what it was: this app hammering the provider.
+        //
+        // Two independent brakes, because either alone is insufficient:
+        //   * the cap bounds a SUCCESSFUL walk (a provider that answers happily
+        //     still must not receive thousands of requests for one guide paint),
+        //   * the breaker aborts a FAILING walk immediately (when the provider
+        //     is rejecting us, continuing is both useless and what escalates a
+        //     rate-limit into a ban).
+        let maxFallbackChannels = 300
+        let breakerFailureThreshold = 8
+        let cappedChannels = Array(channels.prefix(maxFallbackChannels))
+        if channels.count > maxFallbackChannels {
+            DebugLogger.shared.log(
+                "EPG per-channel fallback capped: \(cappedChannels.count) of \(channels.count) channels "
+                + "(bulk xmltv.php yielded nothing for this provider). The rest keep whatever the grid already has.",
+                category: "EPG", level: .warning)
+        }
+
         let didReceiveAnyResponse = await withTaskGroup(of: (String, [GuideProgram], Bool).self) { group in
             let maxConcurrent = 3
             var launched = 0
             var didReceiveAnyResponse = false
+            var consecutiveFailures = 0
+            var tripped = false
 
-            for ch in channels {
+            for ch in cappedChannels {
+                if tripped { break }
                 if launched >= maxConcurrent {
                     if let (channelID, progs, didRespond) = await group.next() {
                         didReceiveAnyResponse = didReceiveAnyResponse || didRespond
+                        if didRespond {
+                            consecutiveFailures = 0
+                        } else {
+                            consecutiveFailures += 1
+                            if consecutiveFailures >= breakerFailureThreshold {
+                                tripped = true
+                                DebugLogger.shared.log(
+                                    "EPG per-channel fallback ABORTED after \(consecutiveFailures) consecutive "
+                                    + "failures. The provider is refusing these requests; continuing would only "
+                                    + "deepen a rate-limit or ban.",
+                                    category: "EPG", level: .warning)
+                            }
+                        }
                         for p in progs { mergeProgram(p, for: channelID) }
                     }
                 }
@@ -1765,7 +1808,21 @@ final class GuideStore: ObservableObject {
             // tunnel / Synology QuickConnect / public hostname user
             // hits this.
             if code == 403 {
-                debugLog("📺 XMLTV fetch failed for \(url.host ?? "?"): HTTP 403 (headers=\(headers.count)). Likely Dispatcharr's M3U/EPG Network Access policy blocking non-LAN clients (default since Dispatcharr 0.23.0). Fix in Dispatcharr → Settings → Network Access → 'M3U / EPG Endpoints': add 0.0.0.0/0,::/0 or the client's public IP.")
+                // Only name the Dispatcharr policy when this actually IS a
+                // Dispatcharr server. On a plain Xtream panel the same 403
+                // means something completely different (commonly the provider
+                // rate-limiting or banning the client's IP), and confidently
+                // pointing at a Dispatcharr setting the user does not have
+                // sent this investigation down the wrong path on 2026-08-11.
+                // Dispatcharr requests carry auth headers (API key / bearer);
+                // a plain Xtream panel is fetched with none, which is exactly
+                // what the crx.watch log showed (`headers=0`) while this text
+                // confidently blamed a Dispatcharr setting the user does not have.
+                if !headers.isEmpty {
+                    debugLog("📺 XMLTV fetch failed for \(url.host ?? "?"): HTTP 403 (headers=\(headers.count)). Likely Dispatcharr's M3U/EPG Network Access policy blocking non-LAN clients (default since Dispatcharr 0.23.0). Fix in Dispatcharr → Settings → Network Access → 'M3U / EPG Endpoints': add 0.0.0.0/0,::/0 or the client's public IP.")
+                } else {
+                    debugLog("📺 XMLTV fetch failed for \(url.host ?? "?"): HTTP 403 (headers=\(headers.count)). The provider refused the bulk guide for this client. Common causes: the plan does not include xmltv.php, or the provider is rate-limiting or has banned this IP. Not retried this session.")
+                }
             } else {
                 debugLog("📺 XMLTV fetch failed for \(url.host ?? "?"): HTTP \(code) (headers=\(headers.count))")
             }
