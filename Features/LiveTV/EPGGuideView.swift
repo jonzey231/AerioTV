@@ -1337,6 +1337,25 @@ final class GuideStore: ObservableObject {
     private static let upstreamEPGTotalBudget: TimeInterval = 180
 
     // MARK: - Xtream Codes
+
+    /// Servers whose per-channel EPG fallback has already been run to
+    /// exhaustion this session, and must not be run again.
+    ///
+    /// The cap and the circuit breaker each bound ONE pass. They do not bound
+    /// how many passes happen, and that turned out to be the real multiplier:
+    /// measured on an iPhone 2026-08-11, the breaker fired 46 times in a single
+    /// session and 5,374 get_short_epg requests still went out, because the
+    /// guide re-enters this path on every repaint / group change / refresh.
+    /// A provider that has no usable per-stream EPG will not grow one thirty
+    /// seconds later, so the answer is remembered per server for the life of
+    /// the process. Static (not @State) so it survives the view being torn
+    /// down and rebuilt, which is exactly what was re-arming it.
+    private static var xtreamFallbackExhausted = Set<String>()
+    /// Servers whose bulk xmltv.php answered with a definitive refusal.
+    /// 403 is not a transient error and re-asking 155 times in one session
+    /// (measured, same device) is indistinguishable from an attack.
+    private static var xmltvRefused = Set<String>()
+
     private func fetchXtream(server: ServerConnection, channels: [ChannelDisplayItem],
                               windowStart: Date, windowEnd: Date,
                               replaceExisting: Bool = false) async -> Bool {
@@ -1350,7 +1369,8 @@ final class GuideStore: ObservableObject {
         // tvgID (ChannelStore.fetchXtream). Only fall back to the per-stream
         // get_short_epg loop below when the feed yields no matching programmes
         // (provider without xmltv.php, or channels with no epg_channel_id).
-        if let xmltvURL = api.xmltvURL() {
+        let serverKey = server.id.uuidString
+        if let xmltvURL = api.xmltvURL(), !Self.xmltvRefused.contains(serverKey) {
             let ok = await fetchXMLTVFromURL(
                 url: xmltvURL, channels: channels,
                 windowStart: windowStart, windowEnd: windowEnd,
@@ -1358,6 +1378,12 @@ final class GuideStore: ObservableObject {
                 replaceExisting: replaceExisting)
             if ok { return true }
         }
+
+        if Self.xtreamFallbackExhausted.contains(serverKey) {
+            debugLog("📺 XC per-channel EPG fallback skipped for \(server.name): already exhausted this session.")
+            return false
+        }
+        Self.xtreamFallbackExhausted.insert(serverKey)
 
         let batchBasePrograms = replaceExisting
             ? replacingWindowBase(for: channels, windowStart: windowStart, windowEnd: windowEnd)
@@ -1808,6 +1834,9 @@ final class GuideStore: ObservableObject {
             // tunnel / Synology QuickConnect / public hostname user
             // hits this.
             if code == 403 {
+                // Definitive refusal: remember it so this session stops asking.
+                // Measured 155 repeats in a single session before this latch.
+                Self.xmltvRefused.insert(categoryServerID)
                 // Only name the Dispatcharr policy when this actually IS a
                 // Dispatcharr server. On a plain Xtream panel the same 403
                 // means something completely different (commonly the provider
