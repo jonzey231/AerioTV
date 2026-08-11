@@ -2408,6 +2408,25 @@ final class GuideStore: ObservableObject {
         for channelID: String,
         deferSort: Bool = false
     ) {
+        // Reject degenerate programmes at the single point every source funnels
+        // through (bulk XMLTV, get_short_epg, Dispatcharr grid, catch-up).
+        //
+        // A programme whose end is at or before its start renders as a ~10px
+        // vertical sliver with its title wrapped to one character per line --
+        // the "weird formatting" visible on TVO / Global / City TV / CTV /
+        // Yes TV in the tvOS guide on 2026-08-11. The per-source guards only
+        // checked that the programme OVERLAPS the requested window
+        // (`end > windowStart && start < windowEnd`), which a zero-length or
+        // inverted programme satisfies happily. Nothing downstream can render
+        // one sensibly, and the dedup pass below already has to special-case
+        // `progDuration > 0`, so drop them here rather than teaching every
+        // consumer to cope.
+        //
+        // 30s floor rather than 0: sub-30s "programmes" are feed noise
+        // (placeholder or truncated entries), not schedule data, and they
+        // produce the same unreadable sliver.
+        guard prog.end.timeIntervalSince(prog.start) >= 30 else { return }
+
         var list = dict[channelID] ?? []
         // Check for duplicate: same title + similar start time, OR
         // >80% time overlap. The overlap check catches feeds that
