@@ -511,9 +511,16 @@ final class ServerConnection {
     /// Returns localEPGURL when the server is reachable on the local
     /// network (per `TVLANProbe`), otherwise returns epgURL.
     var effectiveEPGURL: String {
-        guard !localEPGURL.isEmpty else { return epgURL }
-        guard isOnLANNetwork else { return epgURL }
-        return localEPGURL
+        if !localEPGURL.isEmpty, isOnLANNetwork { return localEPGURL }
+        if !epgURL.isEmpty { return epgURL }
+        // An M3U playlist whose URL is really an Xtream `get.php` link is
+        // loaded through the XC JSON (see HomeView.fetchChannels), so its
+        // channels carry epg_channel_id. Derive the panel's own xmltv.php so
+        // they have a guide to match against; without this those playlists end
+        // up with guide ids and no guide. Only ever a fallback: an explicit
+        // epgURL, and the LAN override above, both still win.
+        guard type == .m3uPlaylist else { return "" }
+        return XtreamCodesAPI.derivedXMLTVURL(fromGetPhpURL: baseURL) ?? ""
     }
 
     var normalizedLocalURL: String {

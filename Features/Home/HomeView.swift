@@ -2148,6 +2148,18 @@ final class ChannelStore: ObservableObject {
     ) async throws -> ([ChannelDisplayItem], [String]) {
         switch type {
         case .m3uPlaylist:
+            // A pasted XC get.php link is an Xtream playlist wearing an M3U
+            // hat. Load it through the panel's JSON instead: 23.7MB rather
+            // than 538MB on the provider measured 2026-08-10, and it carries
+            // the epg_channel_id the M3U omits entirely (that panel emitted
+            // tvg-id="" on every single entry). fetchXtream also gives these
+            // playlists correct catch-up and channel numbering for free.
+            if let xc = XtreamCodesAPI.credentials(fromGetPhpURL: baseURL) {
+                debugLog("📺 M3U URL is an Xtream get.php link; loading via player_api instead")
+                return try await fetchXtream(baseURL: xc.base,
+                                             username: xc.username,
+                                             password: xc.password)
+            }
             return try await fetchM3U(baseURL: baseURL, epgURL: epgURL)
         case .xtreamCodes:
             return try await fetchXtream(baseURL: baseURL, username: username, password: password)
@@ -2168,12 +2180,15 @@ final class ChannelStore: ObservableObject {
 
     private func fetchM3U(baseURL: String, epgURL: String = "") async throws -> ([ChannelDisplayItem], [String]) {
         guard let url = URL(string: baseURL) else { throw APIError.invalidURL }
-        let (data, response) = try await URLSession.shared.data(from: url)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw APIError.serverError((response as? HTTPURLResponse)?.statusCode ?? -1)
-        }
-        guard let content = String(data: data, encoding: .utf8) else { throw APIError.invalidResponse }
-        let parsed = M3UParser.parse(content: content)
+        // Download to disk and line-stream the parse. This used to buffer the
+        // WHOLE body as Data and then build a String of it (UTF-16, ~2x again)
+        // before parsing -- on a provider playlist measured at 538MB that is
+        // well over a gigabyte resident, which no device survives. Android hit
+        // exactly this (GH #26/#31) and fixed it; the fix was never brought
+        // across. M3UParser.fetchAndParse already does the streaming download,
+        // charset detection and the empty-body / HTTP guards this inline copy
+        // was duplicating by hand.
+        let parsed = try await M3UParser.fetchAndParse(url: url)
         var groups: [String] = []
         for ch in parsed {
             if !ch.groupTitle.isEmpty && !groups.contains(ch.groupTitle) { groups.append(ch.groupTitle) }

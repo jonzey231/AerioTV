@@ -466,7 +466,7 @@ struct ChannelListView: View {
                     let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
                     let hasEPG: Bool = {
                         guard let s = activeServer else { return false }
-                        if s.type == .m3uPlaylist { return !s.epgURL.isEmpty }
+                        if s.type == .m3uPlaylist { return !s.effectiveEPGURL.isEmpty }
                         return true
                     }()
 
@@ -533,7 +533,7 @@ struct ChannelListView: View {
                     let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
                     let hasEPG: Bool = {
                         guard let s = activeServer else { return false }
-                        if s.type == .m3uPlaylist { return !s.epgURL.isEmpty }
+                        if s.type == .m3uPlaylist { return !s.effectiveEPGURL.isEmpty }
                         return true
                     }()
                     #if os(tvOS)
@@ -566,7 +566,7 @@ struct ChannelListView: View {
                     let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
                     let hasEPG: Bool = {
                         guard let s = activeServer else { return false }
-                        if s.type == .m3uPlaylist { return !s.epgURL.isEmpty }
+                        if s.type == .m3uPlaylist { return !s.effectiveEPGURL.isEmpty }
                         return true
                     }()
                     showGuideView = resolvedGuideDefault(hasEPG: hasEPG)
@@ -580,7 +580,7 @@ struct ChannelListView: View {
                     let activeServer = servers.first(where: { $0.isActive }) ?? servers.first
                     let hasEPG: Bool = {
                         guard let s = activeServer else { return false }
-                        if s.type == .m3uPlaylist { return !s.epgURL.isEmpty }
+                        if s.type == .m3uPlaylist { return !s.effectiveEPGURL.isEmpty }
                         return true
                     }()
                     showGuideView = resolvedGuideDefault(hasEPG: hasEPG)

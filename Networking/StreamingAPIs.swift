@@ -499,6 +499,52 @@ struct XtreamCodesAPI {
     /// `output` is required by some panels: crx.watch returns a bare HTTP 404
     /// for `type=m3u_plus` with no `output`, and 200 for `output=ts`. Android
     /// omitted it and could not add that provider's playlist at all.
+    /// Xtream credentials recovered from a pasted `get.php` playlist URL.
+    ///
+    /// Providers hand out links like
+    /// `http://host:8080/get.php?username=U&password=P&type=m3u_plus&output=ts`,
+    /// and users reasonably paste them as an "M3U URL" playlist rather than
+    /// picking the Xtream Codes type. That lands them on the worst path we
+    /// have: the panel flattens live + ALL VOD + ALL series into one file
+    /// (538MB on a provider measured 2026-08-10) and frequently emits
+    /// `tvg-id=""` on every entry, so the guide can never match. The XC JSON
+    /// behind the SAME credentials is 23.7MB and carries epg_channel_id.
+    ///
+    /// Returns nil for anything that is not unambiguously an XC get.php URL
+    /// carrying both credentials.
+    static func credentials(fromGetPhpURL raw: String)
+        -> (base: String, username: String, password: String)? {
+        guard raw.range(of: "get.php", options: .caseInsensitive) != nil,
+              let comps = URLComponents(string: raw.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = comps.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = comps.host,
+              let items = comps.queryItems else { return nil }
+        func value(_ name: String) -> String? {
+            items.first { $0.name.lowercased() == name }?.value
+        }
+        guard let user = value("username"), !user.isEmpty,
+              let pass = value("password") else { return nil }
+        // Everything before the trailing "/get.php" is the panel base, so
+        // panels served from a subdirectory keep working.
+        var basePath = comps.path
+        if let r = basePath.range(of: "/get.php", options: [.caseInsensitive, .backwards]) {
+            basePath = String(basePath[..<r.lowerBound])
+        }
+        let port = comps.port.map { ":\($0)" } ?? ""
+        return ("\(scheme)://\(host)\(port)\(basePath)", user, pass)
+    }
+
+    /// The XMLTV feed for a panel recovered by [credentials(fromGetPhpURL:)].
+    static func derivedXMLTVURL(fromGetPhpURL raw: String) -> String? {
+        guard let xc = credentials(fromGetPhpURL: raw),
+              var comps = URLComponents(string: "\(xc.base)/xmltv.php") else { return nil }
+        comps.queryItems = [
+            URLQueryItem(name: "username", value: xc.username),
+            URLQueryItem(name: "password", value: xc.password),
+        ]
+        return comps.url?.absoluteString
+    }
+
     func m3uURL() -> URL? {
         let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
         return URL(string: "\(base)/get.php?username=\(username)&password=\(password)&type=m3u_plus&output=ts")
