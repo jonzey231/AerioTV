@@ -384,10 +384,26 @@ struct XtreamCodesAPI {
     private static let jsonDecoder = JSONDecoder()
 
     // MARK: - Account Info / Verify
+    /// The bare Xtream handshake: credentials only, NO `action` parameter.
+    ///
+    /// This used to send `action=""`. Most panels ignore an empty action and
+    /// answer with the account payload anyway, but not all: crx.watch returns
+    /// a ZERO-BYTE body for `&action=` and the full `user_info` JSON when the
+    /// parameter is absent entirely (measured 2026-08-10). The empty body then
+    /// failed to decode and surfaced as "Failed to parse server response: The
+    /// data couldn't be read because it isn't in the correct format" on Test
+    /// Connection, with a perfectly good account behind it. Android's
+    /// equivalent (XtreamCodesApi.getServerTimezone) has always omitted the
+    /// parameter, which is why the same credentials verified there.
     func verifyConnection() async throws -> XtreamAccountInfo {
-        let url = try buildURL(path: "/player_api.php", params: ["action": ""])
+        let url = try buildURL(path: "/player_api.php", params: [:])
         let (data, response) = try await loggedData(from: url)
         try validate(response: response, data: data)
+        // An empty 200 is a failure the decoder would otherwise report as a
+        // format error, sending users to look at the wrong thing entirely.
+        guard !data.isEmpty else {
+            throw APIError.emptyResponse((response as? HTTPURLResponse)?.statusCode ?? 200)
+        }
         return try decode(XtreamAccountInfo.self, from: data)
     }
 
