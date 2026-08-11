@@ -352,13 +352,28 @@ struct XtreamCodesAPI {
     private static let session: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 20
-        config.timeoutIntervalForResource = 300
+        // NO total-resource cap. timeoutIntervalForResource budgets the ENTIRE
+        // transfer, so on a provider-sized payload it silently becomes a
+        // MINIMUM BANDWIDTH requirement rather than a liveness check. Measured
+        // 2026-08-10 on a real panel: get_live_streams is 23.7MB (53.6k
+        // channels), and a panel a few times larger is ordinary. The 20s
+        // timeoutIntervalForRequest above is the correct guard - it is an IDLE
+        // timeout, so a dead host still fails in 20s while a slow-but-alive
+        // link is allowed to finish. Same reasoning as PlaylistParsers.session,
+        // which has always omitted the resource cap.
+        config.timeoutIntervalForResource = .infinity
         return URLSession(configuration: config)
     }()
     private static let largeLibrarySession: URLSession = {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 180
+        // This session fetches the FULL VOD and series libraries. On the panel
+        // measured 2026-08-10 those are 99MB (194k movies) and 65MB (44.7k
+        // series); the old 180s cap demanded ~4.4 Mbit/s sustained or the
+        // library download died part-way. Providers this size are normal for
+        // anyone not running Dispatcharr, so the cap is removed here for the
+        // same reason as above; the 30s idle timeout still fails a dead host.
+        config.timeoutIntervalForResource = .infinity
         return URLSession(configuration: config)
     }()
     private var session: URLSession { Self.session }
