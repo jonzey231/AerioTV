@@ -566,15 +566,100 @@ struct XtreamCodesAPI {
     }
 
     // MARK: - EPG (short)
+
+    /// Per-host governor for the per-stream EPG endpoint.
+    ///
+    /// This endpoint is the single most dangerous call in the app: it is
+    /// inherently one-request-per-channel, and on a 14k-channel panel any
+    /// caller that loops over channels becomes a flood. Measured on crx.watch
+    /// 2026-08-11: 14,264 calls in one session, which tripped the provider's
+    /// Cloudflare bot protection and got the user's IP banned outright.
+    ///
+    /// Bounding the CALLERS was tried first and was the wrong altitude -- a
+    /// cap plus circuit breaker went into the guide's fallback, and the very
+    /// next measurement showed 2,258 calls in a single minute from the OTHER
+    /// call sites (ChannelListView, HomeView, and a second site in the guide
+    /// itself). There are five callers today and nothing stops a sixth. So the
+    /// budget lives here, at the chokepoint every caller must pass through:
+    /// bound it once and every present and future caller is bounded with it.
+    ///
+    /// Deliberately per-HOST, not per-server-record: two playlists pointed at
+    /// the same provider share one provider's patience.
+    actor ShortEPGGovernor {
+        static let shared = ShortEPGGovernor()
+
+        /// Calls allowed per host per window. 400 comfortably covers a guide
+        /// screen's worth of visible rows; it does not cover a library walk.
+        private let budget = 400
+        private let window: TimeInterval = 600      // 10 minutes
+        private let failuresToOpen = 8
+        private let openDuration: TimeInterval = 900 // 15 minutes
+
+        private var used: [String: Int] = [:]
+        private var windowStart: [String: Date] = [:]
+        private var consecutiveFailures: [String: Int] = [:]
+        private var openUntil: [String: Date] = [:]
+
+        /// Returns false when this call must NOT go out.
+        func allow(host: String, now: Date = Date()) -> Bool {
+            if let until = openUntil[host] {
+                if now < until { return false }
+                openUntil[host] = nil
+                consecutiveFailures[host] = 0
+            }
+            let start = windowStart[host] ?? now
+            if now.timeIntervalSince(start) > window {
+                windowStart[host] = now
+                used[host] = 0
+            } else if windowStart[host] == nil {
+                windowStart[host] = now
+            }
+            let count = used[host] ?? 0
+            guard count < budget else { return false }
+            used[host] = count + 1
+            return true
+        }
+
+        func recordSuccess(host: String) { consecutiveFailures[host] = 0 }
+
+        func recordFailure(host: String, now: Date = Date()) {
+            let n = (consecutiveFailures[host] ?? 0) + 1
+            consecutiveFailures[host] = n
+            if n >= failuresToOpen, openUntil[host] == nil {
+                openUntil[host] = now.addingTimeInterval(openDuration)
+                DebugLogger.shared.log(
+                    "Short-EPG governor OPENED for \(host) after \(n) consecutive failures; "
+                    + "no further get_short_epg calls to this host for \(Int(openDuration / 60))m. "
+                    + "Continuing would deepen a rate-limit or ban.",
+                    category: "EPG", level: .warning)
+            }
+        }
+    }
+
+    /// Thrown when the governor above is refusing calls. Callers already treat
+    /// a throw as "no EPG for this channel", so this needs no call-site changes.
+    struct ShortEPGThrottled: Error {}
+
     func getEPG(streamID: String, limit: Int = 3) async throws -> XtreamEPGResponse {
         let url = try buildURL(path: "/player_api.php", params: [
             "action": "get_short_epg",
             "stream_id": streamID,
             "limit": String(limit)
         ])
-        let (data, response) = try await loggedData(from: url)
-        try validate(response: response)
-        return try decode(XtreamEPGResponse.self, from: data)
+        let host = url.host ?? baseURL
+        guard await ShortEPGGovernor.shared.allow(host: host) else {
+            throw ShortEPGThrottled()
+        }
+        do {
+            let (data, response) = try await loggedData(from: url)
+            try validate(response: response)
+            let decoded = try decode(XtreamEPGResponse.self, from: data)
+            await ShortEPGGovernor.shared.recordSuccess(host: host)
+            return decoded
+        } catch {
+            await ShortEPGGovernor.shared.recordFailure(host: host)
+            throw error
+        }
     }
 
     // MARK: - M3U Playlist (contains real proxy stream URLs)
