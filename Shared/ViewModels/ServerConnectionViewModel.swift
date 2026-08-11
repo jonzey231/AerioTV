@@ -20,6 +20,13 @@ final class ServerConnectionViewModel {
     /// but the field is kept neutral so flipping types in the wizard
     /// does not reset the user's choice.
     var vodEnabled: Bool = true
+    /// Days of already-aired guide data to keep, chosen during Add.
+    /// Android has always offered this on its Configure screen; Apple
+    /// only exposed it in Edit Server afterwards, so an XC provider with
+    /// a huge guide pulled the 7-day default before the user had any say
+    /// (Logan, 2026-08-10). Same option set and default as the Edit
+    /// Server picker, so the two screens agree.
+    var epgRetentionDays: Int = 7
     var epgURL: String = ""       // Optional EPG URL for m3uPlaylist
     var localURL: String = ""     // LAN URL (e.g. http://192.168.1.10:9191)
     var localEPGURL: String = ""  // Local EPG URL for M3U when on LAN
@@ -550,6 +557,7 @@ final class ServerConnectionViewModel {
         // (matches the model default), so older code paths that did not
         // capture this still produce a server with VOD enabled.
         server.vodEnabled = vodEnabled
+        server.epgRetentionDays = epgRetentionDays
         // v1.6.20: persist the auth header shape that worked during
         // verifyConnection so subsequent API calls and stream playback
         // skip re-discovery and immediately speak the right shape.
@@ -618,6 +626,7 @@ final class ServerConnectionViewModel {
         dispatcharrXMLTVURL = ""
         xtreamXMLTVURL = ""
         vodEnabled = true
+        epgRetentionDays = 7
         epgURL = ""
         localURL = ""
         localEPGURL = ""

@@ -300,7 +300,32 @@ struct AddServerView: View {
             if viewModel.serverType.supportsVOD {
                 vodEnabledRow
             }
+            guideHistoryRow
         }
+    }
+
+    /// Guide History, surfaced at Add time rather than only in Edit Server.
+    /// A provider's guide can be large, and the retention window decides how
+    /// much already-aired data is kept; asking after the first sync means the
+    /// user has already paid for a window they may not have wanted. Same
+    /// options and default as the Edit Server picker so the screens agree.
+    private var guideHistoryRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("Guide History", selection: $viewModel.epgRetentionDays) {
+                Text("1 day").tag(1)
+                Text("3 days").tag(3)
+                Text("7 days (default)").tag(7)
+                Text("14 days").tag(14)
+                Text("30 days").tag(30)
+            }
+            .tint(.accentPrimary)
+            Text("How many days of already-aired guide data to keep. Past shows on channels with catch-up can be replayed from the guide. Longer history means a larger guide cache. You can change this later in Settings.")
+                .font(.labelSmall)
+                .foregroundColor(.textTertiary)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(Color.cardBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     /// On Demand opt-in. Same wording and behavior as the Edit Server

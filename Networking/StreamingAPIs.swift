@@ -430,6 +430,7 @@ struct XtreamCodesAPI {
         let url = try buildURL(path: "/player_api.php", params: ["action": "get_vod_categories"])
         let (data, response) = try await loggedData(from: url)
         try validate(response: response)
+        try Self.requireJSONBody(data, action: "categories")
         // Some panels return false/null/object for missing categories — treat as empty
         return (try? decode([XtreamCategory].self, from: data)) ?? []
     }
@@ -447,11 +448,55 @@ struct XtreamCodesAPI {
         defer { try? FileManager.default.removeItem(at: tempURL) }
         try validate(response: response)
         let data = try Data(contentsOf: tempURL, options: .mappedIfSafe)
+        try Self.requireJSONBody(data, action: "the movie library")
         // Some panels return false/null/object for empty or unavailable VOD — treat as empty
         if let items = try? decode([XtreamVODItem].self, from: data) { return items }
         DebugLogger.shared.log("XC get_vod_streams: non-array response (\(data.count) bytes) — treating as empty",
                                category: "VOD", level: .warning)
         return []
+    }
+
+    /// Whether a response body is plausibly the JSON these endpoints return.
+    ///
+    /// Panels legitimately answer an EMPTY library with `false`, `null` or an
+    /// object, and that has always been treated as "no items" -- keep that. What
+    /// must NOT be silently swallowed is a body that is not JSON at all: a
+    /// plain-text error, an HTML challenge page, a rate-limit notice. Those
+    /// used to decode to nil and surface as a blank On Demand tab that looked
+    /// exactly like an account with no movies.
+    ///
+    /// Real case, 2026-08-10: a provider started answering every endpoint with
+    /// `[Bot-Protection]: You are banned for repeated abuse`. Note it STARTS
+    /// WITH `[`, so "does it begin like an array" is not a sufficient test --
+    /// the character after the bracket has to be array-ish too.
+    static func looksLikeJSONBody(_ data: Data) -> Bool {
+        guard let head = String(data: data.prefix(512), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !head.isEmpty else { return false }
+        switch head.first {
+        case "{": return true
+        case "f": return head.hasPrefix("false")
+        case "n": return head.hasPrefix("null")
+        case "[":
+            let rest = head.dropFirst().drop { $0.isWhitespace }
+            guard let c = rest.first else { return true }   // "[" then EOF: truncated array
+            return c == "{" || c == "]" || c == "\"" || c.isNumber
+        default: return false
+        }
+    }
+
+    /// Throws when the body is not JSON, carrying what the server actually
+    /// said so the user sees the real reason instead of an empty library.
+    static func requireJSONBody(_ data: Data, action: String) throws {
+        guard !looksLikeJSONBody(data) else { return }
+        let snippet = String(data: data.prefix(200), encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        throw NSError(
+            domain: "AerioXtream", code: 2,
+            userInfo: [NSLocalizedDescriptionKey:
+                snippet.isEmpty
+                    ? "The server returned an empty response for \(action)."
+                    : "The server returned an error for \(action): \(snippet)"]
+        )
     }
 
     // MARK: - VOD Stream URL
@@ -467,6 +512,7 @@ struct XtreamCodesAPI {
         let url = try buildURL(path: "/player_api.php", params: ["action": "get_series_categories"])
         let (data, response) = try await loggedData(from: url)
         try validate(response: response)
+        try Self.requireJSONBody(data, action: "categories")
         // Some panels return false/null/object for missing categories — treat as empty
         return (try? decode([XtreamCategory].self, from: data)) ?? []
     }
@@ -484,6 +530,7 @@ struct XtreamCodesAPI {
         defer { try? FileManager.default.removeItem(at: tempURL) }
         try validate(response: response)
         let data = try Data(contentsOf: tempURL, options: .mappedIfSafe)
+        try Self.requireJSONBody(data, action: "the series library")
         // Some panels return false/null/object for empty or unavailable series — treat as empty
         if let items = try? decode([XtreamSeriesItem].self, from: data) { return items }
         DebugLogger.shared.log("XC get_series: non-array response (\(data.count) bytes) — treating as empty",
