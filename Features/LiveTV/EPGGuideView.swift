@@ -406,7 +406,7 @@ final class GuideStore: ObservableObject {
             // work is the `programs` assignment (fires @Published)
             // plus two log lines. The 97k-row fetch + dict build
             // already happened off-main.
-            self.programs = loaded.dict
+            self.programs = Self.drawableOnly(loaded.dict)
             // Record how old the loaded data actually is (newest cached
             // fetch), so the warm-foreground staleness check (issue #24)
             // measures the real age of what the user is looking at, not
@@ -2402,6 +2402,36 @@ final class GuideStore: ObservableObject {
     /// insert. For the single-item callers (Dispatcharr JSON fallback,
     /// Xtream per-channel fetch) the default `false` preserves the
     /// pre-refactor contract of "list is sorted on return."
+    /// Minimum duration a programme must have to be drawable, in seconds.
+    /// Shared by the live merge path and the disk-cache load path so both
+    /// entry points into `programs` enforce the same invariant.
+    nonisolated static let minDrawableDuration: TimeInterval = 30
+
+    /// Strips programmes that cannot be rendered (end at or before start, or
+    /// shorter than `minDrawableDuration`).
+    ///
+    /// `mergeProgramInto` guards the LIVE path, but the cache load assigns
+    /// `programs` wholesale (`self.programs = loaded.dict`) and never goes
+    /// through it. That is why the tvOS guide briefly drew correctly and then
+    /// reverted to slivers: the fresh merge was clean, then the disk cache
+    /// overwrote it with rows persisted before the guard existed. Filtering on
+    /// load also heals caches already holding bad rows, without a migration.
+    nonisolated static func drawableOnly(
+        _ dict: [String: [GuideProgram]]
+    ) -> [String: [GuideProgram]] {
+        var out = dict
+        for (channelID, list) in dict {
+            let kept = list.filter {
+                $0.end.timeIntervalSince($0.start) >= minDrawableDuration
+            }
+            if kept.count != list.count {
+                if kept.isEmpty { out.removeValue(forKey: channelID) }
+                else { out[channelID] = kept }
+            }
+        }
+        return out
+    }
+
     nonisolated static func mergeProgramInto(
         _ dict: inout [String: [GuideProgram]],
         program prog: GuideProgram,
@@ -2425,7 +2455,7 @@ final class GuideStore: ObservableObject {
         // 30s floor rather than 0: sub-30s "programmes" are feed noise
         // (placeholder or truncated entries), not schedule data, and they
         // produce the same unreadable sliver.
-        guard prog.end.timeIntervalSince(prog.start) >= 30 else { return }
+        guard prog.end.timeIntervalSince(prog.start) >= minDrawableDuration else { return }
 
         var list = dict[channelID] ?? []
         // Check for duplicate: same title + similar start time, OR
