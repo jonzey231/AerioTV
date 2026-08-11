@@ -470,8 +470,16 @@ struct XtreamCodesAPI {
     /// WITH `[`, so "does it begin like an array" is not a sufficient test --
     /// the character after the bracket has to be array-ish too.
     static func looksLikeJSONBody(_ data: Data) -> Bool {
-        guard let head = String(data: data.prefix(512), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines), !head.isEmpty else { return false }
+        // String(decoding:as:) NEVER fails -- it substitutes U+FFFD for invalid
+        // sequences. String(data:encoding:.utf8) returns nil instead, and a
+        // 512-byte prefix routinely cuts a multi-byte character in half on a
+        // library full of accented titles. That nil was read as "not JSON" and
+        // threw on a perfectly good response, which broke VOD loading on a real
+        // provider (2026-08-11). Only the FIRST character matters here, so a
+        // replacement char at the truncated tail is harmless.
+        let head = String(decoding: data.prefix(512), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !head.isEmpty else { return false }
         switch head.first {
         case "{": return true
         case "f": return head.hasPrefix("false")
@@ -488,8 +496,10 @@ struct XtreamCodesAPI {
     /// said so the user sees the real reason instead of an empty library.
     static func requireJSONBody(_ data: Data, action: String) throws {
         guard !looksLikeJSONBody(data) else { return }
-        let snippet = String(data: data.prefix(200), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        // Same lenient decode as above: this only ever feeds an error message,
+        // so a truncated multi-byte tail must not turn it into an empty string.
+        let snippet = String(decoding: data.prefix(200), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         throw NSError(
             domain: "AerioXtream", code: 2,
             userInfo: [NSLocalizedDescriptionKey:

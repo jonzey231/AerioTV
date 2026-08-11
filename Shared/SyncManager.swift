@@ -1371,12 +1371,16 @@ final class SyncManager: ObservableObject {
     /// every scenePhase == .active (which fires frequently on tvOS).
     nonisolated(unsafe) private static var lastPullTime: TimeInterval = 0
 
-    func pullFromCloud() {
+    /// - Parameter force: bypass the 60s throttle. Automatic callers (foreground
+    ///   resume) leave this false; a USER tapping "Pull from iCloud" must never
+    ///   be silently ignored, which is exactly what the throttle would do right
+    ///   after launch -- the button would look broken.
+    func pullFromCloud(force: Bool = false) {
         guard isSyncEnabled, !isMerging, !isImporting else { return }
 
         // Throttle: skip if we pulled within the last 60 seconds
         let now = ProcessInfo.processInfo.systemUptime
-        guard now - Self.lastPullTime > 60 else {
+        guard force || now - Self.lastPullTime > 60 else {
             debugLog("🔵 SyncManager.pullFromCloud: throttled (\(Int(now - Self.lastPullTime))s since last)")
             return
         }

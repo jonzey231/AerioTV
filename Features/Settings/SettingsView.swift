@@ -351,10 +351,41 @@ struct SettingsView: View {
                             } label: {
                                 SettingsRow(icon: "arrow.triangle.2.circlepath.icloud",
                                             iconColor: .accentPrimary,
-                                            title: "Sync Now",
+                                            title: "Push to iCloud",
                                             subtitle: syncLastDate > 0
-                                                ? "Last synced \(lastSyncedString)"
-                                                : "Push all data to iCloud now")
+                                                ? "Send this device's data up  ·  Last synced \(lastSyncedString)"
+                                                : "Send this device's playlists, preferences and progress up")
+                            }
+                            #if os(iOS)
+                            .buttonStyle(PressableButtonStyle())
+                            #else
+                            .buttonStyle(.plain)
+                            #endif
+
+                            // The other direction. Without this the only manual
+                            // control was push-only, so the device that needed
+                            // the data had no way to ask for it -- and on an
+                            // Apple TV, tapping the push button would send the
+                            // TV's older state UP and clobber what the phone had
+                            // just added (Logan, 2026-08-11: "If I add a playlist
+                            // on my iPhone and want to immediately pull it to my
+                            // Apple TV, there's no way to do that").
+                            //
+                            // force: true skips pullFromCloud's 60s throttle. A
+                            // user tapping this must never be silently ignored.
+                            //
+                            // This MERGES remote into local; it does not wipe
+                            // local state the way Android's "Pull Config from
+                            // Drive" does. Merge is what this flow needs and is
+                            // the safer default.
+                            Button {
+                                debugLog("🔵 Pull from iCloud tapped")
+                                SyncManager.shared.pullFromCloud(force: true)
+                            } label: {
+                                SettingsRow(icon: "icloud.and.arrow.down",
+                                            iconColor: .accentPrimary,
+                                            title: "Pull from iCloud",
+                                            subtitle: "Fetch what your other devices sent up")
                             }
                             #if os(iOS)
                             .buttonStyle(PressableButtonStyle())
@@ -1050,10 +1081,22 @@ struct SettingsView: View {
                     } label: {
                         SettingsRow(icon: "arrow.triangle.2.circlepath.icloud",
                                     iconColor: .accentPrimary,
-                                    title: "Sync Now",
+                                    title: "Push to iCloud",
                                     subtitle: syncLastDate > 0
-                                        ? "Last synced \(lastSyncedString)"
-                                        : "Push all data to iCloud now")
+                                        ? "Send this device's data up  ·  Last synced \(lastSyncedString)"
+                                        : "Send this device's playlists, preferences and progress up")
+                    }
+                    .buttonStyle(PressableButtonStyle())
+
+                    // See the Pull note on the iPhone root section above.
+                    Button {
+                        debugLog("🔵 Pull from iCloud tapped")
+                        SyncManager.shared.pullFromCloud(force: true)
+                    } label: {
+                        SettingsRow(icon: "icloud.and.arrow.down",
+                                    iconColor: .accentPrimary,
+                                    title: "Pull from iCloud",
+                                    subtitle: "Fetch what your other devices sent up")
                     }
                     .buttonStyle(PressableButtonStyle())
                 }
