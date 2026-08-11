@@ -6073,7 +6073,77 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             debugLog("[MPV-DIAG] isLive=\(isLive), attempt=\(currentIndex + 1)/\(urls.count)")
             #endif
 
+            // DIAGNOSTIC (2026-08-11, Tuliprox/crx 403 investigation).
+            // mpv reports `HTTP error 403 Forbidden` on two unrelated panels
+            // while curl AND ffprobe fetch the SAME URL from a Mac on the SAME
+            // network and get 200. Credentials are known-good (the API side
+            // answers 200), and UA / extra headers / concurrency / redirects
+            // were all excluded by black-box testing, so the remaining unknown
+            // is what the DEVICE actually puts on the wire. URLSession is a
+            // client we control and can log in full: if it gets 200 here while
+            // mpv gets 403, the difference lives inside mpv/ffmpeg; if it also
+            // gets 403, the panel is rejecting this device and the response
+            // headers say why. One request per play attempt, gated on the
+            // user's debug-logging switch so it costs nothing in normal use.
+            Self.probeStreamURLForDiagnostics(url)
+
             mpvCommand(mpv, ["loadfile", url.absoluteString, "replace"])
+        }
+
+        // MARK: - Stream 403 Diagnostic (2026-08-11, temporary)
+
+        /// Fetches the first KB of the stream URL with URLSession and logs the
+        /// outcome, so a device-side 403 can be told apart from an mpv-side one.
+        ///
+        /// The password is never logged: for an Xtream `/live/<user>/<pass>/<id>`
+        /// URL it is reduced to a length + FNV-1a fingerprint, which is enough to
+        /// prove the playback credential matches the one the API is using without
+        /// putting the secret in a file users hand to support (the sanitizer rule
+        /// that redacts these URLs everywhere else stays intact).
+        private static func probeStreamURLForDiagnostics(_ url: URL) {
+            guard DebugLogger.shared.isEnabled else { return }
+
+            func fingerprint(_ s: String) -> String {
+                var h: UInt64 = 0xcbf29ce484222325
+                for b in s.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+                return "len=\(s.count) fnv=\(String(h, radix: 16).suffix(8))"
+            }
+
+            // /live/<user>/<pass>/<id>.ext -> fingerprint the 3rd segment
+            let segs = url.pathComponents.filter { $0 != "/" }
+            var credNote = "cred=n/a"
+            if segs.count >= 4, ["live", "movie", "series"].contains(segs[0]) {
+                credNote = "user=\(segs[1]) pass[\(fingerprint(segs[2]))]"
+            }
+
+            var req = URLRequest(url: url)
+            req.setValue("bytes=0-1023", forHTTPHeaderField: "Range")
+            req.timeoutInterval = 12
+            URLSession.shared.dataTask(with: req) { data, response, error in
+                let host = url.host ?? "?"
+                if let error {
+                    DebugLogger.shared.log(
+                        "STREAM-PROBE \(host) \(credNote) transport error: \(error.localizedDescription)",
+                        category: "Playback", level: .warning)
+                    return
+                }
+                guard let http = response as? HTTPURLResponse else { return }
+                // Echo back the headers that explain a refusal.
+                let interesting = ["server", "content-type", "location",
+                                   "www-authenticate", "x-error", "retry-after",
+                                   "cf-ray", "cf-mitigated"]
+                let hdrs = interesting.compactMap { k -> String? in
+                    guard let v = http.value(forHTTPHeaderField: k) else { return nil }
+                    return "\(k)=\(v)"
+                }.joined(separator: " ")
+                let body = data.flatMap { String(data: $0.prefix(160), encoding: .utf8) }?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                DebugLogger.shared.log(
+                    "STREAM-PROBE \(host) \(credNote) -> HTTP \(http.statusCode) bytes=\(data?.count ?? 0) \(hdrs)"
+                    + (body.isEmpty ? "" : " body=\(DebugLogger.sanitize(body))"),
+                    category: "Playback",
+                    level: http.statusCode == 200 || http.statusCode == 206 ? .info : .warning)
+            }.resume()
         }
 
         // MARK: - Event Processing
