@@ -752,7 +752,7 @@ final class SyncManager: ObservableObject {
         mergeRemoteReminders(reminders)
     }
 
-    private func doMerge(servers: [[String: Any]]?, isInitial: Bool) {
+    private func doMerge(servers: [[String: Any]]?, isInitial: Bool, replace: Bool = false) {
         guard let servers else {
             debugLog("🔵 SyncManager.doMerge: no server data")
             return
@@ -769,12 +769,12 @@ final class SyncManager: ObservableObject {
         defer { isMerging = false }
 
         let remoteServers = servers.compactMap { deserialize($0) }
-        debugLog("🔵 SyncManager.doMerge: merging \(remoteServers.count) servers (initial=\(isInitial))")
+        debugLog("🔵 SyncManager.doMerge: \(replace ? "replacing with" : "merging") \(remoteServers.count) servers (initial=\(isInitial))")
 
         NotificationCenter.default.post(
             name: .syncManagerDidReceiveRemoteServers,
             object: nil,
-            userInfo: ["servers": remoteServers, "isInitial": isInitial]
+            userInfo: ["servers": remoteServers, "isInitial": isInitial, "replace": replace]
         )
     }
 
@@ -1206,8 +1206,13 @@ final class SyncManager: ObservableObject {
     /// path can ever trap on a duplicate again — if two payloads
     /// share a composite key (corrupted state, double-push race),
     /// the most recently updated wins.
-    private func mergeRemoteWatchProgress(_ remoteEntries: [[String: Any]]?) {
-        guard let remoteEntries, !remoteEntries.isEmpty else { return }
+    private func mergeRemoteWatchProgress(_ remoteEntries: [[String: Any]]?, replace: Bool = false) {
+        // nil means the cloud has no watch-progress key at all — nothing to
+        // apply in either mode. An EMPTY array during a replace is meaningful
+        // ("the authoritative device has no progress"), so it falls through
+        // to the delete pass below instead of returning early.
+        guard let remoteEntries else { return }
+        guard replace || !remoteEntries.isEmpty else { return }
         guard let context = WatchProgressManager.modelContext else { return }
         // v1.6.17 — granular per-category gate. Local watch progress
         // stays authoritative on this device when the user opts out.
@@ -1249,8 +1254,9 @@ final class SyncManager: ObservableObject {
         // Upsert remote → local
         for remote in remotes {
             if let local = localByID[compositeKey(remote.vodID, remote.serverID)] {
-                // Conflict: most recent updatedAt wins
-                if remote.updatedAt > local.updatedAt {
+                // Conflict: most recent updatedAt wins. A replace is the user
+                // declaring the cloud authoritative, so remote wins outright.
+                if replace || remote.updatedAt > local.updatedAt {
                     local.title = remote.title
                     local.positionMs = remote.positionMs
                     local.durationMs = remote.durationMs
@@ -1375,17 +1381,23 @@ final class SyncManager: ObservableObject {
     ///   resume) leave this false; a USER tapping "Pull from iCloud" must never
     ///   be silently ignored, which is exactly what the throttle would do right
     ///   after launch -- the button would look broken.
-    func pullFromCloud(force: Bool = false) {
+    /// - Parameter replace: OVERWRITE this device's state with the cloud copy
+    ///   instead of merging into it. Only ever true for the explicit
+    ///   "Pull from iCloud" button, which confirms with the user first
+    ///   (mirrors Android's "Pull Config from Drive"). Every automatic path
+    ///   (foreground resume, KVS change notification) still merges.
+    func pullFromCloud(force: Bool = false, replace: Bool = false) {
         guard isSyncEnabled, !isMerging, !isImporting else { return }
 
-        // Throttle: skip if we pulled within the last 60 seconds
+        // Throttle: skip if we pulled within the last 60 seconds. An explicit
+        // replace is a deliberate, confirmed user action and never throttles.
         let now = ProcessInfo.processInfo.systemUptime
-        guard force || now - Self.lastPullTime > 60 else {
+        guard force || replace || now - Self.lastPullTime > 60 else {
             debugLog("🔵 SyncManager.pullFromCloud: throttled (\(Int(now - Self.lastPullTime))s since last)")
             return
         }
         Self.lastPullTime = now
-        debugLog("🔵 SyncManager.pullFromCloud: reading KVS on foreground")
+        debugLog("🔵 SyncManager.pullFromCloud: reading KVS (force=\(force) replace=\(replace))")
 
         let sKey = kvsKey
         let pKey = prefKVSKey
@@ -1412,14 +1424,14 @@ final class SyncManager: ObservableObject {
                 return
             }
 
-            SyncManager.shared.doMerge(servers: servers, isInitial: false)
+            SyncManager.shared.doMerge(servers: servers, isInitial: false, replace: replace)
             await Task.yield()
             SyncManager.shared.doApplyPreferences(prefs: prefs)
             await Task.yield()
-            SyncManager.shared.mergeRemoteWatchProgress(wp)
+            SyncManager.shared.mergeRemoteWatchProgress(wp, replace: replace)
             await Task.yield()
             SyncManager.shared.mergeRemoteReminders(reminders)
-            debugLog("🔵 SyncManager.pullFromCloud: merge complete")
+            debugLog("🔵 SyncManager.pullFromCloud: \(replace ? "replace" : "merge") complete")
         }
     }
 

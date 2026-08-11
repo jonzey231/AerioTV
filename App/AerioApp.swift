@@ -1291,9 +1291,10 @@ struct RootView: View {
             .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidReceiveRemoteServers)) { notification in
                 guard let remoteServers = notification.userInfo?["servers"] as? [SyncedServer] else { return }
                 let isInitial = notification.userInfo?["isInitial"] as? Bool ?? false
-                debugLog("🟢 RootView: received \(remoteServers.count) servers, isInitial=\(isInitial)")
+                let replace = notification.userInfo?["replace"] as? Bool ?? false
+                debugLog("🟢 RootView: received \(remoteServers.count) servers, isInitial=\(isInitial), replace=\(replace)")
                 isMergingRemote = true
-                mergeRemoteServers(remoteServers, isInitial: isInitial)
+                mergeRemoteServers(remoteServers, isInitial: isInitial, replace: replace)
                 debugLog("🟢 RootView: merge done. servers=\(servers.count)")
 
                 if isInitial && !remoteServers.isEmpty {
@@ -1638,7 +1639,14 @@ struct RootView: View {
     /// Conflict resolution: most recent `lastConnected` wins.
     /// On initial import (fresh install, no local servers), `isActive` from the
     /// remote is respected so the previously-active server is ready to use immediately.
-    private func mergeRemoteServers(_ remoteServers: [SyncedServer], isInitial: Bool = false) {
+    /// - Parameter replace: the user explicitly asked to overwrite this device
+    ///   with the cloud copy ("Pull from iCloud", confirmed by a destructive
+    ///   dialog). Remote wins every field conflict and the young-server
+    ///   race-guard below is bypassed, because "this local server is only 3
+    ///   seconds old" is not a reason to keep it when the user just asked for
+    ///   the cloud's list verbatim. The empty-remote guard still holds: a
+    ///   replace against an EMPTY cloud never wipes the device.
+    private func mergeRemoteServers(_ remoteServers: [SyncedServer], isInitial: Bool = false, replace: Bool = false) {
         let localByID = Dictionary(uniqueKeysWithValues: servers.map { ($0.id, $0) })
         let wasEmpty = servers.isEmpty
 
@@ -1651,7 +1659,7 @@ struct RootView: View {
                 // Existing server — update if remote is newer
                 let localDate = local.lastConnected ?? local.createdAt
                 let remoteDate = remote.lastConnected ?? remote.createdAt
-                if remoteDate > localDate {
+                if replace || remoteDate > localDate {
                     local.name = remote.name
                     local.baseURL = remote.baseURL
                     local.username = remote.username
@@ -1699,6 +1707,17 @@ struct RootView: View {
                     // Catch-up: adopt the remote guide-history retention
                     // so the replay window matches across devices.
                     local.epgRetentionDays = remote.epgRetentionDays
+                    // Which playlist is selected is normally a per-device
+                    // choice and never synced. A replace is the exception:
+                    // the user asked this device to mirror the cloud, and
+                    // if the locally-active playlist is one the replace is
+                    // about to delete, the device would be left with none
+                    // selected (every call site falls back to
+                    // `servers.first`, so it degrades to an arbitrary pick
+                    // rather than an obviously-wrong one).
+                    if replace {
+                        local.isActive = remote.isActive
+                    }
                     // Queue credential writes for after the merge
                     if !remote.password.isEmpty {
                         pendingCredentials.append(("password_\(remote.id.uuidString)", remote.password))
@@ -1713,7 +1732,8 @@ struct RootView: View {
                 // New server from another device — insert locally.
                 // Respect isActive from remote only on initial import of a fresh install,
                 // so the user's previously-active server is ready without manual selection.
-                let shouldActivate = isInitial && wasEmpty && remote.isActive
+                // ... or when the user explicitly asked to mirror the cloud.
+                let shouldActivate = ((isInitial && wasEmpty) || replace) && remote.isActive
                 let newServer = ServerConnection(
                     name: remote.name,
                     type: remote.type,
@@ -1805,7 +1825,7 @@ struct RootView: View {
             // Only delete if sync has been active (i.e., remote has servers but this one is missing)
             if !remoteServers.isEmpty {
                 let ageSeconds = now.timeIntervalSince(local.createdAt)
-                if ageSeconds < 10 {
+                if ageSeconds < 10 && !replace {
                     // v1.7.x: caught a near-miss. The race we're guarding
                     // against (FINDING 1 in the v1.7.0 multi-server-add
                     // bug investigation): a foreign KVS notification fires
@@ -1824,7 +1844,7 @@ struct RootView: View {
                 local.deleteCredentialsFromKeychain()
                 modelContext.delete(local)
                 DebugLogger.shared.log(
-                    "SyncManager: deleted server \(local.name) (removed on another device, age=\(String(format: "%.1f", ageSeconds))s, remoteCount=\(remoteServers.count))",
+                    "SyncManager: deleted server \(local.name) (\(replace ? "absent from the cloud copy the user pulled" : "removed on another device"), age=\(String(format: "%.1f", ageSeconds))s, remoteCount=\(remoteServers.count))",
                     category: "Sync",
                     level: .info
                 )

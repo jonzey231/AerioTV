@@ -46,6 +46,7 @@ struct SettingsView: View {
     /// Drives the confirmation alert for the "Clear iCloud Data"
     /// destructive action in the iCloud Sync section.
     @State private var showClearICloudConfirm = false
+    @State private var showPullConfirm = false
     /// Optional confirmation toast shown after a successful Clear
     /// iCloud Data invocation. Auto-dismisses after a couple of
     /// seconds so the user gets feedback without an extra tap.
@@ -371,21 +372,19 @@ struct SettingsView: View {
                             // on my iPhone and want to immediately pull it to my
                             // Apple TV, there's no way to do that").
                             //
-                            // force: true skips pullFromCloud's 60s throttle. A
-                            // user tapping this must never be silently ignored.
-                            //
-                            // This MERGES remote into local; it does not wipe
-                            // local state the way Android's "Pull Config from
-                            // Drive" does. Merge is what this flow needs and is
-                            // the safer default.
+                            // This REPLACES local state with the cloud copy,
+                            // matching Android's "Pull Config from Drive"
+                            // (Logan, 2026-08-11: "I'd prefer the full
+                            // overwrite. Just make sure there's a note that
+                            // tells the user"). Destructive, so it confirms
+                            // first; the alert carries the note.
                             Button {
-                                debugLog("🔵 Pull from iCloud tapped")
-                                SyncManager.shared.pullFromCloud(force: true)
+                                showPullConfirm = true
                             } label: {
                                 SettingsRow(icon: "icloud.and.arrow.down",
                                             iconColor: .accentPrimary,
                                             title: "Pull from iCloud",
-                                            subtitle: "Fetch what your other devices sent up")
+                                            subtitle: "Replace this device's data with the iCloud copy")
                             }
                             #if os(iOS)
                             .buttonStyle(PressableButtonStyle())
@@ -663,7 +662,16 @@ struct SettingsView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Wipes synced playlists, preferences, watch progress, and credentials from iCloud. This device's data is preserved. iCloud Sync stays enabled — your local state will replace whatever was on iCloud the next time the app pushes.")
+                Text("Wipes synced playlists, preferences, watch progress, and credentials from iCloud. This device's data is preserved. iCloud Sync stays enabled, so your local state will replace whatever was on iCloud the next time the app pushes.")
+            }
+            .alert("Pull from iCloud?", isPresented: $showPullConfirm) {
+                Button("Replace This Device", role: .destructive) {
+                    debugLog("🔵 Pull from iCloud confirmed (replace)")
+                    SyncManager.shared.pullFromCloud(force: true, replace: true)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This replaces this device's playlists, preferences, and watch progress with the copy in iCloud. Anything on this device that is not in iCloud is removed. If this device has the newest changes, push them up first.")
             }
             .overlay(alignment: .bottom) {
                 if clearICloudConfirmationVisible {
@@ -841,7 +849,16 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Wipes synced playlists, preferences, watch progress, and credentials from iCloud. This device's data is preserved. iCloud Sync stays enabled — your local state will replace whatever was on iCloud the next time the app pushes.")
+            Text("Wipes synced playlists, preferences, watch progress, and credentials from iCloud. This device's data is preserved. iCloud Sync stays enabled, so your local state will replace whatever was on iCloud the next time the app pushes.")
+        }
+        .alert("Pull from iCloud?", isPresented: $showPullConfirm) {
+            Button("Replace This Device", role: .destructive) {
+                debugLog("🔵 Pull from iCloud confirmed (replace)")
+                SyncManager.shared.pullFromCloud(force: true, replace: true)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This replaces this device's playlists, preferences, and watch progress with the copy in iCloud. Anything on this device that is not in iCloud is removed. If this device has the newest changes, push them up first.")
         }
         .overlay(alignment: .bottom) {
             if clearICloudConfirmationVisible {
@@ -1090,13 +1107,12 @@ struct SettingsView: View {
 
                     // See the Pull note on the iPhone root section above.
                     Button {
-                        debugLog("🔵 Pull from iCloud tapped")
-                        SyncManager.shared.pullFromCloud(force: true)
+                        showPullConfirm = true
                     } label: {
                         SettingsRow(icon: "icloud.and.arrow.down",
                                     iconColor: .accentPrimary,
                                     title: "Pull from iCloud",
-                                    subtitle: "Fetch what your other devices sent up")
+                                    subtitle: "Replace this device's data with the iCloud copy")
                     }
                     .buttonStyle(PressableButtonStyle())
                 }
@@ -1409,11 +1425,17 @@ struct SettingsView: View {
                 }
 
                 if iCloudSyncEnabled {
+                    // "Sync Now" was ambiguous on the one device where the
+                    // direction matters most: on an Apple TV it pushed the
+                    // TV's older state UP and clobbered what the phone had
+                    // just added, with no way to ask for the phone's copy.
+                    // Named directions plus a real Pull, matching the iPhone
+                    // and iPad panes.
                     TVSettingsActionRow(
                         icon: "arrow.triangle.2.circlepath.icloud",
                         label: syncLastDate > 0
-                            ? "Sync Now  ·  Last synced \(lastSyncedString)"
-                            : "Sync Now"
+                            ? "Push to iCloud  ·  Last synced \(lastSyncedString)"
+                            : "Push to iCloud"
                     ) {
                         SyncManager.shared.pushServers(servers, immediate: true)
                         SyncManager.shared.pushPreferencesImmediate()
@@ -1422,6 +1444,12 @@ struct SettingsView: View {
                             SyncManager.shared.pushWatchProgress(all, immediate: true)
                         }
                         SyncManager.shared.pushReminders(immediate: true)
+                    }
+                    TVSettingsActionRow(
+                        icon: "icloud.and.arrow.down",
+                        label: "Pull from iCloud"
+                    ) {
+                        showPullConfirm = true
                     }
                 }
                 TVSettingsNavRow(destination: SyncCategoriesSettingsView().trackedAsClassicSettingsChild()) {
