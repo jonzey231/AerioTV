@@ -130,6 +130,30 @@ private enum SeriesDetailCache {
     }
 }
 
+/// Single entry point for wiping both On Demand detail caches, called by
+/// `VODStore.beginDisplaying` when the active playlist changes.
+///
+/// Both caches are keyed by the provider's own item id, and those ids collide
+/// across playlists: two panels each number their first series "1". Without a
+/// wipe, opening a series on the new playlist could hit the OLD playlist's
+/// cached entry and render another show's seasons and episodes. The caches
+/// were designed to live for the app's lifetime, which is correct within one
+/// playlist and wrong the moment the user switches.
+@MainActor
+enum VODDetailCaches {
+    static func reset() {
+        let seriesCount = SeriesDetailCache.entries.count
+        let movieCount = MovieDetailCache.entries.count
+        SeriesDetailCache.inFlightTasks.values.forEach { $0.cancel() }
+        SeriesDetailCache.inFlightTasks.removeAll()
+        SeriesDetailCache.entries.removeAll()
+        MovieDetailCache.inFlightTasks.values.forEach { $0.cancel() }
+        MovieDetailCache.inFlightTasks.removeAll()
+        MovieDetailCache.entries.removeAll()
+        debugLog("🎬 VODDetailCaches: reset for playlist switch — dropped \(movieCount) movie and \(seriesCount) series detail entries")
+    }
+}
+
 // MARK: - Movie Detail Cache (v1.6.16.x)
 //
 // Same shape as `SeriesDetailCache` above, ported because the

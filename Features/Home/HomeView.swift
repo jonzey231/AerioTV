@@ -139,6 +139,36 @@ final class VODStore: ObservableObject {
         lastMoviesServerName = nil; lastSeriesServerName = nil
     }
 
+    /// The playlist On Demand is currently showing. Distinct from
+    /// `currentMoviesServerID` / `currentSeriesServerID`, which are assigned
+    /// deep inside the loaders and only once a load gets past its guards.
+    private(set) var displayedServerID: UUID? = nil
+
+    /// Rebuild On Demand from scratch for a new playlist, the same way
+    /// channels and the guide are rebuilt.
+    ///
+    /// Before this, a switch only dropped the previous playlist's movies once
+    /// `loadMovies` happened to reach its own server-changed check — which is
+    /// at the END of the sync orchestrator, after channels, EPG, DVR and a 3s
+    /// settle delay. Until then On Demand kept showing the old playlist's
+    /// library, and any load that returned early at a guard never cleared it
+    /// at all.
+    ///
+    /// The detail caches matter more than the lists. They are keyed by the
+    /// provider's own movie/series ids ("1", "2", ...), which collide across
+    /// playlists exactly the way live stream ids do -- the same collision that
+    /// put one playlist's programmes on another's channels. A cached entry
+    /// from the old playlist would be served for the new playlist's item of
+    /// the same id, so the seasons and episodes on screen would belong to a
+    /// different show entirely.
+    func beginDisplaying(serverID: UUID?) {
+        guard displayedServerID != serverID else { return }
+        debugLog("🎬 VODStore: playlist switch \(displayedServerID?.uuidString.prefix(8) ?? "none") → \(serverID?.uuidString.prefix(8) ?? "none"); rebuilding On Demand from scratch")
+        displayedServerID = serverID
+        clear()
+        VODDetailCaches.reset()
+    }
+
     func refreshMovies(servers: [ServerConnection]) {
         moviesTask?.cancel()
         moviesTask = Task { await loadMovies(servers: servers) }
@@ -406,6 +436,12 @@ final class VODStore: ObservableObject {
         // active server at all (never fall back to an inactive VOD server when a non-VOD
         // server is explicitly active — that would show stale data from the wrong server).
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else {
+            // Nothing left to load from, so nothing should still be on screen.
+            // This path used to return with the previous playlist's movies
+            // intact, under an error message saying no server supports VOD.
+            movies = []; movieCategories = []
+            isLoadingMovies = false
+            lastMoviesServerName = nil; currentMoviesServerID = nil
             if !servers.isEmpty {
                 moviesError = "None of your configured servers support VOD. Use an Xtream Codes or Dispatcharr server to browse movies."
             }
@@ -630,6 +666,11 @@ final class VODStore: ObservableObject {
         }
         let vodServers = servers.filter { $0.supportsVOD && $0.vodEnabled }
         guard let server = vodServers.first(where: { $0.isActive }) ?? (activeServer == nil ? vodServers.first : nil) else {
+            // See the movies path above: clear rather than leave the previous
+            // playlist's series on screen behind an error.
+            series = []; seriesCategories = []
+            isLoadingSeries = false
+            lastSeriesServerName = nil; currentSeriesServerID = nil
             if !servers.isEmpty {
                 seriesError = "None of your configured servers support VOD. Use an Xtream Codes or Dispatcharr server to browse series."
             }
@@ -893,6 +934,9 @@ final class ChannelStore: ObservableObject {
     /// Pass `modelContext` to persist the rebuilt guide back to SwiftData.
     func forceRefresh(servers: [ServerConnection], modelContext: ModelContext? = nil) async {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else { return }
+        // The user asked for fresh data, so the bulk guide must actually be
+        // re-downloaded even if a pass completed moments ago.
+        GuideStore.shared.invalidateBulkGuideReuse()
         activeServer = server
         currentChannelServerID = server.id
         loadTask?.cancel()
@@ -4960,6 +5004,15 @@ struct MainTabView: View {
         // gets exactly one LAN/WAN re-probe-and-retry attempt.
         didAttemptGuideFailover = false
         debugLog("🟢 [Orchestrator] BEGIN, servers=\(allServers.count)")
+        // Rebuild On Demand for the new playlist FIRST, before anything else
+        // runs. VOD is the last phase of this orchestrator (after channels,
+        // EPG, DVR and a settle delay), so leaving the reset to the loaders
+        // meant On Demand kept serving the previous playlist's library, and
+        // its id-keyed detail caches, for the whole of that. Channels and the
+        // guide already rebuild on a switch; this makes VOD behave the same.
+        vodStore.beginDisplaying(
+            serverID: (allServers.first(where: { $0.isActive }) ?? allServers.first)?.id
+        )
         debugLog("🔶 MainTabView.task(channelServerKey): firing, servers=\(allServers.count)")
         channelStore.refresh(servers: allServers)
         debugLog("🔶 MainTabView.task(channelServerKey): refresh called")
