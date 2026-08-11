@@ -230,6 +230,21 @@ struct ChannelListView: View {
         #endif
     }
 
+    /// Whether the group pills themselves belong in the filter row. On tvOS the
+    /// row also carries controls that have nothing to do with group selection
+    /// (Guide/List, Search, Refresh) and therefore always renders, so this is
+    /// what decides the pills alone: gone in sidebar mode, where the sidebar IS
+    /// the group selector, and gone when the playlist has nothing to filter by.
+    /// Always true elsewhere -- iOS gates the whole row at its call sites.
+    private var showsGroupPills: Bool {
+        #if os(tvOS)
+        return (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
+            && !guideSidebarSelectorActive
+        #else
+        return true
+        #endif
+    }
+
     /// Close the docked group sidebar and restore focus to the guide grid. On
     /// tvOS, `.guideGroupSidebarDismissed` runs EPGGuideView's retry-assert
     /// focus loop so Right/Back land back on the origin cell (rebind:false) or
@@ -724,19 +739,28 @@ struct ChannelListView: View {
                     }
                     #endif
                     VStack(spacing: 0) {
+                        #if os(tvOS)
+                        // The row ALWAYS renders on tvOS. It carries the
+                        // Guide/List toggle, Search and Refresh, none of which
+                        // are group selectors, so hiding it with the groups
+                        // took them out too: sidebar mode (mutually exclusive
+                        // with the pills) and single-group playlists both left
+                        // the Apple TV guide with no search and no refresh at
+                        // all. `groupFilterBar` decides internally whether the
+                        // group pills appear inside it.
+                        groupFilterBar
+                            .padding(.vertical, 10)
+                            .focusSection()
+                        #else
                         // Compact-chrome honors the user's hide-filter preference even
                         // in the iPad Guide layout (iPad itself is gated by the flag,
                         // so this only activates on actual iPhones in landscape).
-                        // Sidebar mode hides the pills (mutually exclusive selectors).
                         if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
-                            && !compactChromeHidesFilterBar
-                            && !guideSidebarSelectorActive {
+                            && !compactChromeHidesFilterBar {
                             groupFilterBar
                                 .padding(.vertical, 10)
-                                #if os(tvOS)
-                                .focusSection()
-                                #endif
                         }
+                        #endif
                         EPGGuideView(
                             channels: filteredChannels,
                             servers: Array(servers),
@@ -871,20 +895,22 @@ struct ChannelListView: View {
             // List-level safe area inset means show/hide changes the
             // List's TOP INSET only — the List's content offset and
             // outer frame are stable, so the feedback loop can't form.
+            #if os(iOS)
             if (channelStore.orderedGroups.count > 1 || !hiddenGroups.isEmpty)
                 && !compactChromeHidesFilterBar {
-                #if os(iOS)
                 if UIDevice.current.userInterfaceIdiom != .phone {
                     groupFilterBar
                         .padding(.vertical, 10)
                 }
-                #else
-                groupFilterBar
-                    .padding(.vertical, 10)
-                    .focusSection()
-                    .focusEffectDisabled()
-                #endif
             }
+            #else
+            // Always rendered on tvOS for the same reason as the Guide layout
+            // above: the leading controls are not group selectors.
+            groupFilterBar
+                .padding(.vertical, 10)
+                .focusSection()
+                .focusEffectDisabled()
+            #endif
 
             #if os(tvOS)
             // On tvOS, List draws a white highlight over any focused row —
@@ -1238,6 +1264,25 @@ struct ChannelListView: View {
                 )
                 .disabled(leftHoldPinningAll)   // #42 Part 1: see above
 
+                // Refresh: re-pull channels + guide for the active playlist.
+                // tvOS has no pull-to-refresh gesture, so without this the only
+                // way to force a refresh was Settings → Refresh EPG Data, three
+                // levels away from the guide the user is looking at.
+                TVGroupPill(
+                    group: "",
+                    isSelected: false,
+                    action: {
+                        Task {
+                            await channelStore.forceRefresh(
+                                servers: servers,
+                                modelContext: modelContext
+                            )
+                        }
+                    },
+                    systemImage: "arrow.clockwise"
+                )
+                .disabled(leftHoldPinningAll)   // #42 Part 1: see above
+
                 if showSearchField {
                     TextField("Search channels", text: $searchText)
                         .textFieldStyle(.plain)
@@ -1343,6 +1388,10 @@ struct ChannelListView: View {
                 }
                 #endif
 
+                // Everything from here down is group selection, and only that,
+                // so it is the part that hides in sidebar mode or when the
+                // playlist has no groups. The controls above stay put.
+                if showsGroupPills {
                 // #45: collections placed at the beginning sit before "All".
                 // #42 Part 1: also non-focusable while a guide Left is held, so
                 // the hold cannot land on a beginning collection before "All".
@@ -1398,6 +1447,7 @@ struct ChannelListView: View {
                     hiddenCount: hiddenGroups.count
                 )
                 #endif
+                }   // showsGroupPills
             }
             .padding(.horizontal, 16)
             #if os(tvOS)
