@@ -476,9 +476,17 @@ struct XtreamCodesAPI {
     // Dispatcharr and most Xtream panels serve the actual playable URLs in the M3U,
     // not in the /live/user/pass/id.ext format from the JSON API.
     // The M3U embeds URLs like /proxy/ts/stream/{uuid} for Dispatcharr.
+    /// NOTE: currently has no callers - Apple loads XC live channels from
+    /// `getLiveStreams()` (player_api.php JSON), which is why the Android-only
+    /// get.php 404 below never affected iOS/tvOS. Kept (and kept correct) so a
+    /// future M3U-based parity path can't inherit the bug.
+    ///
+    /// `output` is required by some panels: crx.watch returns a bare HTTP 404
+    /// for `type=m3u_plus` with no `output`, and 200 for `output=ts`. Android
+    /// omitted it and could not add that provider's playlist at all.
     func m3uURL() -> URL? {
         let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        return URL(string: "\(base)/get.php?username=\(username)&password=\(password)&type=m3u_plus")
+        return URL(string: "\(base)/get.php?username=\(username)&password=\(password)&type=m3u_plus&output=ts")
     }
 
     /// Standard Xtream Codes bulk XMLTV EPG feed — the full guide every
