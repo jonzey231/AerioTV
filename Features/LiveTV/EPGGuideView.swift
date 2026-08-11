@@ -4581,7 +4581,38 @@ private struct GuideProgramButton: View {
         }
     }
 
+    /// Below this cell width, text is omitted entirely.
+    ///
+    /// `programCell` clamps every cell to `max(20, …)` so a very short
+    /// programme still has a hit target. Real feeds contain plenty of them:
+    /// the Tuliprox XMLTV measured 2026-08-11 carries 1,685 one-minute
+    /// programmes out of 147,463 (and only 18 that are truly degenerate), and
+    /// at a 2.5-hour viewport one minute is roughly 12 points wide.
+    ///
+    /// `cellContent` stacks four rows -- title, subtitle, time, badges -- so at
+    /// that width each row rendered a one-or-two character fragment and the
+    /// cell became a vertical column of punctuation. `.lineLimit(1)` does not
+    /// help: the problem is four STACKED rows, not wrapping within one.
+    ///
+    /// So this is a rendering rule, not a data rule. An earlier attempt
+    /// filtered these out by duration, which was wrong -- a 1-minute programme
+    /// is real schedule data the provider published, and dropping it loses
+    /// information. Keeping the cell (focusable, selectable, correctly placed
+    /// on the timeline) while omitting text that cannot fit is honest about
+    /// both.
+    ///
+    /// 44pt: below roughly two glyphs plus padding there is nothing legible to
+    /// show at any of the guide's font sizes.
+    private var minWidthForText: CGFloat { 44 }
+
+    @ViewBuilder
     private var cellContent: some View {
+        if width < minWidthForText {
+            // Deliberately empty: the cell's background still draws, so the
+            // programme remains visible as a block on the timeline and stays
+            // focusable/selectable. Details are available on selection.
+            Color.clear
+        } else {
         VStack(alignment: .leading, spacing: 2) {
             #if os(tvOS)
             HStack(spacing: 4) {
@@ -4731,6 +4762,7 @@ private struct GuideProgramButton: View {
         }
         #endif
         .clipped()
+        }
     }
 
     private var reminderKey: String {
