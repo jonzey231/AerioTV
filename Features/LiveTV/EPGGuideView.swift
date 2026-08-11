@@ -187,6 +187,58 @@ final class GuideStore: ObservableObject {
 
     private var inFlightXMLTVTask: (key: InFlightXMLTVKey, task: Task<Bool, Never>)? = nil
 
+    /// The last bulk-XMLTV pass that completed successfully, so a caller
+    /// arriving *after* it finished is served from the merge that already
+    /// landed instead of re-downloading the feed.
+    ///
+    /// `inFlightXMLTVTask` above only coalesces callers that overlap in time.
+    /// The expensive duplicates are sequential: `ChannelStore.loadAllEPG` →
+    /// `primeXMLTVFromURL` pulls the provider's whole guide, finishes, and then
+    /// `fetchUpcoming` → `fetchXtreamBulkXMLTV` pulls the identical bytes again
+    /// a moment later. Nothing in the in-flight path can see that.
+    ///
+    /// A hit requires the same request shape AND that this call's channels are
+    /// already covered by the completed pass. That subset test is what makes
+    /// skipping safe rather than merely cheap: `performXMLTVFetch` parses the
+    /// whole feed but merges only the channels it was handed, so a channel the
+    /// earlier pass carried has *already* been merged, while one it did not
+    /// carry still needs a real fetch.
+    private struct CompletedXMLTVPass {
+        let key: InFlightXMLTVKey
+        let channelKeys: Set<String>
+        let at: Date
+    }
+    private var lastCompletedXMLTVPass: CompletedXMLTVPass? = nil
+
+    /// How long a completed pass stays reusable. Long enough to absorb a cold
+    /// start's overlapping loaders, short enough that a user who waits a few
+    /// minutes and pulls to refresh gets real bytes. Explicit refresh carries
+    /// `replaceExisting: true`, a different key, so it never lands here at all.
+    private static let xmltvReuseWindow: TimeInterval = 180
+
+    /// Drop the completed-pass record so the next bulk-XMLTV request goes to
+    /// the network. Called when the user explicitly asks for fresh data: the
+    /// reuse window exists to stop redundant background re-fetches, and must
+    /// never turn a deliberate Refresh into a no-op.
+    func invalidateBulkGuideReuse() {
+        guard lastCompletedXMLTVPass != nil else { return }
+        lastCompletedXMLTVPass = nil
+        debugLog("📺 GuideStore: bulk-guide reuse invalidated — the next XMLTV request will re-download")
+    }
+
+    /// Every key the XMLTV merge loop can match a programme on, lowercased to
+    /// match the parser's case-folded comparison. Shared by the reuse check and
+    /// the filter-during-parse allowlist so the two can never drift apart.
+    private static func channelMatchKeys(_ channels: [ChannelDisplayItem]) -> Set<String> {
+        var keys = Set<String>()
+        for ch in channels {
+            if let tvg = ch.tvgID, !tvg.isEmpty { keys.insert(tvg.lowercased()) }
+            if !ch.number.isEmpty { keys.insert(ch.number.lowercased()) }
+            if let uuid = ch.uuid, !uuid.isEmpty { keys.insert(uuid.lowercased()) }
+        }
+        return keys
+    }
+
     /// Signature of the last seedEPGCache run — "serverID|channelCount|programCount".
     /// Warm relaunch fires `seedEPGCache` three times with identical
     /// inputs (MainTabView.task after loadFromCache, EPGGuideView.task
@@ -237,6 +289,12 @@ final class GuideStore: ObservableObject {
         inFlightLoadTask = nil
         inFlightXMLTVTask?.task.cancel()
         inFlightXMLTVTask = nil
+        // A completed pass belongs to the playlist that was on screen when it
+        // ran. Its key is already server-scoped, so a stale entry could not be
+        // served to the new playlist, but holding a foreign playlist's channel
+        // key set across a switch is exactly the kind of cross-playlist state
+        // that caused the contamination this section exists to prevent.
+        lastCompletedXMLTVPass = nil
     }
 
     /// The single gate for bulk replacement of `programs`. Returns false and
@@ -863,35 +921,35 @@ final class GuideStore: ObservableObject {
                 }
             }
         case .xtreamCodes:
-            // Xtream: still need per-channel fetching with batches
-            let initialBatchSize = 40
-            let initialChannels = Array(channels.prefix(initialBatchSize))
-            let remainingChannels = channels.count > initialBatchSize ? Array(channels.suffix(from: initialBatchSize)) : []
-
-            var didReceiveAnyResponse = await fetchXtream(
+            // ONE request covers the whole playlist, so ask for the whole
+            // playlist once. This used to be batched (40, then 20 at a time),
+            // and because the bulk-XMLTV attempt lived inside the per-batch
+            // function, every batch re-downloaded and re-parsed the provider's
+            // complete guide. See `fetchXtreamBulkXMLTV` for the measurements.
+            var didReceiveAnyResponse = await fetchXtreamBulkXMLTV(
                 server: server,
-                channels: initialChannels,
+                channels: channels,
                 windowStart: windowStart,
                 windowEnd: windowEnd,
                 replaceExisting: replaceExisting
             )
 
-            // Phase 2: backfill remaining Xtream channels
-            if !remainingChannels.isEmpty {
-                let batchSize = 20
-                for batchStart in stride(from: 0, to: remainingChannels.count, by: batchSize) {
-                    let batchEnd = min(batchStart + batchSize, remainingChannels.count)
-                    let batch = Array(remainingChannels[batchStart..<batchEnd])
-                    let batchDidRespond = await fetchXtream(
-                        server: server,
-                        channels: batch,
-                        windowStart: windowStart,
-                        windowEnd: windowEnd,
-                        replaceExisting: replaceExisting
-                    )
-                    didReceiveAnyResponse = didReceiveAnyResponse || batchDidRespond
-                    await Task.yield()
-                }
+            // Only when the provider has no usable bulk guide: walk channels
+            // individually via get_short_epg. Also unbatched, for a different
+            // reason — the walk latches itself off after one run per session
+            // (`xtreamFallbackExhausted`), so under the old batching only the
+            // FIRST batch ever ran and the remaining batches no-opped. Passing
+            // the full list means the walk's own 300-channel cap decides the
+            // coverage instead of an arbitrary first-40, which is strictly more
+            // EPG for the same request budget.
+            if !didReceiveAnyResponse {
+                didReceiveAnyResponse = await fetchXtream(
+                    server: server,
+                    channels: channels,
+                    windowStart: windowStart,
+                    windowEnd: windowEnd,
+                    replaceExisting: replaceExisting
+                )
             }
             didRefresh = didReceiveAnyResponse
         case .m3uPlaylist:
@@ -1434,28 +1492,47 @@ final class GuideStore: ObservableObject {
     /// (measured, same device) is indistinguishable from an attack.
     private static var xmltvRefused = Set<String>()
 
+    /// Standard XC EPG: the server's bulk `xmltv.php` guide (full programmes,
+    /// server-native naming + categories), matched by tvg-id through the same
+    /// XMLTV path M3U uses. XC channels carry their epg_channel_id as tvgID
+    /// (`ChannelStore.fetchXtream`).
+    ///
+    /// SEPARATE from the per-stream fallback below, and that separation is the
+    /// whole point. One `xmltv.php` request returns the programmes for the
+    /// ENTIRE playlist, so it is a whole-playlist operation that must run once.
+    /// It used to live at the top of the per-channel function, which
+    /// `fetchUpcoming` called once per 20-channel batch — so a single guide
+    /// load re-downloaded and re-parsed the complete feed once per batch.
+    /// Measured 2026-08-11: 91 downloads of a 44 MB feed in five minutes on one
+    /// provider, and 576 downloads of another's 33 MB feed (~19 GB) in a single
+    /// session, which is the other half of why that provider's Cloudflare
+    /// banned the user's IP. Callers must hand this the FULL channel list.
+    private func fetchXtreamBulkXMLTV(server: ServerConnection, channels: [ChannelDisplayItem],
+                                      windowStart: Date, windowEnd: Date,
+                                      replaceExisting: Bool = false) async -> Bool {
+        let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL,
+                                  username: server.username,
+                                  password: server.effectivePassword)
+        let serverKey = server.id.uuidString
+        guard let xmltvURL = api.xmltvURL(), !Self.xmltvRefused.contains(serverKey) else { return false }
+        return await fetchXMLTVFromURL(
+            url: xmltvURL, channels: channels,
+            windowStart: windowStart, windowEnd: windowEnd,
+            categoryServerID: serverKey,
+            replaceExisting: replaceExisting)
+    }
+
+    /// Per-stream `get_short_epg` fallback, for providers whose bulk
+    /// `xmltv.php` yields nothing usable (no such endpoint, or no channel
+    /// carries an epg_channel_id). Genuinely per-channel, hence the cap, the
+    /// circuit breaker and the once-per-session latch below.
     private func fetchXtream(server: ServerConnection, channels: [ChannelDisplayItem],
                               windowStart: Date, windowEnd: Date,
                               replaceExisting: Bool = false) async -> Bool {
         let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL,
                                   username: server.username,
                                   password: server.effectivePassword)
-
-        // Standard XC EPG: the server's bulk xmltv.php guide (full programmes,
-        // server-native naming + categories), matched by tvg-id through the
-        // same XMLTV path M3U uses. XC channels carry their epg_channel_id as
-        // tvgID (ChannelStore.fetchXtream). Only fall back to the per-stream
-        // get_short_epg loop below when the feed yields no matching programmes
-        // (provider without xmltv.php, or channels with no epg_channel_id).
         let serverKey = server.id.uuidString
-        if let xmltvURL = api.xmltvURL(), !Self.xmltvRefused.contains(serverKey) {
-            let ok = await fetchXMLTVFromURL(
-                url: xmltvURL, channels: channels,
-                windowStart: windowStart, windowEnd: windowEnd,
-                categoryServerID: server.id.uuidString,
-                replaceExisting: replaceExisting)
-            if ok { return true }
-        }
 
         if Self.xtreamFallbackExhausted.contains(serverKey) {
             debugLog("📺 XC per-channel EPG fallback skipped for \(server.name): already exhausted this session.")
@@ -1802,6 +1879,18 @@ final class GuideStore: ObservableObject {
             return await inFlight.task.value
         }
 
+        // Recently-completed reuse — see `lastCompletedXMLTVPass`. Catches the
+        // sequential duplicates that in-flight coalescing structurally cannot.
+        let requestedKeys = Self.channelMatchKeys(channels)
+        if let done = lastCompletedXMLTVPass,
+           done.key == inFlightKey,
+           Date().timeIntervalSince(done.at) < Self.xmltvReuseWindow,
+           requestedKeys.isSubset(of: done.channelKeys) {
+            let age = Int(Date().timeIntervalSince(done.at))
+            debugLog("📺 GuideStore.fetchXMLTVFromURL: reusing the bulk guide fetched \(age)s ago from \(url.host ?? "?") — these \(channels.count) channels were already merged from it, skipping the re-download")
+            return true
+        }
+
         // Wrap the fetch+parse+merge body in a Task so a concurrent
         // caller with the same URL can join via `inFlightXMLTVTask`.
         // Inherits @MainActor from the enclosing GuideStore, which
@@ -1823,6 +1912,17 @@ final class GuideStore: ObservableObject {
         // stomp it.
         if inFlightXMLTVTask?.key == inFlightKey {
             inFlightXMLTVTask = nil
+        }
+        // Record the pass so a later caller asking for the same feed and a
+        // subset of these channels can be served without touching the network.
+        // Successes only: a failed pass merged nothing, so there is nothing to
+        // reuse and the next caller should get a real attempt.
+        if success {
+            lastCompletedXMLTVPass = CompletedXMLTVPass(
+                key: inFlightKey,
+                channelKeys: requestedKeys,
+                at: Date()
+            )
         }
         return success
     }
@@ -1886,12 +1986,7 @@ final class GuideStore: ObservableObject {
         // `fetchAndParse` consults this; uncompressed XMLTV parses
         // whole (small enough) and ignores it. Empty set passes nil
         // so a misconfigured channel list never filters everything out.
-        var knownChannelKeys = Set<String>()
-        for ch in channels {
-            if let tvg = ch.tvgID, !tvg.isEmpty { knownChannelKeys.insert(tvg.lowercased()) }
-            if !ch.number.isEmpty { knownChannelKeys.insert(ch.number.lowercased()) }
-            if let uuid = ch.uuid, !uuid.isEmpty { knownChannelKeys.insert(uuid.lowercased()) }
-        }
+        var knownChannelKeys = Self.channelMatchKeys(channels)
         // Catch-up depth: bridged `epg_data_id -> EPGData.tvg_id` keys from
         // the caller (layerDispatcharrUpstreamSources). Upstream feeds key
         // programmes by exactly these ids, which routinely differ from a
