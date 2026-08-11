@@ -200,14 +200,67 @@ final class GuideStore: ObservableObject {
     /// on the same @MainActor won't race.
     private var lastSeedEPGCacheSignature: String? = nil
 
+    // MARK: - Display ownership (2026-08-11, multi-playlist EPG contamination)
+    //
+    // GuideStore is a singleton and `programs` is keyed by CHANNEL id -- which
+    // for Xtream playlists is the panel's bare stream_id ("1", "2", ...). Two
+    // playlists routinely collide on those keys. The bug this fixes: open the
+    // guide on playlist A (crx, 33MB XMLTV, slow parse), switch to playlist B
+    // (Tuliprox) while A's merge is still in flight. B loads and renders
+    // correctly, then A's merge completes and does `programs = result.dict`,
+    // replacing B's schedule with A's under the same keys. On screen: ESPN's
+    // "First Take" on Global Toronto, and colliding cells collapsed to 20pt
+    // slivers. Three earlier "sliver fixes" (duration filter, cache-load
+    // filter, narrow-cell text gate) all treated symptoms of this race.
+    //
+    // The rule, which is how every multi-playlist IPTV client stays sane: a
+    // bulk programme write is only valid for the playlist the guide is
+    // CURRENTLY displaying. Anything else is a stale writer and is discarded.
+    // The per-server SwiftData cache still gets saved by the fetch paths, so
+    // the discarded work isn't wasted -- it's there when the user switches
+    // back. Persisted identifiers are untouched.
+
+    /// UUID string of the server whose programmes the guide is displaying.
+    /// Set by `loadFromCache` and `fetchUpcoming` (the two per-server entry
+    /// points); every bulk write checks it via `commitPrograms`.
+    private(set) var displayedServerID: String? = nil
+
+    /// Records a playlist switch and cancels in-flight EPG work that belongs
+    /// to the previous playlist. Deliberately does NOT clear `programs`:
+    /// the new server's cache load replaces it wholesale moments later, and
+    /// clearing early would blank the guide during the transition.
+    private func beginDisplaying(serverID: String) {
+        guard displayedServerID != serverID else { return }
+        debugLog("📺 GuideStore: display switch \(displayedServerID?.prefix(8) ?? "none") → \(serverID.prefix(8)); cancelling stale in-flight EPG work")
+        displayedServerID = serverID
+        inFlightLoadTask?.task.cancel()
+        inFlightLoadTask = nil
+        inFlightXMLTVTask?.task.cancel()
+        inFlightXMLTVTask = nil
+    }
+
+    /// The single gate for bulk replacement of `programs`. Returns false and
+    /// discards when the result was computed for a server the guide has
+    /// since navigated away from.
+    @discardableResult
+    private func commitPrograms(_ dict: [String: [GuideProgram]],
+                                for serverID: String, source: String) -> Bool {
+        guard displayedServerID == nil || displayedServerID == serverID else {
+            debugLog("📺 GuideStore: DISCARDED stale \(source) write for \(serverID.prefix(8)) — guide now displays \(displayedServerID!.prefix(8))")
+            return false
+        }
+        programs = dict
+        return true
+    }
+
     private func beginBatch(basePrograms: [String: [GuideProgram]]? = nil) {
         _isBatching = true
         _pendingPrograms = basePrograms ?? programs
     }
 
-    private func endBatch() {
+    private func endBatch(for serverID: String, source: String) {
         _isBatching = false
-        programs = _pendingPrograms
+        commitPrograms(_pendingPrograms, for: serverID, source: source)
         _pendingPrograms = [:]
     }
 
@@ -249,6 +302,7 @@ final class GuideStore: ObservableObject {
     func loadFromCache(modelContext: ModelContext, channels: [ChannelDisplayItem], serverID: String) async -> Bool {
         // Completed-fetch shortcut. Match on serverID so a playlist
         // switch still forces a real read.
+        beginDisplaying(serverID: serverID)
         if let cached = lastLoadFromCacheResult, cached.serverID == serverID {
             debugLog("📺 GuideStore.loadFromCache: idempotent replay (serverID=\(serverID), fresh=\(cached.isFresh), programs already loaded=\(programs.count) channels)")
             return cached.isFresh
@@ -360,6 +414,28 @@ final class GuideStore: ObservableObject {
                     return nil
                 }
 
+                // 2026-08-11 one-shot: purge rows poisoned by cross-playlist
+                // saves. Before the display-ownership gate, a playlist switch
+                // during a slow XMLTV parse let the OLD playlist's merge land
+                // in `programs`, and `saveToCache` then persisted that dict
+                // tagged with the NEW playlist's serverID -- so the disk cache
+                // itself holds the wrong playlist's schedule under the right
+                // server tag. The rows are self-consistently mislabeled;
+                // nothing can repair them in place, and every cache load
+                // faithfully re-displays the contamination (the "it looked
+                // right, then reverted" reports). Cache is pure derived data;
+                // purge once and re-fetch through the now-gated write path.
+                let crossPlaylistKey = "epg.crossPlaylistPurgeV1"
+                if !UserDefaults.standard.bool(forKey: crossPlaylistKey) {
+                    if let allRows = try? bgContext.fetch(FetchDescriptor<EPGProgram>()) {
+                        for ep in allRows { bgContext.delete(ep) }
+                        try? bgContext.save()
+                        debugLog("🗑️ Cross-playlist EPG purge: dropped \(allRows.count) rows saved before the display-ownership gate")
+                    }
+                    UserDefaults.standard.set(true, forKey: crossPlaylistKey)
+                    return nil
+                }
+
                 let now = Date()
                 let windowStart = now.addingTimeInterval(-retentionSecs)
                 let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
@@ -406,7 +482,7 @@ final class GuideStore: ObservableObject {
             // work is the `programs` assignment (fires @Published)
             // plus two log lines. The 97k-row fetch + dict build
             // already happened off-main.
-            self.programs = Self.drawableOnly(loaded.dict)
+            self.commitPrograms(Self.drawableOnly(loaded.dict), for: serverID, source: "cache-load")
             // Record how old the loaded data actually is (newest cached
             // fetch), so the warm-foreground staleness check (issue #24)
             // measures the real age of what the user is looking at, not
@@ -743,6 +819,7 @@ final class GuideStore: ObservableObject {
             return false  // `defer` above resets isLoading
         }
         debugLog("📺 GuideStore.fetchUpcoming: server=\(server.name), type=\(server.type), channels=\(channels.count)")
+        beginDisplaying(serverID: server.id.uuidString)
 
         let didRefresh: Bool
         switch server.type {
@@ -903,9 +980,10 @@ final class GuideStore: ObservableObject {
         }()
         beginBatch(basePrograms: batchBasePrograms)
         var shouldCommitBatch = false
+        let batchServerID = server.id.uuidString
         defer {
             if shouldCommitBatch {
-                endBatch()
+                endBatch(for: batchServerID, source: "dispatcharr-grid")
             } else {
                 cancelBatch()
             }
@@ -1392,7 +1470,7 @@ final class GuideStore: ObservableObject {
         var shouldCommitBatch = false
         defer {
             if shouldCommitBatch {
-                endBatch()
+                endBatch(for: serverKey, source: "xtream-short-epg")
             } else {
                 cancelBatch()
             }
@@ -1645,7 +1723,7 @@ final class GuideStore: ObservableObject {
 
             updated[cid] = progs
         }
-        self.programs = updated
+        guard commitPrograms(updated, for: serverID, source: "category-apply") else { return }
 
         // Apply to Live-TV channel-card stripe.
         ChannelStore.shared.applyXMLTVCategories(byChannel, serverID: serverID)
@@ -1982,7 +2060,15 @@ final class GuideStore: ObservableObject {
         // invalidation instead of 98k (which is what the old
         // beginBatch/endBatch pair was also designed to do, but
         // that version still ran the merge loop on main).
-        programs = result.dict
+        guard commitPrograms(result.dict, for: categoryServerID, source: "xmltv-merge") else {
+            // Stale writer: the user switched playlists during this parse.
+            // Return true so the caller does NOT fall through to its
+            // per-channel backstop for a playlist nobody is looking at.
+            // (The persistent save happens in the caller via saveToCache,
+            // which snapshots the displayed dict -- correctly the OTHER
+            // playlist's by now -- so nothing stale is persisted either.)
+            return true
+        }
         debugLog("📺 XMLTV \(hostLabel): \(result.matched) programs matched, \(result.missed) skipped (no channel)")
         // Back-fill ChannelStore so Tint Channel Cards reflects
         // the XMLTV categories on every channel row.
