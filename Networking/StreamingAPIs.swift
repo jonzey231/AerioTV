@@ -494,8 +494,12 @@ struct XtreamCodesAPI {
         // threw on a perfectly good response, which broke VOD loading on a real
         // provider (2026-08-11). Only the FIRST character matters here, so a
         // replacement char at the truncated tail is harmless.
+        // Strip a UTF-8 BOM before looking at the first character.
+        // `.whitespacesAndNewlines` does NOT cover U+FEFF, and PHP panels
+        // emitting BOM'd JSON are a real thing — JSONSerialization decodes
+        // them fine, so this check must not reject them.
         let head = String(decoding: data.prefix(512), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{FEFF}")))
         guard !head.isEmpty else { return false }
         switch head.first {
         case "{": return true
@@ -657,7 +661,16 @@ struct XtreamCodesAPI {
             await ShortEPGGovernor.shared.recordSuccess(host: host)
             return decoded
         } catch {
-            await ShortEPGGovernor.shared.recordFailure(host: host)
+            // Cancellation is the DEVICE giving up (a scrolled-away cell's
+            // 15s race, a torn-down view), not the provider refusing. Counting
+            // it opened the 15-minute host breaker on slow-but-honest links —
+            // eight 14-second answers in a row read as eight "failures" and
+            // silenced short-EPG for the whole host.
+            let isDeviceSideCancel = error is CancellationError
+                || (error as? URLError)?.code == .cancelled
+            if !isDeviceSideCancel {
+                await ShortEPGGovernor.shared.recordFailure(host: host)
+            }
             throw error
         }
     }

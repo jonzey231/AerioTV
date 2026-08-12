@@ -139,10 +139,16 @@ final class VODStore: ObservableObject {
         lastMoviesServerName = nil; lastSeriesServerName = nil
     }
 
-    /// The playlist On Demand is currently showing. Distinct from
-    /// `currentMoviesServerID` / `currentSeriesServerID`, which are assigned
-    /// deep inside the loaders and only once a load gets past its guards.
-    private(set) var displayedServerID: UUID? = nil
+    /// Identity of the playlist On Demand is currently showing:
+    /// "uuid|baseURL|username", not the UUID alone. The URL and username are
+    /// part of it because editing a server row in place to point at a
+    /// DIFFERENT panel re-fires the orchestrator with the same UUID — and the
+    /// detail caches are keyed by the provider's own item ids, which collide
+    /// across panels, so that path needs the same wipe a playlist switch
+    /// gets. Distinct from `currentMoviesServerID` / `currentSeriesServerID`,
+    /// which are assigned deep inside the loaders and only once a load gets
+    /// past its guards.
+    private(set) var displayedServerIdentity: String? = nil
 
     /// Rebuild On Demand from scratch for a new playlist, the same way
     /// channels and the guide are rebuilt.
@@ -161,10 +167,13 @@ final class VODStore: ObservableObject {
     /// from the old playlist would be served for the new playlist's item of
     /// the same id, so the seasons and episodes on screen would belong to a
     /// different show entirely.
-    func beginDisplaying(serverID: UUID?) {
-        guard displayedServerID != serverID else { return }
-        debugLog("🎬 VODStore: playlist switch \(displayedServerID?.uuidString.prefix(8) ?? "none") → \(serverID?.uuidString.prefix(8) ?? "none"); rebuilding On Demand from scratch")
-        displayedServerID = serverID
+    func beginDisplaying(server: ServerConnection?) {
+        let identity = server.map { "\($0.id.uuidString)|\($0.effectiveBaseURL)|\($0.username)" }
+        guard displayedServerIdentity != identity else { return }
+        let fromLabel = displayedServerIdentity?.prefix(8) ?? "none"
+        let toLabel = identity?.prefix(8) ?? "none"
+        debugLog("🎬 VODStore: playlist switch \(fromLabel) → \(toLabel); rebuilding On Demand from scratch")
+        displayedServerIdentity = identity
         clear()
         VODDetailCaches.reset()
     }
@@ -935,8 +944,11 @@ final class ChannelStore: ObservableObject {
     func forceRefresh(servers: [ServerConnection], modelContext: ModelContext? = nil) async {
         guard let server = servers.first(where: { $0.isActive }) ?? servers.first else { return }
         // The user asked for fresh data, so the bulk guide must actually be
-        // re-downloaded even if a pass completed moments ago.
+        // re-downloaded even if a pass completed moments ago — and a server
+        // that got refusal-latched by an earlier 403 must get a real retry,
+        // not a silent no-op (Cloudflare rate-limits lift; bans expire).
         GuideStore.shared.invalidateBulkGuideReuse()
+        GuideStore.shared.resetEPGRefusalLatches(forServerKey: server.id.uuidString)
         activeServer = server
         currentChannelServerID = server.id
         loadTask?.cancel()
@@ -2200,9 +2212,20 @@ final class ChannelStore: ObservableObject {
             // playlists correct catch-up and channel numbering for free.
             if let xc = XtreamCodesAPI.credentials(fromGetPhpURL: baseURL) {
                 debugLog("📺 M3U URL is an Xtream get.php link; loading via player_api instead")
-                return try await fetchXtream(baseURL: xc.base,
-                                             username: xc.username,
-                                             password: xc.password)
+                do {
+                    return try await fetchXtream(baseURL: xc.base,
+                                                 username: xc.username,
+                                                 password: xc.password)
+                } catch {
+                    // The reroute is a URL-shape guess, not a probe. Some
+                    // middleware serves get.php but has player_api disabled,
+                    // broken, or separately IP-locked — for those users the
+                    // pasted M3U worked before the reroute existed, and it
+                    // must keep working. Only a get.php URL lands here, so
+                    // falling back re-fetches at most the M3U they pasted.
+                    debugLog("📺 player_api failed for the get.php link (\(error.localizedDescription)); falling back to the pasted M3U itself")
+                    return try await fetchM3U(baseURL: baseURL, epgURL: epgURL)
+                }
             }
             return try await fetchM3U(baseURL: baseURL, epgURL: epgURL)
         case .xtreamCodes:
@@ -5011,7 +5034,7 @@ struct MainTabView: View {
         // its id-keyed detail caches, for the whole of that. Channels and the
         // guide already rebuild on a switch; this makes VOD behave the same.
         vodStore.beginDisplaying(
-            serverID: (allServers.first(where: { $0.isActive }) ?? allServers.first)?.id
+            server: allServers.first(where: { $0.isActive }) ?? allServers.first
         )
         debugLog("🔶 MainTabView.task(channelServerKey): firing, servers=\(allServers.count)")
         channelStore.refresh(servers: allServers)

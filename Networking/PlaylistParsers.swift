@@ -196,9 +196,15 @@ struct M3UParser {
         // GH #26: download to disk + line-stream the parse (see parseFile).
         let (tempURL, response) = try await session.download(from: url)
         defer { try? FileManager.default.removeItem(at: tempURL) }
-        guard let http = response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode) else {
+        guard let http = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
+        }
+        guard (200...299).contains(http.statusCode) else {
+            // Keep the status code: ChannelStore's retry loop only retries
+            // `.serverError` with a retryable code, so collapsing a transient
+            // 502/503 into `.invalidResponse` silently disabled M3U retry and
+            // showed a generic message with the real reason stripped.
+            throw APIError.serverError(http.statusCode)
         }
         // A 2xx is not enough: the body has to contain something. See
         // APIError.emptyResponse - a proxy that cannot build the playlist can

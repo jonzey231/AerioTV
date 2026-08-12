@@ -671,7 +671,7 @@ struct SettingsView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This replaces this device's playlists, preferences, and watch progress with the copy in iCloud. Anything on this device that is not in iCloud is removed. If this device has the newest changes, push them up first.")
+                Text("This replaces this device's playlists and watch progress with the copy in iCloud. Playlists or progress on this device that are not in iCloud are removed. Preferences merge normally. If this device has the newest changes, push them up first.")
             }
             .overlay(alignment: .bottom) {
                 if clearICloudConfirmationVisible {
@@ -858,7 +858,7 @@ struct SettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This replaces this device's playlists, preferences, and watch progress with the copy in iCloud. Anything on this device that is not in iCloud is removed. If this device has the newest changes, push them up first.")
+            Text("This replaces this device's playlists and watch progress with the copy in iCloud. Playlists or progress on this device that are not in iCloud are removed. Preferences merge normally. If this device has the newest changes, push them up first.")
         }
         .overlay(alignment: .bottom) {
             if clearICloudConfirmationVisible {

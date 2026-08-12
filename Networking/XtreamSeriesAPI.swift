@@ -30,7 +30,21 @@ extension XtreamCodesAPI {
         guard let http = response as? HTTPURLResponse else { throw APIError.invalidResponse }
         switch http.statusCode {
         case 200...299: break
-        case 401, 403: throw APIError.unauthorized
+        case 401: throw APIError.unauthorized
+        case 403:
+            // Same split as the main XC validator: `.unauthorized` renders
+            // Dispatcharr Admin-API-Key advice, which is nonsense on a plain
+            // Xtream panel — a 403 here is typically the provider's edge
+            // (rate limit, bot protection, IP ban) and the plain-text body
+            // says so. Surface the server's own words instead.
+            var reason: String? = nil
+            if !data.isEmpty,
+               let body = String(data: data.prefix(200), encoding: .utf8)?
+                   .trimmingCharacters(in: .whitespacesAndNewlines),
+               !body.isEmpty, !body.hasPrefix("<") {
+                reason = String(body.prefix(160))
+            }
+            throw APIError.forbidden(reason)
         default: throw APIError.serverError(http.statusCode)
         }
 

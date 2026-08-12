@@ -206,6 +206,16 @@ final class GuideStore: ObservableObject {
     private struct CompletedXMLTVPass {
         let key: InFlightXMLTVKey
         let channelKeys: Set<String>
+        /// The parse window the pass actually kept programmes for. Reuse must
+        /// require the new request's window to fit inside this (with slack for
+        /// the natural forward drift of `now`-derived windows): the parser
+        /// window-filters at parse time, so a later caller wanting a deeper
+        /// window would otherwise be told "already merged" for programmes the
+        /// recorded pass threw away. Today all same-URL callers use the same
+        /// window shape and this never rejects; it exists so the first future
+        /// deep-window caller (catch-up backfill) fails safe into a real fetch.
+        let windowStart: Date
+        let windowEnd: Date
         let at: Date
     }
     private var lastCompletedXMLTVPass: CompletedXMLTVPass? = nil
@@ -224,6 +234,24 @@ final class GuideStore: ObservableObject {
         guard lastCompletedXMLTVPass != nil else { return }
         lastCompletedXMLTVPass = nil
         debugLog("📺 GuideStore: bulk-guide reuse invalidated — the next XMLTV request will re-download")
+    }
+
+    /// Un-latch a server's EPG refusal state so the next fetch is a real
+    /// attempt. The latches exist to stop the app re-asking a refusing
+    /// provider hundreds of times per session (measured 155 xmltv.php
+    /// repeats, 5,374 get_short_epg calls), but a 403 is NOT always
+    /// permanent — Cloudflare rate-limits lift, bans expire. Without a reset,
+    /// one transient 403 silenced EPG for the rest of the process and even
+    /// Settings → Refresh EPG Data could not recover; a user who purged their
+    /// cache on that screen was left with an EMPTY guide until force-quit.
+    /// Called from `ChannelStore.forceRefresh` (the user asked; ask again)
+    /// and from `beginDisplaying` (the incoming playlist gets a fresh chance).
+    func resetEPGRefusalLatches(forServerKey serverKey: String) {
+        let hadRefusal = Self.xmltvRefused.remove(serverKey) != nil
+        let hadExhausted = Self.xtreamFallbackExhausted.remove(serverKey) != nil
+        if hadRefusal || hadExhausted {
+            debugLog("📺 GuideStore: cleared EPG refusal latches for \(serverKey.prefix(8)) (refused=\(hadRefusal), fallbackExhausted=\(hadExhausted)) — next fetch is a real attempt")
+        }
     }
 
     /// Every key the XMLTV merge loop can match a programme on, lowercased to
@@ -295,6 +323,14 @@ final class GuideStore: ObservableObject {
         // key set across a switch is exactly the kind of cross-playlist state
         // that caused the contamination this section exists to prevent.
         lastCompletedXMLTVPass = nil
+        // The incoming playlist gets a fresh EPG attempt even if it was
+        // refusal-latched earlier in the session — see resetEPGRefusalLatches.
+        resetEPGRefusalLatches(forServerKey: serverID)
+        // Per-cell prefetches belong to the outgoing playlist too. Their
+        // merge path also re-checks display ownership (a task already past
+        // its cancellation checkpoints still completes), and the fetched-ids
+        // / breaker state resets so the new playlist prefetches cleanly.
+        resetPrefetchCache()
     }
 
     /// The single gate for bulk replacement of `programs`. Returns false and
@@ -589,6 +625,11 @@ final class GuideStore: ObservableObject {
         inFlightXMLTVTask?.task.cancel()
         inFlightXMLTVTask = nil
         lastSeedEPGCacheSignature = nil
+        // `programs` was just emptied; a completed-pass record claiming "these
+        // channels are already merged" would be a lie until the next fetch.
+        // Every current caller pairs this with forceRefresh (which also
+        // clears it), but the invariant belongs HERE, not in the callers.
+        lastCompletedXMLTVPass = nil
     }
 
     /// User-facing "nuke the EPG cache" action. Clears the in-memory
@@ -968,7 +1009,11 @@ final class GuideStore: ObservableObject {
         debugLog("📺 GuideStore done: \(totalPrograms) programs across \(programs.count) channels, \(channelsWithMultiple) channels have >1 program")
         // A real network refresh landed, so the loaded data is current as of
         // `now`. Resets the warm-foreground staleness clock (issue #24).
-        if didRefresh { newestFetchedAt = now }
+        // Guarded on display ownership: a fetch whose merge was discarded
+        // because the user switched playlists mid-flight reports true (to
+        // suppress the backstop) but refreshed nothing the user can see, and
+        // must not mark the NEW playlist's guide as fresh.
+        if didRefresh, displayedServerID == server.id.uuidString { newestFetchedAt = now }
         return didRefresh
     }
 
@@ -1885,6 +1930,8 @@ final class GuideStore: ObservableObject {
         if let done = lastCompletedXMLTVPass,
            done.key == inFlightKey,
            Date().timeIntervalSince(done.at) < Self.xmltvReuseWindow,
+           windowStart >= done.windowStart - Self.xmltvReuseWindow,
+           windowEnd <= done.windowEnd + Self.xmltvReuseWindow,
            requestedKeys.isSubset(of: done.channelKeys) {
             let age = Int(Date().timeIntervalSince(done.at))
             debugLog("📺 GuideStore.fetchXMLTVFromURL: reusing the bulk guide fetched \(age)s ago from \(url.host ?? "?") — these \(channels.count) channels were already merged from it, skipping the re-download")
@@ -1917,10 +1964,22 @@ final class GuideStore: ObservableObject {
         // subset of these channels can be served without touching the network.
         // Successes only: a failed pass merged nothing, so there is nothing to
         // reuse and the next caller should get a real attempt.
-        if success {
+        //
+        // The display check closes a phantom-success hole: when the user
+        // switches playlists mid-parse, performXMLTVFetch's merge is DISCARDED
+        // by commitPrograms but it still returns true (deliberately, so the
+        // caller does not run its per-channel backstop for a playlist nobody
+        // is looking at). beginDisplaying cleared this latch — but that ran
+        // BEFORE this line, so recording on `success` alone would re-create a
+        // pass whose data was never kept. Switching back within the reuse
+        // window would then skip a real fetch. Only a merge that landed on the
+        // currently-displayed playlist is reusable.
+        if success, displayedServerID == nil || displayedServerID == inFlightKey.categoryServerID {
             lastCompletedXMLTVPass = CompletedXMLTVPass(
                 key: inFlightKey,
                 channelKeys: requestedKeys,
+                windowStart: windowStart,
+                windowEnd: windowEnd,
                 at: Date()
             )
         }
@@ -2374,6 +2433,13 @@ final class GuideStore: ObservableObject {
         let password = server.effectivePassword
         let channelID = channel.id
         let tvgID = channel.tvgID
+        // Which playlist this prefetch belongs to, checked again at merge
+        // time. The task can outlive a playlist switch (beginDisplaying now
+        // also cancels these, but a task already past its cancellation checks
+        // still completes), and `mergeProgram` writes straight into `programs`
+        // where bare stream_id keys collide across playlists — the exact
+        // contamination the display-ownership gate exists to stop.
+        let prefetchServerKey = server.id.uuidString
 
         // Cancel any previous debounced task for this same channel
         // so a quickly-repeating `.onAppear` (e.g. SwiftUI diffing a
@@ -2489,6 +2555,14 @@ final class GuideStore: ObservableObject {
             // Merge results back on main actor
             await MainActor.run {
                 guard let self else { return }
+                // Display ownership: discard if the guide moved to another
+                // playlist while this fetch was in flight. Same rule as
+                // commitPrograms, applied to the one write path that does
+                // not go through it.
+                guard self.displayedServerID == nil || self.displayedServerID == prefetchServerKey else {
+                    debugLog("📺 GuideStore.prefetch: DISCARDED stale per-cell result for \(prefetchServerKey.prefix(8)) — guide now displays \(self.displayedServerID!.prefix(8))")
+                    return
+                }
                 for prog in fetched {
                     self.mergeProgram(prog, for: channelID)
                 }
