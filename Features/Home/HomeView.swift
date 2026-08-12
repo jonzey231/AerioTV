@@ -3406,6 +3406,9 @@ private struct TVNavActionCircle: View {
     let systemImage: String
     let label: String
     var spinning: Bool = false
+    /// Android-parity selected fill: the Search circle stays accent-filled
+    /// while its screen is up, so the chrome shows where you are.
+    var isSelected: Bool = false
     let action: () -> Void
 
     var body: some View {
@@ -3421,7 +3424,7 @@ private struct TVNavActionCircle: View {
             }
             .frame(width: 60, height: 60)
         }
-        .buttonStyle(TVNavCircleButtonStyle())
+        .buttonStyle(TVNavCircleButtonStyle(isSelected: isSelected))
         .disabled(spinning)
         .accessibilityLabel(label)
     }
@@ -3432,14 +3435,16 @@ private struct TVNavActionCircle: View {
 /// circle like Android TV's action circles; focused it flips to the white
 /// pill-platter look of the adjacent system tab bar.
 private struct TVNavCircleButtonStyle: ButtonStyle {
+    var isSelected: Bool = false
     @Environment(\.isFocused) private var isFocused
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundColor(isFocused ? .black : .white.opacity(0.85))
+            .foregroundColor(isFocused || isSelected ? .black : .white.opacity(0.85))
             .background(
                 Circle()
-                    .fill(isFocused ? Color.white : Color.white.opacity(0.12))
+                    .fill(isFocused ? Color.white
+                          : (isSelected ? Color.accentPrimary : Color.white.opacity(0.12)))
             )
             .scaleEffect(isFocused ? 1.08 : (configuration.isPressed ? 0.96 : 1.0))
             .animation(.easeOut(duration: 0.15), value: isFocused)
@@ -4246,9 +4251,9 @@ struct MainTabView: View {
                         TVNavActionCircle(
                             systemImage: "magnifyingglass",
                             label: "Search",
-                            spinning: false
+                            isSelected: showSearch
                         ) {
-                            showSearch = true
+                            withAnimation(.easeOut(duration: 0.2)) { showSearch.toggle() }
                         }
                     }
                     // Own focus region beside the tab bar: LEFT from the
@@ -4256,10 +4261,34 @@ struct MainTabView: View {
                     // them; grid navigation never lands here by accident.
                     .focusSection()
                     .padding(.leading, max(16, barLeading - 152))
-                    .padding(.top, 2)
+                    // Mirror-measured against the system tab bar: at .top 2 the
+                    // circle centers sat ~12pt below the capsule's center line
+                    // (Logan: "not centered vertically with the nav bar").
+                    .padding(.top, -10)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
                 .zIndex(2)
+            }
+            #endif
+
+            // In-place Search screen (tvOS): covers the tab content while the
+            // nav bar + action circles stay visible in the band above, exactly
+            // like Android TV's Search screen. zIndex between the hints and
+            // the circles so the circles remain interactive on top.
+            #if os(tvOS)
+            if showSearch {
+                VStack(spacing: 0) {
+                    // Transparent band: the system tab bar and the action
+                    // circles show through here. 106 tucks the search surface
+                    // right under the bar so nothing of the tab content (the
+                    // guide's pill row) can peek through the seam.
+                    Color.clear.frame(height: 106)
+                    SearchView(embedsInTabChrome: true, onClose: { showSearch = false })
+                        .background(Color.appBackground)
+                }
+                .focusSection()
+                .zIndex(1.7)
+                .transition(.opacity)
             }
             #endif
 
@@ -4269,7 +4298,7 @@ struct MainTabView: View {
             // up to five sentence pills grew down over the guide's corner
             // clock when the mini-player lines were showing).
             #if os(tvOS)
-            if selectedTab == .liveTV && (!nowPlaying.isActive || nowPlaying.isMinimized) {
+            if selectedTab == .liveTV && !showSearch && (!nowPlaying.isActive || nowPlaying.isMinimized) {
                 // GeometryReader so the width budget tracks the real container
                 // rather than a hard-coded point value that goes stale.
                 GeometryReader { geo in
@@ -5071,8 +5100,19 @@ struct MainTabView: View {
                 }
             }
         }
+        // tvOS renders search IN PLACE as tab content below the persistent
+        // nav chrome (Logan 2026-08-12, third iteration of this ruling:
+        // never a sheet, never a cover -- exactly Android TV's Search
+        // screen). The overlay lives in the ZStack above; only iOS presents.
+        #if os(iOS)
         .sheet(isPresented: $showSearch) {
             SearchView()
+        }
+        #endif
+        // Leaving the current tab closes search, like Android's pill
+        // selection does.
+        .onChange(of: selectedTab) { _, _ in
+            if showSearch { showSearch = false }
         }
         .liquidGlassTabBar()
         #if os(tvOS)
@@ -5795,6 +5835,15 @@ struct MainTabView: View {
             playerSession.nativeHLSItem = nil
             return
         }
+        #if os(tvOS)
+        // In-place search is the topmost surface when up; Menu leaves it and
+        // returns to the tab content, like Android's Back from Search.
+        if showSearch {
+            debugLog("\u{1F3AE} [HMP]   \u{2192} branch: in-place search up \u{2192} closing it")
+            withAnimation(.easeOut(duration: 0.2)) { showSearch = false }
+            return
+        }
+        #endif
         if nowPlaying.isActive && !nowPlaying.isMinimized {
             // GH #11: hand off to PlayerView's chrome cycle instead
             // of minimizing directly. PlayerView's `.onExitCommand`

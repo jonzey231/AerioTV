@@ -268,6 +268,13 @@ enum WatchProgressManager {
 
 struct ContinueWatchingSection: View {
     let vodType: String   // "movie" or "episode"
+    /// Active playlist scope (Logan 2026-08-12: everything media related is
+    /// per playlist). Without it the row surfaced watch progress from EVERY
+    /// playlist, and resuming an inactive playlist's item played THAT
+    /// server's stream URL from under the active one. Rows with a nil
+    /// serverID predate per-server progress and stay visible everywhere
+    /// rather than vanishing after an update.
+    var activeServerID: String? = nil
     var headers: [String: String] = [:]
     var onPlay: ((WatchProgress) -> Void)?
     /// Loaded series for the active server, used to resolve an episode's
@@ -288,7 +295,11 @@ struct ContinueWatchingSection: View {
     ) private var allProgress: [WatchProgress]
 
     private var items: [WatchProgress] {
-        allProgress.filter { $0.vodType == vodType }
+        allProgress.filter { progress in
+            guard progress.vodType == vodType else { return false }
+            guard let activeServerID else { return true }
+            return progress.serverID == nil || progress.serverID == activeServerID
+        }
     }
 
     var body: some View {

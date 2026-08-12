@@ -363,6 +363,7 @@ struct TVShowsView: View {
                     // Continue Watching section
                     ContinueWatchingSection(
                         vodType: "episode",
+                        activeServerID: (servers.first(where: { $0.isActive }) ?? servers.first)?.id.uuidString,
                         headers: dispatcharrHeaders,
                         onPlay: { progress in resumeFromContinueWatching(progress) },
                         series: vodStore.series,

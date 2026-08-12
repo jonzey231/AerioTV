@@ -71,6 +71,16 @@ enum SearchResult: Identifiable {
 
 // MARK: - Search View
 struct SearchView: View {
+    /// tvOS in-place mode (Logan 2026-08-12, matching Android TV): the Search
+    /// circle swaps the tab CONTENT for this screen while the nav bar and
+    /// action circles stay visible above it — never a sheet or cover. In this
+    /// mode the NavigationStack chrome (title, Cancel, `.searchable`) is
+    /// replaced by an inline field + the same scope chips and results.
+    var embedsInTabChrome = false
+    /// How the embedded mode closes (Menu press / EPG jump); presentation
+    /// mode keeps using `dismiss`.
+    var onClose: (() -> Void)? = nil
+
     @Query private var servers: [ServerConnection]
     @Query private var epgPrograms: [EPGProgram]
     @Environment(\.dismiss) private var dismiss
@@ -87,24 +97,37 @@ struct SearchView: View {
     // Debounce
     @State private var searchTask: Task<Void, Never>?
 
+    /// Shared middle of both layouts: scope chips + the four-way content.
+    @ViewBuilder private var searchContent: some View {
+        VStack(spacing: 0) {
+            scopePicker.padding(.vertical, 8)
+
+            if query.isEmpty {
+                searchPrompt
+            } else if isSearching {
+                LoadingView(message: "Searching...")
+            } else if results.isEmpty {
+                noResults
+            } else {
+                resultsList
+            }
+        }
+    }
+
     var body: some View {
+        if embedsInTabChrome {
+            embeddedBody
+        } else {
+            presentedBody
+        }
+    }
+
+    /// The iOS presentation (sheet) and any other presented context.
+    private var presentedBody: some View {
         NavigationStack {
             ZStack {
                 Color.appBackground.ignoresSafeArea()
-
-                VStack(spacing: 0) {
-                    scopePicker.padding(.vertical, 8)
-
-                    if query.isEmpty {
-                        searchPrompt
-                    } else if isSearching {
-                        LoadingView(message: "Searching...")
-                    } else if results.isEmpty {
-                        noResults
-                    } else {
-                        resultsList
-                    }
-                }
+                searchContent
             }
             .navigationTitle("Search")
             #if os(iOS)
@@ -128,6 +151,54 @@ struct SearchView: View {
             .onChange(of: scope) { _, _ in
                 if !query.isEmpty { scheduleSearch(query) }
             }
+        }
+        .sheet(item: $selectedVODItem) { item in
+            NavigationStack {
+                VODDetailView(item: item, isPlaying: $isPlaying)
+            }
+        }
+    }
+
+    /// tvOS in-place layout: an inline search field row + the shared scope
+    /// chips and results, rendered as tab content below the persistent nav
+    /// chrome (which the caller keeps visible above this view). No
+    /// NavigationStack, no title, no Cancel — the nav bar IS the chrome, and
+    /// Menu (routed by the caller through `onClose`) leaves the screen.
+    private var embeddedBody: some View {
+        ZStack {
+            Color.appBackground.ignoresSafeArea()
+            VStack(spacing: 12) {
+                HStack(spacing: 14) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 26, weight: .medium))
+                        .foregroundColor(theme.accent)
+                    TextField("Search movies, shows, programs…", text: $query)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 28))
+                        .foregroundColor(.textPrimary)
+                }
+                .padding(.horizontal, 22)
+                .padding(.vertical, 14)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.elevatedBackground.opacity(0.6))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(theme.accent.opacity(0.35), lineWidth: 1)
+                        )
+                )
+                .padding(.horizontal, 40)
+
+                searchContent
+            }
+            // Clears the persistent nav chrome band the caller leaves visible.
+            .padding(.top, 24)
+        }
+        .onChange(of: query) { _, newValue in
+            scheduleSearch(newValue)
+        }
+        .onChange(of: scope) { _, _ in
+            if !query.isEmpty { scheduleSearch(query) }
         }
         .sheet(item: $selectedVODItem) { item in
             NavigationStack {
@@ -373,7 +444,7 @@ struct SearchView: View {
         let defaults = UserDefaults.standard
         defaults.set(prog.channelID, forKey: "guideJumpChannelID")
         defaults.set(prog.startTime.timeIntervalSince1970, forKey: "guideJumpStart")
-        dismiss()
+        if let onClose { onClose() } else { dismiss() }
         NotificationCenter.default.post(name: .aerioJumpToGuideProgram, object: nil)
     }
 }
