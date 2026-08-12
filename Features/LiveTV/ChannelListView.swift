@@ -440,6 +440,19 @@ struct ChannelListView: View {
                 }
                 // Sync filtered list whenever the store delivers new data.
                 .onChange(of: channelStore.channels) { _, items in
+                    // A group selected under the previous playlist may not exist
+                    // in the one just activated; keeping it filters the list and
+                    // guide down to nothing with no visible reason. Only reset
+                    // once the new group list is non-empty: mid-refresh the store
+                    // clears to [] and a same-playlist reload must not clobber a
+                    // valid selection. Collection tokens are cross-playlist and
+                    // have their own deleted-collection cleanup.
+                    if selectedGroup != "All",
+                       !selectedGroup.hasPrefix("collection:"),
+                       !channelStore.orderedGroups.isEmpty,
+                       !channelStore.orderedGroups.contains(selectedGroup) {
+                        selectedGroup = "All"
+                    }
                     filterChannels()
                     favoritesStore.register(items: items)
                     #if os(tvOS)
