@@ -236,6 +236,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// reconnect loop owns): this is the pre-terminal "we noticed, we're on it"
     /// signal (2026-07-13, kill-the-container freeze fix).
     @Published var streamStalled: Bool = false
+    /// Transient user-facing note raised by the coordinator when a live
+    /// unpause had no rewind buffer to resume from and playback rejoined
+    /// the live edge (GH #70). Nil = no notice. The tile renders it as a
+    /// small capsule and the coordinator auto-clears it after a few
+    /// seconds. Honest-UX ruling (Logan 2026-08-12): keep the snap, say
+    /// so, and point at the Live Rewind toggle when it is off.
+    @Published var liveResumeNotice: String? = nil
     /// VOD resume tracking — set before playback starts, nil for live
     var vodID: String?
     var vodTitle: String?

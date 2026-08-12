@@ -1397,6 +1397,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // Timestamp the pause entry so the unpause branch below can
             // measure dwell and skip the reload for brief pauses.
             if paused {
+                // Stamped in the pause OBSERVER now (covers every source);
+                // kept here too so a binding-applied pause is stamped even
+                // if the observer callback lags the unpause decision.
                 pauseStartedAt = Date()
             } else {
                 // Resuming: restart the stale-frame clock from now. During a
@@ -1421,63 +1424,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             reportCatchupPositionIfDue(positionSecs: catchupLastKnownPositionSecs,
                                        paused: paused, force: true)
 
-            // LIVE stream unpause → jump to live edge by reloading
-            // the URL. Without this, resuming after a pause (e.g.
-            // user opened the add-sheet to add another tile; every
-            // existing tile paused; sheet closed; tiles resumed)
-            // plays from the buffered-but-stale pause position,
-            // leaving the tile N seconds behind live. User
-            // explicitly requested that existing streams snap back
-            // to LIVE when the add-sheet closes. `loadfile ... replace`
-            // reconnects the stream cleanly at the current live
-            // position; mpv's cache flushes and playback resumes
-            // from the fresh connection point.
-            //
-            // Gated on `wasPaused && !paused && isLive`:
-            //   - Skip on first paused=false (wasPaused=false, no
-            //     prior pause to recover from).
-            //   - Skip on paused=true (we're pausing, not resuming).
-            //   - Skip on VOD (seeking to live makes no sense for
-            //     a fixed-duration stream; resume-from-pause IS
-            //     the correct VOD behaviour).
-            //
-            // Additional gate on pause DURATION: a multiview
-            // tile-add fires isPickerPresented → true → every
-            // existing tile pauses; picker dismisses ~1s later →
-            // every tile unpauses. With N tiles and a rapid add
-            // flow, the old code ran `loadfile replace` on every
-            // tile for every add, producing cascading re-seed
-            // storms (19s recovery on one tile observed after the
-            // 9th add, because the reload hit
-            // `Failed to recognize file format` mid-cascade).
-            // mpv's live cache is typically 5s deep, so a <2s
-            // pause doesn't leave us meaningfully behind live —
-            // skip the reload entirely and let mpv resume from
-            // cache. Long pauses (genuine idle) still snap.
-            // Live Rewind: NO snap when the relay carries playback. Pause
-            // is the feature (the buffer keeps filling underneath); resume
-            // continues from the pause point like a cable box, and Go Live
-            // is one press away. The reload here would also silently swap
-            // mpv onto the direct URL while liveRewindActive stayed true,
-            // stranding the transport/mapping on a buffer mpv left.
-            if wasPaused && !paused && isLive, !liveRewindActive, !urls.isEmpty {
-                let dwell = pauseStartedAt.map { Date().timeIntervalSince($0) } ?? 0
-                if dwell < Self.snapToLiveMinPauseSeconds {
-                    #if DEBUG
-                    debugLog("[MPV-DIAG] \(streamTag) unpause after \(String(format: "%.2f", dwell))s — skipping snap-to-live (brief pause, cache still fresh)")
-                    #endif
-                } else {
-                    let url = urls[currentIndex]
-                    #if DEBUG
-                    debugLog("[MPV-DIAG] \(streamTag) unpause → reload live stream (snap to live edge, dwell=\(String(format: "%.1f", dwell))s)")
-                    #endif
-                    logStore.append("↻ MPV: unpause live → snap to live edge")
-                    mpvQueue.async { [weak self] in
-                        guard let self, let mpv = self.activeMPVHandle() else { return }
-                        self.mpvCommand(mpv, ["loadfile", url.absoluteString, "replace"])
-                    }
-                }
-            }
+            // LIVE unpause snap-to-live moved to the mpv "pause" property
+            // observer (handlePropertyChange case "pause"): setMPVFlag above
+            // triggers that observer, and so do the pause writes this binding
+            // path never sees (Siri remote toggle via togglePauseAction, PiP,
+            // companion) - the GH #70 field trace showed the remote flow
+            // bypassing this branch entirely, so the snap lived here for the
+            // add-sheet flow but never ran for the reported pause path. One
+            // authoritative site now handles every source.
         }
 
         /// Shared mpvQueue hop for boolean mpv properties. Guards
@@ -7079,6 +7033,59 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     mpvObservedPaused = paused
                     let ps = progressStore
                     DispatchQueue.main.async { ps.isPaused = paused }
+
+                    // GH #70: LIVE unpause with no rewind buffer -> rejoin the
+                    // live edge NOW and say so. This observer is the one site
+                    // every pause source funnels through (binding, Siri remote
+                    // togglePauseAction, PiP, companion). Without this, a long
+                    // remote pause resumed at the pause point, drained the few
+                    // seconds of demuxer cache off a connection the provider
+                    // had killed, then stalled into a watchdog reload that
+                    // landed at live anyway - same jump, worse ride. Rewind
+                    // ACTIVE pauses are the feature and are left alone.
+                    // Short pauses (< snapToLiveMinPauseSeconds) resume from
+                    // mpv's own cache untouched (multiview add-sheet flow).
+                    if paused {
+                        pauseStartedAt = Date()
+                    } else if isLive, catchup == nil, !liveRewindActive,
+                              !urls.isEmpty {
+                        let dwell = pauseStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+                        if dwell >= Self.snapToLiveMinPauseSeconds {
+                            // The snap reload is the invisible boundary to
+                            // re-engage the rewind relay (Logan 2026-08-12):
+                            // clear the fallback latch and route like a fresh
+                            // tune. Engine disabled -> direct URL, unchanged.
+                            liveRewindFallbackDirect = false
+                            let target = routeThroughLiveRewind(urls[currentIndex])
+                            #if DEBUG
+                            debugLog("[MPV-DIAG] \(streamTag) unpause → reload live stream (snap to live edge, dwell=\(String(format: "%.1f", dwell))s, relay=\(target.scheme == "aeriots"))")
+                            #endif
+                            logStore.append("↻ MPV: unpause live → snap to live edge")
+                            mpvQueue.async { [weak self] in
+                                guard let self, let mpv = self.activeMPVHandle() else { return }
+                                self.mpvCommand(mpv, ["loadfile", target.absoluteString, "replace"])
+                            }
+                            // Solo fullscreen only (same shape as the relay
+                            // router): the unified player IS a tile, so a
+                            // nil-tileID gate silently skipped the notice.
+                            // True multiview (N>=2) snaps by design and a
+                            // per-tile notice would be noise.
+                            if tileID == nil || (initialIsAudioActive && initialTileCount <= 1) {
+                                let notice = LiveRewindEngine.shared.isEnabled
+                                    ? "Rejoined live TV"
+                                    : "Rejoined live TV. Turn on Live Rewind in Settings to pause live TV."
+                                DispatchQueue.main.async { [weak self] in
+                                    guard let self else { return }
+                                    self.progressStore.liveResumeNotice = notice
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                                        if self?.progressStore.liveResumeNotice == notice {
+                                            self?.progressStore.liveResumeNotice = nil
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     if paused {
                         logStore.append("ℹ️ MPV state: paused")

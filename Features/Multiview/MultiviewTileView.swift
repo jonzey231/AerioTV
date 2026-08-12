@@ -503,6 +503,22 @@ struct MultiviewTileView: View {
                 playbackErrorOverlay(decodeErrorMessage)
             }
         }
+        // GH #70 honest-resume notice: a live unpause with no rewind buffer
+        // rejoined the live edge; the coordinator raised the note (solo
+        // fullscreen only) and auto-clears it after a few seconds.
+        .overlay(alignment: .top) {
+            if let notice = progressStore.liveResumeNotice {
+                Text(notice)
+                    .font(.labelSmall)
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
+                    .background(.black.opacity(0.72), in: Capsule())
+                    .padding(.top, 60)
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .animation(.easeInOut(duration: 0.25), value: progressStore.liveResumeNotice)
+            }
+        }
         // Move audio off a tile the moment it finishes (before the user
         // taps anything) so sound continues on another tile. No-op if
         // this isn't the audio tile or there's nowhere to hand off.
