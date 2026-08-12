@@ -3397,6 +3397,56 @@ enum AppTab: String, CaseIterable {
 }
 
 // MARK: - Main Tab View
+#if os(tvOS)
+/// One of the round action buttons beside the tvOS tab bar (Refresh /
+/// Search). Sized to read as a sibling of the system tab pills; the focus
+/// visual is a white platter with dark glyph to match how the system bar
+/// renders its focused pill, so the whole top row reads as one control strip.
+private struct TVNavActionCircle: View {
+    let systemImage: String
+    let label: String
+    var spinning: Bool = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Group {
+                if spinning {
+                    ProgressView()
+                        .scaleEffect(0.9)
+                } else {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 25, weight: .medium))
+                }
+            }
+            .frame(width: 60, height: 60)
+        }
+        .buttonStyle(TVNavCircleButtonStyle())
+        .disabled(spinning)
+        .accessibilityLabel(label)
+    }
+}
+
+/// Round focus platter owned by the app (tvOS focus canon: never the squared
+/// system platter on custom chrome). Unfocused it is a quiet translucent
+/// circle like Android TV's action circles; focused it flips to the white
+/// pill-platter look of the adjacent system tab bar.
+private struct TVNavCircleButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(isFocused ? .black : .white.opacity(0.85))
+            .background(
+                Circle()
+                    .fill(isFocused ? Color.white : Color.white.opacity(0.12))
+            )
+            .scaleEffect(isFocused ? 1.08 : (configuration.isPressed ? 0.96 : 1.0))
+            .animation(.easeOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
+
 struct MainTabView: View {
     @AppStorage("defaultTab") private var defaultTabRaw = AppTab.liveTV.rawValue
     @ObservedObject private var theme = ThemeManager.shared
@@ -4157,6 +4207,61 @@ struct MainTabView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .zIndex(1)
             }
+
+            // Nav action circles: Refresh + Search immediately LEFT of the
+            // system tab bar, on every content tab (hidden on Settings) —
+            // matching Android TV's TvTopTabBar, which was itself built to
+            // this design. Placement ruling (Logan 2026-08-12): these live
+            // beside the nav bar, NOT in the Live TV filter row, and do not
+            // depend on the guide's sidebar-vs-pills mode. The old global-
+            // search toolbar item stopped rendering here when the tab
+            // hierarchy changed; this overlay replaces it on tvOS (iOS keeps
+            // the toolbar item). Refresh is the TV stand-in for
+            // pull-to-refresh: re-fetches channels + EPG without a trip
+            // through Settings.
+            #if os(tvOS)
+            if selectedTab != .settings && (!nowPlaying.isActive || nowPlaying.isMinimized) {
+                GeometryReader { geo in
+                    // Same centered-bar estimate guideHintWidthBudget uses:
+                    // ~230pt per tab, deliberately WIDE so the circles sit
+                    // shy of the bar's real edge rather than under it.
+                    let visibleTabs = 2
+                        + (showFavoritesTab ? 1 : 0)
+                        + (showRecordingsTab ? 1 : 0)
+                        + (showVODTab ? 1 : 0)
+                    let barLeading = (geo.size.width - CGFloat(visibleTabs) * 230) / 2
+                    HStack(spacing: 16) {
+                        TVNavActionCircle(
+                            systemImage: "arrow.clockwise",
+                            label: "Refresh channels and guide",
+                            spinning: isAnyBackgroundWork
+                        ) {
+                            let servers = allServers
+                            let ctx = modelContext
+                            Task {
+                                await channelStore.forceRefresh(servers: servers,
+                                                                modelContext: ctx)
+                            }
+                        }
+                        TVNavActionCircle(
+                            systemImage: "magnifyingglass",
+                            label: "Search",
+                            spinning: false
+                        ) {
+                            showSearch = true
+                        }
+                    }
+                    // Own focus region beside the tab bar: LEFT from the
+                    // first tab pill (or up-and-left from content) reaches
+                    // them; grid navigation never lands here by accident.
+                    .focusSection()
+                    .padding(.leading, max(16, barLeading - 152))
+                    .padding(.top, 2)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                }
+                .zIndex(2)
+            }
+            #endif
 
             // #42 Part 3: tvOS Menu/Back hints, top-left of the Live TV guide,
             // below the syncing toast. Compressed to at most TWO combined
@@ -5633,8 +5738,10 @@ struct MainTabView: View {
         let barWidthCeiling = CGFloat(visibleTabs) * 230
         let gutter = (containerWidth - barWidthCeiling) / 2
         // Subtract the leading inset (16), the capsule's own horizontal
-        // padding (10 + 10), and a visible 24pt gap before the bar.
-        return max(240, gutter - 16 - 20 - 24)
+        // padding (10 + 10), a visible 24pt gap — and the Refresh + Search
+        // action circles that now sit at the bar's leading edge (2×60 + 16
+        // spacing + 16 gap = 152), so the hint pill can never grow under them.
+        return max(240, gutter - 16 - 20 - 24 - 152)
     }
 
     /// The guide's always-on nav hint, one compressed line. Hold-Left copy

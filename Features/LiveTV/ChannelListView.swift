@@ -1264,25 +1264,6 @@ struct ChannelListView: View {
                 )
                 .disabled(leftHoldPinningAll)   // #42 Part 1: see above
 
-                // Refresh: re-pull channels + guide for the active playlist.
-                // tvOS has no pull-to-refresh gesture, so without this the only
-                // way to force a refresh was Settings → Refresh EPG Data, three
-                // levels away from the guide the user is looking at.
-                TVGroupPill(
-                    group: "",
-                    isSelected: false,
-                    action: {
-                        Task {
-                            await channelStore.forceRefresh(
-                                servers: servers,
-                                modelContext: modelContext
-                            )
-                        }
-                    },
-                    systemImage: "arrow.clockwise"
-                )
-                .disabled(leftHoldPinningAll)   // #42 Part 1: see above
-
                 if showSearchField {
                     TextField("Search channels", text: $searchText)
                         .textFieldStyle(.plain)
