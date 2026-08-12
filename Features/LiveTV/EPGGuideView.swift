@@ -3010,6 +3010,9 @@ struct EPGGuideView: View {
     /// move BEFORE the 0.5s hold recognizes, so the guide scrolls one
     /// step it should not have; the holdBegan handler reverts to this.
     @State private var preRightStepOffset: CGFloat?
+    /// When the offset above was last touched; lets repeats of one held press
+    /// share a single capture while a fresh gesture re-captures.
+    @State private var preRightStepAt = Date.distantPast
 
     /// Namespace + imperative reset hook for the guide's focus
     /// scope. See ChannelListView's identical setup for the full
@@ -3469,7 +3472,17 @@ struct EPGGuideView: View {
                     // the still-held Right does not scroll the EPG forward after the
                     // mini closes. Short/normal Right scrolling is unaffected.
                     if rightHoldPinningTimeline { break }
-                    preRightStepOffset = horizontalOffset
+                    // Capture the pre-gesture offset ONCE per press train. A
+                    // held Right emits repeats before the hold recognizes;
+                    // overwriting per step made the hold's restore land one or
+                    // more steps to the RIGHT of where the user started.
+                    // 0.35s of quiet = a new gesture; repeats arrive faster.
+                    let stepNow = Date()
+                    if preRightStepOffset == nil
+                        || stepNow.timeIntervalSince(preRightStepAt) > 0.35 {
+                        preRightStepOffset = horizontalOffset
+                    }
+                    preRightStepAt = stepNow
                     withAnimation(.easeOut(duration: 0.3)) {
                         horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * 0.5)
                     }
@@ -3523,6 +3536,12 @@ struct EPGGuideView: View {
                 if let restore = preRightStepOffset {
                     withAnimation(.easeOut(duration: 0.3)) { horizontalOffset = restore }
                     preRightStepOffset = nil
+                    // The pre-recognition step already RETARGETED focus one
+                    // column right; putting the offset back without moving
+                    // focus left the focused cell visibly walked to the right
+                    // (Logan 2026-08-12). Re-anchor focus to the restored
+                    // viewport as well.
+                    retargetFocusToViewportColumn()
                 }
                 rightHoldSafetyTask?.cancel()
                 rightHoldSafetyTask = Task { @MainActor in
@@ -5641,9 +5660,13 @@ private struct GuideButtonStyle: ButtonStyle {
 /// publishes, never the guide grid.
 private struct GuideMiniCloseRightHoldArm: View {
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
+    // Disarm while the in-place Search screen is up: the recognizer is on the
+    // WINDOW, and a hold-Right while typing in the search keyboard closed the
+    // mini (Logan 2026-08-12). The gesture belongs to the guide only.
+    @ObservedObject private var searchOverlay = TVSearchOverlayState.shared
     var body: some View {
         GuideLongPressRightDetector(
-            isEnabled: nowPlaying.isActive && nowPlaying.isMinimized,
+            isEnabled: !searchOverlay.isUp && nowPlaying.isActive && nowPlaying.isMinimized,
             onBegan: {
                 NotificationCenter.default.post(name: .guideRightHoldBegan, object: nil)
                 // Full session teardown, not just the manager flags: on

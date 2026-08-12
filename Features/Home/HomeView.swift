@@ -3398,6 +3398,18 @@ enum AppTab: String, CaseIterable {
 
 // MARK: - Main Tab View
 #if os(tvOS)
+/// Whether the in-place Search screen currently covers the tab content.
+/// The guide's hold-Left/hold-Right recognizers live on the WINDOW, so the
+/// guide behind the overlay kept reacting to holds aimed at the search
+/// keyboard - a hold-Right while typing closed the corner mini (Logan
+/// 2026-08-12). Detector sites disarm while this is up.
+@MainActor
+final class TVSearchOverlayState: ObservableObject {
+    static let shared = TVSearchOverlayState()
+    @Published var isUp = false
+    private init() {}
+}
+
 /// One of the round action buttons beside the tvOS tab bar (Refresh /
 /// Search). Sized to read as a sibling of the system tab pills; the focus
 /// visual is a white platter with dark glyph to match how the system bar
@@ -5114,6 +5126,13 @@ struct MainTabView: View {
         .onChange(of: selectedTab) { _, _ in
             if showSearch { showSearch = false }
         }
+        #if os(tvOS)
+        // Publish the overlay state so the guide's window-level hold
+        // recognizers can disarm while search is up.
+        .onChange(of: showSearch) { _, isUp in
+            TVSearchOverlayState.shared.isUp = isUp
+        }
+        #endif
         .liquidGlassTabBar()
         #if os(tvOS)
         // Body extracted to `handleMenuPress()` — the inline closure grew

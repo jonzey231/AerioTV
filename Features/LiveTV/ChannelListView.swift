@@ -219,6 +219,11 @@ struct ChannelListView: View {
     /// rail doesn't re-filter the grid on every row.
     @State private var guideSidebarPreviewTask: Task<Void, Never>?
     @ObservedObject private var remoteStore = RemoteControlStore.shared
+    #if os(tvOS)
+    /// Disarms the guide's window-level hold detectors while the in-place
+    /// Search screen covers the tab content (Logan 2026-08-12).
+    @ObservedObject private var searchOverlay = TVSearchOverlayState.shared
+    #endif
 
     /// Sidebar-mode active (tvOS only): hides the pills row + arms short-Left
     /// on the now-airing column. Mutually exclusive with the group pills.
@@ -800,6 +805,9 @@ struct ChannelListView: View {
                         // SIDEBAR_HOLD_OPEN_MS; the OS-style 0.5s read as a
                         // slow open on device, Logan 2026-08-06).
                         minimumPressDuration: guideSidebarSelectorActive ? 0.32 : 0.5,
+                        // Window-level recognizer: disarm while the in-place
+                        // Search screen covers the guide.
+                        isEnabled: !searchOverlay.isUp,
                         onBegan: { NotificationCenter.default.post(name: .guideLeftHoldBegan, object: nil) },
                         onEnded: { NotificationCenter.default.post(name: .guideLeftHoldEnded, object: nil) }
                     )
@@ -812,6 +820,10 @@ struct ChannelListView: View {
                 .background(
                     GuideLongPressRightDetector(
                         isEnabled: {
+                            // Window-level recognizer: a hold-Right aimed at
+                            // the search keyboard closed the mini (Logan
+                            // 2026-08-12). The gesture is the guide's only.
+                            if searchOverlay.isUp { return false }
                             let action = RemoteControlStore.shared.guideAction(.rightLong)
                             if action == .closeMiniPlayer {
                                 return nowPlaying.isActive && nowPlaying.isMinimized

@@ -342,6 +342,10 @@ struct GuideLongPressLeftDetector: UIViewRepresentable {
     /// ~0.32s so the docked group menu opens snappily (the Android twin moved
     /// off the OS ~500ms long-press for the same reason, Logan 2026-08-06).
     var minimumPressDuration: TimeInterval = 0.5
+    /// Attach the recognizer only while true. The recognizer lives on the
+    /// WINDOW, so the guide behind an overlay (the in-place Search screen)
+    /// would otherwise keep reacting to holds aimed at the overlay.
+    var isEnabled: Bool = true
     /// Fires once when the Left hold crosses the threshold (jump to "All").
     let onBegan: () -> Void
     /// Fires when the Left press is released (stop pinning focus to "All").
@@ -352,6 +356,7 @@ struct GuideLongPressLeftDetector: UIViewRepresentable {
         v.minimumPressDuration = minimumPressDuration
         v.onLeftHoldBegan = onBegan
         v.onLeftHoldEnded = onEnded
+        v.isEnabled = isEnabled
         v.isUserInteractionEnabled = false   // passthrough; never steals focus/taps
         return v
     }
@@ -359,6 +364,8 @@ struct GuideLongPressLeftDetector: UIViewRepresentable {
         uiView.minimumPressDuration = minimumPressDuration
         uiView.onLeftHoldBegan = onBegan
         uiView.onLeftHoldEnded = onEnded
+        uiView.isEnabled = isEnabled
+        uiView.syncRecognizer()
     }
     static func dismantleUIView(_ uiView: LeftHoldHostView, coordinator: ()) {
         uiView.detachRecognizer()
@@ -378,11 +385,21 @@ final class LeftHoldHostView: UIView, UIGestureRecognizerDelegate {
     private weak var attachedWindow: UIWindow?
     private var recognizer: UILongPressGestureRecognizer?
 
+    var isEnabled: Bool = true
+
     override var canBecomeFocused: Bool { false }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
         if window !== attachedWindow { detachRecognizer() }
+        syncRecognizer()
+    }
+
+    /// Attach while enabled + windowed, detach otherwise. Disabling mid-hold
+    /// loses the release event, which the caller's safety-task backstops
+    /// (leftHoldSafetyTask) already cover.
+    func syncRecognizer() {
+        if !isEnabled { detachRecognizer(); return }
         guard let window, recognizer == nil else { return }
         let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleLeftHold(_:)))
         lp.allowedPressTypes = [NSNumber(value: UIPress.PressType.leftArrow.rawValue)]
