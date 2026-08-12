@@ -82,7 +82,7 @@ struct SearchView: View {
     var onClose: (() -> Void)? = nil
 
     @Query private var servers: [ServerConnection]
-    @Query private var epgPrograms: [EPGProgram]
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var theme = ThemeManager.shared
 
@@ -90,7 +90,6 @@ struct SearchView: View {
     @State private var scope: SearchScope = .all
     @State private var results: [SearchResult] = []
     @State private var isSearching = false
-    @State private var vodCache: [UUID: [VODDisplayItem]] = [:]
     @State private var selectedVODItem: VODDisplayItem?
     @State private var isPlaying = false
 
@@ -374,63 +373,67 @@ struct SearchView: View {
     private func performSearch(_ q: String) async {
         isSearching = true
         let lowered = q.lowercased()
+        // Per-playlist scope (Logan 2026-08-12): search the ACTIVE playlist,
+        // like every other media surface.
+        let activeServerID = (servers.first(where: { $0.isActive }) ?? servers.first)?.id.uuidString
         var found: [SearchResult] = []
 
-        // EPG Search (fast — local SwiftData query)
+        // EPG search. This used to be an in-memory filter over a @Query of
+        // the ENTIRE EPG cache -- materializing ~258k SwiftData models and
+        // string-scanning them on the MainActor, which froze the app on the
+        // first keystroke of any large playlist (ATV repro 2026-08-12). The
+        // predicate + fetchLimit push the match into SQLite: only the
+        // handful of hits ever become model objects.
         if scope == .all || scope == .epg {
-            let epgResults = epgPrograms.filter {
-                $0.title.localizedCaseInsensitiveContains(lowered)
-                || $0.programDescription.localizedCaseInsensitiveContains(lowered)
-            }
-            .sorted { a, b in
-                // Live programs first, then upcoming, then past
-                if a.isLive != b.isLive { return a.isLive }
-                return a.startTime < b.startTime
-            }
-            .prefix(30)
+            let sid = activeServerID ?? ""
+            var descriptor = FetchDescriptor<EPGProgram>(
+                predicate: #Predicate<EPGProgram> { p in
+                    p.serverID == sid
+                    && (p.title.localizedStandardContains(lowered)
+                        || p.programDescription.localizedStandardContains(lowered))
+                },
+                sortBy: [SortDescriptor(\.startTime)]
+            )
+            descriptor.fetchLimit = 60
+            let epgMatches = (try? modelContext.fetch(descriptor)) ?? []
+            let epgResults = epgMatches
+                .sorted { a, b in
+                    // Live programs first, then upcoming, then past
+                    if a.isLive != b.isLive { return a.isLive }
+                    return a.startTime < b.startTime
+                }
+                .prefix(30)
             found += epgResults.map { .epg($0) }
         }
 
-        // VOD Search — need to fetch from servers
+        // VOD search. The old path re-downloaded the complete movie+series
+        // catalog from EVERY configured server on the first keystroke (ten
+        // servers here; the log showed the whole fan-out being cancelled and
+        // re-fired per keypress). The active playlist's library is already
+        // resident in VODStore -- filter that, off the MainActor.
         if scope != .epg {
-            // Ensure VOD is cached
-            await ensureVODCache()
+            let movies = VODStore.shared.movies
+            let series = VODStore.shared.series
+            let searchScope = scope
+            let vodResults: [VODDisplayItem] = await Task.detached(priority: .userInitiated) {
+                let pool: [VODDisplayItem]
+                switch searchScope {
+                case .movies: pool = movies
+                case .tv:     pool = series
+                default:      pool = movies + series
+                }
+                return Array(
+                    pool.lazy
+                        .filter { $0.name.localizedCaseInsensitiveContains(lowered) }
+                        .prefix(50)
+                )
+            }.value
 
-            let allVOD = vodCache.values.flatMap { $0 }
-            let vodResults = allVOD.filter {
-                $0.name.localizedCaseInsensitiveContains(lowered)
-            }
-
-            let filtered: [VODDisplayItem]
-            switch scope {
-            case .movies:  filtered = vodResults.filter { $0.type == .movie }
-            case .tv:      filtered = vodResults.filter { $0.type == .series }
-            default:       filtered = vodResults
-            }
-
-            found += filtered.prefix(50).map { .vod($0) }
+            found += vodResults.map { .vod($0) }
         }
 
         results = found
         isSearching = false
-    }
-
-    @MainActor
-    private func ensureVODCache() async {
-        let vodServers = servers.filter({ $0.supportsVOD })
-        for server in vodServers {
-            if vodCache[server.id] == nil {
-                let snap = server.snapshot
-                var items: [VODDisplayItem] = []
-                if let (movies, _) = try? await VODService.fetchMovies(from: snap) {
-                    items += movies.map { VODDisplayItem(movie: $0) }
-                }
-                if let (series, _) = try? await VODService.fetchSeries(from: snap) {
-                    items += series.map { VODDisplayItem(series: $0) }
-                }
-                vodCache[server.id] = items
-            }
-        }
     }
 
     /// Tapping an EPG search result jumps to that program in the Live
