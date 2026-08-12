@@ -4780,6 +4780,34 @@ struct MainTabView: View {
     }
     #endif
 
+    #if os(tvOS) && DEBUG
+    /// Task #254 diagnostic: walk the key window and log every view whose
+    /// class name smells like a tab bar / toolbar, with frame + hidden +
+    /// alpha. The nav-bar-vanishes bug leaves SwiftUI state healthy, so the
+    /// truth has to come from the UIKit layer.
+    private func dumpBarHierarchy(_ tag: String) {
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
+            .first else {
+            debugLog("[BARDUMP \(tag)] no key window")
+            return
+        }
+        var lines = 0
+        func walk(_ v: UIView, _ depth: Int) {
+            let name = String(describing: type(of: v))
+            if name.range(of: "tab", options: .caseInsensitive) != nil
+                || name.range(of: "toolbar", options: .caseInsensitive) != nil
+                || name.range(of: "navigationbar", options: .caseInsensitive) != nil {
+                debugLog("[BARDUMP \(tag)] d\(depth) \(name) frame=\(v.frame) hidden=\(v.isHidden) alpha=\(v.alpha) sub=\(v.subviews.count)")
+                lines += 1
+            }
+            for s in v.subviews { walk(s, depth + 1) }
+        }
+        walk(window, 0)
+        debugLog("[BARDUMP \(tag)] done, matches=\(lines), windowSubviews=\(window.subviews.count)")
+    }
+    #endif
+
     /// Copy the live tab-gate values into the latched @State, but ONLY when it
     /// is safe to mutate the TabView's child set: not while a Settings subview
     /// or VOD detail is pushed, and not while the Settings tab is selected (the
@@ -4812,6 +4840,25 @@ struct MainTabView: View {
     }
 
     // MARK: - Tab Content
+    #if os(tvOS)
+    /// Task #254: recreate the TabView when the ACTIVE PLAYLIST changes.
+    /// The tvOS top tab bar auto-collapses (container slides to y=-115)
+    /// while focus sits deep in a tall settings page - exactly where the
+    /// Dispatcharr detail's Set Active row lives. Activating a playlist
+    /// from there re-layouts the settings content under the collapsed bar
+    /// and breaks UIKit's restore coordination: the bar stays parked
+    /// off-screen forever and Menu is swallowed, trapping the user
+    /// (device-verified via _UITabBarContainerView_TV frame dumps; also
+    /// reproduces on stock 1.8.9). Everything rebuilds on a playlist
+    /// switch anyway, so giving the TabView a fresh identity per active
+    /// server is consistent and puts the bar back in its resting visible
+    /// state. Selection and nav-path state live on MainTabView, not the
+    /// TabView child, so they survive the identity change.
+    private var tvTabViewIdentity: String {
+        allServers.first(where: { $0.isActive })?.id.uuidString ?? "none"
+    }
+    #endif
+
     private var tabContentView: some View {
         TabView(selection: $selectedTab) {
             ChannelListView()
@@ -4860,6 +4907,11 @@ struct MainTabView: View {
                 .tag(AppTab.settings)
             #endif
         }
+        #if os(tvOS)
+        // Task #254: see tvTabViewIdentity - fresh TabView per active
+        // playlist so the collapsed top bar cannot survive a switch.
+        .id(tvTabViewIdentity)
+        #endif
         .tint(theme.accent)
         // GH #20 auto-hide, iOS 26+ path (reworked 2026-07-12): minimize
         // is set to .never so there is no minimized pill and no system
@@ -5201,6 +5253,18 @@ struct MainTabView: View {
             server: allServers.first(where: { $0.isActive }) ?? allServers.first
         )
         debugLog("🔶 MainTabView.task(channelServerKey): firing, servers=\(allServers.count)")
+        #if os(tvOS) && DEBUG
+        // Task #254 instrumentation: dump the UIKit bar-adjacent hierarchy
+        // around a server activation so a healthy-vs-broken diff shows
+        // whether the TabView top bar goes hidden, zero-frame, or REMOVED.
+        dumpBarHierarchy("serverKey+0s")
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            dumpBarHierarchy("serverKey+3s")
+            try? await Task.sleep(for: .seconds(5))
+            dumpBarHierarchy("serverKey+8s")
+        }
+        #endif
         channelStore.refresh(servers: allServers)
         debugLog("🔶 MainTabView.task(channelServerKey): refresh called")
         // Flip `isEPGLoading` to true RIGHT NOW — before the
