@@ -96,6 +96,18 @@ struct SearchView: View {
     // Debounce
     @State private var searchTask: Task<Void, Never>?
 
+    /// Guide-channel lookup for EPG result rows (channel name + logo, Android
+    /// parity: "LIVE . Channel . start-end" with the channel's logo as the
+    /// thumbnail). Rebuilt per search from the active playlist's channels.
+    @State private var channelsByID: [String: ChannelDisplayItem] = [:]
+
+    private static let rangeTimeFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
     /// Shared middle of both layouts: scope chips + the four-way content.
     @ViewBuilder private var searchContent: some View {
         VStack(spacing: 0) {
@@ -273,6 +285,34 @@ struct SearchView: View {
         }
     }
 
+    /// Subtitle + detail line, Android SearchScreen parity: EPG rows carry
+    /// the channel name and full time range with the programme description
+    /// underneath; VOD rows carry the plot.
+    private func rowText(_ result: SearchResult) -> (subtitle: String, detail: String?) {
+        switch result {
+        case .vod(let item):
+            let detail = (item.movie?.plot ?? item.series?.plot)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return (result.subtitle, (detail?.isEmpty ?? true) ? nil : detail)
+        case .epg(let prog):
+            let range = Self.rangeTimeFmt.string(from: prog.startTime)
+                + " \u{2013} " + Self.rangeTimeFmt.string(from: prog.endTime)
+            let parts = [channelsByID[prog.channelID]?.name, range].compactMap { $0 }
+            let detail = prog.programDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (parts.joined(separator: " \u{00B7} "), detail.isEmpty ? nil : detail)
+        }
+    }
+
+    /// EPG rows thumbnail with the CHANNEL's logo (already SSRF-validated at
+    /// channel build time); programme art is the fallback.
+    private func rowThumbnailURL(_ result: SearchResult) -> URL? {
+        if case .epg(let prog) = result,
+           let logo = channelsByID[prog.channelID]?.logoURL {
+            return logo
+        }
+        return validatedPosterURL(result)
+    }
+
     private func resultRow(_ result: SearchResult) -> some View {
         Button {
             switch result {
@@ -282,7 +322,7 @@ struct SearchView: View {
         } label: {
             HStack(spacing: 12) {
                 // Thumbnail
-                AsyncImage(url: validatedPosterURL(result)) { phase in
+                AsyncImage(url: rowThumbnailURL(result)) { phase in
                     if case .success(let img) = phase {
                         img.resizable().aspectRatio(contentMode: .fill)
                             .frame(width: 50, height: 70)
@@ -297,11 +337,18 @@ struct SearchView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 4) {
+                    let text = rowText(result)
                     Text(result.title)
                         .font(.bodyMedium).foregroundColor(.textPrimary)
                         .lineLimit(2)
-                    Text(result.subtitle)
+                    Text(text.subtitle)
                         .font(.labelSmall).foregroundColor(.textSecondary)
+                        .lineLimit(1)
+                    if let detail = text.detail {
+                        Text(detail)
+                            .font(.labelSmall).foregroundColor(.textTertiary)
+                            .lineLimit(2)
+                    }
 
                     if case .epg(let prog) = result, prog.isLive {
                         LiveBadge()
@@ -385,6 +432,10 @@ struct SearchView: View {
         // predicate + fetchLimit push the match into SQLite: only the
         // handful of hits ever become model objects.
         if scope == .all || scope == .epg {
+            channelsByID = Dictionary(
+                ChannelStore.shared.channels.map { ($0.id, $0) },
+                uniquingKeysWith: { a, _ in a }
+            )
             let sid = activeServerID ?? ""
             var descriptor = FetchDescriptor<EPGProgram>(
                 predicate: #Predicate<EPGProgram> { p in
