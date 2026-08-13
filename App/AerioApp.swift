@@ -803,6 +803,7 @@ final class TVLANProbe: ObservableObject {
         // correct in the meantime whenever the SSID is known.
         if UserDefaults.standard.bool(forKey: Self.detectedKey) {
             UserDefaults.standard.set(false, forKey: Self.detectedKey)
+            UserDefaults.standard.set([String](), forKey: Self.reachableURLsKey)
             lastDetected = false
         }
         // Cancel any probe that's still running. The newer call's
@@ -839,9 +840,25 @@ final class TVLANProbe: ObservableObject {
         let retryDelayNs: UInt64 = 300_000_000 // 300ms
         var allLogs: [String] = []
 
+        // PER-CANDIDATE verdicts (Logan's 2026-08-13 VPS migration bug):
+        // the old early-return-on-first-success made ONE reachable local
+        // URL vouch for EVERY server. With two Dispatcharr playlists on
+        // the same LAN host, moving one container off-LAN left its
+        // localURL dead while the sibling's kept the global flag true -
+        // effectiveBaseURL then hammered the dead LAN address in a
+        // constant refused-connection retry loop and never fell back to
+        // the WAN URL. Every candidate is now probed to completion and
+        // the reachable set is persisted; ServerConnection.isOnLANNetwork
+        // consults its OWN localURL's verdict.
+        var reachable: Set<String> = []
+        var firstHost: String? = nil
+        var firstLatency: Int? = nil
+
         for attempt in 1...maxAttempts {
             for baseURL in candidates {
                 guard !Task.isCancelled else { return }
+                let key = Self.reachabilityKey(for: baseURL)
+                if reachable.contains(key) { continue }
                 // Per-candidate HEAD request with a 2s timeout. Some
                 // home routers (notably Ubiquiti) respond slowly to the
                 // first connection to a host the ARP table doesn't know
@@ -864,9 +881,8 @@ final class TVLANProbe: ObservableObject {
                         // proof of LAN reachability.
                         let host = baseURL.host ?? baseURL.absoluteString
                         allLogs.append("\(host)=\(http.statusCode)/\(ms)ms ✓ (attempt \(attempt)/\(maxAttempts))")
-                        record(detected: true, host: host, latencyMs: ms)
-                        print("📡 tvOS LAN probe: DETECTED — \(allLogs.joined(separator: ", "))")
-                        return
+                        reachable.insert(key)
+                        if firstHost == nil { firstHost = host; firstLatency = ms }
                     } else if let http = response as? HTTPURLResponse {
                         allLogs.append("\(baseURL.host ?? "?")=\(http.statusCode)/\(ms)ms ✗ (attempt \(attempt))")
                     }
@@ -875,27 +891,45 @@ final class TVLANProbe: ObservableObject {
                     allLogs.append("\(baseURL.host ?? "?")=err(\(nsErr.code)) (attempt \(attempt))")
                 }
             }
+            // Stop early once every candidate has answered; otherwise give
+            // the stragglers their second attempt.
+            if reachable.count == candidates.count { break }
             if attempt < maxAttempts {
                 try? await Task.sleep(nanoseconds: retryDelayNs)
                 guard !Task.isCancelled else { return }
             }
         }
 
-        // All attempts failed — record a definitive false so
-        // `effectiveBaseURL` falls back to the external URL and the
-        // UI reflects the failure with a timestamp the user can
-        // cross-reference against their network state.
-        record(detected: false, host: nil, latencyMs: nil)
-        print("📡 tvOS LAN probe: FAILED after \(maxAttempts) attempts — [\(allLogs.joined(separator: ", "))]. Streams will use external URL.")
+        record(detected: !reachable.isEmpty, host: firstHost, latencyMs: firstLatency, reachableURLs: reachable)
+        if reachable.isEmpty {
+            print("📡 tvOS LAN probe: FAILED after \(maxAttempts) attempts — [\(allLogs.joined(separator: ", "))]. Streams will use external URL.")
+        } else {
+            print("📡 tvOS LAN probe: DETECTED \(reachable.count)/\(candidates.count) local URL(s) — [\(allLogs.joined(separator: ", "))]")
+        }
     }
+
+    /// Canonical form for matching a probed candidate against a server's
+    /// `normalizedLocalURL`: normalized absolute string, lowercased. Both
+    /// sides run through the same trim / trailing-slash / scheme-default
+    /// normalization before URL construction, so string equality is exact.
+    static func reachabilityKey(for url: URL) -> String {
+        url.absoluteString.lowercased()
+    }
+
+    /// UserDefaults key holding the per-candidate reachable set (array of
+    /// reachabilityKey strings). Read by `ServerConnection.isOnLANNetwork`.
+    static let reachableURLsKey = "tvosLANReachableURLs"
 
     /// Commits a probe result to both UserDefaults (so the rest of
     /// the app + cold-launch state can read it synchronously) and
     /// `@Published` state (so the Settings UI can re-render).
-    private func record(detected: Bool, host: String?, latencyMs: Int?) {
+    private func record(detected: Bool, host: String?, latencyMs: Int?, reachableURLs: Set<String> = []) {
         let timestamp = Date()
         let defaults = UserDefaults.standard
         defaults.set(detected, forKey: Self.detectedKey)
+        // Per-server verdicts. Written on EVERY record so a probe that
+        // finds nothing (or the cellular fast path) clears stale entries.
+        defaults.set(Array(reachableURLs).sorted(), forKey: Self.reachableURLsKey)
         defaults.set(timestamp.timeIntervalSince1970, forKey: Self.timestampKey)
         defaults.set(host ?? "", forKey: Self.hostKey)
         defaults.set(latencyMs ?? 0, forKey: Self.latencyKey)

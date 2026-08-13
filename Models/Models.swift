@@ -545,7 +545,19 @@ final class ServerConnection {
     /// key (name kept to avoid breaking existing installs that already
     /// have a last-known LAN flag stored there).
     private var isOnLANNetwork: Bool {
-        UserDefaults.standard.bool(forKey: "tvosLANDetected")
+        // Per-server verdict (2026-08-13 VPS-migration fix): THIS server's
+        // localURL must itself have answered the probe. The old global
+        // bool let any reachable sibling localURL vouch for a dead one,
+        // stranding effectiveBaseURL on a refused-connection LAN address
+        // with no WAN fallback. Key format matches
+        // TVLANProbe.reachabilityKey (normalized absolute URL, lowercased).
+        // A missing array (pre-upgrade persisted state, one launch max)
+        // falls back to the old global flag.
+        let defaults = UserDefaults.standard
+        guard let reachable = defaults.stringArray(forKey: "tvosLANReachableURLs") else {
+            return defaults.bool(forKey: "tvosLANDetected")
+        }
+        return reachable.contains(normalizedLocalURL.lowercased())
     }
 
     var isHTTPS: Bool {
