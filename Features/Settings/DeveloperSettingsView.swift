@@ -12,6 +12,8 @@ import CoreImage.CIFilterBuiltins
 // GLES-FBO-to-AVSampleBufferDisplayLayer path. tvOS-only, dev-gated.
 import Libmpv
 import QuartzCore
+import AVFoundation
+import CoreMedia
 #endif
 
 // MARK: - Developer Settings View
@@ -1416,6 +1418,45 @@ final class MetalMPVTestViewController: UIViewController {
         startStatsPoller()
     }
 
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        requestHDRDisplayMode()
+    }
+
+    /// Round 2: ask tvOS to switch the HDMI output to HDR10 @ 50Hz via the
+    /// public AVDisplayCriteria init (tvOS 17+). Without this the ATV stays
+    /// in its UI mode (SDR 4K60) and the TV never sees HDR - confirmed by
+    /// Logan's Hisense info panel on the first run. Honored only when the
+    /// user's Match Dynamic Range / Match Frame Rate settings are on.
+    private func requestHDRDisplayMode() {
+        guard let window = view.window else {
+            debugLog("[METAL-HDR] no window; cannot request HDR mode")
+            return
+        }
+        let displayManager = window.avDisplayManager
+        var formatDesc: CMVideoFormatDescription?
+        let extensions: [CFString: Any] = [
+            kCMFormatDescriptionExtension_ColorPrimaries: kCMFormatDescriptionColorPrimaries_ITU_R_2020,
+            kCMFormatDescriptionExtension_TransferFunction: kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ,
+            kCMFormatDescriptionExtension_YCbCrMatrix: kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
+        ]
+        let status = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: kCMVideoCodecType_HEVC,
+            width: 3840,
+            height: 2160,
+            extensions: extensions as CFDictionary,
+            formatDescriptionOut: &formatDesc
+        )
+        guard status == noErr, let formatDesc else {
+            debugLog("[METAL-HDR] CMVideoFormatDescriptionCreate failed: \(status)")
+            return
+        }
+        let criteria = AVDisplayCriteria(refreshRate: 50.0, formatDescription: formatDesc)
+        displayManager.preferredDisplayCriteria = criteria
+        debugLog("[METAL-HDR] preferredDisplayCriteria set: HEVC 3840x2160 bt.2020/PQ @ 50Hz (displayModeSwitchInProgress=\(displayManager.isDisplayModeSwitchInProgress))")
+    }
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         metalLayer.frame = view.bounds
@@ -1465,6 +1506,12 @@ final class MetalMPVTestViewController: UIViewController {
     func shutdown() {
         statsTimer?.invalidate()
         statsTimer = nil
+        // Release the display-mode request so the ATV returns to its UI
+        // mode after the test. isViewLoaded guard: shutdown is also called
+        // from deinit, where touching `view` could force-load it.
+        if isViewLoaded, let window = view.window {
+            window.avDisplayManager.preferredDisplayCriteria = nil
+        }
         guard let handle = mpv else { return }
         mpv = nil
         // Clear the wakeup callback before destroy so a late wakeup can't
