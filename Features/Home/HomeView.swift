@@ -3486,6 +3486,12 @@ struct MainTabView: View {
     /// here whether a Settings subview is on top before falling
     /// through to the "switch to Live TV" default.
     @State private var isSettingsSubviewPushed = false
+    #if os(tvOS)
+    /// Task #254 round 2: incremented by healCollapsedTabBarIfNeeded to
+    /// force a TabView remount when the tab bar is detected parked
+    /// off-screen after backing out of a tall settings detail page.
+    @State private var tvBarHealToken = 0
+    #endif
     /// Signal to SettingsView to pop its innermost pushed subview
     /// (classic stack first, then navPath). Reset by SettingsView
     /// after consuming.
@@ -4855,7 +4861,51 @@ struct MainTabView: View {
     /// state. Selection and nav-path state live on MainTabView, not the
     /// TabView child, so they survive the identity change.
     private var tvTabViewIdentity: String {
-        allServers.first(where: { $0.isActive })?.id.uuidString ?? "none"
+        let serverPart = allServers.first(where: { $0.isActive })?.id.uuidString ?? "none"
+        // tvBarHealToken: bumping it remounts the TabView exactly like a
+        // playlist switch does. See healCollapsedTabBarIfNeeded.
+        return "\(serverPart)#heal\(tvBarHealToken)"
+    }
+
+    /// Task #254 round 2 (Logan 2026-08-13): the Set Active remount above
+    /// only heals when the ACTIVE SERVER changes. The underlying UIKit bug
+    /// fires on ANY tall settings detail page that re-layouts under the
+    /// auto-collapsed bar - Edit mode on the Dispatcharr playlist page,
+    /// then backing out, reproduces the same parked-forever bar with no
+    /// playlist switch to trigger the heal. So: whenever Settings pops
+    /// back to its root, inspect the UIKit layer (same signature the
+    /// task #254 forensics established: container frame minY < 0 with
+    /// hidden=false alpha=1) and, if the bar is parked, bump the heal
+    /// token to force the remount. Checked twice (0.8s + 2.5s) because a
+    /// legitimate restore animation may still be in flight at the first
+    /// check; a healthy bar rests at minY ~46 well before the second.
+    private func scheduleTabBarHealCheck() {
+        for delay in [0.8, 2.5] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                healCollapsedTabBarIfNeeded()
+            }
+        }
+    }
+
+    private func healCollapsedTabBarIfNeeded() {
+        guard !isSettingsSubviewPushed else { return }
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
+            .first else { return }
+        var parked = false
+        func walk(_ v: UIView) {
+            let name = String(describing: type(of: v))
+            if name.contains("TabBarContainerView"),
+               !v.isHidden, v.alpha > 0, v.frame.minY < 0 {
+                parked = true
+                return
+            }
+            for s in v.subviews where !parked { walk(s) }
+        }
+        walk(window)
+        guard parked else { return }
+        debugLog("[TABBAR-HEAL] bar parked off-screen at settings root; remounting TabView (token \(tvBarHealToken) -> \(tvBarHealToken + 1))")
+        tvBarHealToken += 1
     }
     #endif
 
@@ -4911,6 +4961,11 @@ struct MainTabView: View {
         // Task #254: see tvTabViewIdentity - fresh TabView per active
         // playlist so the collapsed top bar cannot survive a switch.
         .id(tvTabViewIdentity)
+        // Task #254 round 2: whenever Settings pops back to root, check
+        // whether the bar came back; remount if it is parked off-screen.
+        .onChange(of: isSettingsSubviewPushed) { _, pushed in
+            if !pushed { scheduleTabBarHealCheck() }
+        }
         #endif
         .tint(theme.accent)
         // GH #20 auto-hide, iOS 26+ path (reworked 2026-07-12): minimize
