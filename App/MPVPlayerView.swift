@@ -5040,6 +5040,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #endif
             checkError(mpv_set_option_string(mpv, "profile", "fast"))  // Disable expensive post-processing for mobile
 
+            // Pin the audio output to audiounit. mpv 0.41 (MPVKit 1.0.0)
+            // changed the Apple default ao to the newer ao_avfoundation,
+            // which negotiated the 32-channel spatial HDMI session on a
+            // 1.8.11 field device (Michael, Discord) - the exact GH #51
+            // poison layout: audio desync, glitching, and the health-check
+            // fallback churning. Every audio behavior in this app (6ch LPCM
+            // surround, the stereo-downmix fallback, underrun tuning) was
+            // built and verified on audiounit; ao_avfoundation adoption is
+            // its own project (it is also the Atmos/E-AC-3 JOC extension
+            // point), not a silent default flip.
+            checkError(mpv_set_option_string(mpv, "ao", "audiounit"))
+
             // CarPlay: never bring the video pipeline up. Set as a PRE-INIT
             // option (not a runtime property) so no frame is ever decoded or
             // handed to the GL presenter. This is the driver-safety default
