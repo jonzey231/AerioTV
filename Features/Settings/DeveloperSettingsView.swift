@@ -1673,6 +1673,11 @@ enum MetalHDRAutoRun {
             for tick in 0..<120 {
                 if let ch = ChannelStore.shared.channels.first(where: { $0.number == channelNumber }) {
                     if tuneMode {
+                        // The tune marker exists to exercise the flag-gated
+                        // production engine headlessly, so it enables the
+                        // flag too (debug builds only; the toggle in this
+                        // screen is the user-facing switch).
+                        UserDefaults.standard.set(true, forKey: "playback.metalHDR")
                         debugLog("[METAL-HDR] autorun: production tune after \(tick)s, ch=\(channelNumber) id=\(ch.id) name=\(ch.name)")
                         NotificationCenter.default.post(
                             name: .aerioOpenChannel,
