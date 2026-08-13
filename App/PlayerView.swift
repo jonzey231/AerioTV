@@ -803,7 +803,33 @@ private struct PlayerRootView: View {
                                 y: deviceSafeAreaTop + 70
                             )
                             let pos = streamInfoPosition ?? defaultPos
-                            streamInfoOverlay
+                            // Close (x) button matching the unified path's
+                            // card (MultiviewContainerView.streamInfoCardWithCloseButton).
+                            // Pre-fix the legacy VOD/single-stream player
+                            // rendered the bare card with no dismiss
+                            // affordance on iPhone - the overlay could only
+                            // be cleared by reopening Options.
+                            ZStack(alignment: .topTrailing) {
+                                streamInfoOverlay
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.15)) {
+                                        showStreamInfo = false
+                                    }
+                                } label: {
+                                    ZStack {
+                                        Circle()
+                                            .fill(.ultraThinMaterial)
+                                            .overlay(Circle().stroke(Color.white.opacity(0.18), lineWidth: 1))
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 11, weight: .bold))
+                                            .foregroundStyle(.white)
+                                    }
+                                    .frame(width: 22, height: 22)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel("Close stream info")
+                                .offset(x: 10, y: -10)
+                            }
                                 .position(pos)
                                 .gesture(
                                     DragGesture()
