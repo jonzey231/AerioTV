@@ -377,6 +377,14 @@ struct AerioApp: App {
                     #if canImport(UIKit)
                     PlaybackDiagnostics.installMemoryWarningHook()
                     #endif
+                    #if os(tvOS) && DEBUG
+                    // HDR prototype (feature/hdr-metal): headless-driveable
+                    // autorun. A marker file pushed into Library/Caches via
+                    // devicectl triggers the Metal HDR test screen without
+                    // any remote input. Debug builds only; no-op when the
+                    // marker is absent.
+                    MetalHDRAutoRun.checkAndRun()
+                    #endif
                 }
                 #if os(tvOS)
                 .onOpenURL { url in

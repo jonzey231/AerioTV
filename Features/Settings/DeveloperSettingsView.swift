@@ -7,6 +7,11 @@ import UIKit
 import Network
 import CoreImage
 import CoreImage.CIFilterBuiltins
+// HDR prototype (Phase 0, feature/hdr-metal): mpv renders straight into a
+// CAMetalLayer via gpu-next/vulkan/MoltenVK instead of the production
+// GLES-FBO-to-AVSampleBufferDisplayLayer path. tvOS-only, dev-gated.
+import Libmpv
+import QuartzCore
 #endif
 
 // MARK: - Developer Settings View
@@ -70,6 +75,10 @@ struct DeveloperSettingsView: View {
     /// LAN via a tiny embedded HTTP server. iOS uses
     /// UIActivityViewController instead (not available on tvOS).
     @State private var showTvOSShareSheet = false
+    /// HDR prototype cover. Non-nil = presenting, carrying the resolved
+    /// stream URL for the requested channel number.
+    @State private var metalHDRTestItem: MetalHDRTestItem?
+    @State private var metalHDRTestError: String?
     #endif
     @State private var logSize = "Empty"
     private let logger = DebugLogger.shared
@@ -659,6 +668,36 @@ struct DeveloperSettingsView: View {
                             : "Off: raw TS channels use the mpv engine (the default)",
                         isOn: $avPlayerRemuxTS
                     ) { _ in }
+
+                    // Phase 0 HDR prototype: play channel 35 (UHD HDR test
+                    // channel) through the Metal/MoltenVK render path with
+                    // hwdec=videotoolbox (zero-copy) and
+                    // target-colorspace-hint=yes. Diagnostic only; results
+                    // land in the debug log as [METAL-HDR] lines.
+                    TVSettingsActionRow(
+                        icon: "tv.and.mediabox",
+                        label: "Metal HDR Test (Channel 35)",
+                        isAccent: true,
+                        action: {
+                            let channels = ChannelStore.shared.channels
+                            if let ch = channels.first(where: { $0.number == "35" }),
+                               let url = ch.streamURL ?? ch.streamURLs.first {
+                                debugLog("[METAL-HDR] launching test ch=35 name=\(ch.name)")
+                                metalHDRTestError = nil
+                                metalHDRTestItem = MetalHDRTestItem(url: url)
+                            } else {
+                                metalHDRTestError = channels.isEmpty
+                                    ? "Channels not loaded yet - open Live TV first."
+                                    : "No channel numbered 35 in the active playlist."
+                                debugLog("[METAL-HDR] launch failed: \(metalHDRTestError ?? "?")")
+                            }
+                        }
+                    )
+                    if let err = metalHDRTestError {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundColor(.textSecondary)
+                    }
                 }
 
                 if debugLoggingEnabled || (logger.logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {
@@ -712,6 +751,9 @@ struct DeveloperSettingsView: View {
                 }
             }
             .padding(48)
+        }
+        .fullScreenCover(item: $metalHDRTestItem) { item in
+            MetalHDRTestScreen(url: item.url)
         }
     }
 
@@ -1255,3 +1297,341 @@ struct TvOSLogShareSheet: View {
 }
 #endif
 
+
+// MARK: - Metal HDR Prototype (Phase 0, feature/hdr-metal, tvOS only)
+//
+// Answers ONE question: does tvOS pass mpv's HDR (PQ/BT.2020) output through
+// a CAMetalLayer + MoltenVK swapchain correctly, with hwdec=videotoolbox in
+// DIRECT (zero-copy) mode? Everything here is diagnostic scaffolding around
+// that question; none of it is production plumbing. Recipe mirrors MPVKit's
+// Demo-tvOS MPVMetalViewController (MPVKit 1.0.0 = mpv 0.41 + libplacebo
+// 7.360.1 + MoltenVK 1.4).
+//
+// Verdict evidence, logged as [METAL-HDR] every 5s:
+//   hwdec=videotoolbox (NOT -copy) -> zero-copy confirmed
+//   gamma=pq primaries=bt.2020 sig-peak>1 -> HDR passthrough negotiated
+//   frame-drop counters -> smoothness vs tonight's 44-71 drops/15s baseline
+// Color CORRECTNESS still needs eyes on the TV (Logan's morning review).
+#if os(tvOS)
+
+struct MetalHDRTestItem: Identifiable {
+    let id = UUID()
+    let url: URL
+}
+
+/// MoltenVK workaround: it momentarily forces drawableSize to 1x1 to
+/// complete presentation; without this clamp the size can stick at 1x1
+/// (black frame / flicker). See mpv PR #13651.
+final class HDRTestMetalLayer: CAMetalLayer {
+    override var drawableSize: CGSize {
+        get { super.drawableSize }
+        set {
+            if Int(newValue.width) > 1 && Int(newValue.height) > 1 {
+                super.drawableSize = newValue
+            }
+        }
+    }
+}
+
+struct MetalHDRTestScreen: View {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+    @State private var hud: String = "starting..."
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            MetalMPVTestHost(url: url) { line in
+                hud = line
+            }
+            .ignoresSafeArea()
+
+            // Stats HUD: small, top-left, updated from the poller. Play/Pause
+            // toggles it so Logan can judge colors with a clean frame.
+            Text(hud)
+                .font(.system(size: 20, weight: .medium, design: .monospaced))
+                .foregroundColor(.white)
+                .padding(12)
+                .background(Color.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+                .padding(24)
+        }
+        .background(Color.black.ignoresSafeArea())
+    }
+}
+
+private struct MetalMPVTestHost: UIViewControllerRepresentable {
+    let url: URL
+    let onStats: (String) -> Void
+
+    func makeUIViewController(context: Context) -> MetalMPVTestViewController {
+        let vc = MetalMPVTestViewController()
+        vc.playURL = url
+        vc.onStats = onStats
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: MetalMPVTestViewController, context: Context) {}
+
+    static func dismantleUIViewController(_ uiViewController: MetalMPVTestViewController, coordinator: ()) {
+        uiViewController.shutdown()
+    }
+}
+
+/// mpv wakeup trampoline. File-scope so it carries NO actor isolation --
+/// mpv invokes it from its core thread. It only bounces to drainEvents,
+/// which itself just hops onto the event queue.
+private func metalHDRTestWakeup(_ ctx: UnsafeMutableRawPointer?) {
+    guard let ctx else { return }
+    let me = unsafeBitCast(ctx, to: MetalMPVTestViewController.self)
+    me.drainEvents()
+}
+
+final class MetalMPVTestViewController: UIViewController {
+    var playURL: URL?
+    var onStats: ((String) -> Void)?
+
+    private var metalLayer = HDRTestMetalLayer()
+    // nonisolated(unsafe): read from the mpv wakeup callback (mpv's core
+    // thread) via drainEvents. Written only on the main thread (setup +
+    // shutdown); shutdown clears the wakeup callback before destroy so the
+    // core thread never sees a dangling handle.
+    private nonisolated(unsafe) var mpv: OpaquePointer?
+    private let eventQueue = DispatchQueue(label: "metal-hdr-test.mpv", qos: .userInitiated)
+    private var statsTimer: Timer?
+    private var statsTick = 0
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        view.backgroundColor = .black
+
+        metalLayer.frame = view.bounds
+        metalLayer.contentsScale = UIScreen.main.nativeScale
+        metalLayer.framebufferOnly = true
+        metalLayer.backgroundColor = UIColor.black.cgColor
+        view.layer.addSublayer(metalLayer)
+
+        setupMpv()
+        if let url = playURL {
+            command("loadfile", args: [url.absoluteString, "replace"])
+        }
+        startStatsPoller()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        metalLayer.frame = view.bounds
+    }
+
+    private func setupMpv() {
+        guard let handle = mpv_create() else {
+            debugLog("[METAL-HDR] mpv_create FAILED")
+            return
+        }
+        mpv = handle
+
+        // Route mpv warnings+errors into the debug log (info+ is too chatty).
+        mpv_request_log_messages(handle, "warn")
+
+        // The load-bearing options. wid = the CAMetalLayer: MPV_FORMAT_INT64
+        // reads the pointer value out of the reference var, exactly like the
+        // MPVKit demo does.
+        check(mpv_set_option(handle, "wid", MPV_FORMAT_INT64, &metalLayer), "wid")
+        check(mpv_set_option_string(handle, "vo", "gpu-next"), "vo")
+        check(mpv_set_option_string(handle, "gpu-api", "vulkan"), "gpu-api")
+        check(mpv_set_option_string(handle, "gpu-context", "moltenvk"), "gpu-context")
+        check(mpv_set_option_string(handle, "hwdec", "videotoolbox"), "hwdec")
+        // HDR passthrough. MUST be set pre-init; cannot be toggled at runtime.
+        check(mpv_set_option_string(handle, "target-colorspace-hint", "yes"), "target-colorspace-hint")
+
+        // Live-TS niceties borrowed from the production engine, kept minimal.
+        mpv_set_option_string(handle, "video-rotate", "no")
+        mpv_set_option_string(handle, "cache", "yes")
+        mpv_set_option_string(handle, "demuxer-max-bytes", "64MiB")
+        mpv_set_option_string(handle, "demuxer-max-back-bytes", "16MiB")
+        mpv_set_option_string(handle, "user-agent", "AerioTV")
+
+        check(mpv_initialize(handle), "initialize")
+
+        // The callback MUST be a file-scope function: a closure literal here
+        // inherits the class's MainActor isolation, and Swift 6's dynamic
+        // isolation check SIGTRAPs the instant mpv's core thread enters it
+        // (crash #2 of this prototype; crash #1 was the same check on
+        // drainEvents itself).
+        mpv_set_wakeup_callback(handle, metalHDRTestWakeup, UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque()))
+
+        debugLog("[METAL-HDR] mpv initialized: vo=gpu-next gpu-api=vulkan gpu-context=moltenvk hwdec=videotoolbox target-colorspace-hint=yes")
+    }
+
+    /// Idempotent teardown. Called from SwiftUI dismantle and deinit.
+    func shutdown() {
+        statsTimer?.invalidate()
+        statsTimer = nil
+        guard let handle = mpv else { return }
+        mpv = nil
+        // Clear the wakeup callback before destroy so a late wakeup can't
+        // touch a deallocating self (we're passed unretained).
+        mpv_set_wakeup_callback(handle, nil, nil)
+        eventQueue.async {
+            mpv_terminate_destroy(handle)
+            debugLog("[METAL-HDR] mpv destroyed")
+        }
+    }
+
+    deinit {
+        shutdown()
+    }
+
+    // MARK: Stats
+
+    private func startStatsPoller() {
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.pollStats()
+        }
+    }
+
+    private func pollStats() {
+        guard let handle = mpv else { return }
+        statsTick += 1
+
+        let hwdec = getString(handle, "hwdec-current") ?? "-"
+        let pixfmt = getString(handle, "video-params/pixelformat") ?? "-"
+        let primaries = getString(handle, "video-params/primaries") ?? "-"
+        let gamma = getString(handle, "video-params/gamma") ?? "-"
+        let sigPeak = getDouble(handle, "video-params/sig-peak")
+        let w = getInt(handle, "video-params/w")
+        let h = getInt(handle, "video-params/h")
+        let fps = getDouble(handle, "container-fps")
+        let voDrops = getInt(handle, "frame-drop-count")
+        let decDrops = getInt(handle, "decoder-frame-drop-count")
+        let cacheSecs = getDouble(handle, "demuxer-cache-duration")
+
+        let hud = String(
+            format: "%dx%d %@ %.5g fps | hwdec=%@ | %@ / %@ peak=%.5g\nvo-drops=%d dec-drops=%d cache=%.1fs",
+            w, h, pixfmt, fps, hwdec, primaries, gamma, sigPeak, voDrops, decDrops, cacheSecs
+        )
+        onStats?(hud)
+
+        // Log a durable evidence line every 5s.
+        if statsTick % 5 == 0 {
+            debugLog("[METAL-HDR] t=\(statsTick)s res=\(w)x\(h) fmt=\(pixfmt) fps=\(fps) hwdec=\(hwdec) primaries=\(primaries) gamma=\(gamma) sig-peak=\(sigPeak) vo-drops=\(voDrops) dec-drops=\(decDrops) cache=\(String(format: "%.1f", cacheSecs))s")
+        }
+    }
+
+    // MARK: mpv plumbing
+
+    // nonisolated: invoked from mpv's wakeup callback on mpv's core thread.
+    // The Swift 6 dynamic isolation check SIGTRAPs if this is left implicitly
+    // MainActor (UIViewController inference) - that was the first on-device
+    // crash of this prototype. All it does is hop to eventQueue.
+    fileprivate nonisolated func drainEvents() {
+        eventQueue.async { [weak self] in
+            guard let self else { return }
+            while let handle = self.mpv {
+                guard let event = mpv_wait_event(handle, 0), event.pointee.event_id != MPV_EVENT_NONE else { break }
+                switch event.pointee.event_id {
+                case MPV_EVENT_LOG_MESSAGE:
+                    if let msg = UnsafePointer<mpv_event_log_message>(OpaquePointer(event.pointee.data))?.pointee {
+                        let prefix = String(cString: msg.prefix)
+                        let text = String(cString: msg.text).trimmingCharacters(in: .whitespacesAndNewlines)
+                        debugLog("[METAL-HDR][mpv \(prefix)] \(text)")
+                    }
+                case MPV_EVENT_END_FILE:
+                    debugLog("[METAL-HDR] end-file event")
+                default:
+                    break
+                }
+            }
+        }
+    }
+
+    private func command(_ name: String, args: [String]) {
+        guard let handle = mpv else { return }
+        var cargs: [UnsafePointer<CChar>?] = ([name] + args).map { UnsafePointer(strdup($0)) }
+        cargs.append(nil)
+        defer { cargs.forEach { if let p = $0 { free(UnsafeMutablePointer(mutating: p)) } } }
+        check(mpv_command(handle, &cargs), "command \(name)")
+    }
+
+    private func check(_ status: CInt, _ what: String) {
+        if status < 0 {
+            debugLog("[METAL-HDR] mpv error on \(what): \(String(cString: mpv_error_string(status)))")
+        }
+    }
+
+    private func getString(_ handle: OpaquePointer, _ name: String) -> String? {
+        guard let cstr = mpv_get_property_string(handle, name) else { return nil }
+        defer { mpv_free(cstr) }
+        return String(cString: cstr)
+    }
+
+    private func getDouble(_ handle: OpaquePointer, _ name: String) -> Double {
+        var v = Double()
+        mpv_get_property(handle, name, MPV_FORMAT_DOUBLE, &v)
+        return v
+    }
+
+    private func getInt(_ handle: OpaquePointer, _ name: String) -> Int {
+        var v = Int64()
+        mpv_get_property(handle, name, MPV_FORMAT_INT64, &v)
+        return Int(v)
+    }
+}
+#endif
+
+// MARK: - Metal HDR autorun (headless driving via devicectl)
+//
+// Push an empty marker file to Library/Caches/metal_hdr_autorun in the app
+// container (devicectl device copy to --domain-type appDataContainer), then
+// launch with --terminate-existing. On launch this waits for the channel
+// list, presents MetalHDRTestScreen full-screen for `runSeconds`, then
+// dismisses itself. Single-shot: the marker is deleted on pickup, so the
+// next normal launch is unaffected. Debug builds only (call site is
+// #if DEBUG gated in AerioApp).
+#if os(tvOS)
+enum MetalHDRAutoRun {
+    static let runSeconds: TimeInterval = 180
+    static let channelNumber = "35"
+
+    static func checkAndRun() {
+        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
+        let marker = caches.appendingPathComponent("metal_hdr_autorun")
+        guard FileManager.default.fileExists(atPath: marker.path) else { return }
+        try? FileManager.default.removeItem(at: marker)
+        debugLog("[METAL-HDR] autorun marker found; waiting for channel \(channelNumber)")
+
+        Task { @MainActor in
+            for tick in 0..<120 {
+                if let ch = ChannelStore.shared.channels.first(where: { $0.number == channelNumber }),
+                   let url = ch.streamURL ?? ch.streamURLs.first {
+                    debugLog("[METAL-HDR] autorun: presenting after \(tick)s, ch=\(channelNumber) name=\(ch.name)")
+                    present(url: url)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+            debugLog("[METAL-HDR] autorun: channel \(channelNumber) never appeared in 120s; giving up")
+        }
+    }
+
+    @MainActor
+    private static func present(url: URL) {
+        guard let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene }).first,
+              let root = scene.keyWindow?.rootViewController else {
+            debugLog("[METAL-HDR] autorun: no root view controller; aborting")
+            return
+        }
+        var top = root
+        while let presented = top.presentedViewController { top = presented }
+
+        let host = UIHostingController(rootView: MetalHDRTestScreen(url: url))
+        host.modalPresentationStyle = .fullScreen
+        top.present(host, animated: false)
+
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(runSeconds) * 1_000_000_000)
+            debugLog("[METAL-HDR] autorun: \(Int(runSeconds))s window complete; dismissing")
+            host.dismiss(animated: false)
+        }
+    }
+}
+#endif

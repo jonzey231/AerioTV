@@ -1801,7 +1801,7 @@
 			repositoryURL = "https://github.com/mpvkit/MPVKit.git";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 0.41.0;
+				minimumVersion = 1.0.0;
 			};
 		};
 		F14B1CE1620BA3F5A29FABEB /* XCRemoteSwiftPackageReference "SwiftDraw" */ = {
