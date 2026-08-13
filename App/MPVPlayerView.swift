@@ -5041,7 +5041,18 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 checkError(mpv_set_option_string(mpv, "gpu-api", "vulkan"))
                 checkError(mpv_set_option_string(mpv, "gpu-context", "moltenvk"))
                 checkError(mpv_set_option_string(mpv, "target-colorspace-hint", "yes"))
-                debugLog("[METAL-ENGINE] pre-init: vo=gpu-next gpu-api=vulkan gpu-context=moltenvk target-colorspace-hint=yes")
+                // Cap the output signal at 1000 nits. tvOS always sends its
+                // own FIXED HDMI mastering metadata (~1000 nit; CAEDRMetadata
+                // is API-unavailable on tvOS, so no app can attach the
+                // stream's real MDCV - MoltenVK's vkSetHdrMetadataEXT is
+                // macOS-only and even AVPlayer apps live with the fixed
+                // values). Without this cap, >1000-nit content exceeds what
+                // the InfoFrame promises and less-forgiving TVs overcook it
+                // (the 1.8.11 oversaturation field report). gpu-next
+                // tone-maps the excess into the signal instead; <=1000-nit
+                // content (most broadcast HDR) passes through untouched.
+                checkError(mpv_set_option_string(mpv, "target-peak", "1000"))
+                debugLog("[METAL-ENGINE] pre-init: vo=gpu-next gpu-api=vulkan gpu-context=moltenvk target-colorspace-hint=yes target-peak=1000")
             } else {
                 // vo=libmpv: app drives rendering via OpenGL ES render API.
                 // GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy).
