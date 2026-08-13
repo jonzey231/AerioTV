@@ -1,4 +1,5 @@
 import Foundation
+import Network
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -443,6 +444,48 @@ final class DebugLogger: @unchecked Sendable {
 
     // MARK: - Session Header
 
+    /// Re-emit the session header for an ALREADY-enabled logger. Called on
+    /// app launch so every session in a shared log file opens with the
+    /// device + build + connection block, not just the session where the
+    /// user first flipped the toggle (Logan 2026-08-12: reports should
+    /// answer "which device, what connection" without asking).
+    @MainActor func logSessionStart() {
+        guard isEnabled else { return }
+        writeSessionHeader()
+    }
+
+    /// Hardware identifier (e.g. "AppleTV14,1", "iPhone16,1"). UIDevice.model
+    /// only says "Apple TV" / "iPhone", which is never enough to tell a 4K
+    /// box from an HD one in a perf report.
+    private static func machineIdentifier() -> String {
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        return withUnsafeBytes(of: &systemInfo.machine) { buf in
+            String(decoding: buf.prefix(while: { $0 != 0 }), as: UTF8.self)
+        }
+    }
+
+    /// One-shot connection snapshot appended right after the session header.
+    /// General transport only (wired / wifi / cellular) -- no SSIDs, no IPs;
+    /// the file gets attached to public GitHub issues.
+    private func logConnectionSnapshot() {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            monitor.cancel()
+            guard let self else { return }
+            let transport: String
+            if path.usesInterfaceType(.wiredEthernet) { transport = "ethernet" }
+            else if path.usesInterfaceType(.wifi) { transport = "wifi" }
+            else if path.usesInterfaceType(.cellular) { transport = "cellular" }
+            else if path.status == .satisfied { transport = "other" }
+            else { transport = "none" }
+            let expensive = path.isExpensive ? " (expensive)" : ""
+            let line = "Connection  : \(transport)\(expensive)\n"
+            self.queue.async { [weak self] in self?.appendToFile(line) }
+        }
+        monitor.start(queue: DispatchQueue.global(qos: .utility))
+    }
+
     @MainActor private func writeSessionHeader() {
         // Capture @MainActor-isolated UIDevice values before entering the background queue.
 #if canImport(UIKit)
@@ -450,6 +493,7 @@ final class DebugLogger: @unchecked Sendable {
         let capturedSysName = UIDevice.current.systemName
         let capturedSysVer  = UIDevice.current.systemVersion
 #endif
+        let machine = Self.machineIdentifier()
         queue.async { [weak self] in
             guard let self else { return }
 #if canImport(UIKit)
@@ -469,7 +513,7 @@ final class DebugLogger: @unchecked Sendable {
             ════════════════════════════════════════════════════════
             Aerio Debug Session — \(self.timestampFormatter.string(from: Date()))
             App Version : \(version) (\(build))
-            Device      : \(deviceModel)
+            Device      : \(deviceModel) (\(machine))
             System      : \(systemInfo)
             Memory      : \(memInfo)
             ════════════════════════════════════════════════════════
@@ -477,6 +521,7 @@ final class DebugLogger: @unchecked Sendable {
             """
             self.appendToFile(header)
         }
+        logConnectionSnapshot()
     }
 
     // MARK: - Free-function (`debugLog`) capture

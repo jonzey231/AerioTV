@@ -363,6 +363,9 @@ struct AerioApp: App {
                 #endif
                 .onAppear {
                     DebugLogger.shared.logLifecycle("App launched")
+                    // Every session opens with the device/build/connection
+                    // block, not just the one where logging was enabled.
+                    DebugLogger.shared.logSessionStart()
                     #if DEBUG
                     MainThreadWatchdog.shared.start()
                     #endif
