@@ -270,12 +270,37 @@ enum MPVLibraryWarmup {
 
 // MARK: - MPV Player View Controller (OpenGL ES render → AVSampleBufferDisplayLayer → PiP)
 
+#if os(tvOS)
+/// Host layer for the Metal HDR render path (vo=gpu-next via MoltenVK).
+/// MoltenVK momentarily forces drawableSize to 1x1 to complete
+/// presentation; without this clamp the size can stick at 1x1
+/// (black frame / flicker). See mpv PR #13651.
+private final class MPVMetalHostLayer: CAMetalLayer {
+    override var drawableSize: CGSize {
+        get { super.drawableSize }
+        set {
+            if Int(newValue.width) > 1 && Int(newValue.height) > 1 {
+                super.drawableSize = newValue
+            }
+        }
+    }
+}
+#endif
+
 class MPVPlayerViewController: UIViewController {
     weak var coordinator: MPVPlayerViewRepresentable.Coordinator?
 
     /// AVSampleBufferDisplayLayer — vsync-synchronized frame presentation.
     /// Used on both iOS (PiP-compatible) and tvOS (tear-free).
     let sampleBufferLayer = AVSampleBufferDisplayLayer()
+
+    #if os(tvOS)
+    /// Metal HDR mode only: the CAMetalLayer mpv presents into directly
+    /// (gpu-next owns the swapchain - no AVSBDL, no GL FBO ring).
+    /// Created in viewDidLoad when the coordinator selected metal mode;
+    /// nil on the classic render path.
+    private var metalHostLayer: MPVMetalHostLayer?
+    #endif
 
     #if os(iOS)
     /// PiP controller — created lazily on first request via
@@ -365,6 +390,30 @@ class MPVPlayerViewController: UIViewController {
         view.backgroundColor = .black
         sampleBufferLayer.backgroundColor = UIColor.black.cgColor
 
+        #if os(tvOS)
+        // Metal HDR path: mpv (gpu-next / vulkan / moltenvk) presents into a
+        // CAMetalLayer directly. The sample-buffer layer is NOT attached -
+        // there is no GL FBO ring and no AVSBDL enqueue on this path. The
+        // layer reference must be on the coordinator BEFORE start() runs on
+        // renderQueue (setupMPV reads it for the pre-init `wid` option);
+        // setupRenderer -> kickstartIfNeeded queues start() after this
+        // method body, so main-then-renderQueue FIFO guarantees ordering.
+        if coordinator?.metalHDRMode == true {
+            let metal = MPVMetalHostLayer()
+            metal.frame = view.bounds
+            metal.contentsScale = UIScreen.main.nativeScale
+            metal.framebufferOnly = true
+            metal.backgroundColor = UIColor.black.cgColor
+            view.layer.addSublayer(metal)
+            metalHostLayer = metal
+            coordinator?.metalLayer = metal
+            coordinator?.metalHostController = self
+            debugLog("[METAL-ENGINE] host CAMetalLayer attached (scale=\(metal.contentsScale))")
+            coordinator?.setupRenderer(layer: view.layer)
+            return
+        }
+        #endif
+
         // AVSampleBufferDisplayLayer for vsync-synchronized presentation (both platforms).
         //
         // `.resizeAspect` keeps the source aspect ratio, letterboxing
@@ -410,10 +459,69 @@ class MPVPlayerViewController: UIViewController {
         guard size.width > 0 && size.height > 0 else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
+        #if os(tvOS)
+        if let metal = metalHostLayer {
+            metal.frame = view.bounds
+        } else {
+            sampleBufferLayer.frame = view.bounds
+        }
+        #else
         sampleBufferLayer.frame = view.bounds
+        #endif
         CATransaction.commit()
         coordinator?.handleResize(size: size)
     }
+
+    #if os(tvOS)
+    /// Metal HDR mode: ask tvOS to switch the HDMI output to an HDR10 mode.
+    /// gpu-next passes PQ/BT.2020 through (target-colorspace-hint=yes), but
+    /// the panel only leaves the ATV's SDR UI mode when this criteria is set
+    /// (and the user's Match Dynamic Range / Match Frame Rate settings allow
+    /// it). The format description advertises the HDR ceiling (HEVC 4K
+    /// BT.2020/PQ), not the exact stream geometry - that is what AVKit's own
+    /// players hand the display manager, and it is what flips the HDMI mode.
+    /// Returns the AVDisplayManager the criteria landed on so the
+    /// Coordinator can record it for the shared clearDisplayCriteria()
+    /// teardown; nil when there is no window to apply against.
+    @discardableResult
+    func applyMetalHDRDisplayCriteria(refreshRate: Float) -> AVDisplayManager? {
+        // tvOS is single-window: fall back to the foreground scene's key
+        // window when our view is not (yet) installed in one, mirroring the
+        // task #186 rate matcher.
+        let window: UIWindow? = viewIfLoaded?.window
+            ?? UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .first(where: { $0.activationState == .foregroundActive })?
+                .keyWindow
+        guard let window else {
+            debugLog("[METAL-ENGINE] HDR display criteria skipped: no window available")
+            return nil
+        }
+        var formatDesc: CMVideoFormatDescription?
+        let extensions: [CFString: Any] = [
+            kCMFormatDescriptionExtension_ColorPrimaries: kCMFormatDescriptionColorPrimaries_ITU_R_2020,
+            kCMFormatDescriptionExtension_TransferFunction: kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ,
+            kCMFormatDescriptionExtension_YCbCrMatrix: kCMFormatDescriptionYCbCrMatrix_ITU_R_2020
+        ]
+        let status = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: kCMVideoCodecType_HEVC,
+            width: 3840,
+            height: 2160,
+            extensions: extensions as CFDictionary,
+            formatDescriptionOut: &formatDesc
+        )
+        guard status == noErr, let formatDesc else {
+            debugLog("[METAL-ENGINE] CMVideoFormatDescriptionCreate failed: \(status)")
+            return nil
+        }
+        let dm = window.avDisplayManager
+        dm.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: refreshRate,
+                                                        formatDescription: formatDesc)
+        debugLog("[METAL-ENGINE] display criteria set: HEVC 3840x2160 bt.2020/PQ @ \(refreshRate)Hz (matchingEnabled=\(dm.isDisplayCriteriaMatchingEnabled))")
+        return dm
+    }
+    #endif
 }
 
 // MARK: - MPV Player View Representable
@@ -1510,6 +1618,34 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 || gamma == "pq" || gamma == "smpte2084"
                 || gamma == "hlg" || gamma == "arib-std-b67"
 
+            if metalHDRMode {
+                // Metal HDR path: NEVER pin target-prim / target-trc /
+                // tone-mapping - that would force gpu-next to tone-map the
+                // stream down to SDR, defeating the whole mode.
+                // target-colorspace-hint=yes (pre-init) already makes
+                // gpu-next pass PQ/BT.2020 through to the metal layer; the
+                // remaining step for an HDR source is asking tvOS to switch
+                // the HDMI output to an HDR mode. SDR sources need neither
+                // (gpu-next renders SDR correctly with no pins), and any
+                // leftover HDR criteria from a prior channel-flip is
+                // released so the rate matcher can own the mode again.
+                #if os(tvOS)
+                if isHDR {
+                    var fps: Double = 0
+                    mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fps)
+                    debugLog("[METAL-ENGINE] HDR source (primaries=\(primaries) gamma=\(gamma) container-fps=\(String(format: "%.3f", fps))); requesting HDR10 display mode")
+                    requestMetalHDRDisplayMode(containerFps: fps)
+                } else {
+                    debugLog("[METAL-ENGINE] SDR source (primaries=\(primaries) gamma=\(gamma)); no pins, no HDR display switch")
+                    if metalHDRCriteriaApplied {
+                        clearDisplayCriteria()
+                    }
+                }
+                #endif
+                hdrToneMappingApplied = true
+                return
+            }
+
             if isHDR {
                 // Pin the BT.709 SDR target so mpv runs the BT.2020 ->
                 // 709 gamut map and the HDR -> SDR tone-map itself before
@@ -1872,7 +2008,45 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// DVB feed reads e.g. 49.98).
         private static let canonicalVideoRates: [Double] = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60]
 
+        /// Metal HDR mode: request an HDR10 output mode at the source's real
+        /// rate. Called from applyHDRToneMappingIfNeeded on the event thread
+        /// once mpv reports an HDR colorspace. The refresh target goes
+        /// through the same canonical-rate snap + 25/30-doubling rule as the
+        /// SDR rate matcher so the two paths' dedup values agree; sources
+        /// with no usable container-fps fall back to 50 (the prototype's
+        /// verified value).
+        private func requestMetalHDRDisplayMode(containerFps: Double) {
+            let fps: Double = containerFps > 0
+                ? min(max(containerFps, 23.9), 60.0)
+                : 50.0
+            var target = Float(fps)
+            if let rate = Self.canonicalVideoRates.min(by: { abs($0 - fps) < abs($1 - fps) }),
+               abs(rate - fps) <= 0.75 {
+                switch rate {
+                case 25, 29.97, 30: target = Float(rate * 2)
+                default: target = Float(rate)
+                }
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard let dm = self.metalHostController?.applyMetalHDRDisplayCriteria(refreshRate: target) else {
+                    debugLog("[METAL-ENGINE] HDR display criteria NOT applied (controller/window unavailable)")
+                    return
+                }
+                // Record on the shared bookkeeping so stop()/deinit's
+                // clearDisplayCriteria() releases this criteria too, and so
+                // the SDR rate matcher's dedup sees the applied rate.
+                self.appliedDisplayManager = dm
+                self.appliedDisplayRefreshRate = target
+                self.metalHDRCriteriaApplied = true
+            }
+        }
+
         private func applyDisplayCriteriaIfNeeded(fps: Double) {
+            // Metal HDR owns the display mode once its criteria is pinned:
+            // the SDR-format (no color extensions) criteria built below
+            // would silently drop the panel back out of HDR.
+            guard !metalHDRCriteriaApplied else { return }
             guard fps > 20, fps < 130 else { return }
             guard let rate = Self.canonicalVideoRates.min(by: { abs($0 - fps) < abs($1 - fps) }),
                   abs(rate - fps) <= 0.75 else { return }
@@ -1965,7 +2139,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let dm = appliedDisplayManager
             appliedDisplayManager = nil
             appliedDisplayRefreshRate = 0
+            let hadMetalHDR = metalHDRCriteriaApplied
+            metalHDRCriteriaApplied = false
             guard dm != nil else { return }
+            if hadMetalHDR {
+                debugLog("[METAL-ENGINE] display criteria cleared (panel returns to default mode)")
+            }
             DispatchQueue.main.async {
                 dm?.preferredDisplayCriteria = nil
             }
@@ -2468,6 +2647,47 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// foreground video-restore while a car is connected).
         private let initialVideoSuppressed: Bool
 
+        /// Metal HDR render mode (tvOS only, dev-flag gated). Decided ONCE at
+        /// Coordinator construction and never flipped mid-flight: the render
+        /// path is baked into mpv's pre-init options (wid / vo / gpu-context /
+        /// target-colorspace-hint cannot change at runtime). When true, mpv
+        /// runs vo=gpu-next through vulkan/moltenvk into the VC's
+        /// CAMetalLayer with DIRECT (zero-copy) videotoolbox decode and HDR
+        /// passthrough - no EAGL context, no FBO ring, no AVSBDL enqueue.
+        /// Everything transport/lifecycle-side (reconnects, retries, live
+        /// rewind, catch-up, time-pos watchdogs, audio) is unchanged.
+        /// Solo live playback only: multiview tiles at mixed colorspaces
+        /// must not fight over the panel mode, and CarPlay/audio-only
+        /// starts never bring video up at all. Constant false on iOS.
+        fileprivate let metalHDRMode: Bool
+
+        #if os(tvOS)
+        /// The CAMetalLayer mpv presents into (metal mode only).
+        /// nonisolated(unsafe): written once on main in viewDidLoad BEFORE
+        /// start() is queued (renderQueue FIFO orders the setupMPV read
+        /// after the write), then read on renderQueue for the `wid` option.
+        fileprivate nonisolated(unsafe) var metalLayer: MPVMetalHostLayer?
+        /// Weak ref to the hosting VC so the HDR display-criteria request
+        /// can run as a @MainActor method with window access. Set on main
+        /// in viewDidLoad (metal mode only); read on main in the
+        /// display-criteria hop.
+        fileprivate weak var metalHostController: MPVPlayerViewController?
+        /// True once the metal path has pinned an HDR-flavored
+        /// preferredDisplayCriteria. Gates the SDR-format rate matcher
+        /// (applyDisplayCriteriaIfNeeded) so it can never clobber the HDR
+        /// mode request. Written on main; cross-queue reads are a benign
+        /// dedup pre-check like appliedDisplayRefreshRate.
+        private var metalHDRCriteriaApplied = false
+        #endif
+
+        /// hwdec value this render path wants asserted / re-asserted.
+        /// Metal mode uses DIRECT videotoolbox (gpu-next consumes the
+        /// decoder's IOSurface zero-copy); the GLES path keeps
+        /// videotoolbox-copy (see the rationale block in setupMPV).
+        private var preferredHwdec: String {
+            metalHDRMode ? "videotoolbox" : "videotoolbox-copy"
+        }
+
         init(urls: [URL], headers: [String: String], isLive: Bool,
              isDVR: Bool = false,
              progressStore: PlayerProgressStore,
@@ -2490,6 +2710,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             self.initialShouldPause = initialShouldPause
             self.initialTileCount = initialTileCount
             self.initialVideoSuppressed = initialVideoSuppressed
+            // Metal HDR mode decision - once, here, never re-evaluated.
+            // Solo = initialTileCount == 1 covers both entry paths: the
+            // legacy single-stream path (tileID == nil, tile count defaults
+            // to 1) and the unified player's N=1 case (tileID set, exactly
+            // one tile in the store at mount time).
+            #if os(tvOS)
+            let metalFlag = UserDefaults.standard.bool(forKey: "playback.metalHDR")
+            self.metalHDRMode = metalFlag && isLive && initialTileCount == 1 && !initialVideoSuppressed
+            #else
+            self.metalHDRMode = false
+            #endif
             // Seed the `lastApplied*` debounce with the initial
             // values — setupMPV applies them via mpv_set_option
             // BEFORE mpv_initialize, so there's no need for
@@ -2499,6 +2730,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             self.lastAppliedAudioFocus = initialIsAudioActive
             self.lastAppliedPause = initialShouldPause
             super.init()
+
+            #if os(tvOS)
+            debugLog("[METAL-ENGINE] mode=\(metalHDRMode ? "ON" : "off") flag=\(metalFlag) isLive=\(isLive) tiles=\(initialTileCount) videoSuppressed=\(initialVideoSuppressed) tile=\(tileID ?? "single")")
+            #endif
 
             // Toggle play/pause. The mpv get/set run on mpvQueue: mpv property
             // calls can block until the core services them, and these closures
@@ -3362,6 +3597,10 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// See the FBOSlot declaration block above (~line 1151)
         /// for the full Step 5 rationale.
         private func setupFBO(width: Int, height: Int) {
+            // Metal HDR mode never creates GL state (eaglContext/textureCache
+            // stay nil, so the next guard already covers it) - explicit guard
+            // so the invariant is stated, not incidental.
+            guard !metalHDRMode else { return }
             guard let eaglContext, let textureCache else { return }
             EAGLContext.setCurrent(eaglContext)
 
@@ -3486,6 +3725,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// Uses video native dimensions when known to avoid oversized render buffers
         /// (e.g., 720p content rendered into a 1080p buffer wastes 2.25x pixels).
         func handleResize(size: CGSize) {
+            // Metal HDR mode: gpu-next sizes its own swapchain off the
+            // CAMetalLayer's bounds/drawableSize - there is no FBO to
+            // (re)build and no render-buffer cap to apply. Keep only the
+            // kickstart backstop this path also provides.
+            if metalHDRMode {
+                kickstartIfNeeded()
+                return
+            }
             let w: Int
             let h: Int
             if videoNativeWidth > 0 && videoNativeHeight > 0 {
@@ -3634,6 +3881,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// during scroll gestures and other tracked-mode work.
         @MainActor
         func startWatchdogIfNeeded() {
+            // Metal HDR mode: no AVSBDL enqueues ever happen, so the
+            // IOSurface re-attach / stale-frame watchdog would misread the
+            // permanently-frozen lastEnqueueTime as a wedge and reload-storm
+            // a healthy stream. The time-pos frozen-stream detection and the
+            // retry ladder stay active on their own paths.
+            guard !metalHDRMode else { return }
             guard displayLinkWatchdog == nil else { return }
             let link = CADisplayLink(target: self, selector: #selector(handleWatchdogTick(_:)))
             // ProMotion-friendly: prefer 60Hz, allow 30-120 range so
@@ -4747,9 +5000,40 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             checkError(mpv_set_option_string(mpv, "subs-match-os-language", "yes"))
             checkError(mpv_set_option_string(mpv, "subs-fallback", "yes"))
 
+            #if os(tvOS)
+            if metalHDRMode {
+                // Metal HDR path: mpv owns presentation into the VC's
+                // CAMetalLayer (gpu-next / vulkan / moltenvk). wid takes the
+                // layer's pointer value read out of a reference var
+                // (MPV_FORMAT_INT64), the recipe device-verified by the
+                // isolated prototype. target-colorspace-hint MUST be pre-init
+                // (cannot change at runtime) - it is what lets gpu-next
+                // negotiate PQ/BT.2020 output instead of tone-mapping down.
+                if var layerForWid = metalLayer {
+                    withUnsafeMutablePointer(to: &layerForWid) { ptr in
+                        checkError(mpv_set_option(mpv, "wid", MPV_FORMAT_INT64, ptr))
+                    }
+                } else {
+                    // Should be impossible: viewDidLoad stores the layer
+                    // before setupRenderer queues start(). Loud so a broken
+                    // mount ordering is unmissable in logs.
+                    debugLog("[METAL-ENGINE] ERROR: metal mode but no host layer at setupMPV; gpu-next will fail to create its context")
+                }
+                checkError(mpv_set_option_string(mpv, "vo", "gpu-next"))
+                checkError(mpv_set_option_string(mpv, "gpu-api", "vulkan"))
+                checkError(mpv_set_option_string(mpv, "gpu-context", "moltenvk"))
+                checkError(mpv_set_option_string(mpv, "target-colorspace-hint", "yes"))
+                debugLog("[METAL-ENGINE] pre-init: vo=gpu-next gpu-api=vulkan gpu-context=moltenvk target-colorspace-hint=yes")
+            } else {
+                // vo=libmpv: app drives rendering via OpenGL ES render API.
+                // GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy).
+                checkError(mpv_set_option_string(mpv, "vo", "libmpv"))
+            }
+            #else
             // vo=libmpv: app drives rendering via OpenGL ES render API.
             // GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy).
             checkError(mpv_set_option_string(mpv, "vo", "libmpv"))
+            #endif
             checkError(mpv_set_option_string(mpv, "profile", "fast"))  // Disable expensive post-processing for mobile
 
             // CarPlay: never bring the video pipeline up. Set as a PRE-INIT
@@ -4809,7 +5093,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // "videotoolbox" here AND in the matching warmup call
             // (~line 160) AND in the loadfile-replace reset inside
             // play(url:) (~line 3036).
-            checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox-copy"))
+            //
+            // Metal HDR mode overrides to DIRECT videotoolbox: gpu-next
+            // consumes the decoder's IOSurface zero-copy through vulkan
+            // interop (device-verified: 0 drops at 4K50 vs 44-71/15s on
+            // the copy+GLES path), and the copy mode's whole reason to
+            // exist - the broken 10-bit GL interop - does not apply.
+            checkError(mpv_set_option_string(mpv, "hwdec", preferredHwdec))
             // Allow up to 90 consecutive VT decode failures before
             // falling back to software. Live MPEG-TS streams join
             // mid-GOP without SPS/PPS so VT errors until the next
@@ -5433,7 +5723,13 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #endif
 
             // ── Post-init: create OpenGL ES render context ──
+            // Metal HDR mode skips this block entirely: gpu-next created its
+            // own vulkan swapchain against the wid layer and drives its own
+            // presentation - no EAGLContext, no texture cache, no
+            // mpv_render_context (mpvGL stays nil, so every GLES render /
+            // teardown path no-ops on its existing guards).
 
+            if !metalHDRMode {
             // EAGLContext for GPU-accelerated mpv rendering
             eaglContext = EAGLContext(api: .openGLES3) ?? EAGLContext(api: .openGLES2)
             #if DEBUG
@@ -5508,6 +5804,9 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             #if DEBUG
             markPhase("render_update_callback")
             #endif
+            } else {
+                debugLog("[METAL-ENGINE] skipping EAGL/FBO render-context setup (gpu-next owns presentation)")
+            }
 
             // ── Post-init: property observers + wakeup callback ──
 
@@ -5718,7 +6017,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             let totalSetupMs = setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
             #if DEBUG
             let cacheStr = String(format: "%.1f", cachingSecs)
-            debugLog("[MPV-DIAG] ✓ mpv fully initialized: vo=libmpv (OpenGL ES render), hwdec=videotoolbox-copy (requested)")
+            debugLog("[MPV-DIAG] ✓ mpv fully initialized: vo=\(metalHDRMode ? "gpu-next (Metal HDR)" : "libmpv (OpenGL ES render)"), hwdec=\(preferredHwdec) (requested)")
             debugLog("[MPV-DIAG]   cache=\(cacheStr)s, readahead=\(cacheStr)s, isLive=\(isLive), setup_time=\(String(format: "%.0f", totalSetupMs))ms")
             #endif
 
@@ -5974,7 +6273,7 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // videotoolbox-copy, so this reset is now mostly defensive.
             resetHwdecFallbackApplied()
             #if !targetEnvironment(simulator)
-            mpv_set_property_string(mpv, "hwdec", "videotoolbox-copy")
+            mpv_set_property_string(mpv, "hwdec", preferredHwdec)
             #endif
             // v1.7.x Issue A round 6: reset the black-frame detector's
             // luma history to neutral so the surround check doesn't
@@ -6148,8 +6447,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                             // next decode without our help.
                             if text.contains("Initializing texture for hardware decoding failed") && self.claimHwdecFallbackIfNeeded() {
                                 let elapsedMs = self.setupStartTime.map { Date().timeIntervalSince($0) * 1000 } ?? -1
-                                debugLog("[MPV-DECODE] \(self.streamTag) defensive fallback fired (mpv re-promoted to videotoolbox?) — reapplying videotoolbox-copy at +\(String(format: "%.0f", elapsedMs))ms from setup")
-                                mpv_set_property_string(mpv, "hwdec", "videotoolbox-copy")
+                                debugLog("[MPV-DECODE] \(self.streamTag) defensive fallback fired (mpv re-promoted to videotoolbox?) - reapplying \(self.preferredHwdec) at +\(String(format: "%.0f", elapsedMs))ms from setup")
+                                mpv_set_property_string(mpv, "hwdec", self.preferredHwdec)
                             }
                             #if DEBUG
                             // Filter out expected recovery-phase noise
@@ -7009,12 +7308,12 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let fellBackToSoftware = value == "no"
                         && lastHwdecCurrentObserved.hasPrefix("videotoolbox")
                     if fellBackToSoftware, isLive, claimHwdecReassertIfNeeded() {
-                        debugLog("[MPV-DECODE] \(streamTag) hw→software fallback on live stream; scheduling one videotoolbox-copy re-assert in 3s (task #56)")
+                        debugLog("[MPV-DECODE] \(streamTag) hw→software fallback on live stream; scheduling one \(preferredHwdec) re-assert in 3s (task #56)")
                         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 3) { [weak self] in
                             guard let self, let current = self.mpv, current == mpv,
                                   !self.withPlaybackStateLock({ $0.isShuttingDown }) else { return }
-                            debugLog("[MPV-DECODE] \(self.streamTag) re-asserting videotoolbox-copy after software fallback")
-                            mpv_set_property_string(current, "hwdec", "videotoolbox-copy")
+                            debugLog("[MPV-DECODE] \(self.streamTag) re-asserting \(self.preferredHwdec) after software fallback")
+                            mpv_set_property_string(current, "hwdec", self.preferredHwdec)
                         }
                     }
                     lastHwdecCurrentObserved = value
@@ -7370,9 +7669,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 maxRenderMs = renderDurations.max() ?? 0
             }
 
-            // Display layer health
-            var layerStatus = "ok"
-            if let renderer = cachedRenderer {
+            // Display layer health. Metal mode has no AVSBDL renderer
+            // (cachedRenderer is nil) - tag the summary so the render path
+            // is visible in grep instead of a misleading "ok".
+            var layerStatus = metalHDRMode ? "metal" : "ok"
+            if !metalHDRMode, let renderer = cachedRenderer {
                 if renderer.status == .failed {
                     layerStatus = "FAILED: \(renderer.error?.localizedDescription ?? "?")"
                 } else if renderer.isReadyForMoreMediaData == false {
