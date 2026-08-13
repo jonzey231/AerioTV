@@ -266,7 +266,6 @@ struct ChannelListView: View {
     }
 
     #if os(tvOS)
-    @State private var showSearchField = false
     /// tvOS guide focus target. Normally `nil` so the focus engine
     /// handles D-pad navigation naturally; programmatically set to
     /// a channel id in response to `.forceGuideFocus` (posted when
@@ -1261,52 +1260,14 @@ struct ChannelListView: View {
         ScrollViewReader { pillProxy in
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                // Guide toggle button (tvOS only — iOS uses the nav bar toolbar button)
-                #if os(tvOS)
-                TVGroupPill(
-                    group: showGuideView ? "List" : "Guide",
-                    isSelected: false,
-                    action: { withAnimation(.spring(response: 0.25)) { showGuideView.toggle() } },
-                    systemImage: showGuideView ? "list.bullet" : "calendar"
-                )
-                // #42 Part 1: leading controls go non-focusable while a guide
-                // Left is held, so the hold stops at "All" instead of
-                // overshooting into them. (TVGroupPill's custom style ignores
-                // isEnabled, so .disabled removes focus without dimming.)
-                .disabled(leftHoldPinningAll)
-
-                // Search toggle
-                TVGroupPill(
-                    group: "",
-                    isSelected: showSearchField,
-                    action: {
-                        withAnimation(.spring(response: 0.25)) {
-                            showSearchField.toggle()
-                            if !showSearchField { searchText = "" }
-                        }
-                    },
-                    systemImage: "magnifyingglass"
-                )
-                .disabled(leftHoldPinningAll)   // #42 Part 1: see above
-
-                if showSearchField {
-                    TextField("Search channels", text: $searchText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 24))
-                        .foregroundColor(.textPrimary)
-                        .frame(width: 400)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(
-                            Capsule()
-                                .fill(Color.elevatedBackground)
-                                .overlay(
-                                    Capsule()
-                                        .stroke(Color.accentPrimary.opacity(0.3), lineWidth: 1)
-                                )
-                        )
-                }
-                #endif
+                // tvOS pill-row Guide/List toggle + search pill REMOVED
+                // (Logan 2026-08-13): the List-vs-Guide default lives in
+                // Settings > App Behaviors > Default Live TV View
+                // (defaultLiveTVView), and search moved to the in-place
+                // screen behind the circle next to the nav bar (#247).
+                // The pill row now starts directly at the group pills.
+                // (#42 Part 1's leftHoldPinningAll gate stays on the
+                // remaining leading controls elsewhere in this row.)
 
                 // Compact-chrome mode hoists Manage Groups into the nav bar
                 // (see the toolbar block above), so we drop it from the pill
