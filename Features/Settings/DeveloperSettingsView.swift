@@ -77,6 +77,12 @@ struct DeveloperSettingsView: View {
     /// LAN via a tiny embedded HTTP server. iOS uses
     /// UIActivityViewController instead (not available on tvOS).
     @State private var showTvOSShareSheet = false
+    /// HDR engine flag (tvOS only). When on, SOLO live playback renders
+    /// through the Metal/MoltenVK gpu-next path with zero-copy
+    /// videotoolbox decode, HDR passthrough, and an HDR10 display-mode
+    /// switch on HDR sources. Multiview (2+ tiles), PiP, and CarPlay
+    /// stay on the GLES engine. Read by MPVPlayerViewRepresentable.
+    @AppStorage("playback.metalHDR") private var metalHDREngine = false
     /// HDR prototype cover. Non-nil = presenting, carrying the resolved
     /// stream URL for the requested channel number.
     @State private var metalHDRTestItem: MetalHDRTestItem?
@@ -669,6 +675,16 @@ struct DeveloperSettingsView: View {
                             ? "On: raw MPEG-TS remuxed to HLS for AVPlayer (HEVC/MPEG-2 fall back to mpv)"
                             : "Off: raw TS channels use the mpv engine (the default)",
                         isOn: $avPlayerRemuxTS
+                    ) { _ in }
+
+                    TVSettingsToggleRow(
+                        icon: metalHDREngine ? "sparkles.tv.fill" : "sparkles.tv",
+                        iconColor: metalHDREngine ? .accentPrimary : .textSecondary,
+                        title: "Metal HDR Engine",
+                        subtitle: metalHDREngine
+                            ? "On: solo live channels render HDR10 with zero-copy 4K decode"
+                            : "Off: all channels use the standard engine (the default)",
+                        isOn: $metalHDREngine
                     ) { _ in }
 
                     // Phase 0 HDR prototype: play channel 35 (UHD HDR test
@@ -1640,18 +1656,36 @@ enum MetalHDRAutoRun {
 
     static func checkAndRun() {
         guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else { return }
-        let marker = caches.appendingPathComponent("metal_hdr_autorun")
-        guard FileManager.default.fileExists(atPath: marker.path) else { return }
-        try? FileManager.default.removeItem(at: marker)
-        debugLog("[METAL-HDR] autorun marker found; waiting for channel \(channelNumber)")
+        // Two marker flavors:
+        //   metal_hdr_autorun      - present the isolated Metal test screen
+        //   metal_hdr_tune         - tune channel 35 through the REAL player
+        //                            (same notification the aerio://channel
+        //                            deep link posts), exercising the
+        //                            production engine path end to end
+        let testMarker = caches.appendingPathComponent("metal_hdr_autorun")
+        let tuneMarker = caches.appendingPathComponent("metal_hdr_tune")
+        let tuneMode = FileManager.default.fileExists(atPath: tuneMarker.path)
+        guard tuneMode || FileManager.default.fileExists(atPath: testMarker.path) else { return }
+        try? FileManager.default.removeItem(at: tuneMode ? tuneMarker : testMarker)
+        debugLog("[METAL-HDR] autorun marker found (mode=\(tuneMode ? "tune" : "test")); waiting for channel \(channelNumber)")
 
         Task { @MainActor in
             for tick in 0..<120 {
-                if let ch = ChannelStore.shared.channels.first(where: { $0.number == channelNumber }),
-                   let url = ch.streamURL ?? ch.streamURLs.first {
-                    debugLog("[METAL-HDR] autorun: presenting after \(tick)s, ch=\(channelNumber) name=\(ch.name)")
-                    present(url: url)
-                    return
+                if let ch = ChannelStore.shared.channels.first(where: { $0.number == channelNumber }) {
+                    if tuneMode {
+                        debugLog("[METAL-HDR] autorun: production tune after \(tick)s, ch=\(channelNumber) id=\(ch.id) name=\(ch.name)")
+                        NotificationCenter.default.post(
+                            name: .aerioOpenChannel,
+                            object: nil,
+                            userInfo: ["channelID": ch.id]
+                        )
+                        return
+                    }
+                    if let url = ch.streamURL ?? ch.streamURLs.first {
+                        debugLog("[METAL-HDR] autorun: presenting after \(tick)s, ch=\(channelNumber) name=\(ch.name)")
+                        present(url: url)
+                        return
+                    }
                 }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
