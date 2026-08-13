@@ -4986,12 +4986,11 @@ struct MainTabView: View {
         #if os(tvOS)
         // Task #254: see tvTabViewIdentity - fresh TabView per active
         // playlist so the collapsed top bar cannot survive a switch.
+        // (Round 2's heal check rides the existing tabNavStateKey
+        // onChange below - a separate chained .onChange here re-tipped
+        // the Release type-checker, the exact failure tabNavStateKey
+        // was created to avoid.)
         .id(tvTabViewIdentity)
-        // Task #254 round 2: whenever Settings pops back to root, check
-        // whether the bar came back; remount if it is parked off-screen.
-        .onChange(of: isSettingsSubviewPushed) { _, pushed in
-            if !pushed { scheduleTabBarHealCheck() }
-        }
         #endif
         .tint(theme.accent)
         // GH #20 auto-hide, iOS 26+ path (reworked 2026-07-12): minimize
@@ -5041,7 +5040,13 @@ struct MainTabView: View {
         // deferred sync-time tab insertions land without tearing down an active
         // Settings navigation (the submenu-stuck-while-syncing fix).
         #if os(tvOS)
-        .onChange(of: tabNavStateKey) { _, _ in syncTabVisibility() }
+        .onChange(of: tabNavStateKey) { _, _ in
+            syncTabVisibility()
+            // Task #254 round 2: when Settings just popped to root the
+            // key flips isSettingsSubviewPushed to false - check whether
+            // the tab bar came back and remount if it is parked.
+            if !isSettingsSubviewPushed { scheduleTabBarHealCheck() }
+        }
         #endif
         .onAppear {
             syncTabVisibility()
