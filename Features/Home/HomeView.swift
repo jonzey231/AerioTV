@@ -501,7 +501,23 @@ final class VODStore: ObservableObject {
             // Dispatcharr's own behaviour: the REST API returns movies
             // only for categories the user enabled for ingest, so the
             // client should show only the same set.
-            let apiCats: [DispatcharrVODCategory] = (try? await api.getVODCategories()) ?? []
+            // Network failure here must NOT masquerade as an empty
+            // category list: `movies = []` below hides the On Demand tab
+            // and nothing re-fires the load until vodServerKey changes
+            // (only a manual playlist refresh). Logan hit this during
+            // the 2026-08-13 Dispatcharr VPS migration - the outage
+            // emptied the tab and it stayed gone after the server came
+            // back. Keep the stale library and bail; the next
+            // orchestrator pass or pull-to-refresh retries.
+            let apiCats: [DispatcharrVODCategory]
+            do {
+                apiCats = try await api.getVODCategories()
+            } catch {
+                debugLog("🎬 VODStore.loadMovies: categories fetch FAILED (\(error.localizedDescription)); keeping existing \(movies.count)-item library")
+                moviesError = "Could not reach the server"
+                isLoadingMovies = false
+                return
+            }
             let enabledMovieCats = apiCats.filter {
                 ($0.categoryType == "movie" || $0.categoryType == "Movie") && $0.isEnabledOnAnyAccount
             }
@@ -714,7 +730,17 @@ final class VODStore: ObservableObject {
             // Mirrors `loadMovies` above — see that function for the
             // full rationale on why per-enabled-category fetching +
             // first-category-wins deduping is the shape of the fix.
-            let apiCats: [DispatcharrVODCategory] = (try? await api.getVODCategories()) ?? []
+            // Same outage guard as loadMovies: a failed fetch keeps the
+            // stale library instead of hiding the On Demand tab.
+            let apiCats: [DispatcharrVODCategory]
+            do {
+                apiCats = try await api.getVODCategories()
+            } catch {
+                debugLog("📺 VODStore.loadSeries: categories fetch FAILED (\(error.localizedDescription)); keeping existing \(series.count)-item library")
+                seriesError = "Could not reach the server"
+                isLoadingSeries = false
+                return
+            }
             let enabledSeriesCats = apiCats.filter {
                 ($0.categoryType == "series" || $0.categoryType == "Series") && $0.isEnabledOnAnyAccount
             }
