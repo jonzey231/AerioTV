@@ -82,7 +82,9 @@ struct DeveloperSettingsView: View {
     /// videotoolbox decode, HDR passthrough, and an HDR10 display-mode
     /// switch on HDR sources. Multiview (2+ tiles), PiP, and CarPlay
     /// stay on the GLES engine. Read by MPVPlayerViewRepresentable.
-    @AppStorage("playback.metalHDR") private var metalHDREngine = false
+    /// Default ON since 1.8.11 (absent-key-means-on in the engine gate);
+    /// this toggle is the escape hatch for metal-path regressions.
+    @AppStorage("playback.metalHDR") private var metalHDREngine = true
     /// HDR prototype cover. Non-nil = presenting, carrying the resolved
     /// stream URL for the requested channel number.
     @State private var metalHDRTestItem: MetalHDRTestItem?
@@ -682,11 +684,12 @@ struct DeveloperSettingsView: View {
                         iconColor: metalHDREngine ? .accentPrimary : .textSecondary,
                         title: "Metal HDR Engine",
                         subtitle: metalHDREngine
-                            ? "On: solo live channels render HDR10 with zero-copy 4K decode"
-                            : "Off: all channels use the standard engine (the default)",
+                            ? "On: solo live channels render HDR10 with zero-copy 4K decode (the default)"
+                            : "Off: all channels use the classic GLES engine",
                         isOn: $metalHDREngine
                     ) { _ in }
 
+                    #if DEBUG
                     // Phase 0 HDR prototype: play channel 35 (UHD HDR test
                     // channel) through the Metal/MoltenVK render path with
                     // hwdec=videotoolbox (zero-copy) and
@@ -716,6 +719,7 @@ struct DeveloperSettingsView: View {
                             .font(.caption)
                             .foregroundColor(.textSecondary)
                     }
+                    #endif
                 }
 
                 if debugLoggingEnabled || (logger.logFileURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false) {

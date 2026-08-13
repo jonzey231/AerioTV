@@ -2716,7 +2716,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             // to 1) and the unified player's N=1 case (tileID set, exactly
             // one tile in the store at mount time).
             #if os(tvOS)
-            let metalFlag = UserDefaults.standard.bool(forKey: "playback.metalHDR")
+            // Default ON (absent-key-means-on, matching avPlayerForHLS):
+            // Logan's 2026-08-13 call after the on-device pass. The
+            // Developer toggle remains the escape hatch for chasing
+            // metal-path regressions.
+            let metalFlag = (UserDefaults.standard.object(forKey: "playback.metalHDR") as? Bool) ?? true
             self.metalHDRMode = metalFlag && isLive && initialTileCount == 1 && !initialVideoSuppressed
             #else
             self.metalHDRMode = false
