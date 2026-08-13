@@ -1633,7 +1633,21 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 if isHDR {
                     var fps: Double = 0
                     mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &fps)
-                    debugLog("[METAL-ENGINE] HDR source (primaries=\(primaries) gamma=\(gamma) container-fps=\(String(format: "%.3f", fps))); requesting HDR10 display mode")
+                    // Mastering-metadata diagnostics (Michael's saturation
+                    // report): log everything mpv knows about the stream's
+                    // HDR metadata so we can tell "metadata present but not
+                    // forwarded" apart from "stream carries none". sig-peak
+                    // is relative to SDR reference white (203 nits); max-luma
+                    // and min-luma are absolute cd/m2 when the SEI exists.
+                    func hdrProp(_ name: String) -> Double {
+                        var v = Double()
+                        mpv_get_property(mpv, name, MPV_FORMAT_DOUBLE, &v)
+                        return v
+                    }
+                    let sigPeak = hdrProp("video-params/sig-peak")
+                    let maxLuma = hdrProp("video-params/max-luma")
+                    let minLuma = hdrProp("video-params/min-luma")
+                    debugLog("[METAL-ENGINE] HDR source (primaries=\(primaries) gamma=\(gamma) container-fps=\(String(format: "%.3f", fps)) sig-peak=\(String(format: "%.3f", sigPeak)) max-luma=\(String(format: "%.1f", maxLuma)) min-luma=\(String(format: "%.4f", minLuma))); requesting HDR10 display mode")
                     requestMetalHDRDisplayMode(containerFps: fps)
                 } else {
                     debugLog("[METAL-ENGINE] SDR source (primaries=\(primaries) gamma=\(gamma)); no pins, no HDR display switch")
