@@ -226,6 +226,19 @@ final class GuideStore: ObservableObject {
     /// `replaceExisting: true`, a different key, so it never lands here at all.
     private static let xmltvReuseWindow: TimeInterval = 180
 
+    /// Generation of the on-disk EPG cache this build trusts. Bump whenever a
+    /// shipped defect could have written cache rows that cannot be repaired in
+    /// place; the next `loadFromCache` then runs ONE full purge, stamps the
+    /// new epoch, and forces a real refetch (see the epoch block inside
+    /// `loadFromCache`). Replaces the old chain of per-defect one-shot
+    /// UserDefaults keys, which purged the cache serially across several
+    /// consecutive app updates.
+    /// Epoch 1 covers everything the legacy keys covered
+    /// (`xmltvCategoryFixMigrationV2`, `epg.badgeCacheClearedV1`,
+    /// `epg.crossPlaylistPurgeV1`).
+    nonisolated private static let epgCacheEpoch = 1
+    nonisolated private static let epgCacheEpochKey = "epg.cacheEpoch"
+
     /// Drop the completed-pass record so the next bulk-XMLTV request goes to
     /// the network. Called when the user explicitly asks for fresh data: the
     /// reuse window exists to stop redundant background re-fetches, and must
@@ -436,98 +449,46 @@ final class GuideStore: ObservableObject {
         // lastLoadFromCacheResult writes all happen on main. The
         // expensive work is still in the nested Task.detached.
         let fetchTask = Task<Bool, Never> { [self] in
-            let loaded: (dict: [String: [GuideProgram]], programCount: Int, isFresh: Bool, newestFetchAgoSec: Int)? = await Task.detached(priority: .userInitiated) {
+            let fetchResult: (loaded: (dict: [String: [GuideProgram]], programCount: Int, isFresh: Bool, newestFetchAgoSec: Int)?, purgedForEpoch: Bool) = await Task.detached(priority: .userInitiated) {
                 let bgContext = ModelContext(container)
 
-                // v1.6.7 one-shot migration: the pre-v1.6.7 XMLTV
-                // parser concatenated multiple `<category>` tags
-                // into a single string with no separator (bug:
-                // `"EpisodeSeriesRealityLaw"` instead of four
-                // distinct tokens). Upgrading users have those
-                // broken strings persisted in SwiftData; the
-                // title+time dedupe in `performXMLTVFetch` would
-                // preserve the old rows even after a fresh parse.
-                // We purge ALL EPGProgram rows here — inside the
-                // same detached task that's about to fetch them —
-                // so there's no race with a concurrent fetch
-                // starting before the prune finishes. Returning
-                // `nil` makes the caller treat the cache as empty,
-                // which triggers the full XMLTV re-fetch through
-                // the fixed parser. One-shot: the UserDefaults key
-                // gates the purge so subsequent launches skip it.
-                //
-                // Key version bumped to v2 because an earlier
-                // attempt ran the migration in
-                // `pruneOrphanedEPGPrograms` as a separate
-                // lower-priority detached task, which raced the
-                // `loadFromCache` fetch — the fetch won, populated
-                // `programs` with concatenated strings, and the
-                // v1 flag was already set. Bumping the key forces
-                // a clean re-run on devices that participated in
-                // that race.
-                let migrationKey = "xmltvCategoryFixMigrationV2"
-                // v1.7.x one-shot: EPG rows cached before the badge fields
-                // (subTitle / season / episode / isNew / isLiveBroadcast /
-                // isPremiere / isFinale / isRepeat) shipped carry the
-                // defaults, so the guide would paint badge-less rows until the
-                // next EPG refresh. Purging once forces a fresh re-fetch that
-                // repopulates the flags. Gated by this single flag; see the
-                // dedicated block below the category-fix migration.
-                let badgeClearKey = "epg.badgeCacheClearedV1"
-                if !UserDefaults.standard.bool(forKey: migrationKey) {
-                    if let allRows = try? bgContext.fetch(FetchDescriptor<EPGProgram>()) {
-                        for ep in allRows { bgContext.delete(ep) }
-                        try? bgContext.save()
-                        debugLog("🗑️ v1.6.7 XMLTV category-fix migration: purged \(allRows.count) rows for fresh re-parse")
+                // EPG cache epoch. Single integer generation stamp for the
+                // on-disk EPG cache, replacing the old chain of per-defect
+                // one-shot UserDefaults keys (category-fix migration, badge
+                // upgrade, cross-playlist purge). The cache is pure derived
+                // data: when the stored epoch is behind the build's epoch,
+                // ONE full purge runs here, inside the same detached task
+                // that is about to fetch, so there is no race with a
+                // concurrent read. Returning a nil load makes the caller
+                // treat the cache as empty, and the caller then clears the
+                // bulk-guide reuse window and the EPG refusal latches so the
+                // follow-up fetch is a real network attempt (the same resets
+                // a user-initiated Refresh performs). Bump `epgCacheEpoch`
+                // whenever a shipped defect could have written a cache that
+                // cannot be repaired in place.
+                let defaults = UserDefaults.standard
+                if defaults.integer(forKey: Self.epgCacheEpochKey) == 0 {
+                    // Devices upgrading from builds that used the legacy
+                    // one-shot keys: if every legacy purge already ran, the
+                    // cache is exactly what epoch 1 would produce, so stamp
+                    // without purging again. Anything less gets the single
+                    // epoch purge below, which satisfies all legacy
+                    // semantics at once (each legacy one-shot only ever
+                    // needed "any full purge plus refetch").
+                    if defaults.bool(forKey: "xmltvCategoryFixMigrationV2"),
+                       defaults.bool(forKey: "epg.badgeCacheClearedV1"),
+                       defaults.bool(forKey: "epg.crossPlaylistPurgeV1") {
+                        defaults.set(Self.epgCacheEpoch, forKey: Self.epgCacheEpochKey)
                     }
-                    UserDefaults.standard.set(true, forKey: migrationKey)
-                    // This purge already dropped every cached row, so the badge
-                    // upgrade is satisfied in the same pass. Mark it done so the
-                    // next launch doesn't re-purge the freshly-badged re-fetch.
-                    UserDefaults.standard.set(true, forKey: badgeClearKey)
-                    return nil
                 }
-
-                // v1.7.x badge-metadata upgrade, for devices that already ran
-                // the category-fix migration above. The EPG cache is pure
-                // derived data (repopulates on the next fetch), and tvOS has no
-                // pull-to-refresh, so without this a TV user could sit with
-                // badge-less rows until the next scheduled refresh. Purge ALL
-                // EPGProgram rows once, before the guide paints from cache;
-                // returning nil makes the caller treat the cache as empty and
-                // triggers the fresh fetch. Only EPGProgram is touched. Same
-                // detached-task placement as the migration above means no race
-                // with a concurrent fetch.
-                if !UserDefaults.standard.bool(forKey: badgeClearKey) {
+                if defaults.integer(forKey: Self.epgCacheEpochKey) < Self.epgCacheEpoch {
                     if let allRows = try? bgContext.fetch(FetchDescriptor<EPGProgram>()) {
                         for ep in allRows { bgContext.delete(ep) }
                         try? bgContext.save()
-                        debugLog("🗑️ EPG badge upgrade: purged \(allRows.count) cached rows for fresh re-fetch")
+                        debugLog("🗑️ EPG cache epoch purge: dropped \(allRows.count) rows written before epoch \(Self.epgCacheEpoch)")
                     }
-                    UserDefaults.standard.set(true, forKey: badgeClearKey)
-                    return nil
-                }
-
-                // 2026-08-11 one-shot: purge rows poisoned by cross-playlist
-                // saves. Before the display-ownership gate, a playlist switch
-                // during a slow XMLTV parse let the OLD playlist's merge land
-                // in `programs`, and `saveToCache` then persisted that dict
-                // tagged with the NEW playlist's serverID -- so the disk cache
-                // itself holds the wrong playlist's schedule under the right
-                // server tag. The rows are self-consistently mislabeled;
-                // nothing can repair them in place, and every cache load
-                // faithfully re-displays the contamination (the "it looked
-                // right, then reverted" reports). Cache is pure derived data;
-                // purge once and re-fetch through the now-gated write path.
-                let crossPlaylistKey = "epg.crossPlaylistPurgeV1"
-                if !UserDefaults.standard.bool(forKey: crossPlaylistKey) {
-                    if let allRows = try? bgContext.fetch(FetchDescriptor<EPGProgram>()) {
-                        for ep in allRows { bgContext.delete(ep) }
-                        try? bgContext.save()
-                        debugLog("🗑️ Cross-playlist EPG purge: dropped \(allRows.count) rows saved before the display-ownership gate")
-                    }
-                    UserDefaults.standard.set(true, forKey: crossPlaylistKey)
-                    return nil
+                    defaults.set(Self.epgCacheEpoch, forKey: Self.epgCacheEpochKey)
+                    return (nil, true)
                 }
 
                 let now = Date()
@@ -540,7 +501,7 @@ final class GuideStore: ObservableObject {
                     sortBy: [SortDescriptor(\.startTime)]
                 )
                 guard let cachedRows = try? bgContext.fetch(descriptor), !cachedRows.isEmpty else {
-                    return nil
+                    return (nil, false)
                 }
                 var dict: [String: [GuideProgram]] = [:]
                 for ep in cachedRows {
@@ -563,10 +524,20 @@ final class GuideStore: ObservableObject {
                 }
                 let newestFetch = cachedRows.map(\.fetchedAt).max() ?? .distantPast
                 let isFresh = now.timeIntervalSince(newestFetch) < stalenessThreshold
-                return (dict, cachedRows.count, isFresh, Int(now.timeIntervalSince(newestFetch)))
+                return ((dict, cachedRows.count, isFresh, Int(now.timeIntervalSince(newestFetch))), false)
             }.value
 
-            guard let loaded else {
+            if fetchResult.purgedForEpoch {
+                // The epoch purge just emptied the cache; make sure the
+                // follow-up fetch is a real one. Reuses the exact resets the
+                // user-facing Refresh path performs (ChannelStore.forceRefresh)
+                // instead of duplicating fetch logic here: the reuse window
+                // must not serve a pre-purge pass, and a refusal latch from
+                // earlier in the session must not silence the refetch.
+                self.invalidateBulkGuideReuse()
+                self.resetEPGRefusalLatches(forServerKey: serverID)
+            }
+            guard let loaded = fetchResult.loaded else {
                 debugLog("📺 GuideStore.loadFromCache: no cached programs for server \(serverID)")
                 self.lastLoadFromCacheResult = (serverID: serverID, isFresh: false)
                 return false
@@ -614,9 +585,9 @@ final class GuideStore: ObservableObject {
     ///   report: program cells render as 1-pixel slivers because
     ///   stop-times got truncated mid-parse, leaving rows with
     ///   ~1-minute durations).
-    /// - The v1.6.7 one-shot migration inside `loadFromCache`'s
-    ///   detached task (which already does the SwiftData purge
-    ///   inline; just calls this for the in-memory side).
+    /// - The cache-epoch purge inside `loadFromCache`'s detached
+    ///   task (which already does the SwiftData purge inline; just
+    ///   calls this for the in-memory side).
     func invalidateCache() {
         programs = [:]
         lastLoadFromCacheResult = nil
@@ -3156,8 +3127,16 @@ struct EPGGuideView: View {
                 // the future blank. `start > now` excludes the airing program
                 // and is true only when real future programming is present.
                 let gateNow = Date()
-                let hasFuturePrograms = guideStore.programs.contains { _, progs in
-                    progs.contains { $0.start > gateNow }
+                // Identity invariant (matches the orchestrator gate in
+                // HomeView): only rows keyed to a channel the guide can
+                // display count. Rows keyed to channels that no longer exist
+                // are orphans, and a cache that does not match the current
+                // channel identity is stale regardless of age; letting
+                // orphans satisfy this guard skips the network while the
+                // guide renders blank.
+                let liveChannelIDs = Set(channels.map(\.id))
+                let hasFuturePrograms = guideStore.programs.contains { channelID, progs in
+                    liveChannelIDs.contains(channelID) && progs.contains { $0.start > gateNow }
                 }
                 guard !cacheIsFresh || !hasFuturePrograms else {
                     debugLog("📺 EPG cache is fresh with future programs; skipping network fetch")

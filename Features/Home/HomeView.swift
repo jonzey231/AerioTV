@@ -5460,8 +5460,17 @@ struct MainTabView: View {
             // the guide showing only the now-playing program with the future
             // blank. See the matching comment in EPGGuideView.swift.
             let gateNow = Date()
-            let hasFuturePrograms = guideStore.programs.contains { _, progs in
-                progs.contains { $0.start > gateNow }
+            // Identity invariant: a cached program row only counts toward the
+            // skip-network guards when its channel key matches a channel the
+            // guide can actually display. Rows keyed to channels that no
+            // longer exist (deleted server, changed id derivation) are
+            // orphans; letting them satisfy freshness/coverage leaves the
+            // user staring at a blank guide that the app believes is fresh.
+            // A cache that does not match the current channel identity is
+            // stale regardless of age.
+            let liveChannelIDs = Set(channelStore.channels.map(\.id))
+            let hasFuturePrograms = guideStore.programs.contains { channelID, progs in
+                liveChannelIDs.contains(channelID) && progs.contains { $0.start > gateNow }
             }
             // v1.6.22: detect a "fresh but pathologically sparse"
             // cache and force a refetch.
@@ -5487,7 +5496,11 @@ struct MainTabView: View {
             // genuinely sparse dataset, which the existing
             // freshness window then catches on the next try.
             let totalChannels = max(channelStore.channels.count, 1)
-            let coverageRatio = Double(guideStore.programs.count) / Double(totalChannels)
+            // Same identity rule as above: only channel keys present in the
+            // current channel list count as covered. Orphaned keys must not
+            // inflate coverage.
+            let matchedChannelKeys = liveChannelIDs.intersection(guideStore.programs.keys).count
+            let coverageRatio = Double(matchedChannelKeys) / Double(totalChannels)
             let cacheCoverageOK = coverageRatio >= 0.25
             if cacheIsFresh && hasFuturePrograms && cacheCoverageOK {
                 debugLog("🟢 [Orchestrator] phase 2 EPG: cache fresh, seeding only (no network), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
