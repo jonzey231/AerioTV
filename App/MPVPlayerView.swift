@@ -1647,10 +1647,17 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     let sigPeak = hdrProp("video-params/sig-peak")
                     let maxLuma = hdrProp("video-params/max-luma")
                     let minLuma = hdrProp("video-params/min-luma")
-                    debugLog("[METAL-ENGINE] HDR source (primaries=\(primaries) gamma=\(gamma) container-fps=\(String(format: "%.3f", fps)) sig-peak=\(String(format: "%.3f", sigPeak)) max-luma=\(String(format: "%.1f", maxLuma)) min-luma=\(String(format: "%.4f", minLuma))); requesting HDR10 display mode")
+                    // 1000-nit output cap, HDR sources ONLY (see the pre-init
+                    // comment: applied to SDR it darkens the picture).
+                    mpv_set_property_string(mpv, "target-peak", "1000")
+                    debugLog("[METAL-ENGINE] HDR source (primaries=\(primaries) gamma=\(gamma) container-fps=\(String(format: "%.3f", fps)) sig-peak=\(String(format: "%.3f", sigPeak)) max-luma=\(String(format: "%.1f", maxLuma)) min-luma=\(String(format: "%.4f", minLuma))); target-peak=1000, requesting HDR10 display mode")
                     requestMetalHDRDisplayMode(containerFps: fps)
                 } else {
-                    debugLog("[METAL-ENGINE] SDR source (primaries=\(primaries) gamma=\(gamma)); no pins, no HDR display switch")
+                    // Clear any cap a prior HDR channel left on this mpv
+                    // instance; auto = mpv derives the target from the (SDR)
+                    // output, i.e. no artificial dimming.
+                    mpv_set_property_string(mpv, "target-peak", "auto")
+                    debugLog("[METAL-ENGINE] SDR source (primaries=\(primaries) gamma=\(gamma)); target-peak=auto, no pins, no HDR display switch")
                     if metalHDRCriteriaApplied {
                         clearDisplayCriteria()
                     }
@@ -5051,8 +5058,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 // (the 1.8.11 oversaturation field report). gpu-next
                 // tone-maps the excess into the signal instead; <=1000-nit
                 // content (most broadcast HDR) passes through untouched.
-                checkError(mpv_set_option_string(mpv, "target-peak", "1000"))
-                debugLog("[METAL-ENGINE] pre-init: vo=gpu-next gpu-api=vulkan gpu-context=moltenvk target-colorspace-hint=yes target-peak=1000")
+                // NOT set here: target-peak is per-source and runtime-settable.
+                // Setting it pre-init applied the 1000-nit cap to SDR channels
+                // too, which mpv renders by mapping SDR into a 1000-nit space
+                // the TV then shows as SDR: a visibly DARK picture (Logan,
+                // 2026-08-13 late, same channel much brighter on the Google TV
+                // Streamer). applyHDRToneMappingIfNeeded now sets it only when
+                // the source is HDR and clears it for SDR.
+                debugLog("[METAL-ENGINE] pre-init: vo=gpu-next gpu-api=vulkan gpu-context=moltenvk target-colorspace-hint=yes")
             } else {
                 // vo=libmpv: app drives rendering via OpenGL ES render API.
                 // GPU renders to CVPixelBuffer via IOSurface-backed FBO (zero copy).
