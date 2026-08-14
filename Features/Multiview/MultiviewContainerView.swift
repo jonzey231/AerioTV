@@ -611,8 +611,19 @@ struct MultiviewContainerView: View {
         // channels instead of landing on the chrome's Record pill.
         // The banner still appears on every flip via its own 5s
         // timer driven by `streamStartedToken`.
-        .onChange(of: nowPlaying.chromeWakeToken) { _, newToken in
+        // initial: true + consume: a fresh mount (cold launch, tune after a
+        // full exit) is created IN the same transaction that publishes the
+        // token, so a plain onChange never fires and the tune-in chrome
+        // silently fails to appear until some other press summons it
+        // (ATV field report 2026-08-13, 17 log-proven fresh tunes; a
+        // guide re-tune "fixed" it because swap-from-mini observes from an
+        // already-mounted container). Consuming the token keeps it a true
+        // one-shot: without the nil-out, initial: true would replay a stale
+        // wake on every later mount, including wakeChrome=false flips.
+        .onChange(of: nowPlaying.chromeWakeToken, initial: true) { _, newToken in
             guard newToken != nil else { return }
+            nowPlaying.chromeWakeToken = nil
+            guard !nowPlaying.isMinimized else { return }
             chromeState.reportInteraction()
         }
         // Connection issue (2026-07-12, Android parity): when the sole live
@@ -1708,7 +1719,7 @@ struct MultiviewContainerView: View {
                     return
                 }
                 DebugLogger.shared.log(
-                    "[MV-Cmd]   → branch: chrome visible + N=1 → minimize",
+                    "[MV-Cmd]   → branch: N=1 fallthrough → minimize (reachable with chrome hidden; #42 Part 4)",
                     category: "Playback", level: .info
                 )
                 NowPlayingManager.shared.minimize()

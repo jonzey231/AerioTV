@@ -91,8 +91,11 @@ struct PlaybackChromeOverlay: View {
     /// Task #225 section gates for the unified output picker; the same
     /// conditions the three separate buttons used (see the button site).
     private var castPickerCastGate: Bool {
+        // P2: the local cast HLS proxy serves ANY raw stream URL; the
+        // codec gate happens at load time inside the proxy, so the only
+        // structural requirement left is having a stream URL at all.
         castController.state != .unavailable
-            && webCastStreamURL(store.tiles.first?.streamURL) != nil
+            && store.tiles.first?.streamURL != nil
     }
     private var castPickerAirPlayGate: Bool {
         store.sessionEngine.isAVPlayer

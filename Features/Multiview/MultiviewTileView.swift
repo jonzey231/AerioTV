@@ -1437,6 +1437,15 @@ struct MultiviewTileView: View {
             autoReconnectTask = nil
             softStallEscalationTask?.cancel()
             softStallEscalationTask = nil
+            // The connection-issue chrome pin is normally released by the
+            // recovery notification, which a torn-down tile can never post.
+            // Without this, exiting or switching channels mid-outage latched
+            // the pin and chrome stayed permanently visible (ATV log
+            // 2026-08-13 10:15: pinned 14 min until session teardown).
+            if progressStore.connectionIssueActive {
+                progressStore.connectionIssueActive = false
+                NotificationCenter.default.post(name: .connectionIssueChanged, object: false)
+            }
         }
     }
 

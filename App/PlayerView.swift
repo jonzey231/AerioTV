@@ -1130,8 +1130,15 @@ private struct PlayerRootView: View {
         // the next up/down keeps flipping channels. The banner
         // (HomeView's `ChannelInfoBanner`) still surfaces on every
         // flip via its own 5s timer.
-        .onChange(of: NowPlayingManager.shared.chromeWakeToken) { _, newToken in
-            guard newToken != nil, isLive else { return }
+        // initial: true + consume: mirrors MultiviewContainerView's wake
+        // observer. A fresh mount is created in the same transaction that
+        // publishes the token, so a plain onChange misses it and the tune-in
+        // controls never appear (ATV field report 2026-08-13). Consuming
+        // keeps the token one-shot across remounts.
+        .onChange(of: NowPlayingManager.shared.chromeWakeToken, initial: true) { _, newToken in
+            guard newToken != nil else { return }
+            NowPlayingManager.shared.chromeWakeToken = nil
+            guard isLive else { return }
             withAnimation(.easeInOut(duration: 0.2)) { showControls = true }
             scheduleControlsHide()
         }

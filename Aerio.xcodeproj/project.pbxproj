@@ -239,6 +239,16 @@
 		MPV0000000000000000000003 /* MPVPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MPV0000000000000000000001 /* MPVPlayerView.swift */; };
 		TSR0000000000000000000002 /* TSHLSRemuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = TSR0000000000000000000001 /* TSHLSRemuxer.swift */; };
 		TSR0000000000000000000003 /* TSHLSRemuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = TSR0000000000000000000001 /* TSHLSRemuxer.swift */; };
+		CASTHLSPROXY0000000000A1 /* CastFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F1 /* CastFMP4Remuxer.swift */; };
+		CASTHLSPROXY0000000000A2 /* CastAudioTranscoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F2 /* CastAudioTranscoder.swift */; };
+		CASTHLSPROXY0000000000A3 /* CastHLSSegmentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F3 /* CastHLSSegmentStore.swift */; };
+		CASTHLSPROXY0000000000A4 /* CastHLSProxyServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F4 /* CastHLSProxyServer.swift */; };
+		CASTHLSPROXY0000000000A5 /* CastHLSProxySession.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F5 /* CastHLSProxySession.swift */; };
+		CASTHLSPROXY0000000000B1 /* CastFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F1 /* CastFMP4Remuxer.swift */; };
+		CASTHLSPROXY0000000000B2 /* CastAudioTranscoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F2 /* CastAudioTranscoder.swift */; };
+		CASTHLSPROXY0000000000B3 /* CastHLSSegmentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F3 /* CastHLSSegmentStore.swift */; };
+		CASTHLSPROXY0000000000B4 /* CastHLSProxyServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F4 /* CastHLSProxyServer.swift */; };
+		CASTHLSPROXY0000000000B5 /* CastHLSProxySession.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F5 /* CastHLSProxySession.swift */; };
 		WHATSNEW00000000000ACE001 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
 		WHATSNEW00000000000ACE002 /* WhatsNew.swift in Sources */ = {isa = PBXBuildFile; fileRef = WHATSNEW00000000000ACE000 /* WhatsNew.swift */; };
 /* End PBXBuildFile section */
@@ -426,6 +436,11 @@
 		TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */ = {isa = PBXFileReference; lastKnownFileType = wrapper.workspace; path = Aerio.xcworkspace; sourceTree = "<group>"; };
 		TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
 		TSR0000000000000000000001 /* TSHLSRemuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSHLSRemuxer.swift; sourceTree = "<group>"; };
+		CASTHLSPROXY0000000000F1 /* CastFMP4Remuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastFMP4Remuxer.swift; sourceTree = "<group>"; };
+		CASTHLSPROXY0000000000F2 /* CastAudioTranscoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastAudioTranscoder.swift; sourceTree = "<group>"; };
+		CASTHLSPROXY0000000000F3 /* CastHLSSegmentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastHLSSegmentStore.swift; sourceTree = "<group>"; };
+		CASTHLSPROXY0000000000F4 /* CastHLSProxyServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastHLSProxyServer.swift; sourceTree = "<group>"; };
+		CASTHLSPROXY0000000000F5 /* CastHLSProxySession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastHLSProxySession.swift; sourceTree = "<group>"; };
 		WHATSNEW00000000000ACE000 /* WhatsNew.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WhatsNew.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -502,9 +517,22 @@
 			path = LiveTV;
 			sourceTree = "<group>";
 		};
+		CASTHLSPROXY0000000000G0 /* CastHLSProxy */ = {
+			isa = PBXGroup;
+			children = (
+				CASTHLSPROXY0000000000F1 /* CastFMP4Remuxer.swift */,
+				CASTHLSPROXY0000000000F2 /* CastAudioTranscoder.swift */,
+				CASTHLSPROXY0000000000F3 /* CastHLSSegmentStore.swift */,
+				CASTHLSPROXY0000000000F4 /* CastHLSProxyServer.swift */,
+				CASTHLSPROXY0000000000F5 /* CastHLSProxySession.swift */,
+			);
+			path = CastHLSProxy;
+			sourceTree = "<group>";
+		};
 		3B7A0F9489A406AEC4BB302B /* Networking */ = {
 			isa = PBXGroup;
 			children = (
+				CASTHLSPROXY0000000000G0 /* CastHLSProxy */,
 				9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */,
 				57B139E212EB25D7559B5A0C /* PlaylistParsers.swift */,
 				4C548BC428D32F3966A46C27 /* VODService.swift */,
@@ -1171,6 +1199,11 @@
 				CARPLAYSCENE000000000002 /* CarPlaySceneDelegate.swift in Sources */,
 				MPV0000000000000000000002 /* MPVPlayerView.swift in Sources */,
 				TSR0000000000000000000002 /* TSHLSRemuxer.swift in Sources */,
+				CASTHLSPROXY0000000000A1 /* CastFMP4Remuxer.swift in Sources */,
+				CASTHLSPROXY0000000000A2 /* CastAudioTranscoder.swift in Sources */,
+				CASTHLSPROXY0000000000A3 /* CastHLSSegmentStore.swift in Sources */,
+				CASTHLSPROXY0000000000A4 /* CastHLSProxyServer.swift in Sources */,
+				CASTHLSPROXY0000000000A5 /* CastHLSProxySession.swift in Sources */,
 				EE1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
 				A8E322C238A7CE0B55BA3D4D /* AerioApp.swift in Sources */,
 				7D775CD7B45EE60B92377A6F /* HomeView.swift in Sources */,
@@ -1280,6 +1313,11 @@
 				CARPLAYSCENE000000000003 /* CarPlaySceneDelegate.swift in Sources */,
 				MPV0000000000000000000003 /* MPVPlayerView.swift in Sources */,
 				TSR0000000000000000000003 /* TSHLSRemuxer.swift in Sources */,
+				CASTHLSPROXY0000000000B1 /* CastFMP4Remuxer.swift in Sources */,
+				CASTHLSPROXY0000000000B2 /* CastAudioTranscoder.swift in Sources */,
+				CASTHLSPROXY0000000000B3 /* CastHLSSegmentStore.swift in Sources */,
+				CASTHLSPROXY0000000000B4 /* CastHLSProxyServer.swift in Sources */,
+				CASTHLSPROXY0000000000B5 /* CastHLSProxySession.swift in Sources */,
 				FF1234567890ABCDEF123456 /* DeveloperSettingsView.swift in Sources */,
 				CF38B25676730E71C9AD497A /* AerioApp.swift in Sources */,
 				3A694D00B8E5469ADCD3D120 /* HomeView.swift in Sources */,
