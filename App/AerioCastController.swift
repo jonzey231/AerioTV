@@ -104,6 +104,15 @@ final class AerioCastController: NSObject, ObservableObject {
         // proxy's own keepalive rides the audio background mode via
         // AudioSessionRefCount (see CastHLSProxySession).
         options.suspendSessionsWhenBackgrounded = false
+        // The SDK defaults to deferring ALL discovery until the user taps a
+        // GCKUICastButton for the first time. Task #225 replaced that button
+        // with the app's own sectioned picker, so the tap never happens,
+        // discovery never starts, castState stays noDevicesAvailable, and the
+        // picker's Google Cast section (gated on that state) can never appear
+        // to start discovery manually. Device-verified on Logan's iPhone:
+        // zero Cast devices listed even for the default media receiver ID
+        // until this flag went false.
+        options.startDiscoveryAfterFirstTapOnCastButton = false
         GCKCastContext.setSharedInstanceWith(options)
         GCKCastContext.sharedInstance().sessionManager.add(self)
         // SDK 4.x has no GCKCastStateListener; cast availability changes arrive
@@ -1516,7 +1525,10 @@ struct CastPickerSheet: View {
                 }
             }
         }
-        .onAppear { if showGoogleCast { castDevices.start() } }
+        // Unconditional: the device-list mirror must run even while the gate
+        // still reads unavailable, or a sheet opened before the first
+        // discovery results can never grow the Google Cast section.
+        .onAppear { castDevices.start() }
         .onDisappear { castDevices.stop() }
         // Freshly connected on either transport -> the picker's job is done;
         // the remote cover (HomeView) takes over.
