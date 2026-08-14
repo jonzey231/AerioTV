@@ -17,6 +17,9 @@
 //
 
 import Foundation
+#if os(iOS)
+import AVFoundation
+#endif
 
 enum CastHLSProxyError: Error, CustomStringConvertible {
     /// The phone has no Wi-Fi/LAN IPv4 address to serve on (a Chromecast
@@ -244,12 +247,39 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// suspend-on-background). Device verification of long background
     /// runs is part of the P2 checklist.
     private var keepaliveHeld = false
+    #if os(iOS)
+    /// A configured-but-silent audio session is NOT enough: iOS suspends a
+    /// backgrounded process that renders no audio, which froze the receiver
+    /// mid-cast within minutes (device-verified 2026-08-13, iPhone 17 Pro
+    /// Max: proxy port unreachable after backgrounding while the TV starved).
+    /// Only an ACTIVE render keeps the process scheduled, so the keepalive
+    /// runs an AVAudioEngine whose output is silence (player node with no
+    /// scheduled buffers; mainMixer volume 0 as a belt-and-braces mute).
+    private var keepaliveEngine: AVAudioEngine?
+    #endif
 
     private func beginBackgroundKeepaliveIfNeeded() {
         #if os(iOS)
         guard !keepaliveHeld else { return }
         keepaliveHeld = true
         AudioSessionRefCount.increment(caller: "cast-hls-proxy")
+        let engine = AVAudioEngine()
+        // The engine must have a source attached for some route
+        // configurations to start; a player node with nothing scheduled
+        // renders silence.
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: nil)
+        engine.mainMixerNode.outputVolume = 0
+        do {
+            try engine.start()
+            keepaliveEngine = engine
+            log("background keepalive engine running")
+        } catch {
+            // Backgrounding will then suspend the proxy; surfaced so the
+            // field log explains a frozen receiver.
+            log("background keepalive engine FAILED: \(error)")
+        }
         #endif
     }
 
@@ -257,6 +287,8 @@ final class CastHLSProxySession: @unchecked Sendable {
         #if os(iOS)
         guard keepaliveHeld else { return }
         keepaliveHeld = false
+        keepaliveEngine?.stop()
+        keepaliveEngine = nil
         AudioSessionRefCount.decrement(caller: "cast-hls-proxy")
         #endif
     }
