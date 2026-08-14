@@ -58,6 +58,14 @@ final class CastHLSProxySession: @unchecked Sendable {
     /// uncastable and the user told. First terminal error wins.
     private static let readyTimeout: TimeInterval = 25.0
 
+    /// A slow provider can eat the whole `readyTimeout` in one failed
+    /// connect (15 s request timeout + backoff) and then recover on the
+    /// reconnect; the timeout exists to catch channels that NEVER start,
+    /// not ones that just healed. Every (re)connect therefore guarantees
+    /// at least this much runway from the moment bytes start flowing
+    /// (two ~4 s segments + remux latency).
+    private static let postConnectGrace: TimeInterval = 15.0
+
     /// Consecutive failed (re)connects before the ingest gives up.
     /// Backoff 1/2/4/8/8 s; the receiver stalls at the live edge in the
     /// meantime, which is the honest presentation of the outage.
@@ -81,6 +89,10 @@ final class CastHLSProxySession: @unchecked Sendable {
     private var currentGeneration = 0
     private var consecutiveFailures = 0
     private var everConnected = false
+    /// Most recent ingest (re)connect; extends `startChannel`'s ready
+    /// wait by `postConnectGrace` so a slow first connect + healthy
+    /// reconnect is not misreported as "never started".
+    private var lastIngestConnectAt: Date?
     /// Monotonic token; a scheduled reconnect from a superseded channel
     /// or a stopped session must not fire.
     private var ingestEpoch = 0
@@ -175,6 +187,7 @@ final class CastHLSProxySession: @unchecked Sendable {
             self.terminalError = nil
             self.consecutiveFailures = 0
             self.everConnected = false
+            self.lastIngestConnectAt = nil
             self.currentGeneration = store.beginGeneration()
             self.totalSegmentsProduced = 0
             self.lastRollupKbps = nil
@@ -194,13 +207,20 @@ final class CastHLSProxySession: @unchecked Sendable {
         // segment gate. 100 ms granularity is invisible next to ~3 s
         // segment cadence.
         let deadline = Date(timeIntervalSinceNow: Self.readyTimeout)
-        while Date() < deadline {
+        while true {
             // A superseding channel flip cancels this task; the flip's own
             // startChannel already re-pointed the ingest, so just leave.
             if Task.isCancelled { throw CancellationError() }
-            let (err, count): (Error?, Int) = queue.sync {
-                (terminalError, store?.currentSegmentsInGeneration ?? 0)
+            let (err, count, connectedAt): (Error?, Int, Date?) = queue.sync {
+                (terminalError, store?.currentSegmentsInGeneration ?? 0, lastIngestConnectAt)
             }
+            // A (re)connect is progress: guarantee `postConnectGrace` of
+            // runway from the moment bytes started flowing, else a slow
+            // first connect eats the whole budget and a healthy reconnect
+            // gets killed as "never started" (seen live 2026-08-14).
+            let effectiveDeadline = max(deadline,
+                connectedAt.map { $0.addingTimeInterval(Self.postConnectGrace) } ?? deadline)
+            if Date() >= effectiveDeadline { break }
             if let err {
                 stopIfStillActive(rawTSURL)
                 throw err
@@ -359,6 +379,7 @@ final class CastHLSProxySession: @unchecked Sendable {
                 }
                 self.everConnected = true
                 self.consecutiveFailures = 0
+                self.lastIngestConnectAt = Date()
             },
             onData: { [weak self] data in
                 guard let self, self.ingestEpoch == epoch, let remuxer = self.remuxer else { return }

@@ -273,11 +273,17 @@ final class AerioCastController: NSObject, ObservableObject {
                     rawTSURL: rawTS, headers: headers)
             } catch let error as CastUnsupportedCodecError {
                 self?.surfaceCastFailure("Can't cast this channel: \(error.codecName) needs transcoding")
+                self?.stopCasting()
                 return
             } catch is CancellationError {
                 return
             } catch {
                 self?.surfaceCastFailure("Can't cast this channel: \(error)")
+                // The proxy is already torn down; a session left up would
+                // show a live cast cover over a dead playlist (zombie
+                // "Casting" UI, seen live 2026-08-14). End it; the session
+                // teardown path resumes local playback.
+                self?.stopCasting()
                 return
             }
             guard !Task.isCancelled else { return }
@@ -357,6 +363,7 @@ final class AerioCastController: NSObject, ObservableObject {
             } catch is CancellationError {
             } catch {
                 self?.surfaceCastFailure("The stream switch interrupted casting: \(error)")
+                self?.stopCasting()
             }
         }
     }
