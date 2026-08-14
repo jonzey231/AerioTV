@@ -152,6 +152,35 @@ final class AerioCastController: NSObject, ObservableObject {
         if let content, let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession {
             load(content, on: session)
         }
+        syncNowPlayingCard()
+    }
+
+    /// Lock-screen / Control Center card while casting. The local player is
+    /// torn down during a cast, so NowPlayingBridge is free; publishing here
+    /// gives the backgrounded phone honest visible UI for why it is awake
+    /// (the silent-render keepalive) plus play/pause without unlocking.
+    /// Channel up/down stay on the in-app cover: the bridge's transport is
+    /// play/pause/seek only, matching the web receiver's control surface.
+    private func syncNowPlayingCard() {
+        guard case .connected = state, let content = castingContent,
+              let item = ChannelStore.shared.channels.first(where: { $0.id == content.mediaID })
+        else {
+            if isCasting == false { NowPlayingBridge.shared.teardown() }
+            return
+        }
+        NowPlayingBridge.shared.configure(
+            for: item,
+            isLive: true,
+            onPlay: {
+                GCKCastContext.sharedInstance().sessionManager
+                    .currentCastSession?.remoteMediaClient?.play()
+            },
+            onPause: {
+                GCKCastContext.sharedInstance().sessionManager
+                    .currentCastSession?.remoteMediaClient?.pause()
+            },
+            onSeek: nil
+        )
     }
 
     /// End the current cast session (returns playback to the phone).
@@ -418,6 +447,9 @@ extension AerioCastController: GCKSessionManagerListener {
         session.remoteMediaClient?.add(self)
         if let pending {
             load(pending, on: session)
+            // setContent ran before the session connected, so its card sync
+            // hit the not-connected guard; publish now that state is live.
+            syncNowPlayingCard()
             return
         }
         // Cast takes precedence over an active companion session: tear that
@@ -434,7 +466,10 @@ extension AerioCastController: GCKSessionManagerListener {
            let content = Self.castContent(for: item) {
             setContent(content)
             AppOrientationLock.release()
+            // PlayerSession.stop() tears down the local player's Now Playing
+            // card; republish the cast card after it.
             PlayerSession.shared.stop()
+            syncNowPlayingCard()
         } else {
             // Nothing castable to hand over (the chrome gate keys on tile 0,
             // but the seed/audio item may differ in multiview): don't strand a
@@ -449,6 +484,9 @@ extension AerioCastController: GCKSessionManagerListener {
     /// playback back to my phone" (Android parity).
     private func onSessionEnded() {
         pending = nil
+        // The cast card must not outlive the session; a local resume below
+        // publishes its own via PlayerSession.
+        NowPlayingBridge.shared.teardown()
         // The receiver is gone; the proxy has no client left to serve.
         proxyLoadTask?.cancel()
         proxyLoadTask = nil
