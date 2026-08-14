@@ -7,8 +7,13 @@
 //  (46B79062) the Android sender uses. That id is a CUSTOM WEB RECEIVER
 //  (receiver.html on the repo's gh-pages; bare castMediaElement video, AerioTV
 //  idle screen + fading channel banner), so the load carries a directly
-//  playable contentURL: the Dispatcharr fMP4+AAC URL
-//  ({proxy}?output_format=fmp4&output_profile=2). customData still carries the
+//  playable contentURL. Casting rework P2: that URL is the PHONE-LOCAL cast
+//  HLS proxy's master playlist (http://<phone-lan-ip>:<port>/master.m3u8,
+//  CastHLSProxySession), which ingests the channel's raw MPEG-TS and
+//  re-serves it as sliding-window live HLS with fMP4/CMAF segments. The
+//  previous Dispatcharr progressive-fMP4 URL stuttered every 10-15 s on the
+//  web receiver because a progressive live stream has no manifest clock; the
+//  proxy also works for NON-Dispatcharr sources. customData still carries the
 //  channel/movie IDENTITY ("aerioMediaId"/"aerioKind", matching the Android
 //  sender) for session resume + parity, but the WEB receiver plays contentURL.
 //
@@ -64,10 +69,13 @@ final class AerioCastController: NSObject, ObservableObject {
         var title: String
         var subtitle: String?
         var artURL: String?
-        /// Directly playable URL for the CUSTOM WEB receiver (Dispatcharr
-        /// fMP4+AAC rewrite, see webCastStreamURL). nil = not basic-castable
-        /// (XC/M3U direct source); callers hide the cast affordance then.
-        var webCastURL: URL?
+        /// The channel's raw MPEG-TS stream URL (the SAME URL the local
+        /// player would tune) plus its auth headers. P2: the web receiver
+        /// no longer gets this URL; it gets the local proxy playlist the
+        /// proxy builds FROM this ingest. nil = nothing playable (event
+        /// style channel); callers hide the cast affordance then.
+        var streamURL: URL?
+        var streamHeaders: [String: String] = [:]
     }
 
     @Published private(set) var state: State = .unavailable
@@ -90,9 +98,12 @@ final class AerioCastController: NSObject, ObservableObject {
         guard !started else { return }
         let criteria = GCKDiscoveryCriteria(applicationID: AerioCast.receiverAppID)
         let options = GCKCastOptions(discoveryCriteria: criteria)
-        // Keep the framework from popping its own "connect" / expanded-controls UI
-        // over our player; we drive the session from the chrome.
-        options.suspendSessionsWhenBackgrounded = true
+        // P2: the phone IS the receiver's media server (local HLS proxy),
+        // so the session must survive backgrounding; suspending it would
+        // freeze the TV the moment the user pockets the phone. The
+        // proxy's own keepalive rides the audio background mode via
+        // AudioSessionRefCount (see CastHLSProxySession).
+        options.suspendSessionsWhenBackgrounded = false
         GCKCastContext.setSharedInstanceWith(options)
         GCKCastContext.sharedInstance().sessionManager.add(self)
         // SDK 4.x has no GCKCastStateListener; cast availability changes arrive
@@ -145,11 +156,10 @@ final class AerioCastController: NSObject, ObservableObject {
         return nil
     }
 
-    /// Channel up/down from the cast cover: each flip is a fresh load on the
-    /// web receiver (no custom channel; same as the Android basic-cast tier).
-    /// Walks ChannelStore's full list, skipping channels that aren't
-    /// basic-castable (no Dispatcharr fMP4 rewrite) so the TV never gets an
-    /// unplayable load.
+    /// Channel up/down from the cast cover: each flip re-points the local
+    /// proxy (same server + port, new generation, gap-free splice) and is
+    /// a fresh load on the web receiver. Walks ChannelStore's full list,
+    /// skipping channels with no stream URL at all.
     func castChannel(_ delta: Int) {
         guard let current = castingContent else { return }
         let channels = ChannelStore.shared.channels
@@ -166,26 +176,75 @@ final class AerioCastController: NSObject, ObservableObject {
     }
 
     /// Build the web-receiver payload for a live channel, or nil when the
-    /// channel has no Dispatcharr fMP4 rewrite (not basic-castable).
+    /// channel has no stream URL at all. P2: EVERY source type is now
+    /// castable in principle (Dispatcharr, XC, M3U); the proxy's codec
+    /// gate is the real arbiter and refuses by name at load time.
     static func castContent(for item: ChannelDisplayItem) -> Content? {
-        guard let web = webCastStreamURL(item.streamURL ?? item.streamURLs.first) else { return nil }
+        guard let url = item.streamURL ?? item.streamURLs.first else { return nil }
         return Content(
             mediaID: item.id,
             kind: .live,
             title: item.name,
             subtitle: item.currentProgram,
             artURL: item.logoURL?.absoluteString,
-            webCastURL: web
+            streamURL: url,
+            streamHeaders: ChannelStore.shared.activeServer?.authHeaders ?? ["Accept": "*/*"]
         )
     }
 
     // MARK: - Loading
 
-    private func load(_ content: Content, on session: GCKCastSession) {
-        guard let client = session.remoteMediaClient else { return }
-        let isVOD = content.kind == .vod
+    /// In-flight "warm the proxy, then load" task; superseded by every
+    /// channel flip and cancelled when the session ends.
+    private var proxyLoadTask: Task<Void, Never>?
+    /// The in-flight load request; retained so its delegate callbacks
+    /// (which report receiver-side load failure) stay alive.
+    private var loadRequest: GCKRequest?
 
-        let metadata = GCKMediaMetadata(metadataType: isVOD ? .movie : .generic)
+    /// Live path (casting rework P2): start (or re-point) the local cast
+    /// HLS proxy at the channel's raw TS URL, wait until the playlist has
+    /// two segments (25 s bound, first terminal error wins), then load
+    /// the proxy's MASTER playlist. The wait matters: the receiver
+    /// fetches the playlist the moment load() lands, and an empty live
+    /// playlist is a hard receiver error, not a retry.
+    private func load(_ content: Content, on session: GCKCastSession) {
+        proxyLoadTask?.cancel()
+        guard content.kind == .live, let rawTS = content.streamURL else {
+            // No proxyable stream: nothing the web receiver could play.
+            surfaceCastFailure("This channel has no castable stream")
+            return
+        }
+        let headers = content.streamHeaders
+        proxyLoadTask = Task { [weak self] in
+            let playlistURL: URL
+            do {
+                playlistURL = try await CastHLSProxySession.shared.startChannel(
+                    rawTSURL: rawTS, headers: headers)
+            } catch let error as CastUnsupportedCodecError {
+                self?.surfaceCastFailure("Can't cast this channel: \(error.codecName) needs transcoding")
+                return
+            } catch is CancellationError {
+                return
+            } catch {
+                self?.surfaceCastFailure("Can't cast this channel: \(error)")
+                return
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                // Re-fetch the session: the connect may have churned while
+                // the proxy warmed up.
+                guard let self,
+                      let live = GCKCastContext.sharedInstance().sessionManager.currentCastSession,
+                      self.castingContent?.mediaID == content.mediaID else { return }
+                self.loadProxyPlaylist(playlistURL, content: content, on: live)
+            }
+        }
+    }
+
+    private func loadProxyPlaylist(_ playlistURL: URL, content: Content, on session: GCKCastSession) {
+        guard let client = session.remoteMediaClient else { return }
+
+        let metadata = GCKMediaMetadata(metadataType: .generic)
         metadata.setString(content.title, forKey: kGCKMetadataKeyTitle)
         if let sub = content.subtitle, !sub.isEmpty {
             metadata.setString(sub, forKey: kGCKMetadataKeySubtitle)
@@ -194,26 +253,46 @@ final class AerioCastController: NSObject, ObservableObject {
             metadata.addImage(GCKImage(url: url, width: 480, height: 270))
         }
 
-        // Use the non-deprecated entity initializer. The channel/movie identity
+        // Use the non-deprecated entity initializer. The channel identity
         // rides in customData; entity is an opaque app-specific identifier.
         let builder = GCKMediaInformationBuilder(entity: content.mediaID)
-        builder.streamType = isVOD ? .buffered : .live
-        // The custom WEB receiver (46B79062) plays contentURL directly: the
-        // Dispatcharr fMP4+AAC rewrite. Its LOAD interceptor normalizes LIVE
-        // duration to -1, so no duration is set here.
-        builder.contentURL = content.webCastURL
-        builder.contentType = "video/mp4"
+        builder.streamType = .live
+        // The custom WEB receiver (46B79062) plays contentURL directly:
+        // the local proxy's MASTER playlist (the master's
+        // CLOSED-CAPTIONS=NONE is load-bearing; see CastHLSSegmentStore).
+        // Declaring the segment container skips the receiver's sniffing.
+        builder.contentURL = playlistURL
+        builder.contentType = "application/x-mpegURL"
+        builder.hlsSegmentFormat = .FMP4
+        builder.hlsVideoSegmentFormat = .FMP4
         builder.metadata = metadata
         builder.customData = [
             AerioCast.keyMediaID: content.mediaID,
-            AerioCast.keyKind: isVOD ? AerioCast.kindVOD : AerioCast.kindLive,
+            AerioCast.keyKind: AerioCast.kindLive,
         ]
         let mediaInfo = builder.build()
 
         let requestBuilder = GCKMediaLoadRequestDataBuilder()
         requestBuilder.mediaInformation = mediaInfo
         requestBuilder.autoplay = true
-        client.loadMedia(with: requestBuilder.build())
+        let request = client.loadMedia(with: requestBuilder.build())
+        request.delegate = self
+        loadRequest = request
+    }
+
+    /// Same surface the cast tap paths already imply: a plain alert on
+    /// the frontmost scene (mirrors the Android Toast).
+    fileprivate func surfaceCastFailure(_ message: String) {
+        debugLog("[CAST-HLS] cast failure surfaced: \(message)")
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        guard let root = scene?.windows.first(where: { $0.isKeyWindow })?.rootViewController else { return }
+        var top = root
+        while let presented = top.presentedViewController { top = presented }
+        let alert = UIAlertController(title: "Cast", message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        top.present(alert, animated: true)
     }
 
     // MARK: - State plumbing
@@ -290,12 +369,38 @@ extension AerioCastController: GCKSessionManagerListener {
     /// playback back to my phone" (Android parity).
     private func onSessionEnded() {
         pending = nil
+        // The receiver is gone; the proxy has no client left to serve.
+        proxyLoadTask?.cancel()
+        proxyLoadTask = nil
+        loadRequest = nil
+        Task.detached { CastHLSProxySession.shared.stop() }
         syncCastState(GCKCastContext.sharedInstance().castState)
         defer { castingContent = nil }
         guard let content = castingContent,
               let item = ChannelStore.shared.channels.first(where: { $0.id == content.mediaID })
         else { return }
         _ = PlayerSession.shared.begin(item: item, server: ChannelStore.shared.activeServer)
+    }
+}
+
+// MARK: - GCKRequestDelegate (receiver-side load failure)
+
+extension AerioCastController: GCKRequestDelegate {
+    /// A load the receiver rejected must not leave the proxy ingesting a
+    /// stream nobody is watching (it pins a provider connection slot).
+    nonisolated func request(_ request: GCKRequest, didFailWithError error: GCKError) {
+        // Identity captured OUTSIDE the isolation hop: GCKRequest is not
+        // Sendable, and the callback arrives on the main thread anyway
+        // (assumeIsolated runs synchronously in place).
+        let failedID = ObjectIdentifier(request)
+        let errorText = String(describing: error)
+        MainActor.assumeIsolated {
+            guard let inFlight = self.loadRequest, ObjectIdentifier(inFlight) == failedID else { return }
+            self.loadRequest = nil
+            debugLog("[CAST-HLS] receiver load failed: \(errorText)")
+            Task.detached { CastHLSProxySession.shared.stop() }
+            self.surfaceCastFailure("The TV could not start this channel")
+        }
     }
 }
 
