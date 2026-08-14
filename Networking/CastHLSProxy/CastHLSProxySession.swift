@@ -87,6 +87,48 @@ final class CastHLSProxySession: @unchecked Sendable {
     private var rollupBytes = 0
     private var rollupTicks: Int64 = 0
 
+    // Stats surface for the cast Options sheet (task #267): the latest
+    // completed per-8-segment rollup is STORED, not just logged, plus a
+    // per-channel segment total and the codec descriptions.
+    private var totalSegmentsProduced = 0
+    private var lastRollupKbps: Int?
+    private var lastRollupAvgSegmentSeconds: Double?
+    private var videoCodecDescription: String?
+    /// Last non-nil remuxer audio path, so the card doesn't blank for
+    /// the sub-second PMT re-parse window on every reconnect splice.
+    private var audioPathCache: String?
+
+    /// Point-in-time proxy stats for the cast Options sheet's Stream
+    /// Info card. Value-typed so it crosses to the MainActor reader.
+    struct Stats: Sendable {
+        let ingestHost: String
+        let port: UInt16
+        let generation: Int
+        let segmentsProduced: Int
+        let videoCodec: String?
+        let audioPath: String?
+        let lastRollupKbps: Int?
+        let lastRollupAvgSegmentSeconds: Double?
+    }
+
+    /// Snapshot for the cast Options sheet; nil when no proxy session is
+    /// up. Cheap: one hop onto the session queue.
+    func statsSnapshot() -> Stats? {
+        queue.sync {
+            guard let server, let url = activeURL else { return nil }
+            if let path = remuxer?.audioPathDescription { audioPathCache = path }
+            return Stats(
+                ingestHost: URLComponents(url: url, resolvingAgainstBaseURL: false)?.host ?? "?",
+                port: server.boundPort,
+                generation: currentGeneration,
+                segmentsProduced: totalSegmentsProduced,
+                videoCodec: videoCodecDescription,
+                audioPath: audioPathCache,
+                lastRollupKbps: lastRollupKbps,
+                lastRollupAvgSegmentSeconds: lastRollupAvgSegmentSeconds)
+        }
+    }
+
     private func log(_ message: String) {
         debugLog("[CAST-HLS] \(message)")
     }
@@ -131,6 +173,11 @@ final class CastHLSProxySession: @unchecked Sendable {
             self.consecutiveFailures = 0
             self.everConnected = false
             self.currentGeneration = store.beginGeneration()
+            self.totalSegmentsProduced = 0
+            self.lastRollupKbps = nil
+            self.lastRollupAvgSegmentSeconds = nil
+            self.videoCodecDescription = nil
+            self.audioPathCache = nil
             self.log("server on \(lanIP):\(server.boundPort); "
                 + "\(isChannelChange ? "channel change" : "session start") "
                 + "gen=\(self.currentGeneration) ingest=\(Self.sanitize(rawTSURL))")
@@ -239,6 +286,9 @@ final class CastHLSProxySession: @unchecked Sendable {
         remuxer.onInitSegment = { [weak self] data in
             guard let self, self.ingestEpoch == epoch else { return }
             self.store?.setInitSegment(generation: gen, data: data)
+            if let avc = CastHLSSegmentStore.avcCodecString(from: data) {
+                self.videoCodecDescription = "H.264 (\(avc))"
+            }
             self.log("init segment ready gen=\(gen) (\(data.count) B)")
         }
         remuxer.onMediaSegment = { [weak self] data, durationTicks in
@@ -247,11 +297,14 @@ final class CastHLSProxySession: @unchecked Sendable {
             // check just spares dead work after a teardown race.
             self.store?.addSegment(generation: gen, data: data, durationTicks: durationTicks)
             self.segmentsLogged += 1
+            self.totalSegmentsProduced += 1
             self.rollupBytes += data.count
             self.rollupTicks += durationTicks
             if self.segmentsLogged % Self.logEverySegments == 0 {
                 let seconds = Double(self.rollupTicks) / Double(CastFMP4Remuxer.ticksPerSecond)
                 let kbps = seconds > 0 ? Int(Double(self.rollupBytes) * 8 / seconds / 1000) : 0
+                self.lastRollupKbps = kbps
+                self.lastRollupAvgSegmentSeconds = seconds / Double(Self.logEverySegments)
                 self.log("segments=\(self.segmentsLogged) last\(Self.logEverySegments): "
                     + "avgDur=\(String(format: "%.2f", seconds / Double(Self.logEverySegments)))s "
                     + "bytes=\(self.rollupBytes) bitrate=\(kbps)kbps")

@@ -4399,7 +4399,10 @@ struct MainTabView: View {
                     onTogglePlayPause: { castController.remoteTogglePlayPause() },
                     onChannelUp: { castController.castChannel(1) },
                     onChannelDown: { castController.castChannel(-1) },
-                    onStop: { castController.stopCasting() }
+                    onStop: { castController.stopCasting() },
+                    // Task #267: Options sheet (Switch Stream / Record /
+                    // Sleep Timer / proxy Stream Info) on the cast cover.
+                    cast: castController
                 )
                 .zIndex(3)
                 .transition(.opacity)

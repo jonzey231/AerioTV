@@ -127,6 +127,19 @@ final class AerioCastController: NSObject, ObservableObject {
                 self?.syncCastState(GCKCastContext.sharedInstance().castState)
             }
         }
+        // Task #267: while casting, a confirmed Dispatcharr Switch Stream
+        // (SwitchStreamView, opened from the cast Options sheet) posts the
+        // same reprime the local player uses; here it re-tunes the proxy.
+        // The local player is torn down while casting, so this observer is
+        // the only live consumer.
+        NotificationCenter.default.addObserver(
+            forName: .switchStreamReprime,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            let uuid = note.userInfo?["uuid"] as? String
+            Task { @MainActor in self?.handleSwitchStreamReprime(uuid: uuid) }
+        }
         started = true
         syncCastState(GCKCastContext.sharedInstance().castState)
     }
@@ -289,6 +302,64 @@ final class AerioCastController: NSObject, ObservableObject {
         loadRequest = request
     }
 
+    // MARK: - Switch Stream reprime (cast Options sheet, task #267)
+
+    /// Dispatcharr Switch Stream while casting: `change_stream` swaps the
+    /// upstream behind the SAME `/proxy/ts/stream/<uuid>` URL, so the
+    /// ingest URL and the receiver's playlist URL never change -- but the
+    /// proxy's remuxer should not be left riding the mid-stream TS splice
+    /// (fresh buffer, new clock). Re-run `startChannel` with the unchanged
+    /// raw TS URL: same server + port, new generation, gap-free playlist
+    /// splice, and the receiver just keeps polling (the same seamless path
+    /// channel flips use, device-verified). No loadMedia; the loaded media
+    /// stays untouched.
+    private func handleSwitchStreamReprime(uuid: String?) {
+        guard isCasting, let uuid, let content = castingContent,
+              let rawTS = content.streamURL,
+              let item = ChannelStore.shared.channels.first(where: { $0.id == content.mediaID }),
+              item.uuid == uuid else { return }
+        debugLog("[CAST-HLS] switch-stream reprime for \(item.name)")
+        let headers = content.streamHeaders
+        proxyLoadTask?.cancel()
+        proxyLoadTask = Task { [weak self] in
+            do {
+                _ = try await CastHLSProxySession.shared.startChannel(
+                    rawTSURL: rawTS, headers: headers)
+            } catch is CancellationError {
+            } catch {
+                self?.surfaceCastFailure("The stream switch interrupted casting: \(error)")
+            }
+        }
+    }
+
+    // MARK: - Sleep timer (Android cast-options parity, task #267)
+
+    /// When the armed timer fires (nil = off). Phone-side countdown like
+    /// the companion remote's; expiry STOPS the cast (frees the TV, the
+    /// proxy, and the provider connection) WITHOUT the usual local resume
+    /// -- a sleeping user's phone must not start playing to a dark room.
+    @Published private(set) var sleepEndsAt: Date?
+    private var sleepTimerTask: Task<Void, Never>?
+    /// One-shot: the next onSessionEnded skips the resume-locally step.
+    private var suppressLocalResume = false
+
+    /// Arm (minutes > 0) or cancel (0) the sleep timer.
+    func armSleepTimer(minutes: Int) {
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        guard minutes > 0 else { sleepEndsAt = nil; return }
+        sleepEndsAt = Date().addingTimeInterval(TimeInterval(minutes) * 60)
+        debugLog("[CAST-HLS] sleep timer armed: \(minutes)m")
+        sleepTimerTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(minutes) * 60 * 1_000_000_000)
+            guard !Task.isCancelled, let self, self.isCasting else { return }
+            debugLog("[CAST-HLS] sleep timer fired -> stopping cast")
+            self.sleepEndsAt = nil
+            self.suppressLocalResume = true
+            self.stopCasting()
+        }
+    }
+
     /// Same surface the cast tap paths already imply: a plain alert on
     /// the frontmost scene (mirrors the Android Toast).
     fileprivate func surfaceCastFailure(_ message: String) {
@@ -382,10 +453,16 @@ extension AerioCastController: GCKSessionManagerListener {
         proxyLoadTask?.cancel()
         proxyLoadTask = nil
         loadRequest = nil
+        sleepTimerTask?.cancel()
+        sleepTimerTask = nil
+        sleepEndsAt = nil
         Task.detached { CastHLSProxySession.shared.stop() }
         syncCastState(GCKCastContext.sharedInstance().castState)
+        let skipResume = suppressLocalResume
+        suppressLocalResume = false
         defer { castingContent = nil }
-        guard let content = castingContent,
+        guard !skipResume,
+              let content = castingContent,
               let item = ChannelStore.shared.channels.first(where: { $0.id == content.mediaID })
         else { return }
         _ = PlayerSession.shared.begin(item: item, server: ChannelStore.shared.activeServer)
@@ -1016,6 +1093,11 @@ struct RemoteControlScreen: View {
     /// Non-nil shows a "Channels" button that minimizes this remote back to
     /// the guide (stay connected, browse, tap a channel to send it to the TV).
     var onBrowse: (() -> Void)? = nil
+    /// Non-nil for the basic-cast transport (task #267): shows the same
+    /// Options button as the companion remote, opening CastOptionsSheet
+    /// (Switch Stream / Record / Sleep Timer / proxy Stream Info) -- the
+    /// phone-driven subset, since the web receiver has no control channel.
+    var cast: AerioCastController? = nil
 
     @State private var showOptions = false
 
@@ -1087,7 +1169,7 @@ struct RemoteControlScreen: View {
                     }
                     .accessibilityLabel(isPlaying ? "Pause" : "Play")
                     transportButton("chevron.up", label: "Channel up", action: onChannelUp)
-                    if companion != nil {
+                    if companion != nil || cast != nil {
                         transportButton("slider.horizontal.3", label: "Options") { showOptions = true }
                     }
                     transportButton("xmark", label: stopLabel, action: onStop)
@@ -1097,7 +1179,11 @@ struct RemoteControlScreen: View {
             .padding(.horizontal, 24)
         }
         .sheet(isPresented: $showOptions) {
-            if let companion { RemoteOptionsSheet(companion: companion) }
+            if let companion {
+                RemoteOptionsSheet(companion: companion)
+            } else if let cast {
+                CastOptionsSheet(cast: cast)
+            }
         }
     }
 
@@ -1326,6 +1412,195 @@ struct RemoteOptionsSheet: View {
 
     private func speedLabel(_ s: Double) -> String {
         s == s.rounded() ? String(Int(s)) : String(format: "%g", s)
+    }
+}
+
+// MARK: - Cast options sheet (task #267, Android cast-options parity)
+
+/// Options for the BASIC cast transport (web receiver). The receiver has
+/// no control channel, so unlike RemoteOptionsSheet everything here is
+/// phone-driven: Switch Stream swaps the Dispatcharr upstream behind the
+/// proxy's unchanged ingest URL (the reprime observer in
+/// AerioCastController re-splices the proxy), Record talks to the
+/// Dispatcharr DVR API directly, the sleep timer is a phone-side countdown
+/// that stops the cast, and Stream Info renders the local HLS proxy's own
+/// stats (there is no player on the phone to ask). The Android cast
+/// overlay's receiver-state rows (audio/subtitles/speed/aspect/audio-only)
+/// need a control channel the web receiver lacks, so they are omitted.
+struct CastOptionsSheet: View {
+    @ObservedObject var cast: AerioCastController
+    @Environment(\.dismiss) private var dismiss
+    @State private var showSwitchStream = false
+    @State private var showRecord = false
+    @State private var stats: CastHLSProxySession.Stats?
+
+    private let sleepChoices: [(minutes: Int, label: String)] =
+        [(0, "Off"), (30, "30 minutes"), (60, "1 hour"), (90, "1.5 hours"), (120, "2 hours")]
+
+    /// The channel the TV is playing, resolved locally (castingContent
+    /// carries the id; ChannelStore has the Dispatcharr fields).
+    private var castItem: ChannelDisplayItem? {
+        guard let id = cast.castingContent?.mediaID else { return nil }
+        return ChannelStore.shared.channels.first(where: { $0.id == id })
+    }
+
+    /// Same pk/uuid/admin gate as the native player's Switch Stream row
+    /// (and the companion sheet's).
+    private var switchStreamTarget: (id: Int, uuid: String, name: String)? {
+        guard ChannelStore.shared.activeServer?.dispatcharrCanSwitchStream ?? false,
+              let item = castItem,
+              let uuid = item.uuid, !uuid.isEmpty,
+              let pk = item.dispatcharrChannelID
+        else { return nil }
+        return (pk, uuid, item.name)
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if switchStreamTarget != nil {
+                    Section {
+                        Button {
+                            showSwitchStream = true
+                        } label: {
+                            Label("Switch Stream", systemImage: "arrow.triangle.2.circlepath")
+                        }
+                    } footer: {
+                        Text("Swaps this channel's upstream. The TV keeps playing; the picture follows in a few seconds.")
+                    }
+                }
+                Section {
+                    if castItem?.dispatcharrChannelID != nil {
+                        Button {
+                            showRecord = true
+                        } label: {
+                            Label("Record Current Program", systemImage: "record.circle")
+                        }
+                    }
+                    Menu {
+                        ForEach(sleepChoices, id: \.minutes) { c in
+                            Button(c.label) { cast.armSleepTimer(minutes: c.minutes) }
+                        }
+                    } label: {
+                        HStack {
+                            Label("Sleep Timer", systemImage: "timer")
+                                .foregroundStyle(.primary)
+                            Spacer()
+                            Text(sleepValueLabel)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Section("Stream Info") {
+                    if let stats {
+                        CastStreamInfoCard(stats: stats,
+                                           receiverName: cast.connectedDeviceName)
+                            .listRowInsets(EdgeInsets())
+                            .listRowBackground(Color.clear)
+                    } else {
+                        Text("Waiting for the cast proxy to report.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("Options")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showSwitchStream) {
+                if let t = switchStreamTarget {
+                    SwitchStreamView(channelID: t.id, channelUUID: t.uuid, channelName: t.name)
+                }
+            }
+            .sheet(isPresented: $showRecord) {
+                if let item = castItem {
+                    let now = Date()
+                    RecordProgramSheet(
+                        programTitle: item.currentProgram ?? "\(item.name) live recording",
+                        programDescription: item.currentProgramDescription ?? "",
+                        channelID: item.id,
+                        channelName: item.name,
+                        scheduledStart: item.currentProgramStart ?? now,
+                        scheduledEnd: (item.currentProgramEnd.flatMap { $0 > now ? $0 : nil })
+                            ?? now.addingTimeInterval(3600),
+                        isLive: true,
+                        dispatcharrChannelID: item.dispatcharrChannelID,
+                        streamURL: item.streamURL
+                    )
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        // ~1 Hz stats poll while the sheet is up; statsSnapshot is one
+        // short hop onto the proxy's session queue.
+        .task {
+            while !Task.isCancelled {
+                stats = CastHLSProxySession.shared.statsSnapshot()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
+    }
+
+    private var sleepValueLabel: String {
+        guard let end = cast.sleepEndsAt else { return "Off" }
+        let mins = max(1, Int(end.timeIntervalSinceNow / 60) + 1)
+        return "\(mins)m left"
+    }
+}
+
+/// The proxy's own numbers in the app's Stream Info card treatment
+/// (StreamInfoCardView's monospaced label/value rows): what the phone is
+/// ingesting, what it serves, and how the pipeline is pacing.
+private struct CastStreamInfoCard: View {
+    let stats: CastHLSProxySession.Stats
+    let receiverName: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            row(label: "SOURCE", value: stats.ingestHost)
+            row(label: "VIDEO", value: stats.videoCodec ?? "detecting")
+            row(label: "AUDIO", value: stats.audioPath ?? "detecting")
+            row(label: "SEGS", value: "\(stats.segmentsProduced) produced  gen \(stats.generation)")
+            row(label: "RATE", value: rateLine)
+            row(label: "PROXY", value: "HLS on port \(stats.port)")
+            row(label: "TV", value: receiverName ?? "-")
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+    }
+
+    /// Latest completed per-8-segment rollup (the same numbers the proxy
+    /// logs); "measuring" until the first rollup lands (~24 s in).
+    private var rateLine: String {
+        guard let kbps = stats.lastRollupKbps else { return "measuring" }
+        var line = "\(kbps) kbps"
+        if let avg = stats.lastRollupAvgSegmentSeconds {
+            line += String(format: "  avg seg %.2fs", avg)
+        }
+        return line
+    }
+
+    @ViewBuilder
+    private func row(label: String, value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(Color.accentPrimary)
+                .frame(width: 46, alignment: .trailing)
+            Text(value)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundColor(.primary.opacity(0.9))
+        }
     }
 }
 

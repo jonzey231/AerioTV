@@ -82,6 +82,18 @@ final class CastFMP4Remuxer {
         0x81: .ac3, 0x87: .eac3, 0x03: .mp2, 0x04: .mp2,
     ]
 
+    /// Speaker-layout label for the Stream Info audio path. Total decoded
+    /// channels (LFE included) to the familiar x.1 names.
+    private static func channelLabel(_ channels: Int) -> String {
+        switch channels {
+        case 1: return "mono"
+        case 2: return "stereo"
+        case 6: return "5.1"
+        case 8: return "7.1"
+        default: return "\(channels)ch"
+        }
+    }
+
     var onInitSegment: ((Data) -> Void)?
     /// `durationTicks` is the segment's video span in 90 kHz ticks.
     var onMediaSegment: ((Data, Int64) -> Void)?
@@ -147,6 +159,11 @@ final class CastFMP4Remuxer {
     private var transcodeASC: [UInt8]?
     private var transcodeSampleRate = 0
     private var transcodeLogged = false
+    /// Human-readable audio path for the cast Options sheet's Stream
+    /// Info card ("AAC passthrough" / "AC-3 5.1 -> AAC stereo"). Set at
+    /// PMT parse, refined with the channel layout once the transcode
+    /// sees its first frame header.
+    private(set) var audioPathDescription: String?
     /// Where the source audio clock should continue; a jump past the
     /// discontinuity threshold flushes the codecs (splice/reconnect).
     private var expectedSrcAudioPTS: Int64 = -1
@@ -315,6 +332,13 @@ final class CastFMP4Remuxer {
         if video < 0 { throw CastUnsupportedCodecError(codecName: "no video stream in PMT") }
         videoPID = video
         audioPID = audio // may stay -1: video-only mux is fine
+        if audio < 0 {
+            audioPathDescription = "none (video only)"
+        } else if let source = audioSource {
+            audioPathDescription = "\(source.displayName) -> AAC stereo"
+        } else {
+            audioPathDescription = "AAC passthrough"
+        }
         pmtSeen = true
     }
 
@@ -526,6 +550,7 @@ final class CastFMP4Remuxer {
             }
             if !transcodeLogged {
                 log("audio transcode active: \(source.displayName) \(info.channels)ch \(info.sampleRate)Hz -> AAC-LC stereo")
+                audioPathDescription = "\(source.displayName) \(Self.channelLabel(info.channels)) -> AAC stereo"
                 transcodeLogged = true
             }
             if framePTS < 0 {
