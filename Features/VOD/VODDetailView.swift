@@ -348,6 +348,13 @@ struct VODDetailView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 #if os(tvOS)
+                // The last row sat flush against the bottom of the screen, so
+                // the cast cards' names and roles were clipped and a focused
+                // card's scale had nowhere to grow into. Give the column a
+                // bottom inset to scroll past.
+                .padding(.bottom, 60)
+                #endif
+                #if os(tvOS)
                 // Scope focus so the movie Play button can be the default
                 // target (see detailFocusNS). The top tab bar is owned by
                 // OnDemandView now (hidden while a detail is pushed), so the
@@ -1311,6 +1318,19 @@ struct VODDetailView: View {
                 Button("Auto (recommended)") { rememberVersion(nil) }
                 ForEach(versionProviders) { rel in
                     Button(label(for: rel)) { rememberVersion(rel) }
+                }
+            }
+            // Same problem the cast strip solves below: Play sits above a tall
+            // band of NON-focusable text (the overview), and a geometric D-pad
+            // Up from here does not land on it. It escapes the whole scroll
+            // view and lands on the top nav bar instead, which reads as "I
+            // can't get back to Play" (Logan, 2026-08-15, Apple TV). Drive
+            // focus to Play directly; other directions fall through, so Down
+            // still reaches the cast strip.
+            .focusSection()
+            .onMoveCommand { direction in
+                if direction == .up, item.type == .movie {
+                    playFocused = true
                 }
             }
             #else
