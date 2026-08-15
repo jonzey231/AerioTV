@@ -521,6 +521,7 @@ final class VODService {
             // empty (filled later in fetchMovieDetail).
             movie.tmdbID = m.tmdbID ?? ""
             movie.country = cp?.country ?? ""
+            movie.dispatcharrUUID = m.uuid
             return movie
         }
         let cats = genreCounts.sorted { $0.key < $1.key }.map { VODCategory(id: $0.key, name: $0.key, itemCount: $0.value) }
@@ -689,6 +690,9 @@ final class VODService {
             if let c = info.country, !c.isEmpty { return c }
             return existing.country
         }()
+        // Carry the Dispatcharr uuid through enrichment - VODDetailView's
+        // version switcher rebuilds the proxy URL from it.
+        enriched.dispatcharrUUID = existing.dispatcharrUUID
         return enriched
     }
 
@@ -819,6 +823,7 @@ final class VODService {
             vodEp.tmdbID  = ep.tmdbID ?? ""
             vodEp.imdbID  = ep.imdbID ?? ""
             vodEp.crew    = ep.customProperties?.crew ?? ""
+            vodEp.dispatcharrUUID = ep.uuid
             seasonMap[season, default: []].append(vodEp)
         }
         let seasons: [VODSeason] = seasonMap.map { (num, eps) in

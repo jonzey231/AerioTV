@@ -2406,6 +2406,45 @@ struct DispatcharrAPI {
         return try decode(DispatcharrVODMovieProviderInfo.self, from: data)
     }
 
+    /// v1.8.17 VOD version switching: enumerate the per-provider copies
+    /// of one logical movie. Dispatcharr dedupes VOD across M3U accounts
+    /// (TMDB id / IMDB id / name+year) into a single Movie row with one
+    /// `M3UMovieRelation` per provider; `/providers/` returns those
+    /// relations. NOT the same endpoint as `/provider-info/` (singular),
+    /// which merges metadata from one chosen provider.
+    ///
+    /// The raw response embeds the provider account's upstream
+    /// credentials inside `m3u_account.profiles`, so it deliberately
+    /// bypasses `loggedData` — never let this body near the debug log.
+    /// The decode keeps only display-safe fields.
+    func getMovieProviders(movieID: Int) async throws -> [DispatcharrVODProviderRelation] {
+        let url = try buildURL(path: "/api/vod/movies/\(movieID)/providers/")
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await dataWithJWTRetry(for: request)
+        try validate(response: response, data: data)
+        if let flat = try? decode([DispatcharrVODProviderRelation].self, from: data) {
+            return flat
+        }
+        return try decode(DispatcharrResultsWrapper<DispatcharrVODProviderRelation>.self, from: data).results
+    }
+
+    /// v1.8.17: series counterpart of `getMovieProviders` - the
+    /// per-provider `M3USeriesRelation`s. Episode playback pins a copy
+    /// with `m3u_account_id` only (episode relations have their own
+    /// stream ids the series row doesn't know).
+    func getSeriesProviders(seriesID: Int) async throws -> [DispatcharrVODProviderRelation] {
+        let url = try buildURL(path: "/api/vod/series/\(seriesID)/providers/")
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await dataWithJWTRetry(for: request)
+        try validate(response: response, data: data)
+        if let flat = try? decode([DispatcharrVODProviderRelation].self, from: data) {
+            return flat
+        }
+        return try decode(DispatcharrResultsWrapper<DispatcharrVODProviderRelation>.self, from: data).results
+    }
+
     /// v1.6.12: same lazy-refresh contract as `getMovieProviderInfo`,
     /// but for series. Hits `/api/vod/series/<id>/provider-info/`,
     /// which Dispatcharr names internally as `series_info()`. Same
@@ -2823,21 +2862,26 @@ struct DispatcharrAPI {
     }
 
     // MARK: - Proxy stream URLs
-    func proxyMovieURL(uuid: String, preferredStreamID: Int? = nil) -> URL? {
+    func proxyMovieURL(uuid: String, preferredStreamID: Int? = nil, m3uAccountID: Int? = nil) -> URL? {
         // Trailing slash helps Django/DRF route matching and avoids extra redirects in some setups.
         var urlString = baseURL + "/proxy/vod/movie/\(uuid)"
-        if let sid = preferredStreamID {
-            urlString += "?stream_id=\(sid)"
-        }
+        // v1.8.17 version switching: m3u_account_id pins the provider copy
+        // (server matches stream_id first, then account, else priority
+        // failover). Omitting both keeps server-side priority + failover.
+        var params: [String] = []
+        if let sid = preferredStreamID { params.append("stream_id=\(sid)") }
+        if let aid = m3uAccountID { params.append("m3u_account_id=\(aid)") }
+        if !params.isEmpty { urlString += "?" + params.joined(separator: "&") }
         return URL(string: urlString)
     }
 
-    func proxyEpisodeURL(uuid: String, preferredStreamID: Int? = nil) -> URL? {
+    func proxyEpisodeURL(uuid: String, preferredStreamID: Int? = nil, m3uAccountID: Int? = nil) -> URL? {
         // Dispatcharr commonly redirects this to a session URL: /proxy/vod/episode/<uuid>/<session>
         var urlString = baseURL + "/proxy/vod/episode/\(uuid)"
-        if let sid = preferredStreamID {
-            urlString += "?stream_id=\(sid)"
-        }
+        var params: [String] = []
+        if let sid = preferredStreamID { params.append("stream_id=\(sid)") }
+        if let aid = m3uAccountID { params.append("m3u_account_id=\(aid)") }
+        if !params.isEmpty { urlString += "?" + params.joined(separator: "&") }
         return URL(string: urlString)
     }
 
@@ -4208,6 +4252,78 @@ struct DispatcharrVODStreamOption: Decodable {
     enum CodingKeys: String, CodingKey {
         case streamID = "stream_id"
         case providerID = "provider_id"
+    }
+}
+
+/// v1.8.17 VOD version switching: one `M3UMovieRelation` row from
+/// `/api/vod/movies/<id>/providers/` — a single provider's copy of a
+/// deduped movie. Only display-safe fields are decoded on purpose: the
+/// raw payload nests the account's upstream credentials under
+/// `m3u_account.profiles`, which must never be retained or logged.
+struct DispatcharrVODProviderRelation: Decodable, Identifiable {
+    let id: Int                       // relation pk
+    let streamID: String?             // provider-side stream id (string in the wild)
+    let containerExtension: String?
+    let qualityInfo: QualityInfo?
+    let account: Account
+
+    struct Account: Decodable {
+        let id: Int
+        let name: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, name
+        }
+    }
+
+    /// Server-computed quality summary. Every field is optional and the
+    /// whole object is frequently null — fall back to containerExtension.
+    struct QualityInfo: Decodable {
+        let quality: String?
+        let resolution: String?
+
+        enum CodingKeys: String, CodingKey {
+            case quality, resolution
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case streamID = "stream_id"
+        case containerExtension = "container_extension"
+        case qualityInfo = "quality_info"
+        case account = "m3u_account"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(Int.self, forKey: .id)
+        // stream_id arrives as a string in the wild but is an int in the
+        // model; accept both.
+        if let s = try? c.decodeIfPresent(String.self, forKey: .streamID) {
+            streamID = s
+        } else if let i = try? c.decodeIfPresent(Int.self, forKey: .streamID) {
+            streamID = String(i)
+        } else {
+            streamID = nil
+        }
+        containerExtension = try? c.decodeIfPresent(String.self, forKey: .containerExtension)
+        // quality_info is a server-computed summary whose shape has
+        // drifted across Dispatcharr versions; never let it sink a row.
+        qualityInfo = try? c.decodeIfPresent(QualityInfo.self, forKey: .qualityInfo)
+        account = try c.decode(Account.self, forKey: .account)
+    }
+
+    /// "Provider · 1080p" style label for pickers. Quality falls back to
+    /// the container extension so two copies from one account stay
+    /// distinguishable.
+    var displayLabel: String {
+        let name = account.name ?? "Source \(account.id)"
+        let quality = qualityInfo?.quality ?? qualityInfo?.resolution ?? containerExtension?.uppercased()
+        if let quality, !quality.isEmpty {
+            return "\(name) · \(quality)"
+        }
+        return name
     }
 }
 

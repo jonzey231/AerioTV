@@ -3003,6 +3003,29 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 DispatchQueue.main.async { self.progressStore.currentSubtitleTrackID = trackID }
             }
 
+            // v1.8.17 VOD version switching (Dispatcharr Direct Connect):
+            // swap to another provider copy of the same title in place.
+            // Reuses the playback-restart auto-resume machinery: stamp the
+            // current position into explicitResumeMs and re-arm the one-shot
+            // resume gate, so the loadfile-replace lands and seeks back to
+            // where the user was. Progress stays keyed to the logical item
+            // (vodID unchanged); vodStreamURL updates so Continue Watching
+            // relaunches the chosen copy.
+            progressStore.switchVersionAction = { [weak self] option in
+                Task { @MainActor [weak self] in
+                    guard let self, !self.isLive else { return }
+                    let resumeMs = self.progressStore.currentMs
+                    self.progressStore.explicitResumeMs = resumeMs > 5_000 ? resumeMs : nil
+                    self.hasAttemptedResume = false
+                    self.progressStore.currentVersionOptionID = option.id
+                    self.progressStore.vodStreamURL = option.url.absoluteString
+                    debugLog("[VOD-VERSION] switch to '\(option.label)' at \(resumeMs)ms")
+                    self.swapStream(to: option.url,
+                                    newTitle: self.progressStore.vodTitle ?? "",
+                                    newSubtitle: nil)
+                }
+            }
+
             // Audio Only via the companion remote (GH #33): drop/restore the
             // video track like the Android host's setVideoTrackEnabled --
             // audio keeps rolling with zero video decode. isAudioOnly mirrors

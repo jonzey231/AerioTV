@@ -512,6 +512,15 @@ enum VODItemType {
     case episode
 }
 
+// MARK: - VOD version option (v1.8.17, Dispatcharr Direct Connect only)
+/// One playable provider copy of a VOD item, pre-resolved to a proxy URL
+/// so the player's Options menu can switch without any API knowledge.
+struct VODVersionOption: Identifiable, Equatable, Hashable {
+    let id: Int          // provider relation pk (movies) or m3u account id (episodes)
+    let label: String    // "Provider · 1080p"
+    let url: URL
+}
+
 // MARK: - VOD Movie (display model — not persisted, fetched on demand)
 struct VODMovie: Identifiable, Hashable {
     let id: String
@@ -539,6 +548,12 @@ struct VODMovie: Identifiable, Hashable {
     var tmdbID: String = ""
     var youtubeTrailer: String = ""
     var country: String = ""
+
+    // v1.8.17 VOD version switching: the Dispatcharr Movie uuid, needed
+    // to rebuild /proxy/vod/movie/<uuid>?m3u_account_id=N for a chosen
+    // provider copy. Empty for XC/M3U sources (feature hidden there).
+    // Default empty so existing initializers don't need updating.
+    var dispatcharrUUID: String = ""
 
     // Computed
     var displayRating: String {
@@ -622,6 +637,10 @@ struct VODEpisode: Identifiable, Hashable {
     var tmdbID: String = ""
     var imdbID: String = ""
     var crew: String = ""
+
+    // v1.8.17 VOD version switching: Dispatcharr Episode uuid for
+    // /proxy/vod/episode/<uuid>?m3u_account_id=N. Empty for XC sources.
+    var dispatcharrUUID: String = ""
 
     /// "8.0" / "" for nil-or-zero. Same convention as VODMovie /
     /// VODSeries — the UI's empty-rating skip logic stays portable

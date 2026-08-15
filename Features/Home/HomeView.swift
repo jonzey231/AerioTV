@@ -266,6 +266,7 @@ final class VODStore: ObservableObject {
                         // would fall through to the title fallback where a
                         // same-named remake could hijack the match.
                         movie.tmdbID = m.tmdbID ?? ""
+                        movie.dispatcharrUUID = m.uuid
                         return VODDisplayItem(movie: movie)
                     }
                     results += items
@@ -399,6 +400,7 @@ final class VODStore: ObservableObject {
         )
         var item = movie
         item.tmdbID = m.tmdbID ?? ""
+        item.dispatcharrUUID = m.uuid
         return VODDisplayItem(movie: item)
     }
 
@@ -587,7 +589,7 @@ final class VODStore: ObservableObject {
                                 uuid: m.uuid,
                                 preferredStreamID: m.streams?.first?.streamID
                             )
-                            let movie = VODMovie(
+                            var movie = VODMovie(
                                 id: String(m.id), name: m.title,
                                 posterURL: m.posterURL.flatMap { resolveURL($0, base: baseURL) },
                                 backdropURL: nil,
@@ -599,6 +601,7 @@ final class VODStore: ObservableObject {
                                 streamURL: streamURL, containerExtension: "mp4",
                                 serverID: sID
                             )
+                            movie.dispatcharrUUID = m.uuid
                             accumulated.append(VODDisplayItem(movie: movie))
                         }
                         // First batch overall: reveal content + hide the

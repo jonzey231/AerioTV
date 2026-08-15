@@ -275,6 +275,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var setAudioTrackAction: ((Int) -> Void)?
     /// Closure set by the Coordinator; sets subtitle track (0 = off).
     var setSubtitleTrackAction: ((Int) -> Void)?
+    /// v1.8.17 VOD version switching (Dispatcharr Direct Connect): the
+    /// pre-built provider-copy URLs for the playing item (empty = row
+    /// hidden), which copy is currently playing, and the Coordinator's
+    /// swap closure (loadfile replace at the current position).
+    @Published var vodVersionOptions: [VODVersionOption] = []
+    @Published var currentVersionOptionID: Int? = nil
+    var switchVersionAction: ((VODVersionOption) -> Void)?
     /// Closure set by the Coordinator; enables/disables the video track
     /// (mpv vid=auto/no) and mirrors `isAudioOnly`. Drives the companion
     /// hosts' Audio Only command (GH #33 parity with the Android host's
@@ -494,6 +501,9 @@ struct PlayerView: View {
     /// to the programme's real duration and turns seeks into URL
     /// re-tunes (the timeshift protocol's only random access).
     let catchup: CatchupPlayback?
+    /// v1.8.17: provider-copy URLs for in-play version switching
+    /// (Dispatcharr Direct Connect VOD only; empty everywhere else).
+    let vodVersionOptions: [VODVersionOption]
     let onMinimize: (() -> Void)?
     let onClose: (() -> Void)?
 
@@ -505,6 +515,7 @@ struct PlayerView: View {
          vodServerID: String? = nil, vodType: String = "movie",
          resumePositionMs: Int32? = nil,
          catchup: CatchupPlayback? = nil,
+         vodVersionOptions: [VODVersionOption] = [],
          onMinimize: (() -> Void)? = nil, onClose: (() -> Void)? = nil) {
         self.urls = urls
         self.title = title
@@ -521,6 +532,7 @@ struct PlayerView: View {
         self.vodType = vodType
         self.resumePositionMs = resumePositionMs
         self.catchup = catchup
+        self.vodVersionOptions = vodVersionOptions
         self.onMinimize = onMinimize
         self.onClose = onClose
     }
@@ -544,6 +556,7 @@ struct PlayerView: View {
             vodType: vodType,
             resumePositionMs: resumePositionMs,
             catchup: catchup,
+            vodVersionOptions: vodVersionOptions,
             onDismiss: { if let c = onClose { c() } else { dismiss() } },
             onMinimize: onMinimize,
             logStore: logStore,
@@ -595,6 +608,8 @@ private struct PlayerRootView: View {
     /// See `PlayerView.catchup`. Mirrored here for the fixed-duration
     /// timeline and threaded into the Coordinator for re-tune seeks.
     var catchup: CatchupPlayback? = nil
+    /// See `PlayerView.vodVersionOptions`.
+    var vodVersionOptions: [VODVersionOption] = []
     let onDismiss: () -> Void
     let onMinimize: (() -> Void)?
 
@@ -1778,7 +1793,12 @@ private struct PlayerRootView: View {
                                 // sheet sometimes failed to present
                                 // at all.
                                 showAddStreamSheet = true
-                            }
+                            },
+                            versionOptions: progressStore.vodVersionOptions,
+                            currentVersionOptionID: progressStore.currentVersionOptionID,
+                            onSelectVersion: progressStore.switchVersionAction == nil
+                                ? nil
+                                : { [weak progressStore] in progressStore?.switchVersionAction?($0) }
                         )
                         .focusSection()
                         // Back/Menu inside the panel closes it (not the app)
@@ -2355,6 +2375,11 @@ private struct PlayerRootView: View {
 
     private var playerOverflowMenu: some View {
         PlayerOverflowMenu(
+            versionOptions: progressStore.vodVersionOptions,
+            currentVersionOptionID: progressStore.currentVersionOptionID,
+            switchVersionAction: progressStore.switchVersionAction == nil
+                ? nil
+                : { [weak progressStore] in progressStore?.switchVersionAction?($0) },
             audioTracks: progressStore.audioTracks,
             currentAudioTrackID: progressStore.currentAudioTrackID,
             subtitleTracks: progressStore.subtitleTracks,
@@ -2617,6 +2642,12 @@ private struct PlayerRootView: View {
         progressStore.vodServerID = vodServerID
         progressStore.vodType = vodType
         progressStore.explicitResumeMs = resumePositionMs
+        // v1.8.17: seed the version-switch menu. Current selection is
+        // whichever option matches the launch URL (nil = Auto).
+        progressStore.vodVersionOptions = vodVersionOptions
+        progressStore.currentVersionOptionID = vodVersionOptions.first {
+            $0.url.absoluteString == urls.first?.absoluteString
+        }?.id
         state = .playing
         scheduleControlsHide()
     }
@@ -2745,6 +2776,15 @@ private struct PlayerRootView: View {
 /// when all Equatable inputs are unchanged.
 struct PlayerOverflowMenu: View, Equatable {
     // Value properties — used for rendering AND equality comparison.
+    /// v1.8.17 VOD version switching: provider-copy options + current
+    /// selection. Empty options hide the row (single provider, XC/M3U,
+    /// live). Defaults keep the other call sites (unified chrome) source-
+    /// compatible.
+    var versionOptions: [VODVersionOption] = []
+    var currentVersionOptionID: Int? = nil
+    /// Same presence-gates-row + `nonisolated(unsafe)` contract as
+    /// `switchStreamAction` below.
+    nonisolated(unsafe) var switchVersionAction: ((VODVersionOption) -> Void)?
     let audioTracks: [MediaTrack]
     let currentAudioTrackID: Int
     let subtitleTracks: [MediaTrack]
@@ -2808,7 +2848,10 @@ struct PlayerOverflowMenu: View, Equatable {
         // Stream action gates whether the row shows, so compare its
         // nil-ness so eligibility changes still re-render the menu.
         (lhs.switchStreamAction == nil) == (rhs.switchStreamAction == nil) &&
-        (lhs.setAudioSync == nil) == (rhs.setAudioSync == nil)
+        (lhs.setAudioSync == nil) == (rhs.setAudioSync == nil) &&
+        lhs.versionOptions == rhs.versionOptions &&
+        lhs.currentVersionOptionID == rhs.currentVersionOptionID &&
+        (lhs.switchVersionAction == nil) == (rhs.switchVersionAction == nil)
     }
 
     /// Task #184: "+0.25 s" style label for the Audio Sync submenu.
@@ -2832,6 +2875,26 @@ struct PlayerOverflowMenu: View, Equatable {
     var body: some View {
         Menu {
             Group {
+                // v1.8.17: provider-copy switcher (Dispatcharr Direct
+                // Connect VOD with >1 copy; hidden otherwise).
+                if versionOptions.count > 1, let switchVersionAction {
+                    Menu {
+                        ForEach(versionOptions) { option in
+                            Button {
+                                switchVersionAction(option)
+                            } label: {
+                                if option.id == currentVersionOptionID {
+                                    Label(option.label, systemImage: "checkmark")
+                                } else {
+                                    Text(option.label)
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Switch Version", systemImage: "square.stack.3d.up")
+                    }
+                }
+
                 // Audio track (sub-menu, only when multiple)
                 if audioTracks.count > 1 {
                     Menu {
@@ -3097,6 +3160,12 @@ struct TVPlayerOptionsPanel: View {
     /// non-nil the panel shows a top "Switch Stream" row that opens the
     /// member-stream picker. nil hides it.
     var onSwitchStream: (() -> Void)?
+    /// v1.8.17 VOD version switching: one pill per provider copy of the
+    /// playing item (Dispatcharr Direct Connect VOD, >1 copy). Empty
+    /// hides the section.
+    var versionOptions: [VODVersionOption] = []
+    var currentVersionOptionID: Int? = nil
+    var onSelectVersion: ((VODVersionOption) -> Void)?
     /// Issue #48: multiview layout options for the CURRENT tile count
     /// (`MultiviewLayoutMode.available(forTileCount:)`). Empty hides the
     /// Layout section entirely (single-stream playback / fewer than 2 tiles).
@@ -3117,6 +3186,7 @@ struct TVPlayerOptionsPanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if onSwitchStream != nil { switchStreamSection }
+                if versionOptions.count > 1, onSelectVersion != nil { versionSection }
                 if !layoutOptions.isEmpty { layoutSection }
                 audioSection
                 subtitleSection
@@ -3153,6 +3223,9 @@ struct TVPlayerOptionsPanel: View {
     /// on a real id so the `@FocusState` binding takes.
     private var firstFocusableID: String {
         if onSwitchStream != nil { return "switch-stream" }
+        if versionOptions.count > 1, onSelectVersion != nil, let first = versionOptions.first {
+            return "version-\(first.id)"
+        }
         if !layoutOptions.isEmpty { return "layout-\(currentLayout.rawValue)" }
         if audioTracks.count > 1, let first = audioTracks.first {
             return "audio-\(first.id)"
@@ -3170,6 +3243,24 @@ struct TVPlayerOptionsPanel: View {
     }
 
     // MARK: - Sections
+
+    /// v1.8.17: provider-copy picker. One pill per copy; selecting swaps
+    /// the stream in place at the current position. Panel stays open so
+    /// the user can compare copies without re-summoning Options.
+    @ViewBuilder private var versionSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            sectionHeader("Version")
+            ForEach(versionOptions) { option in
+                optionPill(
+                    id: "version-\(option.id)",
+                    text: option.label,
+                    isSelected: option.id == currentVersionOptionID
+                ) {
+                    onSelectVersion?(option)
+                }
+            }
+        }
+    }
 
     /// Issue #48: live multiview layout picker. One pill per layout option
     /// available at the current tile count; selecting one persists the choice

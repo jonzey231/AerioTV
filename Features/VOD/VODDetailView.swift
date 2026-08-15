@@ -297,6 +297,17 @@ struct VODDetailView: View {
     @State private var playingPosterURL: String?       // episode poster overrides series poster when playing an episode
     @State private var isLoadingDetail = false
     @State private var isResolvingURL = false
+    // v1.8.17 VOD version switching (Dispatcharr Direct Connect only):
+    // the per-provider copies of this deduped movie/series from
+    // /api/vod/{movies|series}/<id>/providers/. UI renders only when
+    // more than one copy exists; nil selection = server priority +
+    // failover (the pre-feature behavior, labeled "Auto").
+    @State private var versionProviders: [DispatcharrVODProviderRelation] = []
+    @State private var selectedVersion: DispatcharrVODProviderRelation?
+    @State private var versionPickerPresented = false
+    /// Options handed to the player so its Options menu can switch
+    /// versions mid-play; rebuilt at each launch for the item being played.
+    @State private var playingVersionOptions: [VODVersionOption] = []
     @Binding var isPlaying: Bool
 
     private var server: ServerConnection? {
@@ -387,6 +398,7 @@ struct VODDetailView: View {
         #endif
         .task {
             await loadDetail()
+            await loadVersionProviders()
             // Provider-info has settled once loadDetail() returns (the
             // task is sequential), satisfying the backfill's settled gate.
             await loadTMDBDetailsIfNeeded()
@@ -409,7 +421,8 @@ struct VODDetailView: View {
                 vodID: playingVodID,
                 vodPosterURL: playingPosterURL ?? item.posterURL?.absoluteString,
                 vodServerID: item.serverID.uuidString,
-                vodType: playingVodType
+                vodType: playingVodType,
+                vodVersionOptions: playingVersionOptions
             )
             .onDisappear {
                 isPlaying = false
@@ -526,7 +539,8 @@ struct VODDetailView: View {
                     }
 
                     if item.type == .movie, let movie = fullMovie ?? item.movie {
-                        playButton(url: movie.streamURL, title: movie.name)
+                        playButton(url: versionedMovieURL(movie) ?? movie.streamURL,
+                                   title: movie.name)
                     }
                 }
             }
@@ -561,6 +575,10 @@ struct VODDetailView: View {
                     .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            // v1.8.17: provider-copy picker (Dispatcharr Direct Connect,
+            // multi-provider items only).
+            versionRow
 
             // v1.6.12: external-link row. Surfaces the YouTube
             // trailer + a "View on TMDB" link when the underlying
@@ -986,7 +1004,10 @@ struct VODDetailView: View {
     }
 
     private func playEpisode(_ ep: VODEpisode) {
-        guard let url = ep.streamURL else { return }
+        // v1.8.17: honor a picked version by pinning the episode URL to
+        // the chosen provider account. Falls back to the default URL
+        // (server priority + failover) when no version is selected.
+        guard let url = versionedEpisodeURL(ep) ?? ep.streamURL else { return }
         // Stash the parent series ID into WatchProgress before playback starts.
         // The Top Shelf extension uses this to build a deep link that
         // navigates back to the series detail. The episode itself doesn't
@@ -1043,6 +1064,177 @@ struct VODDetailView: View {
         return String(data: data, encoding: .utf8)
     }
 
+    // MARK: - VOD version switching (v1.8.17, Dispatcharr Direct Connect)
+
+    /// Authenticated API client for the item's server, nil unless the
+    /// playlist is Dispatcharr Direct Connect (the only source where
+    /// multi-provider versions exist - XC emulation collapses them
+    /// server-side to the priority winner).
+    private var versionAPI: DispatcharrAPI? {
+        guard let server, server.type == .dispatcharrAPI else { return nil }
+        return DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                              auth: .apiKey(server.effectiveApiKey),
+                              userAgent: server.effectiveUserAgent,
+                              authMode: server.dispatcharrHeaderMode)
+    }
+
+    /// Relation id -> picker label, uniqued. One account frequently carries
+    /// SEVERAL copies of the same title (measured on a live server: Barbie
+    /// had two rows from one account and two from another, all "4K"), so the
+    /// raw "Account · Quality" label repeats and the rows become
+    /// indistinguishable. Collisions get a trailing "(n)" in server order.
+    private var versionLabels: [Int: String] {
+        var counts: [String: Int] = [:]
+        for rel in versionProviders { counts[rel.displayLabel, default: 0] += 1 }
+        var used: [String: Int] = [:]
+        var out: [Int: String] = [:]
+        for rel in versionProviders {
+            let base = rel.displayLabel
+            if counts[base, default: 0] > 1 {
+                let n = used[base, default: 0] + 1
+                used[base] = n
+                out[rel.id] = "\(base) (\(n))"
+            } else {
+                out[rel.id] = base
+            }
+        }
+        return out
+    }
+
+    private func label(for rel: DispatcharrVODProviderRelation) -> String {
+        versionLabels[rel.id] ?? rel.displayLabel
+    }
+
+    private func loadVersionProviders() async {
+        guard let api = versionAPI, let numericID = Int(item.id) else { return }
+        do {
+            switch item.type {
+            case .movie:
+                versionProviders = try await api.getMovieProviders(movieID: numericID)
+            case .series:
+                // Episodes pin by m3u_account_id only (a series relation id
+                // does not address an episode row), so two relations from one
+                // account would be two rows that play the same thing.
+                var seenAccounts = Set<Int>()
+                versionProviders = try await api.getSeriesProviders(seriesID: numericID)
+                    .filter { seenAccounts.insert($0.account.id).inserted }
+            case .episode:
+                break
+            }
+            if versionProviders.count > 1 {
+                debugLog("[VOD-VERSION] \(item.type) \(item.id): \(versionProviders.count) provider copies")
+            }
+        } catch {
+            // Best-effort enrichment: older Dispatcharr versions lack the
+            // endpoint; the row simply doesn't render.
+            debugLog("[VOD-VERSION] providers load failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Movie URL honoring the picked version. Nil = no override (Auto).
+    private func versionedMovieURL(_ movie: VODMovie) -> URL? {
+        guard let sel = selectedVersion, let api = versionAPI,
+              !movie.dispatcharrUUID.isEmpty else { return nil }
+        return api.proxyMovieURL(uuid: movie.dispatcharrUUID,
+                                 preferredStreamID: sel.streamID.flatMap(Int.init),
+                                 m3uAccountID: sel.account.id)
+    }
+
+    /// Episode URL honoring the picked version (account pin only - the
+    /// series relation's stream id doesn't apply to episode rows).
+    private func versionedEpisodeURL(_ ep: VODEpisode) -> URL? {
+        guard let sel = selectedVersion, let api = versionAPI,
+              !ep.dispatcharrUUID.isEmpty else { return nil }
+        return api.proxyEpisodeURL(uuid: ep.dispatcharrUUID, m3uAccountID: sel.account.id)
+    }
+
+    /// Options for the player's in-play "Switch Version" menu. Movies pin
+    /// relation stream ids; episodes pin one option per distinct account.
+    private func buildVersionOptions(movie: VODMovie?, episode: VODEpisode?) -> [VODVersionOption] {
+        guard versionProviders.count > 1, let api = versionAPI else { return [] }
+        if let movie, !movie.dispatcharrUUID.isEmpty {
+            return versionProviders.compactMap { rel in
+                guard let url = api.proxyMovieURL(uuid: movie.dispatcharrUUID,
+                                                  preferredStreamID: rel.streamID.flatMap(Int.init),
+                                                  m3uAccountID: rel.account.id) else { return nil }
+                return VODVersionOption(id: rel.id, label: label(for: rel), url: url)
+            }
+        }
+        if let episode, !episode.dispatcharrUUID.isEmpty {
+            var seen = Set<Int>()
+            return versionProviders.compactMap { rel in
+                guard seen.insert(rel.account.id).inserted,
+                      let url = api.proxyEpisodeURL(uuid: episode.dispatcharrUUID,
+                                                    m3uAccountID: rel.account.id) else { return nil }
+                return VODVersionOption(id: rel.account.id,
+                                        label: rel.account.name ?? "Source \(rel.account.id)",
+                                        url: url)
+            }
+        }
+        return []
+    }
+
+    /// "Version" picker row. Renders only when the Dispatcharr server
+    /// reports more than one provider copy. "Auto" (nil selection) keeps
+    /// server-side priority + failover - the pre-feature default.
+    @ViewBuilder private var versionRow: some View {
+        if versionProviders.count > 1 {
+            let currentLabel = selectedVersion.map { label(for: $0) } ?? "Auto"
+            #if os(tvOS)
+            Button {
+                versionPickerPresented = true
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "square.stack.3d.up")
+                    Text("Version: \(currentLabel)")
+                        .font(.bodyMedium)
+                }
+            }
+            .confirmationDialog("Version", isPresented: $versionPickerPresented, titleVisibility: .visible) {
+                Button("Auto (recommended)") { selectedVersion = nil }
+                ForEach(versionProviders) { rel in
+                    Button(label(for: rel)) { selectedVersion = rel }
+                }
+            }
+            #else
+            Menu {
+                Button {
+                    selectedVersion = nil
+                } label: {
+                    if selectedVersion == nil {
+                        Label("Auto (recommended)", systemImage: "checkmark")
+                    } else {
+                        Text("Auto (recommended)")
+                    }
+                }
+                ForEach(versionProviders) { rel in
+                    Button {
+                        selectedVersion = rel
+                    } label: {
+                        if selectedVersion?.id == rel.id {
+                            Label(label(for: rel), systemImage: "checkmark")
+                        } else {
+                            Text(label(for: rel))
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "square.stack.3d.up")
+                    Text("Version: \(currentLabel)")
+                        .font(.labelMedium)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundColor(.textPrimary)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color.elevatedBackground)
+                .clipShape(Capsule())
+            }
+            #endif
+        }
+    }
+
     /// Resolves any redirects in the proxy URL with auth headers before handing off to the player.
     /// Dispatcharr's /proxy/vod/* endpoints often redirect to a session-based or provider URL.
     /// The player follows redirects but can drop custom headers; resolving first avoids that.
@@ -1054,6 +1246,17 @@ struct VODDetailView: View {
         playingVodID = vodID ?? item.id  // default to movie id
         playingVodType = vodType
         playingPosterURL = posterURL
+
+        // v1.8.17: hand the player pre-built URLs for every provider copy
+        // so its Options menu can switch versions mid-play with zero API
+        // knowledge. Empty for single-provider items and non-Dispatcharr
+        // sources - the menu row hides itself.
+        if vodType == "movie" {
+            playingVersionOptions = buildVersionOptions(movie: fullMovie ?? item.movie, episode: nil)
+        } else {
+            let ep = fullSeries?.seasons.flatMap(\.episodes).first { $0.id == (vodID ?? "") }
+            playingVersionOptions = buildVersionOptions(movie: nil, episode: ep)
+        }
 
         var resolvedURL = url
         if let server, server.type == .dispatcharrAPI {
