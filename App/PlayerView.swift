@@ -282,6 +282,9 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     @Published var vodVersionOptions: [VODVersionOption] = []
     @Published var currentVersionOptionID: Int? = nil
     var switchVersionAction: ((VODVersionOption) -> Void)?
+    /// Storage key for remembering the user's version choice, so a switch
+    /// made mid-playback survives the same way a detail-screen pick does.
+    var vodVersionSelectionKey: String?
     /// Closure set by the Coordinator; enables/disables the video track
     /// (mpv vid=auto/no) and mirrors `isAudioOnly`. Drives the companion
     /// hosts' Audio Only command (GH #33 parity with the Android host's
@@ -504,6 +507,11 @@ struct PlayerView: View {
     /// v1.8.17: provider-copy URLs for in-play version switching
     /// (Dispatcharr Direct Connect VOD only; empty everywhere else).
     let vodVersionOptions: [VODVersionOption]
+    /// Which copy this playback started on, when the caller pinned one.
+    /// Nil for Auto (the server picked, so we cannot attribute what plays).
+    let vodSelectedVersionID: Int?
+    /// See `PlayerProgressStore.vodVersionSelectionKey`.
+    let vodVersionSelectionKey: String?
     let onMinimize: (() -> Void)?
     let onClose: (() -> Void)?
 
@@ -516,6 +524,8 @@ struct PlayerView: View {
          resumePositionMs: Int32? = nil,
          catchup: CatchupPlayback? = nil,
          vodVersionOptions: [VODVersionOption] = [],
+         vodSelectedVersionID: Int? = nil,
+         vodVersionSelectionKey: String? = nil,
          onMinimize: (() -> Void)? = nil, onClose: (() -> Void)? = nil) {
         self.urls = urls
         self.title = title
@@ -533,6 +543,8 @@ struct PlayerView: View {
         self.resumePositionMs = resumePositionMs
         self.catchup = catchup
         self.vodVersionOptions = vodVersionOptions
+        self.vodSelectedVersionID = vodSelectedVersionID
+        self.vodVersionSelectionKey = vodVersionSelectionKey
         self.onMinimize = onMinimize
         self.onClose = onClose
     }
@@ -557,6 +569,8 @@ struct PlayerView: View {
             resumePositionMs: resumePositionMs,
             catchup: catchup,
             vodVersionOptions: vodVersionOptions,
+            vodSelectedVersionID: vodSelectedVersionID,
+            vodVersionSelectionKey: vodVersionSelectionKey,
             onDismiss: { if let c = onClose { c() } else { dismiss() } },
             onMinimize: onMinimize,
             logStore: logStore,
@@ -610,6 +624,10 @@ private struct PlayerRootView: View {
     var catchup: CatchupPlayback? = nil
     /// See `PlayerView.vodVersionOptions`.
     var vodVersionOptions: [VODVersionOption] = []
+    /// See `PlayerView.vodSelectedVersionID`.
+    var vodSelectedVersionID: Int? = nil
+    /// See `PlayerView.vodVersionSelectionKey`.
+    var vodVersionSelectionKey: String? = nil
     let onDismiss: () -> Void
     let onMinimize: (() -> Void)?
 
@@ -2645,9 +2663,15 @@ private struct PlayerRootView: View {
         // v1.8.17: seed the version-switch menu. Current selection is
         // whichever option matches the launch URL (nil = Auto).
         progressStore.vodVersionOptions = vodVersionOptions
-        progressStore.currentVersionOptionID = vodVersionOptions.first {
-            $0.url.absoluteString == urls.first?.absoluteString
-        }?.id
+        // Identify the copy being played from the caller's explicit choice.
+        // Matching URLs cannot work here: the detail view resolves the proxy
+        // redirect before launching, so `urls.first` is the one-shot session
+        // URL (/proxy/vod/movie/<uuid>/vod_<session>) and never equals the
+        // option URL. The URL match stays as a fallback for callers that
+        // hand over an unresolved option URL.
+        progressStore.vodVersionSelectionKey = vodVersionSelectionKey
+        progressStore.currentVersionOptionID = vodSelectedVersionID
+            ?? vodVersionOptions.first { $0.url.absoluteString == urls.first?.absoluteString }?.id
         state = .playing
         scheduleControlsHide()
     }

@@ -2429,6 +2429,26 @@ struct DispatcharrAPI {
         return try decode(DispatcharrResultsWrapper<DispatcharrVODProviderRelation>.self, from: data).results
     }
 
+    /// v1.8.17: MEASURED properties of ONE provider copy. Same endpoint as
+    /// `getMovieProviderInfo` but pinned to a relation, so each copy reports
+    /// its own ffprobe results instead of the priority winner's.
+    ///
+    /// Same lazy-refresh caveat as its sibling: the first call for a copy the
+    /// server has never inspected triggers an upstream fetch and can take
+    /// seconds, then caches for 24h. Callers should treat it as progressive
+    /// enrichment and render the picker before it returns.
+    func getMovieProviderMedia(movieID: Int, relationID: Int) async throws -> DispatcharrVODProviderMedia {
+        var comps = URLComponents(url: try buildURL(path: "/api/vod/movies/\(movieID)/provider-info/"),
+                                  resolvingAgainstBaseURL: false)
+        comps?.queryItems = [URLQueryItem(name: "relation_id", value: String(relationID))]
+        guard let url = comps?.url else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        let (data, response) = try await dataWithJWTRetry(for: request)
+        try validate(response: response, data: data)
+        return try decode(DispatcharrVODProviderMedia.self, from: data)
+    }
+
     /// v1.8.17: series counterpart of `getMovieProviders` - the
     /// per-provider `M3USeriesRelation`s. Episode playback pins a copy
     /// with `m3u_account_id` only (episode relations have their own
@@ -4314,16 +4334,125 @@ struct DispatcharrVODProviderRelation: Decodable, Identifiable {
         account = try c.decode(Account.self, forKey: .account)
     }
 
-    /// "Provider · 1080p" style label for pickers. Quality falls back to
-    /// the container extension so two copies from one account stay
-    /// distinguishable.
+    /// Base picker label: account name plus the container, which is the only
+    /// per-copy fact this endpoint reports. Everything about picture and
+    /// sound comes from MEASURED stream data (see
+    /// `DispatcharrVODProviderMedia`), never from the provider's own title:
+    /// those titles are marketing text and routinely claim a quality the
+    /// file does not deliver.
     var displayLabel: String {
         let name = account.name ?? "Source \(account.id)"
-        let quality = qualityInfo?.quality ?? qualityInfo?.resolution ?? containerExtension?.uppercased()
-        if let quality, !quality.isEmpty {
-            return "\(name) · \(quality)"
+        if let ext = containerExtension, !ext.isEmpty {
+            return "\(name) · \(ext.uppercased())"
         }
         return name
+    }
+}
+
+/// v1.8.17: MEASURED stream properties for one provider copy, from
+/// `/api/vod/movies/<id>/provider-info/?relation_id=<n>`. Dispatcharr relays
+/// the upstream panel's own ffprobe output here, so these are the file's real
+/// characteristics rather than the provider's advertised title.
+///
+/// Every field is optional on purpose: coverage varies per provider. Measured
+/// on a live server, some copies report full video/audio streams, some report
+/// only a bitrate, and some report nothing at all. Whatever is missing is
+/// simply not shown - the picker never guesses.
+struct DispatcharrVODProviderMedia: Decodable {
+    let bitrateKbps: Int?
+    let width: Int?
+    let height: Int?
+    let videoCodec: String?
+    let audioCodec: String?
+    let audioChannels: Int?
+
+    private struct VideoStream: Decodable {
+        let width: Int?
+        let height: Int?
+        let codecName: String?
+        enum CodingKeys: String, CodingKey {
+            case width, height
+            case codecName = "codec_name"
+        }
+    }
+
+    private struct AudioStream: Decodable {
+        let codecName: String?
+        let channels: Int?
+        enum CodingKeys: String, CodingKey {
+            case channels
+            case codecName = "codec_name"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case bitrate, video, audio
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // 0 is Dispatcharr's "unknown", not a real measurement.
+        bitrateKbps = (try? c.decodeIfPresent(Int.self, forKey: .bitrate))?.flatMap { $0 > 0 ? $0 : nil }
+        let video = (try? c.decodeIfPresent(VideoStream.self, forKey: .video)) ?? nil
+        let audio = (try? c.decodeIfPresent(AudioStream.self, forKey: .audio)) ?? nil
+        width = video?.width
+        height = video?.height
+        videoCodec = video?.codecName
+        audioCodec = audio?.codecName
+        audioChannels = audio?.channels
+    }
+
+    /// True when the server reported at least one real measurement.
+    var hasAnyMeasurement: Bool {
+        bitrateKbps != nil || width != nil || videoCodec != nil || audioCodec != nil
+    }
+
+    /// Measured descriptors, most significant first. Resolution comes from the
+    /// actual frame size, so an upscaled "4K" file that is really 1920 wide
+    /// reads as 1080p here.
+    var descriptors: [String] {
+        descriptors(mergedWith: nil)
+    }
+
+    /// Server measurements first, with any field the server left blank filled
+    /// in from what the player measured on this device while playing that same
+    /// copy. Both sources are real measurements, so they compose cleanly.
+    func descriptors(mergedWith learned: VODLearnedStream?) -> [String] {
+        var out: [String] = []
+        if let res = VODStreamFormatting.resolutionLabel(width: width, height: height)
+            ?? VODStreamFormatting.resolutionLabel(width: learned?.width, height: learned?.height) {
+            out.append(res)
+        }
+        if let codec = VODStreamFormatting.videoCodecLabel(videoCodec)
+            ?? VODStreamFormatting.videoCodecLabel(learned?.videoCodec) {
+            out.append(codec)
+        }
+        if let audio = VODStreamFormatting.audioLabel(codec: audioCodec, channels: audioChannels)
+            ?? VODStreamFormatting.audioLabel(codec: learned?.audioCodec, channels: learned?.audioChannels) {
+            out.append(audio)
+        }
+        if let br = VODStreamFormatting.bitrateLabel(kbps: bitrateKbps) {
+            out.append(br)
+        }
+        return out
+    }
+
+    /// Descriptors when the SERVER reported nothing for a copy but the player
+    /// has measured it here. Same formatting, so the rows stay consistent.
+    static func descriptorsForLearnedOnly(_ learned: VODLearnedStream?) -> [String] {
+        guard let learned else { return [] }
+        var out: [String] = []
+        if let res = VODStreamFormatting.resolutionLabel(width: learned.width, height: learned.height) {
+            out.append(res)
+        }
+        if let codec = VODStreamFormatting.videoCodecLabel(learned.videoCodec) {
+            out.append(codec)
+        }
+        if let audio = VODStreamFormatting.audioLabel(codec: learned.audioCodec,
+                                                      channels: learned.audioChannels) {
+            out.append(audio)
+        }
+        return out
     }
 }
 

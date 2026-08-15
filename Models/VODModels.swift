@@ -512,6 +512,195 @@ enum VODItemType {
     case episode
 }
 
+// MARK: - VOD stream descriptor formatting (v1.8.17)
+
+/// Shared formatting for MEASURED stream properties, so a copy described by
+/// the server and one measured during playback read identically.
+enum VODStreamFormatting {
+    /// Resolution bucket from the real frame size. An upscaled file sold as
+    /// "4K" that is actually 1920 wide reads as 1080p here, which is the
+    /// entire point of preferring measurements over provider titles.
+    static func resolutionLabel(width: Int?, height: Int?) -> String? {
+        guard let w = width, let h = height, w > 0, h > 0 else { return nil }
+        switch max(w, h) {
+        case 3200...: return "4K"
+        case 2400..<3200: return "1440p"
+        case 1800..<2400: return "1080p"
+        case 1200..<1800: return "720p"
+        case 900..<1200: return "576p"
+        default: return "480p"
+        }
+    }
+
+    /// Codec strings arrive in wildly different forms depending on the
+    /// source: a bare ffprobe name from the server ("hevc"), or mpv's full
+    /// human description ("h265 / hevc (High Efficiency Video Coding)").
+    /// Scan for a known codec anywhere in the string rather than matching the
+    /// whole thing, so the picker always shows a short tag instead of a
+    /// sentence that pushes the rest of the row off screen.
+    private static func normalize(_ raw: String, _ table: [(String, String)]) -> String {
+        let hay = raw.lowercased()
+        for (needle, label) in table where hay.contains(needle) { return label }
+        // Unknown codec: keep the leading token only, never the description.
+        let head = hay.split(whereSeparator: { " /(,".contains($0) }).first.map(String.init) ?? hay
+        return head.uppercased()
+    }
+
+    static func videoCodecLabel(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        return normalize(raw, [
+            ("hevc", "HEVC"), ("h265", "HEVC"), ("h.265", "HEVC"),
+            ("x265", "HEVC"), ("hvc1", "HEVC"), ("hev1", "HEVC"),
+            ("av01", "AV1"), ("av1", "AV1"),
+            ("vp9", "VP9"),
+            ("avc", "H.264"), ("h264", "H.264"), ("h.264", "H.264"),
+            ("x264", "H.264"), ("mpeg-4 part 10", "H.264"),
+            ("mpeg2", "MPEG-2"), ("mpeg-2", "MPEG-2"),
+        ])
+    }
+
+    static func audioLabel(codec: String?, channels: Int?) -> String? {
+        guard let codec, !codec.isEmpty else { return nil }
+        let name = normalize(codec, [
+            ("truehd", "TrueHD"),
+            ("eac3", "E-AC-3"), ("ec-3", "E-AC-3"), ("e-ac-3", "E-AC-3"),
+            ("dolby digital plus", "E-AC-3"),
+            ("ac3", "AC-3"), ("ac-3", "AC-3"),
+            ("dts", "DTS"),
+            ("aac", "AAC"), ("mp4a", "AAC"),
+            ("opus", "Opus"),
+            ("mp3", "MP3"), ("flac", "FLAC"),
+        ])
+        switch channels {
+        case 8: return "\(name) 7.1"
+        case 6: return "\(name) 5.1"
+        case 2: return "\(name) 2.0"
+        default: return name
+        }
+    }
+
+    static func bitrateLabel(kbps: Int?) -> String? {
+        guard let kbps, kbps > 0 else { return nil }
+        return kbps >= 1000
+            ? String(format: "%.1f Mbps", Double(kbps) / 1000)
+            : "\(kbps) kbps"
+    }
+}
+
+// MARK: - Learned stream measurements (v1.8.17)
+
+/// What the PLAYER measured while actually playing one provider copy. The
+/// upstream panels only publish ffprobe output for some copies (verified on a
+/// live server: several report a bitrate and nothing else), so anything we
+/// play gets measured on-device and remembered for the picker.
+struct VODLearnedStream: Codable, Equatable {
+    var width: Int?
+    var height: Int?
+    var videoCodec: String?
+    var audioCodec: String?
+    var audioChannels: Int?
+
+    var isEmpty: Bool {
+        width == nil && videoCodec == nil && audioCodec == nil
+    }
+}
+
+/// Remembers per-copy measurements across launches, keyed by the picker's
+/// option id (the Dispatcharr relation pk for movies, which is stable and
+/// globally unique). Small, disposable cache: losing it only means the
+/// picker falls back to whatever the server reported.
+enum VODVersionMeasurementStore {
+    private static let key = "vod.versionMeasurements.v1"
+    private static let maxEntries = 400
+
+    private struct Entry: Codable {
+        var stream: VODLearnedStream
+        var updatedAt: Date
+    }
+
+    private static func load() -> [String: Entry] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([String: Entry].self, from: data)
+        else { return [:] }
+        return decoded
+    }
+
+    static func lookup(optionID: Int) -> VODLearnedStream? {
+        load()[String(optionID)]?.stream
+    }
+
+    static func record(optionID: Int, stream: VODLearnedStream) {
+        guard !stream.isEmpty else { return }
+        var all = load()
+        // Nothing new to write: avoid a UserDefaults round trip on every
+        // stream-info refresh tick.
+        if all[String(optionID)]?.stream == stream { return }
+        all[String(optionID)] = Entry(stream: stream, updatedAt: Date())
+        if all.count > maxEntries {
+            let keep = all.sorted { $0.value.updatedAt > $1.value.updatedAt }.prefix(maxEntries)
+            all = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+        }
+        if let data = try? JSONEncoder().encode(all) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+}
+
+// MARK: - Remembered version choice (v1.8.17)
+
+/// Remembers which provider copy the user pinned for a title, so reopening it
+/// does not silently fall back to Auto. Keyed by server + item so the same
+/// movie on two Dispatcharr servers keeps separate choices, and stores the
+/// relation id, which is validated against the current provider list on load
+/// (a copy the provider dropped falls back to Auto rather than failing to
+/// play).
+enum VODVersionSelectionStore {
+    private static let key = "vod.versionSelections.v1"
+    private static let maxEntries = 500
+
+    private struct Entry: Codable {
+        var relationID: Int
+        var updatedAt: Date
+    }
+
+    private static func load() -> [String: Entry] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([String: Entry].self, from: data)
+        else { return [:] }
+        return decoded
+    }
+
+    private static func save(_ all: [String: Entry]) {
+        var all = all
+        if all.count > maxEntries {
+            let keep = all.sorted { $0.value.updatedAt > $1.value.updatedAt }.prefix(maxEntries)
+            all = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+        }
+        if let data = try? JSONEncoder().encode(all) {
+            UserDefaults.standard.set(data, forKey: key)
+        }
+    }
+
+    static func storageKey(serverID: UUID, itemType: String, itemID: String) -> String {
+        "\(serverID.uuidString)|\(itemType)|\(itemID)"
+    }
+
+    static func selection(forKey key: String) -> Int? {
+        load()[key]?.relationID
+    }
+
+    /// Pass nil to clear (the user chose Auto).
+    static func setSelection(_ relationID: Int?, forKey key: String) {
+        var all = load()
+        if let relationID {
+            all[key] = Entry(relationID: relationID, updatedAt: Date())
+        } else {
+            all.removeValue(forKey: key)
+        }
+        save(all)
+    }
+}
+
 // MARK: - VOD version option (v1.8.17, Dispatcharr Direct Connect only)
 /// One playable provider copy of a VOD item, pre-resolved to a proxy URL
 /// so the player's Options menu can switch without any API knowledge.

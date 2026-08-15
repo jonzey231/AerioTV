@@ -3018,6 +3018,11 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     self.progressStore.explicitResumeMs = resumeMs > 5_000 ? resumeMs : nil
                     self.hasAttemptedResume = false
                     self.progressStore.currentVersionOptionID = option.id
+                    // Remember an in-player switch too, so reopening the
+                    // title keeps the copy the user chose here.
+                    if let key = self.progressStore.vodVersionSelectionKey {
+                        VODVersionSelectionStore.setSelection(option.id, forKey: key)
+                    }
                     self.progressStore.vodStreamURL = option.url.absoluteString
                     debugLog("[VOD-VERSION] switch to '\(option.label)' at \(resumeMs)ms")
                     self.swapStream(to: option.url,
@@ -8224,7 +8229,28 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             )
 
             let ps = progressStore
-            DispatchQueue.main.async { ps.streamInfo = info }
+            let isLiveStream = isLive
+            DispatchQueue.main.async {
+                ps.streamInfo = info
+                // v1.8.17 VOD version switching: the upstream panels publish
+                // ffprobe output for only some copies, so remember what we
+                // measured here. The Version picker shows it next time
+                // instead of leaving that copy undescribed. Movies only -
+                // an episode option pins an account, not a specific file.
+                if !isLiveStream, ps.vodType == "movie", let optionID = ps.currentVersionOptionID {
+                    let learned = VODLearnedStream(
+                        width: info.width > 0 ? info.width : nil,
+                        height: info.height > 0 ? info.height : nil,
+                        videoCodec: info.videoCodec.isEmpty ? nil : info.videoCodec,
+                        audioCodec: info.audioCodec.isEmpty ? nil : info.audioCodec,
+                        audioChannels: info.channels > 0 ? info.channels : nil
+                    )
+                    if !learned.isEmpty {
+                        debugLog("[VOD-VERSION] measured copy \(optionID): \(info.width)x\(info.height) \(info.videoCodec) \(info.audioCodec) \(info.channels)ch")
+                    }
+                    VODVersionMeasurementStore.record(optionID: optionID, stream: learned)
+                }
+            }
             return info
         }
 

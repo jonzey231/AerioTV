@@ -303,11 +303,22 @@ struct VODDetailView: View {
     // more than one copy exists; nil selection = server priority +
     // failover (the pre-feature behavior, labeled "Auto").
     @State private var versionProviders: [DispatcharrVODProviderRelation] = []
+    /// Measured stream properties per relation id, filled in progressively
+    /// after the picker renders (each lookup can hit the upstream panel).
+    @State private var versionMedia: [Int: DispatcharrVODProviderMedia] = [:]
+    /// What THIS device measured while playing each copy, loaded once per
+    /// screen entry and refreshed when a player closes. Fills the gaps the
+    /// upstream panels leave (several publish a bitrate and nothing else).
+    @State private var learnedVersionStreams: [Int: VODLearnedStream] = [:]
     @State private var selectedVersion: DispatcharrVODProviderRelation?
     @State private var versionPickerPresented = false
     /// Options handed to the player so its Options menu can switch
     /// versions mid-play; rebuilt at each launch for the item being played.
     @State private var playingVersionOptions: [VODVersionOption] = []
+    /// Which copy the current playback was pinned to, passed to the player so
+    /// it can attribute its measurements. Nil for Auto (the server chose, so
+    /// there is no copy to credit).
+    @State private var playingVersionOptionID: Int?
     @Binding var isPlaying: Bool
 
     private var server: ServerConnection? {
@@ -422,10 +433,19 @@ struct VODDetailView: View {
                 vodPosterURL: playingPosterURL ?? item.posterURL?.absoluteString,
                 vodServerID: item.serverID.uuidString,
                 vodType: playingVodType,
-                vodVersionOptions: playingVersionOptions
+                vodVersionOptions: playingVersionOptions,
+                vodSelectedVersionID: playingVersionOptionID,
+                vodVersionSelectionKey: versionSelectionKey
             )
             .onDisappear {
                 isPlaying = false
+                // Pick up whatever that playback session measured, so a copy
+                // the upstream panel never described now reads with its real
+                // resolution and codecs.
+                refreshLearnedVersionStreams()
+                // An in-player Switch Version persists its own choice; adopt
+                // it so the detail pill agrees with what actually played.
+                restoreRememberedVersion()
                 #if os(tvOS)
                 // Restore the root safe area the full-screen cover can
                 // collapse on tvOS, otherwise the tab bar leaks off the
@@ -1084,12 +1104,25 @@ struct VODDetailView: View {
     /// raw "Account · Quality" label repeats and the rows become
     /// indistinguishable. Collisions get a trailing "(n)" in server order.
     private var versionLabels: [Int: String] {
+        // Account + container, then whatever the server MEASURED for that
+        // copy (resolution, codec, audio, bitrate). Nothing here is derived
+        // from the provider's advertised title.
+        func base(_ rel: DispatcharrVODProviderRelation) -> String {
+            // Server measurements, with gaps filled from what this device
+            // measured while playing that copy (many upstream panels publish
+            // a bitrate and nothing else).
+            let learned = learnedVersionStreams[rel.id]
+            let measured = versionMedia[rel.id]?.descriptors(mergedWith: learned)
+                ?? DispatcharrVODProviderMedia.descriptorsForLearnedOnly(learned)
+            guard !measured.isEmpty else { return rel.displayLabel }
+            return ([rel.displayLabel] + measured).joined(separator: " · ")
+        }
         var counts: [String: Int] = [:]
-        for rel in versionProviders { counts[rel.displayLabel, default: 0] += 1 }
+        for rel in versionProviders { counts[base(rel), default: 0] += 1 }
         var used: [String: Int] = [:]
         var out: [Int: String] = [:]
         for rel in versionProviders {
-            let base = rel.displayLabel
+            let base = base(rel)
             if counts[base, default: 0] > 1 {
                 let n = used[base, default: 0] + 1
                 used[base] = n
@@ -1103,6 +1136,31 @@ struct VODDetailView: View {
 
     private func label(for rel: DispatcharrVODProviderRelation) -> String {
         versionLabels[rel.id] ?? rel.displayLabel
+    }
+
+    /// Key for the remembered version choice: server + type + item.
+    private var versionSelectionKey: String {
+        VODVersionSelectionStore.storageKey(serverID: item.serverID,
+                                            itemType: item.type == .series ? "series" : "movie",
+                                            itemID: item.id)
+    }
+
+    /// Apply the user's remembered choice, if that copy still exists. A copy
+    /// the provider dropped falls back to Auto rather than pinning a dead id.
+    private func restoreRememberedVersion() {
+        guard let savedID = VODVersionSelectionStore.selection(forKey: versionSelectionKey) else { return }
+        if let match = versionProviders.first(where: { $0.id == savedID }) {
+            selectedVersion = match
+        } else {
+            VODVersionSelectionStore.setSelection(nil, forKey: versionSelectionKey)
+        }
+    }
+
+    /// Persist (or clear, for Auto) the user's pick so reopening the title
+    /// keeps it.
+    private func rememberVersion(_ rel: DispatcharrVODProviderRelation?) {
+        selectedVersion = rel
+        VODVersionSelectionStore.setSelection(rel?.id, forKey: versionSelectionKey)
     }
 
     private func loadVersionProviders() async {
@@ -1123,12 +1181,71 @@ struct VODDetailView: View {
             }
             if versionProviders.count > 1 {
                 debugLog("[VOD-VERSION] \(item.type) \(item.id): \(versionProviders.count) provider copies")
+                restoreRememberedVersion()
+                refreshLearnedVersionStreams()
+                await loadVersionMedia(movieID: numericID)
             }
         } catch {
             // Best-effort enrichment: older Dispatcharr versions lack the
             // endpoint; the row simply doesn't render.
             debugLog("[VOD-VERSION] providers load failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Re-read the on-device measurements for the loaded copies. Cheap (one
+    /// UserDefaults read), so it also runs after a player closes to pick up
+    /// whatever that session just measured.
+    private func refreshLearnedVersionStreams() {
+        // Movies only. Series relations come from a different server table
+        // whose primary keys can numerically collide with movie relation
+        // keys, and only movies are ever recorded, so an unscoped lookup
+        // could show a movie's codecs on a series row.
+        guard item.type == .movie else {
+            learnedVersionStreams = [:]
+            return
+        }
+        var out: [Int: VODLearnedStream] = [:]
+        for rel in versionProviders {
+            if let learned = VODVersionMeasurementStore.lookup(optionID: rel.id) {
+                out[rel.id] = learned
+            }
+        }
+        learnedVersionStreams = out
+    }
+
+    /// Fill in each copy's MEASURED stream properties. Runs after the picker
+    /// is already on screen because a copy the server has not inspected yet
+    /// costs an upstream round trip. Concurrency is capped so opening a
+    /// detail page never fans out a burst at the provider; failures just
+    /// leave that row showing account + container.
+    ///
+    /// Movies only: the series `/providers/` rows describe the show, not an
+    /// episode file, so there is nothing measured to attach to them.
+    private func loadVersionMedia(movieID: Int) async {
+        guard item.type == .movie, let api = versionAPI else { return }
+        let relationIDs = versionProviders.map(\.id)
+        await withTaskGroup(of: (Int, DispatcharrVODProviderMedia?).self) { group in
+            var next = 0
+            let maxConcurrent = 3
+            func addTask() {
+                guard next < relationIDs.count else { return }
+                let relationID = relationIDs[next]
+                next += 1
+                group.addTask {
+                    (relationID, try? await api.getMovieProviderMedia(movieID: movieID,
+                                                                      relationID: relationID))
+                }
+            }
+            for _ in 0..<min(maxConcurrent, relationIDs.count) { addTask() }
+            for await (relationID, media) in group {
+                if let media, media.hasAnyMeasurement {
+                    versionMedia[relationID] = media
+                }
+                addTask()
+            }
+        }
+        let measured = versionMedia.count
+        debugLog("[VOD-VERSION] measured \(measured)/\(relationIDs.count) copies")
     }
 
     /// Movie URL honoring the picked version. Nil = no override (Auto).
@@ -1191,15 +1308,15 @@ struct VODDetailView: View {
                 }
             }
             .confirmationDialog("Version", isPresented: $versionPickerPresented, titleVisibility: .visible) {
-                Button("Auto (recommended)") { selectedVersion = nil }
+                Button("Auto (recommended)") { rememberVersion(nil) }
                 ForEach(versionProviders) { rel in
-                    Button(label(for: rel)) { selectedVersion = rel }
+                    Button(label(for: rel)) { rememberVersion(rel) }
                 }
             }
             #else
             Menu {
                 Button {
-                    selectedVersion = nil
+                    rememberVersion(nil)
                 } label: {
                     if selectedVersion == nil {
                         Label("Auto (recommended)", systemImage: "checkmark")
@@ -1209,7 +1326,7 @@ struct VODDetailView: View {
                 }
                 ForEach(versionProviders) { rel in
                     Button {
-                        selectedVersion = rel
+                        rememberVersion(rel)
                     } label: {
                         if selectedVersion?.id == rel.id {
                             Label(label(for: rel), systemImage: "checkmark")
@@ -1253,9 +1370,12 @@ struct VODDetailView: View {
         // sources - the menu row hides itself.
         if vodType == "movie" {
             playingVersionOptions = buildVersionOptions(movie: fullMovie ?? item.movie, episode: nil)
+            playingVersionOptionID = selectedVersion?.id
         } else {
             let ep = fullSeries?.seasons.flatMap(\.episodes).first { $0.id == (vodID ?? "") }
             playingVersionOptions = buildVersionOptions(movie: nil, episode: ep)
+            // Episodes pin an account, not a file, so nothing to attribute.
+            playingVersionOptionID = nil
         }
 
         var resolvedURL = url
