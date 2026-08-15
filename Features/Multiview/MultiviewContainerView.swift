@@ -272,7 +272,7 @@ struct MultiviewContainerView: View {
                     // is "tiles render inside the safe boundary,
                     // black fills the corners around them" — same
                     // behaviour as iOS PiP or MapKit.
-                    .modifier(MultiviewSafeAreaModifier())
+                    .modifier(MultiviewSafeAreaModifier(minimized: nowPlaying.isMinimized))
                     // v1.6.12 (GH #11 follow-up): disable the tile
                     // Button(s) while the TVOptions panel is open so
                     // D-pad-UP from the panel's first row can't
@@ -2262,6 +2262,13 @@ final class MultiviewChromeState: ObservableObject {
 // edge-to-edge behaviour: iPad's safe-area insets are zero in
 // normal full-screen mode, and tvOS doesn't have a notch to dodge.
 private struct MultiviewSafeAreaModifier: ViewModifier {
+    /// tvOS mini player: the 400x225 corner frame sits against the screen's
+    /// safe-area region (40pt top/trailing padding), so an unconditional
+    /// `.ignoresSafeArea()` expands the player 40pt past its frame while the
+    /// clip shape stays at 400x225 - shaving the edges off the video. Only
+    /// bleed to the hardware edges when actually fullscreen.
+    var minimized: Bool = false
+
     func body(content: Content) -> some View {
         #if os(iOS)
         if UIDevice.current.userInterfaceIdiom == .phone {
@@ -2275,8 +2282,13 @@ private struct MultiviewSafeAreaModifier: ViewModifier {
             content.ignoresSafeArea()
         }
         #else
-        // tvOS — no notch, edge-to-edge is the right thing.
-        content.ignoresSafeArea()
+        // tvOS — no notch, edge-to-edge is right for fullscreen; the corner
+        // mini player must stay inside its proposed frame (see `minimized`).
+        // One modifier with a dynamic edge set, NOT an if/else: a structural
+        // branch here changes the SwiftUI identity of the whole player
+        // subtree, so every minimize/expand tore the video views down and
+        // froze playback.
+        content.ignoresSafeArea(.all, edges: minimized ? [] : .all)
         #endif
     }
 }

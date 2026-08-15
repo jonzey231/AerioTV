@@ -400,7 +400,14 @@ class MPVPlayerViewController: UIViewController {
         // method body, so main-then-renderQueue FIFO guarantees ordering.
         if coordinator?.metalHDRMode == true {
             let metal = MPVMetalHostLayer()
-            metal.frame = view.bounds
+            // The layer is pinned at fullscreen extent for its whole life and
+            // scaled into the hosting view with a CA transform (see
+            // viewDidLayoutSubviews). MPVKit's moltenvk ra_ctx has NO resize
+            // path: moltenvk_control returns VO_NOTIMPL, and only reconfig
+            // (video parameter changes) re-reads layer.drawableSize. If the
+            // layer itself shrank (mini player), gpu-next kept compositing at
+            // the old extent and the drawable showed only its top-left corner.
+            metal.frame = CGRect(origin: .zero, size: UIScreen.main.bounds.size)
             metal.contentsScale = UIScreen.main.nativeScale
             metal.framebufferOnly = true
             metal.backgroundColor = UIColor.black.cgColor
@@ -457,11 +464,28 @@ class MPVPlayerViewController: UIViewController {
         super.viewDidLayoutSubviews()
         let size = view.bounds.size
         guard size.width > 0 && size.height > 0 else { return }
+        #if os(tvOS)
+        if metalHostLayer != nil {
+            debugLog("[METAL-ENGINE] layout: view=\(Int(size.width))x\(Int(size.height)) layer=\(Int(metalHostLayer?.frame.width ?? -1))x\(Int(metalHostLayer?.frame.height ?? -1)) drawable=\(Int(metalHostLayer?.drawableSize.width ?? -1))x\(Int(metalHostLayer?.drawableSize.height ?? -1))")
+        }
+        #endif
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         #if os(tvOS)
         if let metal = metalHostLayer {
-            metal.frame = view.bounds
+            // Never change the layer's bounds/drawableSize: mpv's moltenvk
+            // context cannot follow a resize (no VO_EVENT_RESIZE handling in
+            // the MPVKit patch). Keep the render extent at fullscreen and let
+            // CoreAnimation scale the presented frames into the current view
+            // rect. Fullscreen and the 400x225 mini are both 16:9, so this is
+            // a uniform, pixel-exact fit.
+            let ref = metal.bounds.size
+            if ref.width > 0 && ref.height > 0 {
+                metal.position = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+                metal.transform = CATransform3DMakeScale(
+                    size.width / ref.width, size.height / ref.height, 1
+                )
+            }
         } else {
             sampleBufferLayer.frame = view.bounds
         }
