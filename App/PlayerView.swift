@@ -1712,6 +1712,12 @@ private struct PlayerRootView: View {
             }
             guard !Task.isCancelled else { return }
             isScrubbing = false
+            // The hide timer was cancelled when the scrub began, and every
+            // scheduleControlsHide() call while isScrubbing is a no-op, so
+            // the end of the settle window is the ONE place the countdown
+            // can restart. Without this the chrome stays pinned forever
+            // after the first D-pad scrub (Discord DVR report, 1.8.13).
+            scheduleControlsHide()
         }
         scheduleControlsHide()
     }
@@ -1724,6 +1730,7 @@ private struct PlayerRootView: View {
         scrubAccelCount = 0
         scrubCommitTask?.cancel()
         scrubSettleTask?.cancel()
+        scheduleControlsHide()
     }
     #endif
 
@@ -1907,11 +1914,17 @@ private struct PlayerRootView: View {
             .focusable(showControls && (!isLive || isLiveRewindMode) && isScrubberActive)
             .focused($tvFocus, equals: .scrubber)
             .onMoveCommand { direction in
+                // onMoveCommand swallows any direction it receives: the
+                // focus engine never falls back to default navigation for
+                // it. Every direction therefore needs an explicit exit or
+                // action, else the scrubber is a one-way trap (Discord DVR
+                // report, 1.8.13: "can't navigate off the pause button").
                 switch direction {
                 case .left:  scrubStep(-1)
                 case .right: scrubStep(+1)
                 case .up:    tvFocus = .playPause
-                default:     break
+                case .down:  tvFocus = .playPause
+                @unknown default: break
                 }
             }
             .onTapGesture {
