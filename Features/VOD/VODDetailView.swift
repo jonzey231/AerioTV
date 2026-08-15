@@ -1584,9 +1584,16 @@ struct VODDetailView: View {
                         }
                     }
                     .padding(.horizontal, 16)
-                    // Headroom for the tvOS focus scale so the focused
-                    // card's ring is not clipped by the scroll view.
+                    // Headroom for the tvOS focus scale so the focused card is
+                    // not clipped by the scroll view. 12 was measured too small:
+                    // .card grows a ~366pt card by roughly a tenth, which is
+                    // ~18pt past each edge before its lift and shadow, so the
+                    // focused card's role line was cut off (Logan, 2026-08-15).
+                    #if os(tvOS)
+                    .padding(.vertical, 36)
+                    #else
                     .padding(.vertical, 12)
+                    #endif
                 }
             }
             .padding(.bottom, 8)
@@ -1987,20 +1994,36 @@ private struct PersonCard: View {
                 .frame(width: cardWidth, height: cardWidth * 1.5)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-                Text(person.name)
-                    .font(.labelMedium)
-                    .foregroundColor(.textPrimary)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                if let role = person.role {
-                    Text(role)
-                        .font(.labelSmall)
-                        .foregroundColor(.textSecondary)
+                // Reserved, uniform height for the two labels. Without it the
+                // card's clip shape ended partway through the role line and
+                // sliced it horizontally on EVERY card (Logan, 2026-08-15,
+                // Apple TV), and a two-line name made its card taller than its
+                // neighbours. Sized for the worst case the line limits allow:
+                // two lines of name plus two of role.
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(person.name)
+                        .font(.labelMedium)
+                        .foregroundColor(.textPrimary)
                         .lineLimit(2)
                         .multilineTextAlignment(.leading)
+                    if let role = person.role {
+                        Text(role)
+                            .font(.labelSmall)
+                            .foregroundColor(.textSecondary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+                    Spacer(minLength: 0)
                 }
+                #if os(tvOS)
+                .frame(height: 86, alignment: .topLeading)
+                #endif
             }
             .frame(width: cardWidth, alignment: .leading)
+            #if os(tvOS)
+            // Keep the labels clear of the card's bottom edge.
+            .padding(.bottom, 6)
+            #endif
         }
         #if os(tvOS)
         .buttonStyle(.card)
