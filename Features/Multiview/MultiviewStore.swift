@@ -126,6 +126,13 @@ final class MultiviewStore: ObservableObject {
     /// action; distinct from `fullscreenTileID`, which hides the others.
     @Published var spotlightTileID: String?
 
+    /// Swap Stream: the tile the user asked to re-point at another
+    /// channel. Non-nil raises the normal Add picker in swap mode; the
+    /// container owns the presentation, so the per-tile menu (which
+    /// lives deep inside the grid) only has to set this. Cleared when
+    /// the picker closes, whether or not a channel was chosen.
+    @Published var pendingSwapTileID: String?
+
     /// tvOS relocate mode: when non-nil, the container's D-pad
     /// remap kicks in so arrow keys swap `relocatingTileID` with
     /// its neighbor at the pressed direction. Click commits
@@ -544,6 +551,76 @@ final class MultiviewStore: ObservableObject {
         audioTileID = tile.id
         DebugLogger.shared.log(
             "[MV-Tile] add ok: \(item.name) tileID=\(tile.id) total=\(tiles.count) bypassWarning=\(bypassWarning)",
+            category: "Playback", level: .info
+        )
+        return .added
+    }
+
+    /// Swap an existing tile to a different channel, keeping its slot in
+    /// the grid and whatever roles it held (audio / spotlight / full-
+    /// screen). The tile count never changes, so the hard cap and the
+    /// soft-limit performance warning do not apply here; only `add`'s
+    /// dedup and stream-resolution rules carry over.
+    ///
+    /// A NEW tile id is minted deliberately. The tile views key their
+    /// player coordinators on the id, so reusing it would leave the old
+    /// coordinator attached to a stale URL; a fresh id tears the old
+    /// player down and builds one for the new stream. The roles are then
+    /// re-pointed at the new id so the swap is invisible to the user.
+    func replace(
+        tileID: String,
+        with item: ChannelDisplayItem,
+        server: ServerConnection?
+    ) -> AddResult {
+        guard let idx = tiles.firstIndex(where: { $0.id == tileID }) else {
+            DebugLogger.shared.log(
+                "[MV-Tile] swap rejected: unknown tileID=\(tileID)",
+                category: "Playback", level: .warning
+            )
+            return .unresolvable
+        }
+        // Picking the channel the tile already shows is a no-op, not a
+        // rejection: the user asked for this state and now has it.
+        if tiles[idx].item.id == item.id { return .added }
+        // Dedup against the OTHER tiles only.
+        if tiles.contains(where: { $0.id != tileID && $0.item.id == item.id }) {
+            DebugLogger.shared.log(
+                "[MV-Tile] swap rejected: alreadyPresent id=\(item.id)",
+                category: "Playback", level: .info
+            )
+            return .alreadyPresent
+        }
+        guard let resolved = Self.resolveStream(item, server: server) else {
+            // Never log streamURLs - XC URLs carry credentials in the path.
+            DebugLogger.shared.log(
+                "[MV-Tile] swap rejected: unresolvable channel=\(item.name)",
+                category: "Playback", level: .warning
+            )
+            return .unresolvable
+        }
+        // Same direct-HLS upgrade `add` applies, for the same reason: under
+        // an AVPlayer session lock a raw-TS stream must request the server
+        // side HLS upgrade or it trips the one-way downgrade.
+        var tileURL = resolved.url
+        if sessionEngine == .avPlayerDirectHLS,
+           classifyStreamURL(resolved.url) == .mpegTS,
+           HLSCapabilityStore.shared.isCapable(resolved.url) {
+            tileURL = appendingHLSOutputFormat(resolved.url)
+        }
+        let old = tiles[idx]
+        let fresh = MultiviewTile(
+            id: UUID().uuidString,
+            item: item,
+            streamURL: tileURL,
+            headers: resolved.headers,
+            addedAt: old.addedAt   // keep grid ordering stable
+        )
+        tiles[idx] = fresh
+        if audioTileID == old.id { audioTileID = fresh.id }
+        if spotlightTileID == old.id { spotlightTileID = fresh.id }
+        if fullscreenTileID == old.id { fullscreenTileID = fresh.id }
+        DebugLogger.shared.log(
+            "[MV-Tile] swap ok: \(old.item.name) -> \(item.name) slot=\(idx) tileID=\(fresh.id)",
             category: "Playback", level: .info
         )
         return .added

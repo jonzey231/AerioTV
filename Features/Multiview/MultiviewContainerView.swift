@@ -33,6 +33,17 @@ struct MultiviewContainerView: View {
     /// transport bar's "Add Tile" button.
     @State private var showAddSheet: Bool = false
 
+    /// Presentation for the Swap Stream picker. There is no separate
+    /// Bool: the store's `pendingSwapTileID` IS the state, so the tile
+    /// menu can raise the picker from anywhere in the tree by setting
+    /// it, and dismissing clears the target in the same gesture.
+    private var swapSheetBinding: Binding<Bool> {
+        Binding(
+            get: { store.pendingSwapTileID != nil },
+            set: { if !$0 { store.pendingSwapTileID = nil } }
+        )
+    }
+
     /// When `true`, the exit-confirmation dialog is presented. Set by
     /// the second Menu/Back press (first press summons the chrome;
     /// second press prompts for confirmation instead of exiting
@@ -1167,6 +1178,17 @@ struct MultiviewContainerView: View {
                 .presentationDetents([.fraction(0.45), .large])
                 .presentationDragIndicator(.visible)
         }
+        // Swap Stream: the SAME picker, targeted at one existing tile.
+        // Driven by the store so the per-tile menu (which lives deep in
+        // the tile view) can raise it without threading a binding down.
+        .sheet(isPresented: swapSheetBinding) {
+            AddToMultiviewSheet(
+                isPresented: swapSheetBinding,
+                swapTargetTileID: store.pendingSwapTileID
+            )
+            .presentationDetents([.fraction(0.45), .large])
+            .presentationDragIndicator(.visible)
+        }
         #else
         // tvOS: use `fullScreenCover` instead of `.sheet`. SwiftUI's
         // default sheet on tvOS renders as a small centred modal
@@ -1177,6 +1199,14 @@ struct MultiviewContainerView: View {
         // itself surfaces pickers (Settings sheets, AirPlay picker).
         .fullScreenCover(isPresented: $showAddSheet) {
             AddToMultiviewSheet(isPresented: $showAddSheet)
+        }
+        // Swap Stream: same picker, same full-screen treatment, aimed at
+        // the tile the user long-pressed.
+        .fullScreenCover(isPresented: swapSheetBinding) {
+            AddToMultiviewSheet(
+                isPresented: swapSheetBinding,
+                swapTargetTileID: store.pendingSwapTileID
+            )
         }
         #endif
         // Record sheet — presented by the Record pill in the tvOS

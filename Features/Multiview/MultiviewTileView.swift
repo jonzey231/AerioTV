@@ -558,6 +558,15 @@ struct MultiviewTileView: View {
             }
         }
 
+        // Swap Stream: re-point THIS tile at another channel using the
+        // same picker as Add Stream. Setting the store's target is all
+        // that is needed; the container owns the presentation.
+        Button {
+            store.pendingSwapTileID = tile.id
+        } label: {
+            Label("Swap Stream", systemImage: "arrow.triangle.2.circlepath")
+        }
+
         let isFullscreen = store.fullscreenTileID == tile.id
         Button {
             store.fullscreenTileID = isFullscreen ? nil : tile.id

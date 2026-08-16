@@ -66,6 +66,12 @@ private struct PendingVODAdd {
 struct AddToMultiviewSheet: View {
     @Binding var isPresented: Bool
 
+    /// Swap Stream: when non-nil this same picker re-points an EXISTING
+    /// tile at whatever the user chooses instead of appending a new one.
+    /// Everything else about the sheet is identical, which is the point:
+    /// one picker, two verbs. Nil keeps the original add behaviour.
+    var swapTargetTileID: String? = nil
+
     @ObservedObject private var channelStore = ChannelStore.shared
     @ObservedObject private var favoritesStore = FavoritesStore.shared
     @ObservedObject private var recentsStore = RecentChannelsStore.shared
@@ -1174,6 +1180,32 @@ struct AddToMultiviewSheet: View {
     // MARK: - Add flow
 
     private func tryAdd(_ item: ChannelDisplayItem) {
+        // Swap mode re-points one existing tile: the grid does not grow,
+        // so the thermal refusal and the soft-limit warning below (both
+        // about ADDING load) do not apply. Resolution + dedup still do,
+        // and they live in the store.
+        if let swapTargetTileID {
+            switch multiviewStore.replace(
+                tileID: swapTargetTileID,
+                with: item,
+                server: channelStore.activeServer
+            ) {
+            case .added:
+                recentsStore.push(item)
+                isPresented = false
+            case .alreadyPresent:
+                showToast("\(item.name) is already in Multiview")
+            case .unresolvable:
+                showToast("Could not open \(item.name)")
+            case .rejectedMax, .needsWarning:
+                // Unreachable in swap mode (count is unchanged), but the
+                // switch stays exhaustive so a future AddResult case has
+                // to be considered here too.
+                isPresented = false
+            }
+            return
+        }
+
         // Thermal refusal — the container banner is the primary
         // signal; this toast gives the immediate feedback at the
         // moment of the blocked tap. Threshold is `.critical` only
