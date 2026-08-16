@@ -244,6 +244,12 @@ final class ServerConnectionViewModel {
         // frustration of a false-negative on a good one.
         do {
             try await runVerifyAttempt()
+        } catch DispatcharrDirectConnectError.loginRateLimited {
+            // HTTP 429 from /api/accounts/token/: another login 400ms
+            // later is exactly what the server is throttling, and each
+            // attempt can extend the window. Surface the wait-a-minute
+            // copy immediately instead (Discord 2026-08-16).
+            verificationError = DispatcharrDirectConnectError.loginRateLimited.errorDescription
         } catch {
             try? await Task.sleep(nanoseconds: 400_000_000)
             do {

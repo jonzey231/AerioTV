@@ -125,7 +125,18 @@ struct DispatcharrUser: Decodable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decode(Int.self, forKey: .id)
         username = try c.decode(String.self, forKey: .username)
-        apiKey = try c.decode(String.self, forKey: .apiKey)
+        // Lenient for the same reason every other field here is, and for
+        // one more: a STRICT decode of this key threw a raw Foundation
+        // DecodingError that escaped fetchCurrentUser uncaught, so an
+        // account whose api_key is absent or null surfaced to the user as
+        // "The data couldn't be read because it is missing" - a message
+        // that names neither the field nor the fix (Discord 2026-08-16,
+        // Dispatcharr dev running a superuser created outside the
+        // api_key-minting path). Decoding to "" instead lets
+        // fetchCurrentUser raise `.noAPIKeyForAccount`, which says what
+        // to do about it. Android already behaved this way
+        // (DispatcharrClient.fetchApiKey), so this is parity too.
+        apiKey = (try? c.decodeIfPresent(String.self, forKey: .apiKey)) ?? ""
         // Lenient: is_staff / is_superuser only joined Dispatcharr's
         // /users/me/ payload in 2025-06 (serializer commit 1e91dd75);
         // a strict decode failed the WHOLE user object against older
@@ -354,6 +365,20 @@ enum DispatcharrDirectConnectError: Error, LocalizedError {
     /// (>24h since last login). Caller should re-login from the
     /// Keychain-stored username/password.
     case refreshExpired
+    /// Login was throttled by Dispatcharr (HTTP 429 on
+    /// `/api/accounts/token/`). Distinct from `.transport` because it
+    /// is self-clearing and the user must be told to WAIT rather than
+    /// to check their URL or credentials.
+    case loginRateLimited
+    /// `/api/accounts/users/me/` returned 200 but the account carries
+    /// no `api_key`. AerioTV needs it for stream/logo headers, so this
+    /// is fatal for setup, but it is entirely fixable server-side.
+    case noAPIKeyForAccount(username: String)
+    /// `/api/accounts/users/me/` returned 200 with a shape we could not
+    /// decode. Carries the underlying decode failure so the message
+    /// names the offending field instead of Foundation's opaque
+    /// "The data couldn't be read because it is missing".
+    case unexpectedUserResponse(detail: String)
     /// Generic transport failure — wraps the underlying URLError or
     /// HTTP status for telemetry.
     case transport(String)
@@ -372,6 +397,12 @@ enum DispatcharrDirectConnectError: Error, LocalizedError {
             return "Server returned an unexpected response shape during login. Verify the URL points at a Dispatcharr 0.23.0 or newer instance."
         case .refreshExpired:
             return "Your session expired. AerioTV will re-authenticate automatically."
+        case .loginRateLimited:
+            return "The server is rate-limiting login attempts (HTTP 429). Wait a minute and try again."
+        case .noAPIKeyForAccount(let username):
+            return "The Dispatcharr account '\(username)' has no API key. In Dispatcharr, open System, then Users, edit this user, and generate an API key, then try again."
+        case .unexpectedUserResponse(let detail):
+            return "The server's user profile response was missing expected data (\(detail)). Verify the URL points at a Dispatcharr 0.23.0 or newer instance."
         case .transport(let detail):
             return "Login transport error: \(detail)"
         }
@@ -432,6 +463,15 @@ extension DispatcharrAPI {
             let snippet = String(data: data.prefix(160), encoding: .utf8) ?? "<non-utf8>"
             debugLog("📺 Direct Connect login FAIL: invalid credentials, body=\(snippet)")
             throw DispatcharrDirectConnectError.invalidCredentials
+        }
+        if status == 429 {
+            // Dispatcharr throttles /api/accounts/token/ (django-ratelimit).
+            // Seen in the field when Test Connection and the token warmup
+            // land close together: the SECOND login 429s and the generic
+            // transport copy sent the user chasing URL/credential problems
+            // that did not exist (Discord 2026-08-16).
+            debugLog("📺 Direct Connect login FAIL: rate limited (HTTP 429)")
+            throw DispatcharrDirectConnectError.loginRateLimited
         }
         guard status == 200 else {
             let snippet = String(data: data.prefix(160), encoding: .utf8) ?? "<non-utf8>"
@@ -507,7 +547,39 @@ extension DispatcharrAPI {
         guard status == 200 else {
             throw DispatcharrDirectConnectError.transport("HTTP \(status) on users/me")
         }
-        return try JSONDecoder().decode(DispatcharrUser.self, from: data)
+        // Decode failures used to escape here as raw DecodingErrors, whose
+        // localizedDescription is the useless "The data couldn't be read
+        // because it is missing". Wrap them with the failing key so the
+        // Test Connection error names the actual mismatch.
+        let user: DispatcharrUser
+        do {
+            user = try JSONDecoder().decode(DispatcharrUser.self, from: data)
+        } catch {
+            let snippet = String(data: data.prefix(160), encoding: .utf8) ?? "<non-utf8>"
+            debugLog("📺 Direct Connect users/me FAIL: decode failed — \(error); body=\(snippet)")
+            let detail: String
+            if case let DecodingError.keyNotFound(key, _) = error {
+                detail = "missing field '\(key.stringValue)'"
+            } else if case let DecodingError.typeMismatch(_, ctx) = error {
+                detail = "unexpected type at '\(ctx.codingPath.map(\.stringValue).joined(separator: "."))'"
+            } else if case let DecodingError.valueNotFound(_, ctx) = error {
+                detail = "null at '\(ctx.codingPath.map(\.stringValue).joined(separator: "."))'"
+            } else {
+                detail = "not valid JSON"
+            }
+            throw DispatcharrDirectConnectError.unexpectedUserResponse(detail: detail)
+        }
+        // AerioTV leans on api_key as the durable credential (stream and
+        // logo headers, recording playback), so an account without one
+        // cannot finish setup. Tell the user the server-side fix instead
+        // of failing with a decode-shaped error (Discord 2026-08-16: a
+        // superuser created before Dispatcharr's api_key-minting path
+        // existed carried none).
+        guard !user.apiKey.isEmpty else {
+            debugLog("📺 Direct Connect users/me FAIL: account '\(user.username.prefix(1))***' has no api_key")
+            throw DispatcharrDirectConnectError.noAPIKeyForAccount(username: user.username)
+        }
+        return user
     }
 
     /// Capability probe for admin status. Dispatcharr only added
