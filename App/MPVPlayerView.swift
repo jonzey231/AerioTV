@@ -2222,6 +2222,67 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
         /// start of a new stream).
         private var loadFailureRetryCount = 0
 
+        /// Discord field report (Oki, 2026-08-16): a Dispatcharr proxy
+        /// stream that answered instantly with a small non-TS body (a
+        /// JSON error, an HTML page) surfaces from mpv only as
+        /// "unrecognized file format" - the HTTP status is swallowed,
+        /// so the debug log looks like a demuxer problem when the real
+        /// story is "the server said 404". On the FIRST UNKNOWN_FORMAT
+        /// of a play session we fire a one-shot HTTP probe of the same
+        /// URL with the same headers and record status + Content-Type
+        /// + body prefix. The summary lands in the debug log
+        /// immediately, and in the final error card if the retry
+        /// budget burns out. One-shot: the retries hit the same URL,
+        /// so re-probing each attempt only spams the server that is
+        /// already refusing us. `probeFired` resets with the retry
+        /// counter on playback-restart.
+        private var streamProbeFired = false
+        private var streamProbeSummary: String?
+
+        /// Fire-and-forget probe of `url`. Uses its own short-timeout
+        /// session (not HTTPRouter: this is diagnostics, and a hung
+        /// diagnostic must never outlive the 8s window a user waits
+        /// on the error card). Reads at most 512 bytes via Range; a
+        /// server that ignores Range still gets cut off by the small
+        /// timeout + immediate cancel after the first chunk.
+        private func probeStreamResponse(url: URL) {
+            guard !streamProbeFired else { return }
+            streamProbeFired = true
+            var request = URLRequest(url: url, timeoutInterval: 5)
+            request.setValue("bytes=0-511", forHTTPHeaderField: "Range")
+            for (key, value) in headers {
+                request.setValue(value, forHTTPHeaderField: key)
+            }
+            let tag = streamTag
+            let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+                let summary: String
+                if let http = response as? HTTPURLResponse {
+                    let type = (http.value(forHTTPHeaderField: "Content-Type") ?? "?")
+                    // Only quote the body when it is textual - a real
+                    // TS/mp4 prefix is binary noise nobody wants in a
+                    // log line, and its presence alone already says
+                    // "the server DID send media".
+                    let textual = type.contains("json") || type.contains("text")
+                        || type.contains("xml") || type.contains("html")
+                    let snippet: String
+                    if textual, let data, !data.isEmpty {
+                        let text = String(data: data.prefix(160), encoding: .utf8) ?? "<non-utf8>"
+                        snippet = " body=\(text.replacingOccurrences(of: "\n", with: " "))"
+                    } else {
+                        snippet = data?.isEmpty == false ? " body=<\(data?.count ?? 0) binary bytes>" : " body=<empty>"
+                    }
+                    summary = "HTTP \(http.statusCode) (\(type))\(snippet)"
+                } else if let error {
+                    summary = "probe transport error: \(error.localizedDescription)"
+                } else {
+                    summary = "probe returned no response"
+                }
+                debugLog("[MPV-PROBE] \(tag) stream URL answered: \(summary)")
+                self?.streamProbeSummary = summary
+            }
+            task.resume()
+        }
+
         /// v1.7.x Phase 4: retry budget is URL-aware. Live streams
         /// keep the historical 3 retries (~7s total budget — fits
         /// transient 503/network blips). Recording URLs get 5
@@ -2813,6 +2874,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                     guard let self, !self.isShuttingDown, !self.urls.isEmpty else { return }
                     self.loadFailureRetryCount = 0
                     self.sameURLRetryCount = 0
+                    self.streamProbeFired = false
+                    self.streamProbeSummary = nil
                     self.hasPerformedWarmupRetry = false
                     self.playbackEnded = false
                     debugLog("[MPV-DIAG] user/auto retry after fatal error")
@@ -3595,6 +3658,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
             hasPerformedWarmupRetry = false
             sameURLRetryCount = 0
             loadFailureRetryCount = 0
+            streamProbeFired = false
+            streamProbeSummary = nil
             isShuttingDown = false
             playbackEnded = false
             // Reset diagnostics
@@ -6686,6 +6751,8 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                         // a stale counter from a prior mid-session
                         // 503 storm.
                         self.loadFailureRetryCount = 0
+                        self.streamProbeFired = false
+                        self.streamProbeSummary = nil
                         // Populate audio/subtitle track lists for the UI
                         self.queryTracks()
                         // Update render buffer to match video's native dimensions.
@@ -7224,6 +7291,15 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 let isTransientLoadError =
                     (endFile.error == MPV_ERROR_LOADING_FAILED.rawValue ||
                      endFile.error == MPV_ERROR_UNKNOWN_FORMAT.rawValue)
+                // Oki 2026-08-16: UNKNOWN_FORMAT with an instant server
+                // answer usually means the proxy returned an HTTP error
+                // body, not media. Ask the server directly (once) so the
+                // debug log and the eventual error card name the actual
+                // status instead of mpv's demuxer-shaped guess.
+                if endFile.error == MPV_ERROR_UNKNOWN_FORMAT.rawValue,
+                   currentIndex < urls.count {
+                    probeStreamResponse(url: urls[currentIndex])
+                }
                 if isTransientLoadError && loadFailureRetryCount < maxLoadFailureRetries {
                     loadFailureRetryCount += 1
                     let retryNum = loadFailureRetryCount
@@ -7905,8 +7981,14 @@ struct MPVPlayerViewRepresentable: UIViewControllerRepresentable {
                 }
             } else {
                 fatalErrorReported = true
+                // If the diagnostic probe learned what the server really
+                // said, put it on the card: "unrecognized file format"
+                // plus "HTTP 404 (application/json)" is self-diagnosing
+                // where the mpv string alone sent everyone (including the
+                // Dispatcharr devs) chasing codec problems.
+                let detail = streamProbeSummary.map { "\(reason) - server response: \($0)" } ?? reason
                 let callback = onFatalError
-                Task { await callback(reason) }
+                Task { await callback(detail) }
             }
         }
 
