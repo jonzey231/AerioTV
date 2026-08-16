@@ -1315,9 +1315,17 @@ struct VODDetailView: View {
                 }
             }
             .confirmationDialog("Version", isPresented: $versionPickerPresented, titleVisibility: .visible) {
-                Button("Auto (recommended)") { rememberVersion(nil) }
+                // A leading checkmark marks the active choice. iOS's Menu and
+                // Android TV's radio row both show it; this dialog's plain
+                // buttons gave no clue which copy was pinned (Logan,
+                // 2026-08-15) - the only tell was the pill behind the dialog.
+                Button(selectedVersion == nil ? "✓ Auto (recommended)" : "Auto (recommended)") {
+                    rememberVersion(nil)
+                }
                 ForEach(versionProviders) { rel in
-                    Button(label(for: rel)) { rememberVersion(rel) }
+                    Button(selectedVersion?.id == rel.id ? "✓ \(label(for: rel))" : label(for: rel)) {
+                        rememberVersion(rel)
+                    }
                 }
             }
             // Same problem the cast strip solves below: Play sits above a tall
@@ -1394,8 +1402,14 @@ struct VODDetailView: View {
         } else {
             let ep = fullSeries?.seasons.flatMap(\.episodes).first { $0.id == (vodID ?? "") }
             playingVersionOptions = buildVersionOptions(movie: nil, episode: ep)
-            // Episodes pin an account, not a file, so nothing to attribute.
-            playingVersionOptionID = nil
+            // Episodes pin an ACCOUNT, not a file, so the options built above
+            // are keyed by account id while the series-level pin is a relation
+            // id. Map one to the other or the player's Switch Version menu can
+            // never mark the copy in use (Logan, 2026-08-15, iPhone: the
+            // submenu listed all three copies with no checkmark). Learned
+            // measurements stay movies-only via the player's own vodType gate,
+            // so feeding a real id here does not pollute that cache.
+            playingVersionOptionID = selectedVersion?.account.id
         }
 
         var resolvedURL = url

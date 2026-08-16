@@ -2068,6 +2068,39 @@ private struct PlayerRootView: View {
             // chrome's cells sit (it was flush against the bottom,
             // overlapping broadcaster tickers).
             .padding(.bottom, 24)
+            // These cells draw their focus visual from `tvFocus`, not the
+            // system ring, and the focus engine was handing left/right to
+            // neighbours that draw nothing (the scrubber above, the
+            // background behind). Focus silently left the row, every cell
+            // went unlit, and the user was stranded on Pause with no way to
+            // reach Options (Logan 2026-08-15 on a VOD episode; Discord
+            // roman on DVR before that). Walk the row ourselves.
+            //
+            // onMoveCommand swallows EVERY direction it receives, so each one
+            // needs an explicit answer or it becomes the next one-way trap -
+            // the same lesson the scrubber above carries from 1.8.13.
+            .onMoveCommand { direction in
+                let order: [TVPlayerFocus] = [.transportRW, .playPause, .transportFF, .gearIcon]
+                let current = tvFocus ?? .playPause
+                guard let idx = order.firstIndex(of: current) else { return }
+                switch direction {
+                case .left:
+                    if idx > 0 { tvFocus = order[idx - 1] }
+                case .right:
+                    if idx < order.count - 1 { tvFocus = order[idx + 1] }
+                case .up:
+                    // Back up to the timeline, but only when it can actually
+                    // hold focus; otherwise stay put rather than vanish.
+                    if showControls, !isLive || isLiveRewindMode, isScrubberActive {
+                        tvFocus = .scrubber
+                    }
+                case .down:
+                    break
+                @unknown default:
+                    break
+                }
+                scheduleControlsHide()
+            }
             #endif
         }
         // YouTube-style scrub readout: a floating bubble above the bar
