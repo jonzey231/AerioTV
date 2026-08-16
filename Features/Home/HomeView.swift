@@ -4271,8 +4271,16 @@ struct MainTabView: View {
             // the toolbar item). Refresh is the TV stand-in for
             // pull-to-refresh: re-fetches channels + EPG without a trip
             // through Settings.
+            // A pushed VOD detail hides the tab bar (VODDetailView's
+            // .toolbar(.hidden, for: .tabBar)), but these circles are an
+            // overlay OUTSIDE the TabView, so that hide never reached them:
+            // they kept drawing at zIndex 2 over the detail page and stayed
+            // focusable through their own focusSection. Gate on the same
+            // isDetailPushed flag OnDemandView already uses to drop its
+            // Movies/Series pill row.
             #if os(tvOS)
-            if selectedTab != .settings && (!nowPlaying.isActive || nowPlaying.isMinimized) {
+            if selectedTab != .settings && !isVODDetailPushed
+                && (!nowPlaying.isActive || nowPlaying.isMinimized) {
                 GeometryReader { geo in
                     // Same centered-bar estimate guideHintWidthBudget uses:
                     // ~230pt per tab, deliberately WIDE so the circles sit

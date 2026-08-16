@@ -663,6 +663,30 @@ struct ChannelListView: View {
         }
     }
 
+    /// GH #72 (ochaos, 1.8.16): a group with no channels rendered a blank
+    /// guide / list containing nothing focusable. In sidebar mode the group
+    /// pills are hidden, so once the user landed in an empty group there was
+    /// no control left on screen at all. This notice keeps a focusable way
+    /// back to every channel on screen no matter which group-selection mode,
+    /// view mode, or platform the user is on. The hold-Left fix in
+    /// EPGGuideView (the sidebar no longer requires a focused cell) is the
+    /// other half; this is the one that does not depend on a remote gesture.
+    @ViewBuilder
+    private var emptyGroupNotice: some View {
+        EmptyStateView(
+            icon: searchText.isEmpty ? "rectangle.on.rectangle.slash" : "magnifyingglass",
+            title: searchText.isEmpty ? "No Channels in This Group" : "No Matching Channels",
+            message: searchText.isEmpty
+                ? "This group has no channels yet. It fills in as soon as the provider assigns some."
+                : "No channels in this group match that search.",
+            action: {
+                searchText = ""
+                selectedGroup = "All"
+            },
+            actionTitle: "Show All Channels"
+        )
+    }
+
     @ViewBuilder
     private var bodyContent: some View {
         if servers.isEmpty {
@@ -793,6 +817,15 @@ struct ChannelListView: View {
                                 withAnimation(.easeOut(duration: 0.28)) { guideSidebarOpen = true }
                             }
                         )
+                        // GH #72: the guide itself stays mounted (it owns the
+                        // hold-Left / sidebar receivers), the notice just
+                        // covers its empty grid.
+                        .overlay {
+                            if filteredChannels.isEmpty {
+                                emptyGroupNotice
+                                    .background(Color.appBackground)
+                            }
+                        }
                         #if os(tvOS)
                         .focusSection()
                         #endif
@@ -955,6 +988,14 @@ struct ChannelListView: View {
                             .frame(height: 0)
                             .id("guide.top")
 
+                        // GH #72: inside the LazyVStack (not an overlay) so
+                        // the button lands in the same focus scope the rows
+                        // would have occupied.
+                        if filteredChannels.isEmpty {
+                            emptyGroupNotice
+                                .frame(minHeight: 420)
+                        }
+
                         // Keyed by the channel id (Identifiable), not rowKey,
                         // because the tvOS focus + scroll-restore below targets
                         // rows by id (`focusedGuideRowID`, prefersDefaultFocus,
@@ -1080,6 +1121,15 @@ struct ChannelListView: View {
             }
             #else
             List {
+                // GH #72: an empty group is a legitimate state (a provider
+                // group the upstream has not populated yet), not an error, so
+                // it gets a notice with a way out rather than a blank list.
+                if filteredChannels.isEmpty {
+                    emptyGroupNotice
+                        .frame(minHeight: 320)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                }
                 // Key rows by the unique stream URL, not the channel id,
                 // so a provider that reuses one tvg-id across distinct
                 // channels can't produce duplicate SwiftUI identities.

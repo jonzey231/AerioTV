@@ -2879,7 +2879,10 @@ struct EPGGuideView: View {
     var sidebarOpen: Bool = false
     /// Called with the focused now-airing program id when a short-Left on the
     /// now column should open the group sidebar (sidebar mode only).
-    var onRequestGroupSidebar: ((String) -> Void)? = nil
+    /// Optional programme id = the cell to restore focus to when the sidebar
+    /// closes. nil when nothing is focused (GH #72: an empty group has no
+    /// cells, and the hold must still open the sidebar).
+    var onRequestGroupSidebar: ((String?) -> Void)? = nil
 
     // Observe the shared GuideStore so its loading state is visible to
     // MainTabView's initial-sync loading cover (see HomeView's
@@ -3964,10 +3967,18 @@ struct EPGGuideView: View {
                 // Sidebar mode's hold-Left (Logan 2026-08-06 ruling): the
                 // host posts, we answer with the focused programme so the
                 // sidebar knows where to restore focus on dismiss.
+                //
+                // GH #72: a focused programme must NOT be a precondition.
+                // An empty group has no cells, so focusedProgramID is nil and
+                // the old `let fpid =` binding failed the guard - hold-Left
+                // went dead exactly when the sidebar was the only way out.
+                // The return id is optional all the way down (the dismiss
+                // handler already falls back to resolveFocusProgramID and
+                // then to resetFocus), so nil just means "no cell to
+                // restore".
                 guard RemoteControlStore.shared.useGroupSidebar, !sidebarOpen,
-                      let fpid = focusedProgramID,
                       let request = onRequestGroupSidebar else { return }
-                request(fpid)
+                request(focusedProgramID)
             }
     }
 
