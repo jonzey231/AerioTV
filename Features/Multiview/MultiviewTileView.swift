@@ -1717,6 +1717,14 @@ struct MultiviewTileView: View {
             }
         }
 
+        // Swap Stream: re-point THIS tile at another channel through the same
+        // picker as Add Stream. The tvOS menu carries the twin of this item;
+        // they are separate lists, so an action added to one is NOT on the
+        // other (that is exactly how iOS shipped without this at first).
+        Button("Swap Stream") {
+            store.pendingSwapTileID = tile.id
+        }
+
         let isFullscreen = store.fullscreenTileID == tile.id
         Button(isFullscreen ? "Exit Full-Screen" : "Full-Screen in Grid") {
             store.fullscreenTileID = isFullscreen ? nil : tile.id
