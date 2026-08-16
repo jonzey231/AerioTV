@@ -1390,14 +1390,17 @@ struct MultiviewTileView: View {
                         .foregroundStyle(.white.opacity(0.7))
                 }
                 HStack(spacing: 12) {
-                    // tvOS sole tile (the regular full-screen player): Retry
-                    // lives in the standard player controls, auto-summoned +
-                    // focused (Android parity) - the card stays informational
-                    // because a center button can't reliably take Siri-remote
-                    // focus over the playback surface. Grid tiles and iOS
-                    // keep the card button as the direct tap/click affordance.
+                    // tvOS: the card is INFORMATIONAL, on every tile. A card
+                    // button cannot reliably take Siri-remote focus over the
+                    // playback surface - the sole-tile case learned this first,
+                    // and grid tiles have it worse: the container's D-pad model
+                    // owns navigation between tiles, so these buttons rendered
+                    // active but could never be reached (Logan, 2026-08-16;
+                    // auto-reconnect recovered around them). Retry stays
+                    // covered by the auto-reconnect loop and Remove by the
+                    // tile's long-OK menu. iOS keeps both as tap targets.
                     #if os(tvOS)
-                    let showCardRetry = !isSoleTile
+                    let showCardRetry = false
                     #else
                     let showCardRetry = true
                     #endif
@@ -1418,8 +1421,15 @@ struct MultiviewTileView: View {
                     // Remove is multiview idiom: on the sole full-screen
                     // channel it read as the wrong player's controls AND
                     // removing the only tile exits playback outright (ATV
-                    // field report 2026-07-12). Grid tiles keep it.
-                    if !isSoleTile {
+                    // field report 2026-07-12). iOS grid tiles keep it; on
+                    // tvOS it is unreachable for the same reason as Retry
+                    // above, and the tile menu's Remove covers it.
+                    #if os(tvOS)
+                    let showCardRemove = false
+                    #else
+                    let showCardRemove = !isSoleTile
+                    #endif
+                    if showCardRemove {
                         Button(role: .destructive) {
                             DebugLogger.shared.log(
                                 "[MV-Cmd] error overlay Remove tile=\(tile.id)",
