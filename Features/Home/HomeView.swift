@@ -3597,6 +3597,15 @@ struct MainTabView: View {
     /// `runChannelServerTaskBody` so each fresh server-key change gets
     /// exactly one attempt.
     @State private var didAttemptGuideFailover = false
+    /// Oki's debug log (2026-08-16): true once the orchestrator has run
+    /// this session. Every LATER orchestratorKey change debounces 900ms
+    /// before firing (SwiftUI cancels the pending task when the key
+    /// changes again), so a burst of key changes - each keystroke of a
+    /// URL edit that reaches the model, a sync merge rewriting servers -
+    /// collapses to ONE reload of the settled value instead of a full
+    /// channels + EPG + recordings + VOD run against every intermediate
+    /// state. First run stays immediate so cold launch pays nothing.
+    @State private var orchestratorRanOnce = false
     /// CFAbsoluteTime captured when the initial-sync cover is first
     /// shown. Consumed (and cleared) when the cover dismisses so the
     /// dismissal log line can report total duration. Kept as an
@@ -5217,6 +5226,18 @@ struct MainTabView: View {
         // keeps the total request rate bounded, so it's an
         // acceptable cost for race-free orchestration.
         .task(id: orchestratorKey) {
+            // Debounce every re-fire after the first run (see
+            // orchestratorRanOnce). Task.sleep throws when SwiftUI
+            // cancels this task because the key changed again, so a
+            // burst of changes runs the orchestrator exactly once,
+            // 900ms after the last one. Staging the Edit Server URL
+            // field (EditServerSheet/Page) is the source fix for the
+            // keystroke storm; this net covers every other writer
+            // (sync merges, older edit surfaces, future fields).
+            if orchestratorRanOnce {
+                do { try await Task.sleep(for: .milliseconds(900)) } catch { return }
+            }
+            orchestratorRanOnce = true
             await runChannelServerTaskBody()
         }
         // TEST (branch test/avplayer-hls-engine): hosts the native AVPlayer

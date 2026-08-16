@@ -71,6 +71,26 @@ struct EditServerPage: View {
     // without going to a different device. See `EditServerSheet`
     // for the per-property doc.
     @State private var pendingCredentialType: DispatcharrCredentialType? = nil
+
+    /// Oki's debug log (2026-08-16 12:51:54): binding the URL field
+    /// straight to `$server.baseURL` persisted every keystroke, and each
+    /// write restarted MainTabView's `.task(id: orchestratorKey)` full
+    /// reload against the half-typed host. Staged in @State until Save,
+    /// same pattern as `pendingCredentialType`. Mirrors EditServerSheet.
+    @State private var pendingBaseURL: String? = nil
+
+    private var baseURLBinding: Binding<String> {
+        Binding(
+            get: { pendingBaseURL ?? server.baseURL },
+            set: { pendingBaseURL = $0 }
+        )
+    }
+
+    private func commitBaseURLIfStaged() {
+        guard let pending = pendingBaseURL else { return }
+        server.baseURL = pending.trimmingCharacters(in: .whitespacesAndNewlines)
+        pendingBaseURL = nil
+    }
     @State private var isRefreshingSession: Bool = false
     @State private var sessionRefreshMessage: String? = nil
     @State private var sessionRefreshSucceeded: Bool = false
@@ -178,7 +198,7 @@ struct EditServerPage: View {
                     // Connection
                     SettingsSection("Connection", style: .eyebrowCard) {
                         tvField("Name", text: $server.name)
-                        tvField("URL", text: $server.baseURL)
+                        tvField("URL", text: baseURLBinding)
                     }
 
                     // Credentials
@@ -379,6 +399,7 @@ struct EditServerPage: View {
                             // staged credential-mode change before
                             // persisting credentials. tvOS edit
                             // surface mirrors iOS Save behavior.
+                            commitBaseURLIfStaged()
                             commitCredentialModeIfStaged()
                             SyncManager.shared.saveCredentialsSynced(for: server)
                             dismiss()
@@ -393,7 +414,8 @@ struct EditServerPage: View {
                         }
                         .buttonStyle(TVNoHighlightButtonStyle())
                         .disabled(server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
-                                  server.baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                                  (pendingBaseURL ?? server.baseURL)
+                                      .trimmingCharacters(in: .whitespaces).isEmpty)
                         Spacer()
                     }
                     .padding(.top, 16)

@@ -43,6 +43,34 @@ struct EditServerSheet: View {
     /// "staged change pending Save". Persisted in `commitEdits()`.
     @State private var pendingCredentialType: DispatcharrCredentialType? = nil
 
+    /// Oki's debug log (2026-08-16 12:51:54): the URL TextField bound
+    /// `$server.baseURL` directly, so EVERY keystroke persisted to
+    /// SwiftData, changed `channelServerKey`, and restarted MainTabView's
+    /// `.task(id: orchestratorKey)` - a full channels + EPG + recordings +
+    /// VOD reload against each half-typed host (`:919`, `:91`, `:9`, `:5`,
+    /// `:56`, `:565` as he retyped a port), each hanging to an 8s timeout.
+    /// Same staging pattern as `pendingCredentialType` above: the edit
+    /// lives in @State until Save, so intermediate keystrokes never reach
+    /// the model or its observers, and Cancel discards for free.
+    @State private var pendingBaseURL: String? = nil
+
+    /// Binds the URL TextField. Reads through to the model until the user
+    /// types; writes stage into `pendingBaseURL` only.
+    private var baseURLBinding: Binding<String> {
+        Binding(
+            get: { pendingBaseURL ?? server.baseURL },
+            set: { pendingBaseURL = $0 }
+        )
+    }
+
+    /// Apply the staged URL to the model. Called from Save, before the
+    /// credential commit, so `saveCredentialsSynced` sees the final URL.
+    private func commitBaseURLIfStaged() {
+        guard let pending = pendingBaseURL else { return }
+        server.baseURL = pending.trimmingCharacters(in: .whitespacesAndNewlines)
+        pendingBaseURL = nil
+    }
+
     /// v1.7.x: read view of the credential mode that respects any
     /// staged change. Body switches on this so revealing the
     /// alternate fields is immediate while the model write is
@@ -104,7 +132,10 @@ struct EditServerSheet: View {
     private func refreshDirectConnectSession() async {
         let username = server.username
         let password = server.effectivePassword
-        let baseURL  = server.effectiveBaseURL
+        // Staged-URL aware: if the user retyped the URL and taps Refresh
+        // Session before Save, log in against the visible value.
+        let baseURL  = pendingBaseURL?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? server.effectiveBaseURL
         let userAgent = server.effectiveUserAgent
         let serverID = server.id
         guard !username.isEmpty, !password.isEmpty else {
@@ -204,6 +235,7 @@ struct EditServerSheet: View {
                         // persisting credentials. Cancel skips
                         // this step, so toggling the picker and
                         // backing out leaves the model unchanged.
+                        commitBaseURLIfStaged()
                         commitCredentialModeIfStaged()
                         SyncManager.shared.saveCredentialsSynced(for: server)
                         dismiss()
@@ -211,7 +243,8 @@ struct EditServerSheet: View {
                     .foregroundColor(.accentPrimary)
                     .fontWeight(.semibold)
                     .disabled(server.name.trimmingCharacters(in: .whitespaces).isEmpty ||
-                              server.baseURL.trimmingCharacters(in: .whitespaces).isEmpty)
+                              (pendingBaseURL ?? server.baseURL)
+                                  .trimmingCharacters(in: .whitespaces).isEmpty)
                 }
             }
         }
@@ -224,7 +257,7 @@ struct EditServerSheet: View {
             Section {
                 TextField("Name", text: $server.name)
                     .listRowBackground(Color.cardBackground)
-                TextField("URL", text: $server.baseURL)
+                TextField("URL", text: baseURLBinding)
                     .keyboardType(.URL)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
