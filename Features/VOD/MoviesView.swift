@@ -361,7 +361,7 @@ struct MoviesView: View {
                                                         itemType: "movie",
                                                         itemID: progress.vodID)
                 } ?? ""
-            loadResumeVersionOptions(progress: progress, server: resumeServer)
+            loadResumeVersionOptions(progress: progress, resumeURL: url, server: resumeServer)
             resumePlayingURL = IdentifiableURL(url: url)
             isPlaying = true
             return
@@ -378,22 +378,47 @@ struct MoviesView: View {
     /// Dispatcharr builds lack /provider-info/, and a missing list just
     /// means the player shows no version row, exactly as before).
     private func loadResumeVersionOptions(progress: WatchProgress,
+                                          resumeURL: URL,
                                           server: ServerConnection?) {
-        guard let server, server.type == .dispatcharrAPI,
-              let numericID = Int(progress.vodID) else { return }
-        // The proxy URL needs the movie's Dispatcharr UUID, which lives on
-        // the catalog row rather than the watch-progress record.
-        let uuid = vodStore.movies
-            .first(where: { $0.id == progress.vodID })?
-            .movie?.dispatcharrUUID ?? ""
-        guard !uuid.isEmpty else { return }
+        // Fall back to the active Dispatcharr server: a watch-progress row
+        // synced from another device can carry a serverID this install does
+        // not have, and the resume itself already falls back the same way.
+        let resolved = server ?? servers.first(where: {
+            $0.isActive && $0.type == .dispatcharrAPI
+        }) ?? servers.first(where: { $0.type == .dispatcharrAPI })
+        guard let resolved, resolved.type == .dispatcharrAPI,
+              let numericID = Int(progress.vodID) else {
+            debugLog("[VOD-VERSION] resume skipped: no dispatcharr server or non-numeric id \(progress.vodID)")
+            return
+        }
+        // Take the movie's Dispatcharr UUID straight out of the resume URL
+        // (/proxy/vod/movie/<uuid>[/<session>]) rather than looking the title
+        // up in vodStore.movies. The first attempt did the catalog lookup and
+        // silently found nothing on device (ATV retest 2026-08-17) - the row
+        // may not be loaded yet during the 2.5-minute VOD sync, and a synced
+        // progress row can name a title this device never fetched. The URL is
+        // always present because it is what we are about to play.
+        let comps = resumeURL.pathComponents
+        let uuid = comps.firstIndex(of: "movie")
+            .flatMap { i in i + 1 < comps.count ? comps[i + 1] : nil } ?? ""
+        guard !uuid.isEmpty else {
+            debugLog("[VOD-VERSION] resume skipped: no uuid in \(resumeURL.path)")
+            return
+        }
+        let server = resolved
         let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
                                  auth: .apiKey(server.effectiveApiKey),
                                  userAgent: server.effectiveUserAgent,
                                  authMode: server.dispatcharrHeaderMode)
         Task { @MainActor in
-            guard let providers = try? await api.getMovieProviders(movieID: numericID),
-                  providers.count > 1 else { return }
+            guard let providers = try? await api.getMovieProviders(movieID: numericID) else {
+                debugLog("[VOD-VERSION] resume \(progress.vodID): providers fetch failed")
+                return
+            }
+            guard providers.count > 1 else {
+                debugLog("[VOD-VERSION] resume \(progress.vodID): \(providers.count) copy, no picker")
+                return
+            }
             // Label shape mirrors the detail page: account name, then the
             // best quality hint the server gave (resolution, else quality,
             // else container). Duplicates get a positional suffix so two

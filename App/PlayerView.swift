@@ -1069,6 +1069,20 @@ private struct PlayerRootView: View {
         )
         #endif
         .task { await startPlayback() }
+        // ATV retest 2026-08-17: startPlayback seeds the version menu ONCE,
+        // so a caller that resolves its options asynchronously (Continue
+        // Watching fetches the provider copies as the cover mounts) landed
+        // them after the seed and the Switch Version list stayed empty.
+        // Adopt late arrivals, keeping any selection the user already made
+        // in this session.
+        .onChange(of: vodVersionOptions) { _, options in
+            guard !options.isEmpty else { return }
+            progressStore.vodVersionOptions = options
+            if progressStore.currentVersionOptionID == nil {
+                progressStore.currentVersionOptionID = vodSelectedVersionID
+                    ?? options.first { $0.url.absoluteString == urls.first?.absoluteString }?.id
+            }
+        }
         .task(id: sleepTimerEnd) {
             // Sleep timer countdown — checks every 30s, pauses playback when expired
             guard let end = sleepTimerEnd else { return }
