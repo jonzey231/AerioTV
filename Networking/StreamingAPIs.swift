@@ -2557,15 +2557,25 @@ struct DispatcharrAPI {
         return raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? raw
     }
 
+    /// Hard cap on a SEARCH walk, well below `vodPaginationItemCap`.
+    /// A search is a find-this-title interaction, not a library sync: a
+    /// short query like "f" matches most of the library, and the old
+    /// 5,000-item budget turned it into a 50-page crawl nobody scrolls
+    /// (ATV log 2026-08-17). Three pages is more results than any TV
+    /// list surfaces before the user retypes.
+    static let vodSearchItemCap = 300
+
     /// Server-side search — uses DRF's ?search= filter so items not yet locally fetched are found.
     func searchVODMoviesStream(query: String) -> AsyncThrowingStream<[DispatcharrVODMovie], Error> {
         let encoded = Self.encodeQueryValue(query)
-        return makePageStream(firstPath: "/api/vod/movies/?search=\(encoded)&page_size=100")
+        return makePageStream(firstPath: "/api/vod/movies/?search=\(encoded)&page_size=100",
+                              itemCap: Self.vodSearchItemCap)
     }
 
     func searchVODSeriesStream(query: String) -> AsyncThrowingStream<[DispatcharrVODSeries], Error> {
         let encoded = Self.encodeQueryValue(query)
-        return makePageStream(firstPath: "/api/vod/series/?search=\(encoded)&page_size=100")
+        return makePageStream(firstPath: "/api/vod/series/?search=\(encoded)&page_size=100",
+                              itemCap: Self.vodSearchItemCap)
     }
 
     /// Hard cap on total items returned by a single paginated stream.
@@ -2610,7 +2620,19 @@ struct DispatcharrAPI {
     ///   shows what we did fetch.
     private func makePageStream<T: Decodable & Sendable>(firstPath: String, itemCap: Int? = nil) -> AsyncThrowingStream<[T], Error> {
         return AsyncThrowingStream { [self] continuation in
-            Task {
+            // ATV log 2026-08-17: this producer used to be a bare
+            // `Task {}`, which is UNSTRUCTURED - it is not a child of the
+            // consumer's task, so cancelling the consumer (VODStore's
+            // `movieSearchTask?.cancel()`, a playlist switch, leaving the
+            // screen) never stopped the page walk. Typing "far from home"
+            // in Movies left one detached loop per keystroke: the
+            // `search=f` walk alone ran 50 pages / 51 requests over 90+
+            // seconds, still paginating the whole 5,000-item library while
+            // the user was watching a movie. Hold the task and cancel it
+            // when the stream terminates (consumer break, cancellation, or
+            // iterator deinit), and check cancellation each page so an
+            // in-flight walk stops at the next boundary.
+            let task = Task {
                 let pageItemCap = itemCap ?? Self.vodPaginationItemCap
                 guard var nextURL = try? buildURL(path: firstPath) else {
                     continuation.finish(throwing: APIError.invalidURL)
@@ -2625,6 +2647,10 @@ struct DispatcharrAPI {
                 /// to gate the next iteration.
                 var totalYielded = 0
                 while true {
+                    if Task.isCancelled {
+                        continuation.finish()
+                        return
+                    }
                     var request = URLRequest(url: nextURL)
                     headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
                     let (data, response): (Data, URLResponse)
@@ -2711,6 +2737,7 @@ struct DispatcharrAPI {
                     }
                 }
             }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 

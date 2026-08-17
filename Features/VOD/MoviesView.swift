@@ -107,6 +107,11 @@ struct MoviesView: View {
     @State private var resumePosterURL: String?
     @State private var resumeServerID: String?
     @State private var resumePositionMs: Int32 = 0
+    /// Continue Watching version switching (ATV log 2026-08-17). Populated
+    /// best-effort as the resume cover mounts so the in-player Switch Version
+    /// list matches what the detail page offers for the same title.
+    @State private var resumeVersionOptions: [VODVersionOption] = []
+    @State private var resumeVersionSelectionKey: String = ""
 
     private let hiddenGroupsKey = "hiddenMovieGroups"
 
@@ -297,7 +302,11 @@ struct MoviesView: View {
                     vodPosterURL: resumePosterURL,
                     vodServerID: resumeServerID,
                     vodType: "movie",
-                    resumePositionMs: resumePositionMs
+                    resumePositionMs: resumePositionMs,
+                    vodVersionOptions: resumeVersionOptions,
+                    vodSelectedVersionID: VODVersionSelectionStore
+                        .selection(forKey: resumeVersionSelectionKey),
+                    vodVersionSelectionKey: resumeVersionSelectionKey
                 )
                 .onDisappear { isPlaying = false }
             }
@@ -328,13 +337,31 @@ struct MoviesView: View {
             resumePosterURL = progress.posterURL
             resumeServerID = progress.serverID
             resumePositionMs = progress.positionMs
-            if let sid = progress.serverID,
-               let serverUUID = UUID(uuidString: sid),
-               let server = servers.first(where: { $0.id == serverUUID }) {
-                resumePlayingHeaders = server.authHeaders
-            } else {
-                resumePlayingHeaders = dispatcharrHeaders
-            }
+            let resumeServer: ServerConnection? = progress.serverID
+                .flatMap(UUID.init(uuidString:))
+                .flatMap { uuid in servers.first(where: { $0.id == uuid }) }
+            resumePlayingHeaders = resumeServer?.authHeaders ?? dispatcharrHeaders
+            // ATV log 2026-08-17 (Logan): this fast path mounted the player
+            // cover directly, skipping the teardown VODDetailView does before
+            // its own cover. A minimized live channel therefore kept decoding
+            // UNDER the movie - two mpv instances, both audible - until the
+            // user stopped the live stream by hand. Same call, same reason as
+            // the v1.6.23 fix in VODDetailView.startPlayback.
+            PlayerSession.shared.exit()
+            // Same log, second symptom: Continue Watching passed no version
+            // options, so Switch Version was empty in the player even for a
+            // title that shows several copies when opened from Movies. Load
+            // them for this resume so the two entry points behave alike; the
+            // fetch is best-effort and never gates playback starting.
+            resumeVersionOptions = []
+            resumeVersionSelectionKey = progress.serverID
+                .flatMap(UUID.init(uuidString:))
+                .map { uuid in
+                    VODVersionSelectionStore.storageKey(serverID: uuid,
+                                                        itemType: "movie",
+                                                        itemID: progress.vodID)
+                } ?? ""
+            loadResumeVersionOptions(progress: progress, server: resumeServer)
             resumePlayingURL = IdentifiableURL(url: url)
             isPlaying = true
             return
@@ -342,6 +369,52 @@ struct MoviesView: View {
         // Fallback: find the movie in the store and push to its detail view
         if let item = vodStore.movies.first(where: { $0.id == progress.vodID }) {
             navPath.append(item)
+        }
+    }
+
+    /// Fetch this title's provider copies so the resume player can offer
+    /// Switch Version. Mirrors VODDetailView.loadVersionProviders +
+    /// buildVersionOptions for the movie case; failures are silent (older
+    /// Dispatcharr builds lack /provider-info/, and a missing list just
+    /// means the player shows no version row, exactly as before).
+    private func loadResumeVersionOptions(progress: WatchProgress,
+                                          server: ServerConnection?) {
+        guard let server, server.type == .dispatcharrAPI,
+              let numericID = Int(progress.vodID) else { return }
+        // The proxy URL needs the movie's Dispatcharr UUID, which lives on
+        // the catalog row rather than the watch-progress record.
+        let uuid = vodStore.movies
+            .first(where: { $0.id == progress.vodID })?
+            .movie?.dispatcharrUUID ?? ""
+        guard !uuid.isEmpty else { return }
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode)
+        Task { @MainActor in
+            guard let providers = try? await api.getMovieProviders(movieID: numericID),
+                  providers.count > 1 else { return }
+            // Label shape mirrors the detail page: account name, then the
+            // best quality hint the server gave (resolution, else quality,
+            // else container). Duplicates get a positional suffix so two
+            // copies from one account stay distinguishable.
+            var seenLabels: [String: Int] = [:]
+            resumeVersionOptions = providers.compactMap { rel in
+                guard let url = api.proxyMovieURL(uuid: uuid,
+                                                  preferredStreamID: rel.streamID.flatMap(Int.init),
+                                                  m3uAccountID: rel.account.id) else { return nil }
+                let account = rel.account.name?.trimmingCharacters(in: .whitespaces)
+                let name = (account?.isEmpty == false) ? account! : "Provider \(rel.account.id)"
+                let quality = rel.qualityInfo?.resolution
+                    ?? rel.qualityInfo?.quality
+                    ?? rel.containerExtension?.uppercased()
+                var label = quality.map { "\(name) · \($0)" } ?? name
+                let seen = (seenLabels[label] ?? 0) + 1
+                seenLabels[label] = seen
+                if seen > 1 { label += " (\(seen))" }
+                return VODVersionOption(id: rel.id, label: label, url: url)
+            }
+            debugLog("[VOD-VERSION] resume \(progress.vodID): \(resumeVersionOptions.count) provider copies")
         }
     }
 

@@ -254,6 +254,11 @@ struct TVShowsView: View {
             } else {
                 resumePlayingHeaders = dispatcharrHeaders
             }
+            // ATV log 2026-08-17: same defect as MoviesView's resume path -
+            // mounting the cover directly skipped the teardown VODDetailView
+            // does, so a minimized live channel kept decoding (and playing
+            // audio) underneath the episode.
+            PlayerSession.shared.exit()
             resumePlayingURL = IdentifiableURL(url: url)
             isPlaying = true
             return
