@@ -464,6 +464,18 @@ extension AerioCastController: GCKSessionManagerListener {
         guard let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession else { return }
         state = .connected(session.device.friendlyName)
         session.device.friendlyName.map { lastDeviceName = $0 }
+        // Ask for notification permission the first time a cast connects (a
+        // moment when the user just acted, so the system dialog has obvious
+        // context). Without this the app never appears in Settings >
+        // Notifications unless the user happens to set a reminder first, and
+        // the involuntary-drop alert below has nowhere to land - found on
+        // Logan's iPhone during the drop test 2026-08-19. No-op once the
+        // user has answered either way.
+        Task {
+            let center = UNUserNotificationCenter.current()
+            guard await center.notificationSettings().authorizationStatus == .notDetermined else { return }
+            _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        }
         session.remoteMediaClient?.add(self)
         if let pending {
             load(pending, on: session)
@@ -544,7 +556,8 @@ extension AerioCastController: GCKSessionManagerListener {
             Task {
                 let center = UNUserNotificationCenter.current()
                 let settings = await center.notificationSettings()
-                guard settings.authorizationStatus == .authorized else { return }
+                guard settings.authorizationStatus == .authorized
+                    || settings.authorizationStatus == .provisional else { return }
                 let content = UNMutableNotificationContent()
                 content.title = deviceName.map { "Casting to \($0) interrupted" }
                     ?? "Casting interrupted"
