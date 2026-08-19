@@ -31,6 +31,11 @@ struct TVShowsView: View {
     @State private var resumePosterURL: String?
     @State private var resumeServerID: String?
     @State private var resumePositionMs: Int32 = 0
+    // Provider copies for the resumed episode, so Switch Version works from
+    // Continue Watching the same as it does from the series page (the movie
+    // half of this shipped in 1.8.19; Logan flagged the episode gap 2026-08-19).
+    @State private var resumeVersionOptions: [VODVersionOption] = []
+    @State private var resumeVersionSelectionKey: String = ""
 
     private let hiddenGroupsKey = "hiddenSeriesGroups"
 
@@ -218,7 +223,11 @@ struct TVShowsView: View {
                     vodPosterURL: resumePosterURL,
                     vodServerID: resumeServerID,
                     vodType: "episode",
-                    resumePositionMs: resumePositionMs
+                    resumePositionMs: resumePositionMs,
+                    vodVersionOptions: resumeVersionOptions,
+                    vodSelectedVersionID: VODVersionSelectionStore
+                        .selection(forKey: resumeVersionSelectionKey),
+                    vodVersionSelectionKey: resumeVersionSelectionKey
                 )
                 .onDisappear { isPlaying = false }
             }
@@ -259,6 +268,27 @@ struct TVShowsView: View {
             // does, so a minimized live channel kept decoding (and playing
             // audio) underneath the episode.
             PlayerSession.shared.exit()
+            // Same second symptom as MoviesView's resume: no version options
+            // meant Switch Version was empty in the player even when the
+            // series page shows several sources. Best-effort; never gates
+            // playback. The selection key is the SERIES key (itemType
+            // "series", series id) - identical to VODDetailView's, so a pin
+            // made on the series page and one made mid-play in this resume
+            // read and write the same stored choice.
+            resumeVersionOptions = []
+            let resumeServer: ServerConnection? = progress.serverID
+                .flatMap(UUID.init(uuidString:))
+                .flatMap { uuid in servers.first(where: { $0.id == uuid }) }
+            if let serverUUID = progress.serverID.flatMap(UUID.init(uuidString:)),
+               let seriesID = progress.seriesID {
+                resumeVersionSelectionKey = VODVersionSelectionStore
+                    .storageKey(serverID: serverUUID,
+                                itemType: "series",
+                                itemID: seriesID)
+            } else {
+                resumeVersionSelectionKey = ""
+            }
+            loadResumeVersionOptions(progress: progress, resumeURL: url, server: resumeServer)
             resumePlayingURL = IdentifiableURL(url: url)
             isPlaying = true
             return
@@ -266,6 +296,68 @@ struct TVShowsView: View {
         // Fallback: find the series in the store and push to its detail view
         if let item = vodStore.series.first(where: { $0.id == progress.vodID }) {
             navPath.append(item)
+        }
+    }
+
+    /// Fetch the parent series' provider copies so the resumed episode can
+    /// offer Switch Version. Mirrors MoviesView.loadResumeVersionOptions with
+    /// the episode differences from VODDetailView.buildVersionOptions:
+    /// providers come from the SERIES id (progress.seriesID - an episode
+    /// progress row's vodID is the episode's own id), episodes pin by
+    /// m3u_account_id only (a series relation id does not address an episode
+    /// row), so options dedupe to one per distinct account with the ACCOUNT
+    /// id as the option id, and labels are the plain account name.
+    private func loadResumeVersionOptions(progress: WatchProgress,
+                                          resumeURL: URL,
+                                          server: ServerConnection?) {
+        // Fall back to the active Dispatcharr server: a watch-progress row
+        // synced from another device can carry a serverID this install does
+        // not have, and the resume itself already falls back the same way.
+        let resolved = server ?? servers.first(where: {
+            $0.isActive && $0.type == .dispatcharrAPI
+        }) ?? servers.first(where: { $0.type == .dispatcharrAPI })
+        guard let resolved, resolved.type == .dispatcharrAPI,
+              let seriesID = progress.seriesID, let numericID = Int(seriesID) else {
+            debugLog("[VOD-VERSION] episode resume skipped: no dispatcharr server or series id (vodID=\(progress.vodID))")
+            return
+        }
+        // The episode's Dispatcharr UUID comes straight out of the resume URL
+        // (/proxy/vod/episode/<uuid>[/<session>]), same lesson as the movie
+        // path: the catalog may not hold this episode yet (mid-sync, or a
+        // synced row from another device), but the URL is always present
+        // because it is what we are about to play.
+        let comps = resumeURL.pathComponents
+        let uuid = comps.firstIndex(of: "episode")
+            .flatMap { i in i + 1 < comps.count ? comps[i + 1] : nil } ?? ""
+        guard !uuid.isEmpty else {
+            debugLog("[VOD-VERSION] episode resume skipped: no uuid in \(resumeURL.path)")
+            return
+        }
+        let server = resolved
+        let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                 auth: .apiKey(server.effectiveApiKey),
+                                 userAgent: server.effectiveUserAgent,
+                                 authMode: server.dispatcharrHeaderMode)
+        Task { @MainActor in
+            guard let providers = try? await api.getSeriesProviders(seriesID: numericID) else {
+                debugLog("[VOD-VERSION] episode resume \(progress.vodID): providers fetch failed")
+                return
+            }
+            var seen = Set<Int>()
+            let options: [VODVersionOption] = providers.compactMap { rel in
+                guard seen.insert(rel.account.id).inserted,
+                      let url = api.proxyEpisodeURL(uuid: uuid,
+                                                    m3uAccountID: rel.account.id) else { return nil }
+                return VODVersionOption(id: rel.account.id,
+                                        label: rel.account.name ?? "Source \(rel.account.id)",
+                                        url: url)
+            }
+            guard options.count > 1 else {
+                debugLog("[VOD-VERSION] episode resume \(progress.vodID): \(options.count) distinct account(s), no picker")
+                return
+            }
+            resumeVersionOptions = options
+            debugLog("[VOD-VERSION] episode resume \(progress.vodID): \(options.count) provider accounts")
         }
     }
 
