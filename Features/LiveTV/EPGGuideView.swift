@@ -1207,7 +1207,8 @@ final class GuideStore: ObservableObject {
                                                   subTitle: prog.subTitle.isEmpty ? nil : prog.subTitle,
                                                   season: prog.season, episode: prog.episode,
                                                   isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
-                                                  isPremiere: prog.isPremiere, isFinale: prog.isFinale)
+                                                  isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                                                  isRepeat: prog.isRepeat)
                             GuideStore.mergeProgramInto(&dict, program: gp, for: cid, deferSort: true)
                             touched.insert(cid)
                         }
@@ -1290,7 +1291,8 @@ final class GuideStore: ObservableObject {
                                           subTitle: prog.subTitle.isEmpty ? nil : prog.subTitle,
                                           season: prog.season, episode: prog.episode,
                                           isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
-                                          isPremiere: prog.isPremiere, isFinale: prog.isFinale)
+                                          isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                                          isRepeat: prog.isRepeat)
                     mergeProgram(gp, for: cid)
                 }
             }
@@ -1329,7 +1331,8 @@ final class GuideStore: ObservableObject {
                                           subTitle: prog.subTitle.isEmpty ? nil : prog.subTitle,
                                           season: prog.season, episode: prog.episode,
                                           isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
-                                          isPremiere: prog.isPremiere, isFinale: prog.isFinale)
+                                          isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                                          isRepeat: prog.isRepeat)
                     mergeProgram(gp, for: cid)
                 }
             }
@@ -2481,7 +2484,8 @@ final class GuideStore: ObservableObject {
                                                     subTitle: prog.subTitle.isEmpty ? nil : prog.subTitle,
                                                     season: prog.season, episode: prog.episode,
                                                     isNew: prog.isNew, isLiveBroadcast: prog.isLiveBroadcast,
-                                                    isPremiere: prog.isPremiere, isFinale: prog.isFinale)
+                                                    isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                                                    isRepeat: prog.isRepeat)
                             }
                             return (programs, false)
                         } catch {
@@ -3424,6 +3428,13 @@ struct EPGGuideView: View {
             )
             #endif
             #if os(tvOS)
+            // iOS #66 (knmplace): channel up/down page the guide. The Siri
+            // Remote has no channel buttons, but tvOS maps the channel keys
+            // of CEC-bridged TV remotes to .pageUp/.pageDown presses
+            // (tvOS 14.3+), so this serves every "I use my TV's remote"
+            // setup. Window-level catcher because the presses route to the
+            // focused cell, not to any ancestor this background could own.
+            .background(TVPagePressCatcher { down in pageGuideFocus(down: down) })
             .onMoveCommand { direction in
                 // #42 Part 1: only scroll the EPG timeline when a guide program
                 // cell is actually focused. A held Left whose focus has jumped to
@@ -3883,6 +3894,34 @@ struct EPGGuideView: View {
     /// Task #188: memoized in GuideStore (cleared on EPG writes) -- the
     /// linear scan ran on every focus change and up to ~5x per horizontal
     /// press via the retarget/assert-retry loops.
+    #if os(tvOS)
+    /// iOS #66: move focus one viewport of channels up or down, driven by the
+    /// CEC channel keys (delivered as pageUp/pageDown). Mirrors the Android
+    /// CHANNEL_UP/DOWN pager: clamps at the list edges and never escapes the
+    /// grid. Uses the same assert-until-accepted focus write the top-channel
+    /// and return-from-player paths need (a single write is dropped while the
+    /// target row is still laying out).
+    private func pageGuideFocus(down: Bool) {
+        guard let pid = focusedProgramID,
+              let curCh = channelID(ofProgram: pid),
+              let curIdx = channels.firstIndex(where: { $0.id == curCh }) else { return }
+        let visibleRows = max(1, Int(UIScreen.main.bounds.height / rowHeight) - 2)
+        let target = min(max(down ? curIdx + visibleRows : curIdx - visibleRows, 0),
+                         channels.count - 1)
+        guard target != curIdx,
+              let targetPID = resolveFocusProgramID(preferringChannel: channels[target].id)
+        else { return }
+        debugLog("🧭 [GuideFocus] page\(down ? "Down" : "Up") ch#\(curIdx) -> ch#\(target) rows=\(visibleRows)")
+        Task { @MainActor in
+            for _ in 0..<6 {
+                focusedProgramID = targetPID
+                try? await Task.sleep(nanoseconds: 70_000_000)
+                if focusedProgramID == targetPID { break }
+            }
+        }
+    }
+    #endif
+
     private func channelID(ofProgram pid: String) -> String? {
         if let hit = guideStore.programChannelMemo[pid] { return hit }
         let resolved = channels.first { ch in
@@ -4598,6 +4637,9 @@ private struct GuideChannelButton: View {
     /// Same key as the List view's toggle; the guide's logo is gated by
     /// logoURL presence only, so this is the guide's first appearance flag.
     @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
+    /// GH #73 (ant462, filed on Android; applied here for parity): hide the
+    /// channel NAME text in the guide rail, leaving logo and number.
+    @AppStorage("ui.showChannelNames") private var showChannelNames = true
 
     var body: some View {
         #if os(tvOS)
@@ -4669,10 +4711,12 @@ private struct GuideChannelButton: View {
                 } else {
                     guidePlaceholder
                 }
-                Text(channel.name)
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(.textPrimary)
-                    .lineLimit(1)
+                if showChannelNames {
+                    Text(channel.name)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.textPrimary)
+                        .lineLimit(1)
+                }
             }
             .frame(maxWidth: .infinity)
         }
@@ -4699,10 +4743,12 @@ private struct GuideChannelButton: View {
                 guidePlaceholder
             }
             VStack(spacing: 1) {
-                Text(channel.name)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.textPrimary)
-                    .lineLimit(1)
+                if showChannelNames {
+                    Text(channel.name)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.textPrimary)
+                        .lineLimit(1)
+                }
                 // GH #19: hide the number line when numbers are off.
                 if showChannelNumbers {
                     Text(channel.number)
@@ -5676,5 +5722,50 @@ private struct GuideMiniCloseRightHoldArm: View {
 #else
 private struct GuideMiniCloseRightHoldArm: View {
     var body: some View { Color.clear }
+}
+#endif
+
+#if os(tvOS)
+/// Window-level catcher for the pageUp/pageDown presses tvOS synthesizes from
+/// CEC TV-remote channel keys (iOS #66). The presses are delivered to the
+/// FOCUSED view, so a background sibling never sees them; recognizers on the
+/// window do. Installed while the guide is on screen, removed with the view.
+/// isUserInteractionEnabled=false keeps this view itself out of hit-testing
+/// and the focus system entirely.
+private struct TVPagePressCatcher: UIViewRepresentable {
+    let onPage: (Bool) -> Void
+
+    func makeUIView(context: Context) -> CatcherView { CatcherView(onPage: onPage) }
+    func updateUIView(_ view: CatcherView, context: Context) { view.onPage = onPage }
+
+    final class CatcherView: UIView {
+        var onPage: (Bool) -> Void
+        private var recognizers: [UITapGestureRecognizer] = []
+
+        init(onPage: @escaping (Bool) -> Void) {
+            self.onPage = onPage
+            super.init(frame: .zero)
+            isUserInteractionEnabled = false
+        }
+        required init?(coder: NSCoder) { fatalError("unused") }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            // Remove from the OLD window on the way out (view holds the ref).
+            recognizers.forEach { $0.view?.removeGestureRecognizer($0) }
+            recognizers = []
+            guard let window else { return }
+            let up = UITapGestureRecognizer(target: self, action: #selector(firePageUp))
+            up.allowedPressTypes = [NSNumber(value: UIPress.PressType.pageUp.rawValue)]
+            let down = UITapGestureRecognizer(target: self, action: #selector(firePageDown))
+            down.allowedPressTypes = [NSNumber(value: UIPress.PressType.pageDown.rawValue)]
+            window.addGestureRecognizer(up)
+            window.addGestureRecognizer(down)
+            recognizers = [up, down]
+        }
+
+        @objc private func firePageUp() { onPage(false) }
+        @objc private func firePageDown() { onPage(true) }
+    }
 }
 #endif

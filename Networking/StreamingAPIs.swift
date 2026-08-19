@@ -3864,14 +3864,19 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
 
     // EPG badge metadata. On the wire in `/api/epg/grid/` and the
     // current/upcoming endpoints; older servers omit them, so all decode
-    // with `decodeIfPresent` + false/nil fallbacks. Dispatcharr has no
-    // repeat field, so REPEAT stays false on this path.
+    // with `decodeIfPresent` + false/nil fallbacks. `is_previously_shown`
+    // is NOT in Dispatcharr's slim grid serializer today (only the
+    // per-program detail carries it - apps/epg/serializers.py), which is
+    // why REPEAT pills show via XC's XMLTV but not Direct Connect
+    // (mikec79, Discord 2026-08-19). Decoded anyway so the pill lights
+    // up the moment the server adds the field.
     let season: Int?
     let episode: Int?
     let isNew: Bool
     let isLiveBroadcast: Bool
     let isPremiere: Bool
     let isFinale: Bool
+    let isRepeat: Bool
 
     enum CodingKeys: String, CodingKey {
         case programID = "id"
@@ -3889,6 +3894,7 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
         case isLiveBroadcast = "is_live"
         case isPremiere = "is_premiere"
         case isFinale = "is_finale"
+        case isRepeat = "is_previously_shown"
     }
 
     init(from decoder: Decoder) throws {
@@ -3912,6 +3918,7 @@ struct DispatcharrCurrentProgram: Decodable, Identifiable {
         isLiveBroadcast = (try? c.decodeIfPresent(Bool.self, forKey: .isLiveBroadcast)) ?? false
         isPremiere = (try? c.decodeIfPresent(Bool.self, forKey: .isPremiere)) ?? false
         isFinale = (try? c.decodeIfPresent(Bool.self, forKey: .isFinale)) ?? false
+        isRepeat = (try? c.decodeIfPresent(Bool.self, forKey: .isRepeat)) ?? false
     }
 }
 
@@ -3938,11 +3945,17 @@ struct DispatcharrProgramDetail: Decodable {
 
     private struct ImageEntry: Decodable { let url: String? }
 
+    /// Rerun flag - the detail endpoint DOES carry this today (unlike the
+    /// bulk grid), so ProgramInfoView can badge REPEAT on Direct Connect
+    /// (mikec79, Discord 2026-08-19).
+    let isPreviouslyShown: Bool
+
     enum CodingKeys: String, CodingKey {
         case id, categories, rating
         case icon, images
         case posterURL = "poster_url"
         case tmdbID = "tmdb_id"
+        case isPreviouslyShown = "is_previously_shown"
     }
 
     init(from decoder: Decoder) throws {
@@ -3954,6 +3967,7 @@ struct DispatcharrProgramDetail: Decodable {
         imageURL = (try? c.decode([ImageEntry].self, forKey: .images))?
             .compactMap { $0.url }.first
         posterURL = try? c.decode(String.self, forKey: .posterURL)
+        isPreviouslyShown = (try? c.decodeIfPresent(Bool.self, forKey: .isPreviouslyShown)) ?? false
         // tmdb_id can be Int or String depending on source.
         if let s = try? c.decode(String.self, forKey: .tmdbID) {
             tmdbID = s

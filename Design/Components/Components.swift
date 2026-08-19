@@ -859,11 +859,19 @@ struct EPGFlagsRow: View {
                   compact: compact, spacing: spacing)
     }
 
+    /// Labels the user hid under Settings > App Behaviors > Show Program
+    /// Badges (Logan, 2026-08-19). Newline-joined set; empty = show all, so
+    /// future badge kinds stay visible until explicitly hidden. Same storage
+    /// shape as Android's ui_hidden_epg_badges.
+    @AppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
+
     var body: some View {
-        if !flags.isEmpty {
+        let hidden = Set(hiddenEpgBadgesRaw.split(separator: "\n").map(String.init))
+        let shown = hidden.isEmpty ? flags : flags.filter { !hidden.contains($0.label) }
+        if !shown.isEmpty {
             HStack(spacing: spacing) {
-                ForEach(flags.indices, id: \.self) { i in
-                    EPGFlagBadge(flag: flags[i], compact: compact)
+                ForEach(shown.indices, id: \.self) { i in
+                    EPGFlagBadge(flag: shown[i], compact: compact)
                 }
             }
         }

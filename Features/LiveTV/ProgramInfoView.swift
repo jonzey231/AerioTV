@@ -113,6 +113,9 @@ struct ProgramInfoView: View {
     /// after the sheet slides in" rather than an obvious loading
     /// spinner.
     @State private var loadedCategory: String? = nil
+    /// Rerun flag lazily enriched from /api/epg/programs/<id>/ - the bulk
+    /// grid Direct Connect guides ride carries no repeat field (mikec79).
+    @State private var enrichedRepeat = false
     @State private var isLoadingCategory: Bool = false
 
     /// Program poster, resolved from the Dispatcharr program detail
@@ -195,7 +198,7 @@ struct ProgramInfoView: View {
     private var feedFlags: [EPGFlag] {
         epgFlagBadges(isLiveBroadcast: target.isLiveBroadcast, isNew: target.isNew,
                       isPremiere: target.isPremiere, isFinale: target.isFinale,
-                      isRepeat: target.isRepeat)
+                      isRepeat: target.isRepeat || enrichedRepeat)
     }
 
     /// Badges shown next to the title: the feed flags plus an "ON NOW"
@@ -421,6 +424,9 @@ struct ProgramInfoView: View {
                 posterURL = VODService.resolveImageURL(raw, base: baseURL, size: "w500")
                 debugLog("📺 ProgramInfo poster: \(posterURL?.absoluteString ?? "rejected/none")")
             }
+            // The bulk grid has no repeat field, but this endpoint does:
+            // surface REPEAT on Direct Connect (mikec79, 2026-08-19).
+            if detail.isPreviouslyShown { enrichedRepeat = true }
         } catch {
             debugLog("📺 ProgramInfo lazy-load FAIL: pid=\(pid) error=\(error.localizedDescription)")
             // Swallow — the modal stays usable without pills.

@@ -162,6 +162,25 @@ struct AppBehaviorsSettingsView: View {
     /// iPhone/iPad preference are remembered independently but each syncs
     /// across that user's devices of the same kind.
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    // Per-badge choices under the master switch (Logan, 2026-08-19). Stored
+    // as the newline-joined set of HIDDEN labels (same shape as Android's
+    // ui_hidden_epg_badges) so the default shows everything.
+    @AppStorage("ui.hiddenEpgBadges") private var hiddenEpgBadgesRaw = ""
+
+    private func badgeShownBinding(_ label: String) -> Binding<Bool> {
+        Binding(
+            get: { !hiddenEpgBadgesRaw.split(separator: "\n").map(String.init).contains(label) },
+            set: { on in
+                var set = Set(hiddenEpgBadgesRaw.split(separator: "\n").map(String.init))
+                if on { set.remove(label) } else { set.insert(label) }
+                hiddenEpgBadgesRaw = set.sorted().joined(separator: "\n")
+            }
+        )
+    }
+    private static let badgeKinds = ["NEW", "REPEAT", "LIVE", "PREMIERE", "FINALE"]
+    private static func badgeTitle(_ label: String) -> String {
+        label.prefix(1) + label.dropFirst().lowercased() + " badge"
+    }
 
     // MARK: - TMDB program posters (opt-in, off by default)
 
@@ -428,6 +447,17 @@ struct AppBehaviorsSettingsView: View {
                 }
                 .tint(theme.accent)
                 .listRowBackground(Color.cardBackground)
+                if showEpgBadges {
+                    ForEach(Self.badgeKinds, id: \.self) { kind in
+                        Toggle(isOn: badgeShownBinding(kind)) {
+                            Text(Self.badgeTitle(kind))
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                        }
+                        .tint(theme.accent)
+                        .listRowBackground(Color.cardBackground)
+                    }
+                }
             } header: {
                 Text("Guide").sectionHeaderStyle()
             } footer: {
@@ -672,6 +702,18 @@ struct AppBehaviorsSettingsView: View {
                         subtitle: "LIVE, NEW, and season/episode pills on the guide",
                         isOn: $showEpgBadges
                     ) { _ in }
+
+                    if showEpgBadges {
+                        ForEach(Self.badgeKinds, id: \.self) { kind in
+                            TVSettingsToggleRow(
+                                icon: "tag",
+                                iconColor: theme.accent,
+                                title: Self.badgeTitle(kind),
+                                subtitle: "",
+                                isOn: badgeShownBinding(kind)
+                            ) { _ in }
+                        }
+                    }
 
                     Text("Show the LIVE, NEW, and season/episode pills on the guide, channel list, and program info. Remembered separately for Apple TV and iPhone/iPad, and synced across your Apple TVs.")
                         .font(.system(size: 22))
