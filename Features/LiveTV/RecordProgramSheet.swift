@@ -129,10 +129,18 @@ struct RecordProgramSheet: View {
             }
         }
         .sheet(isPresented: $showCustomPreRoll) {
-            customSheet { preRoll = customValue }
+            // GH #67 (djkotik, Android parity): the pre-roll goes NEGATIVE,
+            // meaning "start recording N minutes after the listed start" - a
+            // 9:00pm rugby listing whose kickoff is 9:50 records from 9:45
+            // with -45. Floored so the start stays at least a minute before
+            // the programme ends. effectiveStart already subtracts the
+            // pre-roll, so a negative value needs no scheduling change.
+            customSheet(floor: -(max(0, Int(scheduledEnd.timeIntervalSince(scheduledStart) / 60) - 1))) {
+                preRoll = customValue
+            }
         }
         .sheet(isPresented: $showCustomPostRoll) {
-            customSheet { postRoll = customValue }
+            customSheet(floor: 1) { postRoll = customValue }
         }
     }
 
@@ -638,19 +646,24 @@ struct RecordProgramSheet: View {
     }
 
     @ViewBuilder
-    private func customSheet(onConfirm: @escaping () -> Void) -> some View {
+    private func customSheet(floor: Int = 1, onConfirm: @escaping () -> Void) -> some View {
         NavigationStack {
             Form {
                 #if os(iOS)
-                Stepper("\(customValue) minutes", value: $customValue, in: 1...120)
+                Stepper(customBufferLabel, value: $customValue, in: floor...120)
                 #else
                 HStack {
-                    Text("\(customValue) minutes")
+                    Text(customBufferLabel)
                     Spacer()
-                    Button("-") { if customValue > 1 { customValue -= 1 } }
+                    Button("-") { if customValue > floor { customValue -= 1 } }
                     Button("+") { if customValue < 120 { customValue += 1 } }
                 }
                 #endif
+                if floor < 0 {
+                    Text("Step below zero to start the recording after the listed start time.")
+                        .font(.labelSmall)
+                        .foregroundColor(.textTertiary)
+                }
             }
             .navigationTitle("Custom Buffer")
             #if os(iOS)
@@ -676,6 +689,11 @@ struct RecordProgramSheet: View {
     }
 
     // MARK: - Helpers
+
+    /// GH #67: negative custom pre-roll reads in plain words.
+    private var customBufferLabel: String {
+        customValue < 0 ? "\(-customValue) min after start" : "\(customValue) minutes"
+    }
 
     private var timeLabel: String {
         let df = DateFormatter()

@@ -47,6 +47,7 @@ struct AppearanceSettingsView: View {
     @AppStorage("ui.showChannelLogos")    private var showChannelLogos = true
     // GH #19 (Android parity): hide channel numbers in the List and Guide.
     @AppStorage("ui.showChannelNumbers")  private var showChannelNumbers = true
+    @AppStorage("ui.showChannelNames")    private var showChannelNames = true
 
     // MARK: - App Behaviors (moved)
     //
@@ -217,6 +218,15 @@ struct AppearanceSettingsView: View {
                         title: "Show Channel Numbers",
                         subtitle: "Turn off to hide channel numbers in the Live TV list and Guide.",
                         isOn: $showChannelNumbers,
+                        onChange: { _ in }
+                    )
+                    // GH #73 (Android parity).
+                    TVSettingsToggleRow(
+                        icon: "textformat",
+                        iconColor: .accentPrimary,
+                        title: "Show Channel Names",
+                        subtitle: "Turn off to hide channel names in the Guide's channel column.",
+                        isOn: $showChannelNames,
                         onChange: { _ in }
                     )
                 }
@@ -520,6 +530,20 @@ struct AppearanceSettingsView: View {
                     .tint(theme.accent)
                     .listRowBackground(Color.cardBackground)
                     .onChange(of: showChannelNumbers) { _, _ in
+                        SyncManager.shared.pushPreferencesImmediate()
+                    }
+                    // GH #73 (Android parity): hide channel names in the Guide rail.
+                    Toggle(isOn: $showChannelNames) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Show Channel Names")
+                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                            Text("Turn off to hide channel names in the Guide's channel column.")
+                                .font(.labelSmall).foregroundColor(.textTertiary)
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+                    .onChange(of: showChannelNames) { _, _ in
                         SyncManager.shared.pushPreferencesImmediate()
                     }
                 } header: {
