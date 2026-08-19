@@ -27,6 +27,7 @@ import Foundation
 import GoogleCast
 import Network
 import SwiftUI
+import UserNotifications
 
 /// Receiver application id registered + published in the Google Cast SDK
 /// Developer Console (same id the Android sender targets).
@@ -86,6 +87,13 @@ final class AerioCastController: NSObject, ObservableObject {
     /// What the TV is (or is about to be) playing. Survives the local player's
     /// teardown so the cast-remote cover + channel flips have their anchor.
     @Published private(set) var castingContent: Content?
+    /// Set by stopCasting() so a deliberate teardown is never reported as a
+    /// drop, even if the SDK attaches an error to it (Android parity, dce3074).
+    private var userRequestedStop = false
+    /// Captured at connect: by didEnd the session no longer exposes its
+    /// device, so reading it there yields nothing to name in the alert
+    /// (same lesson as Android's lastDeviceName, 2026-08-19).
+    private var lastDeviceName: String?
     /// Mirrors the remote player's play/pause for the cover's transport button.
     @Published private(set) var remoteIsPlaying = true
 
@@ -185,6 +193,10 @@ final class AerioCastController: NSObject, ObservableObject {
 
     /// End the current cast session (returns playback to the phone).
     func stopCasting() {
+        // Parity with Android's graceful latch (commit dce3074): GCK documents
+        // a nil error for intentional ends, but our own stops are latched too
+        // so a deliberate teardown can never masquerade as a drop.
+        userRequestedStop = true
         GCKCastContext.sharedInstance().sessionManager.endSessionAndStopCasting(true)
     }
 
@@ -443,7 +455,7 @@ extension AerioCastController: GCKSessionManagerListener {
         MainActor.assumeIsolated { self.onConnected() }
     }
     nonisolated func sessionManager(_ sessionManager: GCKSessionManager, didEnd session: GCKSession, withError error: Error?) {
-        MainActor.assumeIsolated { self.onSessionEnded() }
+        MainActor.assumeIsolated { self.onSessionEnded(error: error) }
     }
 
     /// Re-fetches the current session on the MainActor (rather than receiving the
@@ -451,6 +463,7 @@ extension AerioCastController: GCKSessionManagerListener {
     private func onConnected() {
         guard let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession else { return }
         state = .connected(session.device.friendlyName)
+        session.device.friendlyName.map { lastDeviceName = $0 }
         session.remoteMediaClient?.add(self)
         if let pending {
             load(pending, on: session)
@@ -489,7 +502,17 @@ extension AerioCastController: GCKSessionManagerListener {
     /// Session ended (user tapped Stop on the cover, or the TV went away):
     /// resume the last cast channel locally -- "stop casting" means "bring
     /// playback back to my phone" (Android parity).
-    private func onSessionEnded() {
+    private func onSessionEnded(error: Error? = nil) {
+        // Involuntary drop = the SDK reports an error AND we did not ask to
+        // stop. GCK passes nil for intentional ends (unlike the Android SDK,
+        // whose end codes are non-zero for every path - measured 2026-08-19:
+        // deliberate stop 2161 vs receiver death 2155/2055).
+        let wasUserStop = userRequestedStop
+        userRequestedStop = false
+        let involuntary = (error != nil) && !wasUserStop
+        if involuntary {
+            debugLog("[CAST] session ended involuntarily: \(error.map(String.init(describing:)) ?? "?")")
+        }
         pending = nil
         // The cast card must not outlive the session; a local resume below
         // publishes its own via PlayerSession.
@@ -506,6 +529,35 @@ extension AerioCastController: GCKSessionManagerListener {
         let skipResume = suppressLocalResume
         suppressLocalResume = false
         defer { castingContent = nil }
+        // Kenton-class drop (Android a5e2b73/dce3074 parity): the cast dying
+        // while the app is BACKGROUNDED used to be completely silent here -
+        // the TV falls to the idle splash and the phone says nothing. Post a
+        // notification naming what stopped, and skip the local auto-resume
+        // for that case only (audio starting in a pocket is a worse signal
+        // than a notification). Foreground drops keep the existing behavior:
+        // playback returns to the phone, which announces itself. If
+        // notifications are not authorized, behavior is unchanged - the
+        // resume below stays as the fallback signal.
+        if involuntary, UIApplication.shared.applicationState != .active {
+            let deviceName = lastDeviceName
+            let contentTitle = castingContent?.title
+            Task {
+                let center = UNUserNotificationCenter.current()
+                let settings = await center.notificationSettings()
+                guard settings.authorizationStatus == .authorized else { return }
+                let content = UNMutableNotificationContent()
+                content.title = deviceName.map { "Casting to \($0) interrupted" }
+                    ?? "Casting interrupted"
+                var body = ""
+                if let contentTitle, !contentTitle.isEmpty { body += "\(contentTitle) stopped. " }
+                body += "The connection to the TV was lost. Open AerioTV to cast again."
+                content.body = body
+                content.sound = .default
+                try? await center.add(UNNotificationRequest(
+                    identifier: "aerio-cast-drop", content: content, trigger: nil))
+            }
+            return
+        }
         guard !skipResume,
               let content = castingContent,
               let item = ChannelStore.shared.channels.first(where: { $0.id == content.mediaID })
