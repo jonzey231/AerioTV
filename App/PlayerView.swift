@@ -4139,11 +4139,18 @@ final class AVPlayerProgressDriver {
         let dDropped = max(0, dropped - lastDroppedFrames)
         lastStallCount = stalls
         lastDroppedFrames = dropped
+        // rss rides this tick deliberately. Apple #74 was an ingest buffer
+        // growing at exactly the stream bitrate for the whole session, and
+        // nothing sampled memory during steady playback -- rss was only
+        // logged per tune and on an OS memory warning, by which point the
+        // jetsam kill is minutes away. A periodic sample turns that class of
+        // leak into a visible slope in any ordinary debug log.
         debugLog(String(format:
-            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d",
+            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d rss=%.1f MB",
             dStalls, stalls, dDropped, dropped,
             event.observedBitrate / 1000,
-            event.numberOfMediaRequests))
+            event.numberOfMediaRequests,
+            Double(ProcessMetrics.residentSetSizeBytes()) / 1_048_576.0))
     }
 
     /// Map AVMediaSelectionGroups to the overlay's integer-id track lists.
