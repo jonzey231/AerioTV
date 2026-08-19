@@ -165,8 +165,17 @@ enum PlaybackDiagnostics {
                 // that thread had pinned. Harmless when nothing is listening
                 // or the relay is inactive; the handler self-throttles.
                 if ProcessMetrics.residentSetSizeBytes() > 1_500_000_000 {
+                    // Word this as the BROADCAST it is, not as a mitigation
+                    // that ran. The only observer lives on the mpv coordinator
+                    // and is gated on liveRewindActive, so on the AVPlayer /
+                    // TS-remux path this reaches nobody. The old wording
+                    // ("requesting relay reload") read in the logs as a fix
+                    // that fired and failed, which sent the Apple #74 triage
+                    // chasing a phantom relay leak; the real cause was the
+                    // remuxer's uncompacted ingest buffer. When a handler does
+                    // act it logs its own [MPV-RELOAD] line - trust that one.
                     DebugLogger.shared.log(
-                        "[PlaybackDiag] 🚨 rss over seatbelt line - requesting relay reload",
+                        "[PlaybackDiag] 🚨 rss over seatbelt line - broadcasting reload (mpv relay only; no-op on other engines)",
                         category: "Playback", level: .warning
                     )
                     NotificationCenter.default.post(name: .aerioMemorySeatbeltReload, object: nil)

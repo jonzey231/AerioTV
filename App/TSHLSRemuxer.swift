@@ -166,6 +166,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             self.listener?.cancel()
             self.segments.removeAll()
             self.currentSegment.removeAll()
+            // Assign a fresh Data rather than removeAll(): the latter keeps
+            // the backing allocation, so a stopped-but-still-retained remuxer
+            // would hold its whole dead buffer (Apple #74).
+            self.pending = Data()
             self.spilled.removeAll()
             if let dir = self.spillDir {
                 try? FileManager.default.removeItem(at: dir)
@@ -227,6 +231,29 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             pending.removeFirst(188)
             handlePacket(Data(packet))
         }
+
+        // Apple #74. Foundation's Data is a __DataStorage reference plus a
+        // Range, and removeFirst/removeSubrange at the FRONT only advance the
+        // range's lower bound: the tail is never memmoved down and the
+        // allocation is never compacted, while append keeps extending the far
+        // end. So this buffer retains EVERY byte ever ingested and stays
+        // dirty-resident until the remuxer deallocates, even though
+        // `pending.count` reads back under 188 on every pass and the
+        // "buffered N" segment counter stays honestly pinned at 10. Nothing
+        // the app logs could see it.
+        //
+        // Measured against this exact loop: 218 MB ingested cost +220.1 MB of
+        // phys_footprint (1.0096 bytes resident per byte in) with startIndex
+        // equal to the total consumed; re-seating holds it at +0.1 MB for the
+        // same input and the same packet count. That 1:1 slope is what walked
+        // ochaos's Apple TV from ~450 MB to the ~2 GB jetsam ceiling in under
+        // an hour on a single channel, and why time-to-crash tracked the
+        // channel's bitrate rather than anything the user did.
+        //
+        // The surviving tail is at most one TS packet, so the copy is free.
+        // Placed after the loop so it also covers the `break` out of the
+        // resync path above.
+        pending = pending.isEmpty ? Data() : Data(pending)
     }
 
     private func handlePacket(_ p: Data) {
@@ -527,18 +554,23 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     }
 
     private func receiveRequest(_ connection: NWConnection, buffer: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, _, error in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, error in
             guard let self, error == nil else { connection.cancel(); return }
             var buffer = buffer
             if let data { buffer.append(data) }
             if let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)) {
+                // Parse BEFORE honouring isComplete: a legal request whose
+                // last bytes arrive with FIN piggybacked must still be served.
                 let head = String(decoding: buffer[..<headerEnd.lowerBound], as: UTF8.self)
                 let path = head.split(separator: " ").dropFirst().first.map(String.init) ?? "/"
                 self.respond(connection, path: path)
-            } else if buffer.count < 16_384 {
-                self.receiveRequest(connection, buffer: buffer)
-            } else {
+            } else if isComplete || buffer.count >= 16_384 {
+                // EOF before a complete request, or an oversized head. Without
+                // the isComplete arm a cleanly half-closed peer returns
+                // (nil, true, nil) forever and this re-armed on every one.
                 connection.cancel()
+            } else {
+                self.receiveRequest(connection, buffer: buffer)
             }
         }
     }
