@@ -54,6 +54,18 @@ struct ChannelListView: View {
     @AppStorage("defaultLiveTVView") private var defaultLiveTVView = ""
     @AppStorage("channelSortMode") private var sortModeRaw = "number"
     @State private var showGuideView = false
+
+    /// Session-scoped List/Guide choice. The in-screen toggle is deliberately
+    /// session-only (never writes defaultLiveTVView), but it lived in plain
+    /// @State: leaving the tab (e.g. into Settings) recreates this view and
+    /// the choice silently reverted to the width-adaptive default (Logan,
+    /// iPhone pass 2026-08-19). A static survives view recreation and dies
+    /// with the process - exactly the promised "lasts for the current
+    /// session" semantics.
+    @MainActor
+    enum LiveTVViewSession {
+        static var showGuideView: Bool?
+    }
     /// True once the user flips the in-screen List / Guide toggle this
     /// session. Width-based re-seeds (fold / unfold, Split View resize,
     /// Plus / Max rotation, servers arriving) skip while this is set so a
@@ -368,6 +380,7 @@ struct ChannelListView: View {
                         Button {
                             userDidToggleView = true
                             withAnimation(.spring(response: 0.25)) { showGuideView.toggle() }
+                            LiveTVViewSession.showGuideView = showGuideView
                         } label: {
                             Image(systemName: showGuideView ? "list.bullet" : "calendar")
                                 .foregroundColor(.accentPrimary)
@@ -510,8 +523,15 @@ struct ChannelListView: View {
                     // foldable) opens List unless the user explicitly chose
                     // Guide; regular (iPad, unfolded foldable, Plus / Max
                     // landscape) opens Guide unless the user explicitly chose
-                    // List. See resolvedGuideDefault.
-                    showGuideView = resolvedGuideDefault(hasEPG: hasEPG)
+                    // List. See resolvedGuideDefault. A toggle made earlier
+                    // THIS SESSION wins over the default (view recreation on
+                    // tab switches must not revert the user's choice).
+                    if let sessionChoice = LiveTVViewSession.showGuideView {
+                        showGuideView = sessionChoice
+                        userDidToggleView = true
+                    } else {
+                        showGuideView = resolvedGuideDefault(hasEPG: hasEPG)
+                    }
                     #endif
                     // EPG-search jump (cold path): if SearchView stashed a
                     // pending guide target, force guide mode so EPGGuideView

@@ -671,18 +671,10 @@ struct RecordProgramSheet: View {
 
     @ViewBuilder
     private func customSheet(floor: Int = 1, onConfirm: @escaping () -> Void) -> some View {
+        #if os(iOS)
         NavigationStack {
             Form {
-                #if os(iOS)
                 Stepper(customBufferLabel, value: $customValue, in: floor...120)
-                #else
-                HStack {
-                    Text(customBufferLabel)
-                    Spacer()
-                    Button("-") { if customValue > floor { customValue -= 1 } }
-                    Button("+") { if customValue < 120 { customValue += 1 } }
-                }
-                #endif
                 if floor < 0 {
                     Text("Step below zero to start the recording after the listed start time.")
                         .font(.labelSmall)
@@ -690,9 +682,7 @@ struct RecordProgramSheet: View {
                 }
             }
             .navigationTitle("Custom Buffer")
-            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
-            #endif
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") {
@@ -710,6 +700,50 @@ struct RecordProgramSheet: View {
             }
         }
         .presentationDetents([.medium])
+        #else
+        // tvOS: hand-rolled panel, not a Form. The Form's default focused row
+        // is a WHITE platter that swallowed the row's own white text (Logan's
+        // ATV pass 2026-08-19: value invisible, title truncated to "C..."),
+        // and system toolbar buttons crowd the navigation title. Same pill
+        // components as the record sheet itself, so focus visuals match the
+        // app instead of the system list style.
+        VStack(spacing: 36) {
+            Text("Custom Buffer")
+                .font(.system(size: 42, weight: .bold))
+                .foregroundColor(.textPrimary)
+            HStack(spacing: 28) {
+                RecordOptionPill(label: "−", isSelected: false) {
+                    if customValue > floor { customValue -= 1 }
+                }
+                Text(customBufferLabel)
+                    .font(.system(size: 34, weight: .semibold))
+                    .foregroundColor(.accentPrimary)
+                    .frame(minWidth: 420)
+                RecordOptionPill(label: "+", isSelected: false) {
+                    if customValue < 120 { customValue += 1 }
+                }
+            }
+            if floor < 0 {
+                Text("Step below zero to start the recording after the listed start time.")
+                    .font(.system(size: 24))
+                    .foregroundColor(.textSecondary)
+            }
+            HStack(spacing: 24) {
+                RecordActionPill(label: "Cancel", systemImage: "xmark", tintColor: .accentPrimary) {
+                    showCustomPreRoll = false
+                    showCustomPostRoll = false
+                }
+                RecordActionPill(label: "Done", systemImage: "checkmark", tintColor: .accentPrimary) {
+                    onConfirm()
+                    showCustomPreRoll = false
+                    showCustomPostRoll = false
+                }
+            }
+        }
+        .padding(60)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.appBackground)
+        #endif
     }
 
     // MARK: - Helpers

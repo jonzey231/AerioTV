@@ -4918,6 +4918,15 @@ private struct GuideProgramButton: View {
     /// their own row below the title and description. Renders nothing when
     /// the program carries neither. (tvOS keeps them on the time-range
     /// line, which reads fine at 10-foot distance.)
+    /// Whether compactBadgeRow will render anything (mirrors its own guard).
+    private var compactBadgeRowVisible: Bool {
+        guard showEpgBadges else { return false }
+        return seasonEpisodeLabel(season: prog.season, episode: prog.episode) != nil
+            || !epgFlagBadges(isLiveBroadcast: prog.isLiveBroadcast, isNew: prog.isNew,
+                              isPremiere: prog.isPremiere, isFinale: prog.isFinale,
+                              isRepeat: prog.isRepeat).isEmpty
+    }
+
     @ViewBuilder
     private var compactBadgeRow: some View {
         let seLabel = seasonEpisodeLabel(season: prog.season, episode: prog.episode)
@@ -5056,7 +5065,10 @@ private struct GuideProgramButton: View {
             .layoutPriority(1)
             // GH #34: XMLTV <sub-title> (match/episode name), guarded against the
             // Dispatcharr promote-into-description case so it never double-prints.
-            if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+            let subShown = prog.subTitle.map {
+                !$0.isEmpty && $0 != prog.title && $0 != prog.description
+            } ?? false
+            if subShown, let sub = prog.subTitle {
                 Text(sub)
                     .font(.system(size: 10 * guideScale))
                     .italic()
@@ -5064,7 +5076,15 @@ private struct GuideProgramButton: View {
                     .lineLimit(1)
                     .layoutPriority(1)
             }
-            if !prog.description.isEmpty {
+            // Skip the description when BOTH a sub-title and a badge row
+            // render: the 72pt compact cell fits four priority rows (title,
+            // sub, time, badges) but not five - the flexible description was
+            // offered a sub-line sliver, still drew a full line, and pushed
+            // the badge pills into the clip (Logan's iPhone pass 2026-08-19,
+            // channels with REPEAT + sub-title). Same rule as the Android
+            // cell: the description is the line that gives way. It remains in
+            // Program Info.
+            if !prog.description.isEmpty, !(subShown && compactBadgeRowVisible) {
                 Text(prog.description)
                     .font(.system(size: 10 * guideScale))
                     .foregroundColor(.textSecondary)
