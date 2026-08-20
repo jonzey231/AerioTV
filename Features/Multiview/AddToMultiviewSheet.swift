@@ -1104,7 +1104,14 @@ struct AddToMultiviewSheet: View {
     /// belongs to it; `orderedGroups` is already maintained that way
     /// upstream.
     private var visibleGroups: [String] {
-        channelStore.orderedGroups.filter { !hiddenGroups.contains($0) }
+        // Same ordering pipeline as the guide/list group bar (Logan's ATV
+        // pass 2026-08-19: the picker ignored the Manage Groups manual sort,
+        // the exact Android GH #71 bug this train fixes on the other
+        // platform). Keys match ChannelListView's channelGroupOrderKey.
+        GroupOrderStore.displayOrder(channelStore.orderedGroups,
+                                     mode: GroupOrderStore.loadMode(forKey: "channelGroupOrder.sortMode"),
+                                     order: GroupOrderStore.load(forKey: "channelGroupOrder"))
+            .filter { !hiddenGroups.contains($0) }
     }
 
     /// Pills shown in the filter bar — leading "All" sentinel plus
