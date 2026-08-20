@@ -366,7 +366,11 @@ struct RecordProgramSheet: View {
                             title: "Start Early",
                             options: [0, 5, 10, 15, 30],
                             selection: $preRoll,
-                            label: { $0 == 0 ? "None" : "\($0) min" }
+                            label: { $0 == 0 ? "None" : "\($0) min" },
+                            onCustom: {
+                                customValue = preRoll != 0 ? preRoll : 5
+                                showCustomPreRoll = true
+                            }
                         )
                     }
 
@@ -374,7 +378,11 @@ struct RecordProgramSheet: View {
                         title: "End Late",
                         options: [0, 5, 10, 15, 30, 60],
                         selection: $postRoll,
-                        label: { $0 == 0 ? "None" : "\($0) min" }
+                        label: { $0 == 0 ? "None" : "\($0) min" },
+                        onCustom: {
+                            customValue = postRoll > 0 ? postRoll : 5
+                            showCustomPostRoll = true
+                        }
                     )
 
                     // Destination row only for live recordings on
@@ -474,7 +482,8 @@ struct RecordProgramSheet: View {
     private func optionRow(title: String,
                            options: [Int],
                            selection: Binding<Int>,
-                           label: @escaping (Int) -> String) -> some View {
+                           label: @escaping (Int) -> String,
+                           onCustom: (() -> Void)? = nil) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             Text(title)
                 .font(.system(size: 24, weight: .semibold))
@@ -489,6 +498,21 @@ struct RecordProgramSheet: View {
                         label: label(opt),
                         isSelected: selection.wrappedValue == opt,
                         action: { selection.wrappedValue = opt }
+                    )
+                }
+                // GH #67: the iOS form's "Custom..." never had a tvOS twin,
+                // which also blocked the new negative pre-roll here. A value
+                // set through the sheet is not one of the presets, so the
+                // pill owns the selection and echoes it.
+                if let onCustom {
+                    RecordOptionPill(
+                        label: options.contains(selection.wrappedValue)
+                            ? "Custom…"
+                            : (selection.wrappedValue < 0
+                                ? "Custom (\(-selection.wrappedValue) min after start)"
+                                : "Custom (\(selection.wrappedValue) min)"),
+                        isSelected: !options.contains(selection.wrappedValue),
+                        action: onCustom
                     )
                 }
                 Spacer(minLength: 0)

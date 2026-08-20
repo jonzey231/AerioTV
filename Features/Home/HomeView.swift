@@ -1790,7 +1790,7 @@ final class ChannelStore: ObservableObject {
                     var byChan: [String: String] = [:]
                     var enrichedByChannel: [String: (category: String, title: String)] = [:]
                     for (cid, pid) in currentByChannelID {
-                        guard let c = cats[pid] else { continue }
+                        guard let c = cats[pid]?.categories else { continue }
                         byChan[cid] = c
                         let title = titlesByPID[pid] ?? ""
                         enrichedByChannel[cid] = (c, title)

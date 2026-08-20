@@ -2167,11 +2167,11 @@ struct DispatcharrAPI {
     /// uWSGI / Daphne pool. Errors per program are swallowed (we
     /// just skip enrichment for that one) so a single 5xx can't
     /// block the whole batch.
-    func enrichCategories(programIDs: [Int]) async -> [Int: String] {
+    func enrichCategories(programIDs: [Int]) async -> [Int: (categories: String?, isRepeat: Bool)] {
         guard !programIDs.isEmpty else { return [:] }
         let semaphore = AsyncSemaphore(value: 4)
-        var results: [Int: String] = [:]
-        await withTaskGroup(of: (Int, String?).self) { group in
+        var results: [Int: (categories: String?, isRepeat: Bool)] = [:]
+        await withTaskGroup(of: (Int, String?, Bool).self) { group in
             for pid in programIDs {
                 group.addTask { [self] in
                     await semaphore.wait()
@@ -2179,14 +2179,19 @@ struct DispatcharrAPI {
                     do {
                         let detail = try await getProgramDetail(id: pid)
                         let cats = detail.categories.joined(separator: ",")
-                        return (pid, cats.isEmpty ? nil : cats)
+                        // The rerun flag rides the same fetch: the bulk grid
+                        // has no is_previously_shown, only this endpoint does
+                        // (mikec79, 2026-08-19), so the enrichment pass is
+                        // what lights REPEAT on now-airing Direct Connect
+                        // guide cells.
+                        return (pid, cats.isEmpty ? nil : cats, detail.isPreviouslyShown)
                     } catch {
-                        return (pid, nil)
+                        return (pid, nil, false)
                     }
                 }
             }
-            for await (pid, cats) in group {
-                if let cats = cats { results[pid] = cats }
+            for await (pid, cats, rerun) in group {
+                if cats != nil || rerun { results[pid] = (cats, rerun) }
             }
         }
         return results

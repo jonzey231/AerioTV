@@ -1737,10 +1737,13 @@ final class GuideStore: ObservableObject {
         debugLog("📺 Dispatcharr category enrichment: \(currentByChannelID.count) currently-airing programs; fetching /api/epg/programs/<id>/ at cap-of-4")
         let cats = await api.enrichCategories(programIDs: Array(currentByChannelID.values))
         var byChannel: [String: String] = [:]
+        var repeatChannels: Set<String> = []
         for (cid, pid) in currentByChannelID {
-            if let c = cats[pid] { byChannel[cid] = c }
+            guard let entry = cats[pid] else { continue }
+            if let c = entry.categories { byChannel[cid] = c }
+            if entry.isRepeat { repeatChannels.insert(cid) }
         }
-        debugLog("📺 Dispatcharr category enrichment: \(byChannel.count)/\(currentByChannelID.count) channels got categories")
+        debugLog("📺 Dispatcharr category enrichment: \(byChannel.count)/\(currentByChannelID.count) channels got categories, \(repeatChannels.count) reruns")
         // v1.7.x diagnostic: print a sample of what came back. If this
         // line says `sample=` with an empty suffix or `nil`, Dispatcharr
         // is returning empty categories arrays — the data simply isn't
@@ -1771,7 +1774,10 @@ final class GuideStore: ObservableObject {
         // had applied to EPGCache. Replicating the same propagation
         // here keeps both data sources visually identical.
         var updated = self.programs
-        for (cid, cats) in byChannel {
+        // Rerun flag applies even to channels that got no categories back, so
+        // walk the union of both result sets (mikec79: REPEAT on the guide).
+        for cid in Set(byChannel.keys).union(repeatChannels) {
+            let cats = byChannel[cid]
             guard var progs = updated[cid] else { continue }
             guard let idx = progs.firstIndex(where: { $0.start <= now && $0.end > now }) else { continue }
             // GuideProgram.category is `let` (struct value). Build a
@@ -1784,13 +1790,13 @@ final class GuideStore: ObservableObject {
                                        description: old.description,
                                        start: old.start,
                                        end: old.end,
-                                       category: cats,
+                                       category: cats ?? old.category,
                                        programID: old.programID,
                                        subTitle: old.subTitle, season: old.season,
                                        episode: old.episode, isNew: old.isNew,
                                        isLiveBroadcast: old.isLiveBroadcast,
                                        isPremiere: old.isPremiere, isFinale: old.isFinale,
-                                       isRepeat: old.isRepeat)
+                                       isRepeat: old.isRepeat || repeatChannels.contains(cid))
 
             // Title-matched propagation across the rest of the
             // channel's programs. Skip the now-airing index (just
@@ -1798,7 +1804,7 @@ final class GuideStore: ObservableObject {
             // a non-empty category (idempotent on warm relaunch +
             // respects categories from XMLTV-merge if that ran
             // first).
-            if !nowTitle.isEmpty {
+            if !nowTitle.isEmpty, let cats {
                 for j in progs.indices where j != idx {
                     let p = progs[j]
                     guard p.title == nowTitle, p.category.isEmpty else { continue }
@@ -2973,6 +2979,13 @@ struct EPGGuideView: View {
     /// change (UP/DOWN, needs column correction) from a same-row change
     /// (our own snap / restore, must not loop).
     @State private var lastFocusedChannelForSnap: String?
+
+    /// iOS #66: channel index a page move is currently asserting focus onto.
+    /// Rapid channel-key presses arrive while the previous write is still in
+    /// flight and focusedProgramID reads nil between unfocus and focus - the
+    /// exact bug the Android pager hit - so the next press chains off this
+    /// instead of bailing.
+    @State private var pagePendingChannelIndex: Int?
     /// Task #185: guards the corrective snap's own focus writes from
     /// re-triggering a second snap while the first is still asserting.
     @State private var verticalSnapInFlight = false
@@ -3434,7 +3447,7 @@ struct EPGGuideView: View {
             // (tvOS 14.3+), so this serves every "I use my TV's remote"
             // setup. Window-level catcher because the presses route to the
             // focused cell, not to any ancestor this background could own.
-            .background(TVPagePressCatcher { down in pageGuideFocus(down: down) })
+            .background(TVPagePressCatcher { down in pageGuideFocus(down: down, proxy: proxy) })
             .onMoveCommand { direction in
                 // #42 Part 1: only scroll the EPG timeline when a guide program
                 // cell is actually focused. A held Left whose focus has jumped to
@@ -3901,22 +3914,50 @@ struct EPGGuideView: View {
     /// grid. Uses the same assert-until-accepted focus write the top-channel
     /// and return-from-player paths need (a single write is dropped while the
     /// target row is still laying out).
-    private func pageGuideFocus(down: Bool) {
-        guard let pid = focusedProgramID,
-              let curCh = channelID(ofProgram: pid),
-              let curIdx = channels.firstIndex(where: { $0.id == curCh }) else { return }
+    private func pageGuideFocus(down: Bool, proxy: ScrollViewProxy) {
+        // Current row: the in-flight page target first (rapid presses land
+        // while the previous focus write is still asserting and
+        // focusedProgramID reads nil between unfocus and focus), then live
+        // focus, then the sticky last-focused channel. Device pass 2026-08-19:
+        // the first cut read focusedProgramID only, so every press after the
+        // first bailed here.
+        let curIdx: Int
+        if let pending = pagePendingChannelIndex {
+            curIdx = pending
+        } else if let pid = focusedProgramID,
+                  let ch = channelID(ofProgram: pid),
+                  let i = channels.firstIndex(where: { $0.id == ch }) {
+            curIdx = i
+        } else if let ch = lastFocusedChannelForSnap,
+                  let i = channels.firstIndex(where: { $0.id == ch }) {
+            curIdx = i
+        } else {
+            return
+        }
         let visibleRows = max(1, Int(UIScreen.main.bounds.height / rowHeight) - 2)
         let target = min(max(down ? curIdx + visibleRows : curIdx - visibleRows, 0),
                          channels.count - 1)
-        guard target != curIdx,
-              let targetPID = resolveFocusProgramID(preferringChannel: channels[target].id)
-        else { return }
+        guard target != curIdx else { return }
+        pagePendingChannelIndex = target
         debugLog("🧭 [GuideFocus] page\(down ? "Down" : "Up") ch#\(curIdx) -> ch#\(target) rows=\(visibleRows)")
         Task { @MainActor in
-            for _ in 0..<6 {
+            defer { if pagePendingChannelIndex == target { pagePendingChannelIndex = nil } }
+            // Realize the target row FIRST: the rows live in a LazyVStack, so
+            // a row a full page away is not composed and a focus write into
+            // it is silently dropped (the other half of the one-press bug).
+            // ForEach(channels) tags each row with channel.id for scrollTo.
+            proxy.scrollTo(channels[target].id, anchor: down ? .bottom : .top)
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            // The row may compose without guide data; resolveFocusProgramID
+            // scans onward for the first cell that exists.
+            guard let targetPID = resolveFocusProgramID(preferringChannel: channels[target].id) else { return }
+            for attempt in 0..<8 {
                 focusedProgramID = targetPID
                 try? await Task.sleep(nanoseconds: 70_000_000)
                 if focusedProgramID == targetPID { break }
+                if attempt == 3 {
+                    proxy.scrollTo(channels[target].id, anchor: down ? .bottom : .top)
+                }
             }
         }
     }
