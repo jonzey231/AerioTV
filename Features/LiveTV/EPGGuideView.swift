@@ -356,6 +356,20 @@ final class GuideStore: ObservableObject {
             debugLog("📺 GuideStore: DISCARDED stale \(source) write for \(serverID.prefix(8)) — guide now displays \(displayedServerID!.prefix(8))")
             return false
         }
+        // A bulk write that would leave the guide with NOTHING is a failed
+        // fetch, not an empty guide, and it never wins over data we already
+        // have. The bulk paths pre-strip the fetch window out of their base
+        // dict before the network answers (replacingWindowBase), so a server
+        // that returns 200 with zero rows -- an expired token, a hiccup, a
+        // provider ban -- used to commit that hole: the guide emptied on
+        // screen, and the caller then wrote the empty snapshot over the disk
+        // cache and stamped it fresh, so the next launch had nothing either.
+        // Android carried the same bug (fixed there 2026-08-20); Logan hit it
+        // on the Streamer as "the guide shows for a second, then disappears".
+        if !programs.isEmpty && !dict.contains(where: { !$0.value.isEmpty }) {
+            debugLog("📺 GuideStore: REJECTED empty \(source) write — keeping the existing guide")
+            return false
+        }
         programs = dict
         return true
     }
@@ -677,6 +691,16 @@ final class GuideStore: ObservableObject {
         let container = modelContext.container
         // Snapshot the programs dictionary on the main actor before detaching
         let snapshot = programs
+        // NEVER let an empty guide reach the cache. The save below deletes
+        // every future row for this server before re-inserting, so writing an
+        // empty snapshot destroys a good on-disk guide and leaves the next
+        // launch with nothing to paint. In-memory guards keep `programs` from
+        // being emptied by a failed fetch in the first place; this is the last
+        // line before the data is gone for good.
+        guard snapshot.contains(where: { !$0.value.isEmpty }) else {
+            debugLog("📺 GuideStore: skipped saveToCache — nothing to save (refusing to blank the cache)")
+            return
+        }
         // Catch-up: retained-history horizon (read on the main actor; the
         // detached save below must not touch ChannelStore). The retention
         // horizon superseded the old epgWindowHours trim in this save.
@@ -1248,6 +1272,14 @@ final class GuideStore: ObservableObject {
                                                         serverID: categoryServerID)
             }
 
+            // An empty grid is a failed fetch, not an empty guide: leave
+            // shouldCommitBatch false so cancelBatch discards the pending
+            // (window-stripped) dict, and report failure so the caller runs its
+            // fallback instead of treating the blank as fresh data.
+            guard !gridPrograms.isEmpty else {
+                debugLog("📺 Dispatcharr: EPG grid returned 0 programmes — discarding batch, falling back")
+                return false
+            }
             shouldCommitBatch = true
             return true // Grid endpoint succeeded — no need for fallback
         } catch {
@@ -2194,6 +2226,15 @@ final class GuideStore: ObservableObject {
         // invalidation instead of 98k (which is what the old
         // beginBatch/endBatch pair was also designed to do, but
         // that version still ran the merge loop on main).
+        // Check the match count BEFORE committing. The dict handed to the merge
+        // has the fetch window pre-stripped when replaceExisting is set, so
+        // committing a zero-match parse installs that hole over a good guide.
+        // The contract below already treats zero matches as "did not land"; it
+        // just used to say so 22 lines too late to protect anything.
+        guard result.matched > 0 else {
+            debugLog("📺 XMLTV \(hostLabel): 0 programs matched — guide left untouched, caller falls through to its backstop")
+            return false
+        }
         guard commitPrograms(result.dict, for: categoryServerID, source: "xmltv-merge") else {
             // Stale writer: the user switched playlists during this parse.
             // Return true so the caller does NOT fall through to its
