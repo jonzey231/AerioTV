@@ -3447,56 +3447,8 @@ struct EPGGuideView: View {
             // (tvOS 14.3+), so this serves every "I use my TV's remote"
             // setup. Window-level catcher because the presses route to the
             // focused cell, not to any ancestor this background could own.
-            .background(TVPagePressCatcher { down in pageGuideFocus(down: down, proxy: proxy) })
-            .onMoveCommand { direction in
-                // #42 Part 1: only scroll the EPG timeline when a guide program
-                // cell is actually focused. A held Left whose focus has jumped to
-                // the "All" pill still resolves ONE onMoveCommand(.left) into the
-                // guide on release (focusedProgramID == nil); gating on a focused
-                // cell drops that stray scroll, while normal scrolling (which
-                // always has a focused cell) is untouched.
-                guard focusedProgramID != nil else { return }
-                switch direction {
-                case .left:
-                    // Sidebar mode used to open the docked group menu on a
-                    // short-Left at the now column. REVERSED per Logan
-                    // 2026-08-06 (matching his Android ruling the same day):
-                    // hold-Left opens the sidebar (window-level detector ->
-                    // .guideOpenGroupSidebar) and a single Left is ALWAYS
-                    // plain navigation, because the tap-opens scheme made the
-                    // EPG history left of "now" unreachable in sidebar mode.
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
-                    }
-                    // Task #185: focus rides the viewport. Without this, the
-                    // pan left the OLD cell focused - it slid off-screen while
-                    // still holding focus, so the ring vanished and OK acted
-                    // on an invisible programme.
-                    retargetFocusToViewportColumn()
-                case .right:
-                    // #42: a hold-Right (close corner mini) freezes the timeline so
-                    // the still-held Right does not scroll the EPG forward after the
-                    // mini closes. Short/normal Right scrolling is unaffected.
-                    if rightHoldPinningTimeline { break }
-                    // Capture the pre-gesture offset ONCE per press train. A
-                    // held Right emits repeats before the hold recognizes;
-                    // overwriting per step made the hold's restore land one or
-                    // more steps to the RIGHT of where the user started.
-                    // 0.35s of quiet = a new gesture; repeats arrive faster.
-                    let stepNow = Date()
-                    if preRightStepOffset == nil
-                        || stepNow.timeIntervalSince(preRightStepAt) > 0.35 {
-                        preRightStepOffset = horizontalOffset
-                    }
-                    preRightStepAt = stepNow
-                    withAnimation(.easeOut(duration: 0.3)) {
-                        horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * 0.5)
-                    }
-                    retargetFocusToViewportColumn()
-                default:
-                    break
-                }
-            }
+            .background(pagePressCatcher(proxy: proxy))
+            .onMoveCommand { handleGuideMoveCommand($0) }
             // Task #185: vertical corrective snap. UP/DOWN still move focus via
             // the system focus engine, but the engine picks by raw geometry
             // (widest overlap with the outgoing cell), which drifts the column
@@ -3914,6 +3866,70 @@ struct EPGGuideView: View {
     /// grid. Uses the same assert-until-accepted focus write the top-channel
     /// and return-from-player paths need (a single write is dropped while the
     /// target row is still laying out).
+
+    /// Body of the guide's onMoveCommand, hoisted to a method: the inline
+    /// closure pushed the grid's modifier chain past the RELEASE compiler's
+    /// type-check budget once the page-press catcher joined the chain
+    /// (archive-only failure; the beta compiler managed the inline form).
+    private func handleGuideMoveCommand(_ direction: MoveCommandDirection) {
+        // #42 Part 1: only scroll the EPG timeline when a guide program
+        // cell is actually focused. A held Left whose focus has jumped to
+        // the "All" pill still resolves ONE onMoveCommand(.left) into the
+        // guide on release (focusedProgramID == nil); gating on a focused
+        // cell drops that stray scroll, while normal scrolling (which
+        // always has a focused cell) is untouched.
+        guard focusedProgramID != nil else { return }
+        switch direction {
+        case .left:
+            // Sidebar mode used to open the docked group menu on a
+            // short-Left at the now column. REVERSED per Logan
+            // 2026-08-06 (matching his Android ruling the same day):
+            // hold-Left opens the sidebar (window-level detector ->
+            // .guideOpenGroupSidebar) and a single Left is ALWAYS
+            // plain navigation, because the tap-opens scheme made the
+            // EPG history left of "now" unreachable in sidebar mode.
+            withAnimation(.easeOut(duration: 0.3)) {
+                horizontalOffset = min(0, horizontalOffset + pixelsPerHour * 0.5)
+            }
+            // Task #185: focus rides the viewport. Without this, the
+            // pan left the OLD cell focused - it slid off-screen while
+            // still holding focus, so the ring vanished and OK acted
+            // on an invisible programme.
+            retargetFocusToViewportColumn()
+        case .right:
+            // #42: a hold-Right (close corner mini) freezes the timeline so
+            // the still-held Right does not scroll the EPG forward after the
+            // mini closes. Short/normal Right scrolling is unaffected.
+            if rightHoldPinningTimeline { break }
+            // Capture the pre-gesture offset ONCE per press train. A
+            // held Right emits repeats before the hold recognizes;
+            // overwriting per step made the hold's restore land one or
+            // more steps to the RIGHT of where the user started.
+            // 0.35s of quiet = a new gesture; repeats arrive faster.
+            let stepNow = Date()
+            if preRightStepOffset == nil
+                || stepNow.timeIntervalSince(preRightStepAt) > 0.35 {
+                preRightStepOffset = horizontalOffset
+            }
+            preRightStepAt = stepNow
+            withAnimation(.easeOut(duration: 0.3)) {
+                horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * 0.5)
+            }
+            retargetFocusToViewportColumn()
+        default:
+            break
+        }
+    }
+
+    /// Hoisted out of the body's modifier chain: the inline closure pushed the
+    /// already-huge expression past the RELEASE Xcode type-checker's time
+    /// budget (archive-only failure; the beta compiler managed it).
+    private func pagePressCatcher(proxy: ScrollViewProxy) -> some View {
+        TVPagePressCatcher { (down: Bool) in
+            pageGuideFocus(down: down, proxy: proxy)
+        }
+    }
+
     private func pageGuideFocus(down: Bool, proxy: ScrollViewProxy) {
         // Current row: the in-flight page target first (rapid presses land
         // while the previous focus write is still asserting and
