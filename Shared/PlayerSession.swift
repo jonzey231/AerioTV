@@ -661,12 +661,21 @@ enum PlaybackFeatureFlags {
     /// Engine auto-detection, remux arm: raw MPEG-TS live streams
     /// (Dispatcharr /proxy/ts/) through the on-device TS-to-HLS remuxer into
     /// AVPlayer. H.264 + AC-3/AAC only; the codec gate auto-falls back to mpv
-    /// (HEVC, MPEG-2, MP2). **Deliberately still opt-in**: the loopback remux
-    /// server suspends when the app backgrounds (no background audio) and
-    /// native<->container transitions restart the stream -- the "playback
-    /// works well" bar for defaulting is not met yet (June 2026 eval).
+    /// (HEVC, MPEG-2, MP2). **Default ON since the 2026-08-21 field test**
+    /// (branch test/avplayer-remux-default): Logan is running the remux as
+    /// the default engine for a weekend to qualify it for the MPV removal
+    /// plan. The June 2026 opt-in reasons still hold and are the test's
+    /// watch list: the loopback remux server suspends when the app
+    /// backgrounds (no background audio) and native<->container transitions
+    /// restart the stream. Absent-key-means-on convention (see
+    /// useUnifiedPlayback) so flipping the Developer toggle OFF still works
+    /// and is remembered.
     static var avPlayerRemuxTS: Bool {
-        UserDefaults.standard.bool(forKey: "playback.avplayerRemuxTS")
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "playback.avplayerRemuxTS") == nil {
+            return true
+        }
+        return defaults.bool(forKey: "playback.avplayerRemuxTS")
     }
 
     /// `true` (default) while routing through the unified

@@ -44,7 +44,7 @@ struct DeveloperSettingsView: View {
     /// TS-to-HLS remuxer into AVPlayer (H.264 + AC-3/AAC only; auto
     /// fallback to mpv otherwise). Still opt-in: background-audio +
     /// transition-restart caveats keep it below the default-on bar.
-    @AppStorage("playback.avplayerRemuxTS") private var avPlayerRemuxTS = false
+    @AppStorage("playback.avplayerRemuxTS") private var avPlayerRemuxTS = true
 
     /// **Experimental** — iPhone-only. When on, the Live TV chrome is
     /// compacted: Manage Groups moves into the nav bar toolbar, and the
