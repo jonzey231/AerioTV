@@ -191,8 +191,8 @@
 		B997EA931623455C8A931F29 /* ProgramInfoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7BA4153D0B047D0BF40ACEE /* ProgramInfoView.swift */; };
 		BA33A33C572E086E61AA73AB /* VODService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C548BC428D32F3966A46C27 /* VODService.swift */; };
 		BC00C290CFD296C79CD18EB6 /* Pods-Aerio_iOS-frameworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */; };
-		BDD64B832F76FD240055F82C /* MPVKit-GPL in Frameworks */ = {isa = PBXBuildFile; productRef = BDD64B822F76FD240055F82C /* MPVKit-GPL */; };
-		BDD64B872F76FD890055F82C /* MPVKit-GPL in Frameworks */ = {isa = PBXBuildFile; productRef = BDD64B862F76FD890055F82C /* MPVKit-GPL */; };
+		BDD64B832F76FD240055F82C /* MPVKit in Frameworks */ = {isa = PBXBuildFile; productRef = BDD64B822F76FD240055F82C /* MPVKit */; };
+		BDD64B872F76FD890055F82C /* MPVKit in Frameworks */ = {isa = PBXBuildFile; productRef = BDD64B862F76FD890055F82C /* MPVKit */; };
 		BEEFBC48135CF7E02F81D4D4 /* AppBehaviorsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */; };
 		C02E4BB60A5E960696E8839B /* Pods-Aerio_iOS-acknowledgements.markdown in Resources */ = {isa = PBXBuildFile; fileRef = 8FEC2B12EB3FCB8C13AD3FD1 /* Pods-Aerio_iOS-acknowledgements.markdown */; };
 		C9B3A9A8801BC79552C8D496 /* LiquidGlass.swift in Sources */ = {isa = PBXBuildFile; fileRef = 941113ED14A0DAA1CB8B183B /* LiquidGlass.swift */; };
@@ -458,7 +458,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				BDD64B872F76FD890055F82C /* MPVKit-GPL in Frameworks */,
+				BDD64B872F76FD890055F82C /* MPVKit in Frameworks */,
 				F3D3906F995E10786B3C924D /* Pods_Aerio_tvOS.framework in Frameworks */,
 				62842087B22608DF35AAE271 /* SwiftDraw in Frameworks */,
 			);
@@ -475,7 +475,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				BDD64B832F76FD240055F82C /* MPVKit-GPL in Frameworks */,
+				BDD64B832F76FD240055F82C /* MPVKit in Frameworks */,
 				5FC5F24E2D48E01D39209E78 /* Pods_Aerio_iOS.framework in Frameworks */,
 				F564DDA103FF386C57BADEDE /* SwiftDraw in Frameworks */,
 			);
@@ -1858,15 +1858,15 @@
 			package = F14B1CE1620BA3F5A29FABEB /* XCRemoteSwiftPackageReference "SwiftDraw" */;
 			productName = SwiftDraw;
 		};
-		BDD64B822F76FD240055F82C /* MPVKit-GPL */ = {
+		BDD64B822F76FD240055F82C /* MPVKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = BDD64B7F2F76FD240055F82C /* XCRemoteSwiftPackageReference "MPVKit" */;
-			productName = "MPVKit-GPL";
+			productName = MPVKit;
 		};
-		BDD64B862F76FD890055F82C /* MPVKit-GPL */ = {
+		BDD64B862F76FD890055F82C /* MPVKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = BDD64B7F2F76FD240055F82C /* XCRemoteSwiftPackageReference "MPVKit" */;
-			productName = "MPVKit-GPL";
+			productName = MPVKit;
 		};
 		E12C9B65A0DB5BD84E376DB2 /* SwiftDraw */ = {
 			isa = XCSwiftPackageProductDependency;
