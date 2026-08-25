@@ -207,7 +207,9 @@ struct MultiviewTileView: View {
     /// on-device TS->HLS remux vs mpv. Reads the session-locked engine, which
     /// a mid-session HEVC fallback downgrades to .mpv, so it reflects reality.
     private var engineBadgeLabel: String {
-        guard tile.kind == .live else { return "mpv" }
+        // Same guard as usesAVPlayerEngine - a VOD tile riding AVPlayer
+        // must not report "mpv" (field find: Speak No Evil badge).
+        guard tile.kind == .live || tile.kind == .vod else { return "mpv" }
         switch store.sessionEngine {
         case .avPlayerDirectHLS: return "AVPlayer · Direct HLS"
         case .avPlayerRemuxTS:   return "AVPlayer · Remux TS"

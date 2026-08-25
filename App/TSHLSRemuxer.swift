@@ -1130,8 +1130,12 @@ struct AVPlayerMultiviewTile: View {
         // were inert over an AVPlayer tile before). Tear any prior one
         // down first (channel swap reuses the tile).
         driver?.teardown()
+        // isLive must be truthful: the driver's duration/position
+        // observers all guard on it, so a VOD tile driven as live gets
+        // durationMs 0 and the chrome renders the scrubber-less live
+        // layout (field find: "can't scrub at all", Speak No Evil).
         driver = AVPlayerProgressDriver(
-            player: avPlayer, store: progressStore, isLive: true, applyGravity: { _ in })
+            player: avPlayer, store: progressStore, isLive: !isVOD, applyGravity: { _ in })
         // Fast path: AVFoundation's own diagnosis of a rejected playlist / failed
         // reload arrives as an errorLog entry; escalate the fatal codes straight
         // to the mpv engine instead of logging and stranding the tile.
