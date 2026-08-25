@@ -97,6 +97,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private var patPacket: Data?
     private var pmtPacket: Data?
     private var codecGatePassed = false
+    /// Non-nil after the PMT declared HEVC: the fMP4 arm (Apple HLS rule
+    /// 1.5 - HEVC only rides fMP4 segments; the TS passthrough below is
+    /// the H.264 arm). Bytes route to it INSTEAD of the TS segmenter, the
+    /// playlist grows EXT-X-MAP/VERSION 7, and the loopback serves
+    /// init.mp4 + .m4s. Audio passes through (AC-3/E-AC-3/AAC), which is
+    /// what hands the system pipeline its 5.1/Atmos bitstream.
+    private var fmp4: LiveFMP4Remuxer?
+    private var fmp4InitSegment: Data?
 
     // Segmenter state
     private var currentSegment = Data()
@@ -219,6 +227,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     private func consume(_ data: Data) {
         guard !stopped, !errorSignaled else { return }
         totalBytesIngested += data.count
+        if let fmp4 {
+            // HEVC arm: the sub-remuxer does its own sync/PSI/PES walk.
+            // It re-acquires PAT/PMT from their in-stream repetition, so
+            // the partial chunk consumed before the switch costs nothing.
+            fmp4.feed(data)
+            return
+        }
         pending.append(data)
 
         // Resync to 0x47 if alignment was lost (provider hiccup).
@@ -374,10 +389,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         guard let video = foundVideo else { return }
         videoPID = video.pid
 
-        // The codec gate, per Apple's HLS authoring rules.
+        // The codec gate, per Apple's HLS authoring rules. H.264 stays on
+        // the TS passthrough below; HEVC switches to the fMP4 arm (rule
+        // 1.5); MPEG-2 has no decoder on this platform at all.
+        if video.type == 0x24 {
+            startFMP4Pipeline()
+            return
+        }
         if video.type != 0x1B {
-            let name = video.type == 0x24 ? "HEVC (needs fMP4 segments)" : "MPEG-2 video"
-            fail(.unsupportedCodec(name))
+            fail(.unsupportedCodec("MPEG-2 video"))
             return
         }
         if audioTypes.contains(where: { $0 == 0x03 || $0 == 0x04 }) {
@@ -448,10 +468,50 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         currentStartPTS = pts
     }
 
+    /// Switch this remuxer into fMP4 mode for an HEVC mux. Storage,
+    /// playlist window, READY gating, ramp, spill and jitter telemetry
+    /// are all shared with the TS arm; only production differs.
+    private func startFMP4Pipeline() {
+        guard fmp4 == nil else { return }
+        let mux = LiveFMP4Remuxer(
+            targetSegmentSeconds: targetSegmentSeconds,
+            rampSegmentSeconds: startupSegmentSeconds,
+            rampSegments: startupRampSegments,
+            log: { debugLog("[TS-REMUX] \($0)") })
+        mux.onPMT = { desc in
+            debugLog("[TS-REMUX] PMT: \(desc) -> fMP4 arm ENGAGED")
+        }
+        mux.onInitSegment = { [weak self] data in
+            self?.fmp4InitSegment = data
+        }
+        mux.onMediaSegment = { [weak self] data, duration in
+            self?.storeSegment(data: data, duration: duration)
+        }
+        mux.onError = { [weak self] error in
+            self?.fail(.unsupportedCodec(error.codecName))
+        }
+        fmp4 = mux
+        codecGatePassed = true
+        // Bytes already sitting in the TS arm's buffer belong to the new
+        // arm; hand them over before the next network chunk arrives.
+        if !pending.isEmpty {
+            mux.feed(Data(pending))
+            pending.removeAll()
+        }
+    }
+
     private func closeSegment(endPTS: Double) {
         guard let start = currentStartPTS, !currentSegment.isEmpty else { return }
         var duration = endPTS - start
         if duration <= 0 || duration > 10 { duration = targetSegmentSeconds }
+        storeSegment(data: currentSegment, duration: duration)
+    }
+
+    /// Shared segment store for BOTH arms (TS passthrough and fMP4):
+    /// window buffering, rewind spill, READY gating, and the feed-jitter
+    /// telemetry all behave identically regardless of who produced the
+    /// bytes.
+    private func storeSegment(data: Data, duration: Double) {
         // Upstream delivery jitter telemetry (2026-08-25 capture: 174 of
         // 940 closures arrived >2.6s apart, worst 9.2s, and the two
         // AVPlayer stalls line up with the worst gaps). Wall-clock gap
@@ -468,16 +528,17 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if nextSeq > 0, nextSeq % 150 == 0 {
             debugLog("[TS-REMUX] feed-jitter: \(starvedClosures) starved closures so far, worst gap \(String(format: "%.1f", worstClosureGap))s")
         }
-        segments.append((seq: nextSeq, data: currentSegment, duration: duration))
-        spillSegment(seq: nextSeq, data: currentSegment, duration: duration)
+        segments.append((seq: nextSeq, data: data, duration: duration))
+        spillSegment(seq: nextSeq, data: data, duration: duration)
         nextSeq += 1
         if segments.count > maxBufferedSegments {
             segments.removeFirst(segments.count - maxBufferedSegments)
         }
         if segments.count == 1 || segments.count % 5 == 0 {
-            debugLog("[TS-REMUX] segment \(nextSeq - 1) closed (\(String(format: "%.2f", duration))s, \(currentSegment.count / 1024) KB), buffered \(segments.count)")
+            debugLog("[TS-REMUX] segment \(nextSeq - 1) closed (\(String(format: "%.2f", duration))s, \(data.count / 1024) KB), buffered \(segments.count)")
         }
-        if !readySignaled, segments.count >= readyThreshold, localPort != 0 {
+        if !readySignaled, segments.count >= readyThreshold, localPort != 0,
+           fmp4 == nil || fmp4InitSegment != nil {
             readySignaled = true
             let url = URL(string: "http://127.0.0.1:\(localPort)/live.m3u8")!
             debugLog("[TS-REMUX] READY -> \(url.absoluteString)")
@@ -489,7 +550,7 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// it by total duration so the playlist never exceeds the depth.
     private func spillSegment(seq: Int, data: Data, duration: Double) {
         guard rewindWindowSeconds > 0, let dir = spillDir else { return }
-        let url = dir.appendingPathComponent("seg\(seq).ts")
+        let url = dir.appendingPathComponent("seg\(seq).\(segmentFileExtension)")
         do {
             try data.write(to: url)
         } catch {
@@ -534,18 +595,29 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // target.
         pinnedTargetDuration = max(pinnedTargetDuration,
                                    window.map(\.duration).max() ?? targetSegmentSeconds)
+        // fMP4 arm: EXT-X-MAP requires protocol version 6+; 7 matches
+        // Apple's own fMP4 playlists. The TS arm stays at 3.
+        let version = fmp4 != nil ? 7 : 3
         var text = """
         #EXTM3U
-        #EXT-X-VERSION:3
+        #EXT-X-VERSION:\(version)
         #EXT-X-TARGETDURATION:\(Int(pinnedTargetDuration.rounded(.up)))
         #EXT-X-MEDIA-SEQUENCE:\(first.seq)
 
         """
+        if fmp4 != nil {
+            text += "#EXT-X-MAP:URI=\"init.mp4\"\n"
+        }
         for segment in window {
-            text += "#EXTINF:\(String(format: "%.3f", segment.duration)),\nseg\(segment.seq).ts\n"
+            text += "#EXTINF:\(String(format: "%.3f", segment.duration)),\nseg\(segment.seq).\(segmentFileExtension)\n"
         }
         return text
     }
+
+    /// Media-segment URI extension per arm. Cosmetic to AVPlayer (the
+    /// playlist context decides), load-bearing for a human reading a
+    /// packet capture.
+    private var segmentFileExtension: String { fmp4 != nil ? "m4s" : "ts" }
 
     /// Memory-first (live edge), disk-fallback (scrubbed back into the
     /// rewind window). Called on `queue`.
@@ -629,11 +701,19 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             if path.hasSuffix("live.m3u8") {
                 body = Data(self.playlistText().utf8)
                 contentType = "application/vnd.apple.mpegurl"
+            } else if path.hasSuffix("init.mp4"), let initSeg = self.fmp4InitSegment {
+                body = initSeg
+                contentType = "video/mp4"
             } else if path.hasPrefix("/seg"), path.hasSuffix(".ts"),
                       let seq = Int(path.dropFirst(4).dropLast(3)),
                       let data = self.segmentData(seq: seq) {
                 body = data
                 contentType = "video/mp2t"
+            } else if path.hasPrefix("/seg"), path.hasSuffix(".m4s"),
+                      let seq = Int(path.dropFirst(4).dropLast(4)),
+                      let data = self.segmentData(seq: seq) {
+                body = data
+                contentType = "video/iso.segment"
             } else {
                 body = Data("not found".utf8)
                 contentType = "text/plain"
