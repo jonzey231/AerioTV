@@ -316,6 +316,10 @@ struct PlaybackChromeOverlay: View {
                             chromeState.reportInteraction()
                             showSwitchStream = true
                         } : nil,
+                        versionOptions: store.vodSoloTile != nil ? store.vodVersionOptions : [],
+                        currentVersionOptionID: store.vodCurrentVersionID,
+                        onSelectVersion: store.vodSoloTile == nil ? nil : { store.switchVODVersion($0) },
+                        isVODSession: store.vodSoloTile != nil,
                         // Pin the chrome up while the overflow menu (and
                         // its sub-menus) is open; release + restart the
                         // fade clock on dismiss. Without this the 5s
@@ -367,7 +371,11 @@ struct PlaybackChromeOverlay: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 8)
-            if liveRewindIOS.buffering {
+            if store.vodSoloTile != nil {
+                VODTransportBar_iOS(store: store)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+            } else if liveRewindIOS.buffering {
                 RewindTransportBar_iOS(store: store)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
@@ -631,6 +639,98 @@ struct PlaybackChromeOverlay: View {
 /// centered skip/pause controls with the Go Live pill on the right
 /// while rewound. Actions dispatch through the sole tile's
 /// PlayerProgressStore closures into the coordinator's re-tune branch.
+/// VOD transport for the iOS unified chrome: the rewind bar's layout
+/// over the title's full duration (drag-to-seek timeline, elapsed /
+/// total clock, 30s skips, play-pause). Solo-VOD sessions only.
+struct VODTransportBar_iOS: View {
+    @ObservedObject var store: MultiviewStore
+    @State private var dragFraction: CGFloat? = nil
+
+    var body: some View {
+        let duration = Int64(max(Int32(1), store.audioProgressStore?.durationMs ?? 1))
+        let posMs = Int64(store.audioProgressStore?.currentMs ?? 0)
+        let current = min(posMs, duration)
+        let fraction = dragFraction ?? CGFloat(Double(current) / Double(duration))
+        let isPaused = store.audioProgressStore?.isPaused ?? false
+
+        VStack(spacing: 6) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.2))
+                    Capsule().fill(Color.accentColor)
+                        .frame(width: geo.size.width * max(0, min(1, fraction)))
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 14, height: 14)
+                        .offset(x: geo.size.width * max(0, min(1, fraction)) - 7)
+                }
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { v in
+                            dragFraction = max(0, min(1, v.location.x / geo.size.width))
+                        }
+                        .onEnded { v in
+                            let f = max(0, min(1, v.location.x / geo.size.width))
+                            dragFraction = nil
+                            store.audioProgressStore?.seekAction?(Int32(Double(duration) * Double(f)))
+                        }
+                )
+                .padding(.vertical, -12)
+            }
+            .frame(height: 14)
+
+            HStack {
+                Text(Self.clock(Int32(clamping: dragFraction.map { Int64(Double(duration) * Double($0)) } ?? current)))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .monospacedDigit()
+                Spacer()
+                Text(Self.clock(Int32(clamping: duration)))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .monospacedDigit()
+            }
+
+            HStack(spacing: 26) {
+                vodButton("gobackward.30") {
+                    if let ps = store.audioProgressStore {
+                        ps.seekAction?(max(0, ps.currentMs - 30_000))
+                    }
+                }
+                vodButton(isPaused ? "play.fill" : "pause.fill") {
+                    store.audioProgressStore?.togglePauseAction?()
+                }
+                vodButton("goforward.30") {
+                    if let ps = store.audioProgressStore {
+                        ps.seekAction?(min(Int32(clamping: duration), ps.currentMs + 30_000))
+                    }
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func vodButton(_ icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(Color.black.opacity(0.55), in: Circle())
+        }
+    }
+
+    private static func clock(_ ms: Int32) -> String {
+        let total = Int(ms) / 1000
+        if total >= 3600 {
+            return String(format: "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+        }
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
 struct RewindTransportBar_iOS: View {
     @ObservedObject var store: MultiviewStore
     @ObservedObject private var liveRewind = LiveRewindEngine.shared
@@ -808,6 +908,14 @@ private struct iPadOverflowAdapter: View {
     /// only when the audio tile's channel is eligible; flips
     /// `showSwitchStream` so the container presents `SwitchStreamView`.
     var onSwitchStream: (() -> Void)? = nil
+    /// Switch Version for a solo VOD tile (container parity with the
+    /// legacy cover; same store-driven context the tvOS panel reads).
+    var versionOptions: [VODVersionOption] = []
+    var currentVersionOptionID: Int? = nil
+    var onSelectVersion: ((VODVersionOption) -> Void)? = nil
+    /// True while the session is a solo VOD play; drives the menu's
+    /// live-only gating truthfully.
+    var isVODSession: Bool = false
     /// Pin / unpin the auto-hiding chrome while the menu popover is open
     /// (fired from `PlayerOverflowMenu`'s `.onAppear`/`.onDisappear`
     /// under `#if os(iOS)`). See the type doc comment.
@@ -816,12 +924,15 @@ private struct iPadOverflowAdapter: View {
 
     var body: some View {
         PlayerOverflowMenu(
+            versionOptions: versionOptions,
+            currentVersionOptionID: currentVersionOptionID,
+            switchVersionAction: onSelectVersion,
             audioTracks: progressStore.audioTracks,
             currentAudioTrackID: progressStore.currentAudioTrackID,
             subtitleTracks: progressStore.subtitleTracks,
             currentSubtitleTrackID: progressStore.currentSubtitleTrackID,
             speed: progressStore.speed,
-            isLive: true,  // multiview is always live-only in v1
+            isLive: !isVODSession,
             sleepTimerEnd: sleepTimerEnd,
             showStreamInfo: showStreamInfo,
             isAudioOnly: progressStore.isAudioOnly,
