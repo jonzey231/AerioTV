@@ -4149,15 +4149,40 @@ final class AVPlayerProgressDriver {
     }
 
     private func freezeTick() {
-        guard player.timeControlStatus == .playing,
-              let item = player.currentItem else {
+        guard let item = player.currentItem else {
             freezeLastMediaTime = .invalid
             freezeConsecutiveTicks = 0
             return
         }
+        // 14:26 field freeze (2026-08-25): AVPlayer sat in
+        // .waitingToPlayAtSpecifiedRate at the live edge - not a stall to
+        // the access log, no PlaybackStalled notification, and the first
+        // version of this guard MUTED the detector on exactly that state.
+        // A waiting player IS the freeze; log it with the system's reason.
+        if player.timeControlStatus != .playing {
+            if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+                freezeConsecutiveTicks += 1
+                let reason = player.reasonForWaitingToPlay?.rawValue ?? "unknown"
+                debugLog(String(format:
+                    "[AVP-FREEZE] waiting (%@) tick %d, pos %.1fs",
+                    reason, freezeConsecutiveTicks, item.currentTime().seconds))
+            } else {
+                freezeConsecutiveTicks = 0 // paused deliberately
+            }
+            freezeLastMediaTime = .invalid
+            return
+        }
         let now = item.currentTime()
         defer { freezeLastMediaTime = now }
-        guard freezeLastMediaTime.isValid else { return }
+        guard freezeLastMediaTime.isValid else {
+            if freezeConsecutiveTicks > 0 {
+                debugLog(String(format:
+                    "[AVP-FREEZE] recovered after ~%ds frozen (pos %.1fs)",
+                    freezeConsecutiveTicks, now.seconds))
+                freezeConsecutiveTicks = 0
+            }
+            return
+        }
         let advanced = (now - freezeLastMediaTime).seconds
         if advanced < 0.25 {
             freezeConsecutiveTicks += 1
@@ -4174,6 +4199,14 @@ final class AVPlayerProgressDriver {
 
     private func logPerfSummary() {
         guard let event = player.currentItem?.accessLog()?.events.last else { return }
+        // Live-edge cushion: seekable end minus playhead. The number that
+        // sizes the anti-freeze cushion; freezes should correlate with
+        // this hitting ~0.
+        var edge = -1.0
+        if let item = player.currentItem,
+           let range = item.seekableTimeRanges.last?.timeRangeValue {
+            edge = (range.end - item.currentTime()).seconds
+        }
         let stalls = event.numberOfStalls
         let dropped = event.numberOfDroppedVideoFrames
         let dStalls = max(0, stalls - lastStallCount)
@@ -4187,10 +4220,10 @@ final class AVPlayerProgressDriver {
         // jetsam kill is minutes away. A periodic sample turns that class of
         // leak into a visible slope in any ordinary debug log.
         debugLog(String(format:
-            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d rss=%.1f MB",
+            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d edge=%.1fs rss=%.1f MB",
             dStalls, stalls, dDropped, dropped,
             event.observedBitrate / 1000,
-            event.numberOfMediaRequests,
+            event.numberOfMediaRequests, edge,
             Double(ProcessMetrics.residentSetSizeBytes()) / 1_048_576.0))
     }
 
