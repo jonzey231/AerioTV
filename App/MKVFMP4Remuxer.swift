@@ -241,6 +241,14 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         cond.lock()
+        // Identity guard (2026-08-25 field failure, "movie restarted"): a
+        // seek cancels the old task, but its in-flight callbacks land
+        // AFTER open() resets state for the new one. Without this guard
+        // the stale task's bytes - from the OLD file position - append
+        // into a buffer whose bufferStart describes the NEW position:
+        // corrupt spans ("no video samples"), failed segments, and the
+        // watchdog's mpv fallback restarting the title.
+        guard dataTask === task else { cond.unlock(); return }
         buffer.append(data)
         bytesStreamed += Int64(data.count)
         let ahead = Int(bufferStart + Int64(buffer.count) - consumePoint)
@@ -254,8 +262,15 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         cond.lock()
-        if let error, (error as NSError).code != NSURLErrorCancelled {
-            failed = error.localizedDescription
+        // Same identity guard, and the sharper half of the field bug: the
+        // CANCELLED old task's completion arrived after open() reset
+        // state and set finished=true on the NEW stream - every read then
+        // returned empty instantly instead of waiting for data.
+        guard task === self.task else { cond.unlock(); return }
+        if let error {
+            if (error as NSError).code != NSURLErrorCancelled {
+                failed = error.localizedDescription
+            }
         } else {
             finished = true
         }
