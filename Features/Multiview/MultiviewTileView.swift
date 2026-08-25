@@ -741,6 +741,16 @@ struct MultiviewTileView: View {
             .onChange(of: tile.streamURL) { _, _ in
                 store.registerEngine(engineBadgeLabel, for: tile.id)
             }
+            // 2026-08-25 field find (Sky Sports Main Event UHD screenshots):
+            // a mid-session downgradeToMPV re-rendered the tile as mpv but
+            // the chrome badge kept saying "AVPlayer · Remux TS" -- none of
+            // onAppear / task(id) / streamURL re-fire on an engine change,
+            // so tileEngines held the stale pre-fallback string. Re-register
+            // whenever the session engine actually changes so the badge can
+            // never disagree with the pipeline that is rendering.
+            .onChange(of: store.sessionEngine) { _, _ in
+                store.registerEngine(engineBadgeLabel, for: tile.id)
+            }
             .id(tile.id)
             .onAppear {
                 debugLog("[MV-Tile] onAppear id=\(tile.id) name=\(tile.item.name)")
@@ -1038,6 +1048,11 @@ struct MultiviewTileView: View {
                 store.registerProgressStore(progressStore, for: tile.id)
                 store.registerEngine(engineBadgeLabel, for: tile.id)
                 applyVODIdentityToProgressStore()
+            }
+            // Same stale-badge fix as the tvOS body: re-register on engine
+            // change so a downgradeToMPV updates the chrome badge.
+            .onChange(of: store.sessionEngine) { _, _ in
+                store.registerEngine(engineBadgeLabel, for: tile.id)
             }
 
             // Per-tile corner chrome suppressed at N=1 (container

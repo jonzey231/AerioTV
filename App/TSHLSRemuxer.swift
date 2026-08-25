@@ -53,11 +53,22 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Minimum seconds between segment cuts; the actual cut lands on the
     /// FIRST keyframe at or after this much elapsed PTS.
     private let targetSegmentSeconds = 2.0
-    /// Segments advertised in the live playlist window.
-    private let liveWindowSegments = 6
+    /// Startup ramp (2026-08-25 ESPN capture): the 6.15s tune-in was
+    /// 1.9s connect + 4s of accumulating readyThreshold 2.0s segments.
+    /// The first few segments therefore cut at the first keyframe after
+    /// 1.0s instead, halving the accumulation phase wherever the feed's
+    /// keyframe cadence is denser than 2s. On a 2s-GOP feed the cuts
+    /// still land at 2s and this is a no-op, never a regression.
+    private let startupRampSegments = 3
+    private let startupSegmentSeconds = 1.0
+    /// Segments advertised in the live playlist window. 8 (not 6): the
+    /// same capture showed AVPlayer recovers from an upstream delivery
+    /// gap by re-buffering deeper behind the edge; a 16s window gives
+    /// that recovery room where 12s ran out during a 9.2s feed gap.
+    private let liveWindowSegments = 8
     /// Segments retained in memory; old ones beyond this are dropped even
     /// if a slow client might still want them (live TV: it should not).
-    private let maxBufferedSegments = 10
+    private let maxBufferedSegments = 12
     /// Segments that must exist before `onReady` fires with the playlist
     /// URL. Two keeps startup low; AVPlayer refreshes the playlist as more
     /// land.
@@ -283,9 +294,11 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                 } else if isKeyframe,
                           let start = currentStartPTS {
                     var elapsed = pts - start
+                    let cutAt = nextSeq < startupRampSegments
+                        ? startupSegmentSeconds : targetSegmentSeconds
                     // 33-bit PTS wrap (~26.5h) or discontinuity: cut here.
-                    if elapsed < 0 { elapsed = targetSegmentSeconds }
-                    if elapsed >= targetSegmentSeconds {
+                    if elapsed < 0 { elapsed = cutAt }
+                    if elapsed >= cutAt {
                         closeSegment(endPTS: pts)
                         beginSegment(at: pts)
                     }
@@ -439,6 +452,22 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         guard let start = currentStartPTS, !currentSegment.isEmpty else { return }
         var duration = endPTS - start
         if duration <= 0 || duration > 10 { duration = targetSegmentSeconds }
+        // Upstream delivery jitter telemetry (2026-08-25 capture: 174 of
+        // 940 closures arrived >2.6s apart, worst 9.2s, and the two
+        // AVPlayer stalls line up with the worst gaps). Wall-clock gap
+        // between closures minus the media duration ~= feed starvation.
+        let nowWall = Date()
+        if let lastWall = lastSegmentCloseWall {
+            let gap = nowWall.timeIntervalSince(lastWall)
+            if gap > duration + 0.6 {
+                starvedClosures += 1
+                worstClosureGap = max(worstClosureGap, gap)
+            }
+        }
+        lastSegmentCloseWall = nowWall
+        if nextSeq > 0, nextSeq % 150 == 0 {
+            debugLog("[TS-REMUX] feed-jitter: \(starvedClosures) starved closures so far, worst gap \(String(format: "%.1f", worstClosureGap))s")
+        }
         segments.append((seq: nextSeq, data: currentSegment, duration: duration))
         spillSegment(seq: nextSeq, data: currentSegment, duration: duration)
         nextSeq += 1
@@ -478,6 +507,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
     }
 
+    // MARK: Feed-jitter telemetry (read the [TS-REMUX] feed-jitter lines)
+    private var lastSegmentCloseWall: Date?
+    private var starvedClosures = 0
+    private var worstClosureGap = 0.0
+
+    /// See playlistText: monotonic, never shrinks, seeded at the target.
+    private var pinnedTargetDuration = 2.0
+
     private func playlistText() -> String {
         // Rewind mode: advertise the whole disk window; AVPlayer's
         // seekable range then IS the rewind window. Every spilled entry
@@ -487,13 +524,20 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
             ? spilled.map { (seq: $0.seq, duration: $0.duration) }
             : segments.suffix(liveWindowSegments).map { (seq: $0.seq, duration: $0.duration) }
         guard let first = window.first else {
-            return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:\(Int(targetSegmentSeconds.rounded(.up)))\n#EXT-X-MEDIA-SEQUENCE:0\n"
+            return "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:\(Int(pinnedTargetDuration.rounded(.up)))\n#EXT-X-MEDIA-SEQUENCE:0\n"
         }
-        let maxDur = window.map(\.duration).max() ?? targetSegmentSeconds
+        // RFC 8216 4.3.3.1: TARGETDURATION MUST NOT change between playlist
+        // reloads. The old `window.max()` recomputation could report 1 during
+        // the startup ramp and grow to 2 (or beyond, after a long-GOP cut)
+        // later, which is exactly the heuristic CoreMedia's -12888 staleness
+        // check keys off. Pin it monotonically, seeded at the steady-state
+        // target.
+        pinnedTargetDuration = max(pinnedTargetDuration,
+                                   window.map(\.duration).max() ?? targetSegmentSeconds)
         var text = """
         #EXTM3U
         #EXT-X-VERSION:3
-        #EXT-X-TARGETDURATION:\(Int(maxDur.rounded(.up)))
+        #EXT-X-TARGETDURATION:\(Int(pinnedTargetDuration.rounded(.up)))
         #EXT-X-MEDIA-SEQUENCE:\(first.seq)
 
         """
