@@ -151,7 +151,13 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         self.headers = headers
         super.init()
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 60
+        // The request (inactivity) timeout must survive long SUSPENSIONS:
+        // flow control suspends the task past the high-water mark, and a
+        // paused movie suspends it indefinitely - 60s here killed the
+        // stream mid-pause and on far seeks (field find, 2026-08-25:
+        // "segment 246 failed: stream failed: The request timed out").
+        // Liveness is the reader's own 45s wait timeout, not URLSession's.
+        config.timeoutIntervalForRequest = 2 * 3600
         config.timeoutIntervalForResource = 24 * 3600
         session = URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue())
     }
@@ -185,6 +191,13 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         defer { cond.unlock() }
         if task == nil { return nil }
         if offset < bufferStart { return nil }
+        // A FORWARD seek far past the buffered head must reopen, not
+        // wait: blocking until the stream naturally reaches a target
+        // gigabytes ahead is the other half of the segment-246 field
+        // failure. 48MB (~a couple of spans) is the wait-worthy window.
+        if offset + Int64(length) > bufferStart + Int64(buffer.count) + 48 * 1024 * 1024 {
+            return nil
+        }
         let deadline = Date().addingTimeInterval(timeout)
         while bufferStart + Int64(buffer.count) < offset + Int64(length) {
             if let failed { throw MKVRemuxError(reason: "stream failed: \(failed)") }
@@ -827,9 +840,11 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 stream.open(at: lo)
                 streamOpen = true
             }
-            var piece = try stream.read(offset: lo, length: length)
+            var piece = (try? stream.read(offset: lo, length: length)) ?? nil
             if piece == nil || piece!.count < length {
-                // Behind the window or short at EOF-race: a REAL seek.
+                // Outside the window (seek, either direction), short at an
+                // EOF race, or a failed/timed-out stream: reopen once at
+                // the wanted offset and retry.
                 stream.open(at: lo)
                 piece = try stream.read(offset: lo, length: length)
             }
