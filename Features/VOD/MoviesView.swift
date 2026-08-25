@@ -362,6 +362,20 @@ struct MoviesView: View {
                                                         itemID: progress.vodID)
                 } ?? ""
             loadResumeVersionOptions(progress: progress, resumeURL: url, server: resumeServer)
+            // TEST (AVPlayer VOD): unified container first; false = engine
+            // off or non-VOD shape, legacy cover mounts unchanged.
+            if PlayerSession.shared.beginVOD(
+                title: progress.title,
+                streamURL: url,
+                headers: resumePlayingHeaders,
+                posterURL: progress.posterURL.flatMap { URL(string: $0) },
+                vodID: progress.vodID,
+                serverID: progress.serverID,
+                vodType: "movie",
+                resumePositionMs: progress.positionMs) {
+                isPlaying = true
+                return
+            }
             resumePlayingURL = IdentifiableURL(url: url)
             isPlaying = true
             return
