@@ -3920,6 +3920,10 @@ final class AVPlayerProgressDriver {
     /// mpv vo_drops/dec_drops deltas.
     private var lastStallCount = 0
     private var lastDroppedFrames = 0
+    /// Presentation-freeze detector state (see the 1s sampler below).
+    private var freezeLastMediaTime = CMTime.invalid
+    private var freezeConsecutiveTicks = 0
+    private var freezeTimer: Timer?
     /// Escalation sink for a fatal/persistent stream error the errorLog
     /// surfaces (e.g. a rejected playlist or a failed blocking reload that
     /// never throws to `status`). The host wires this to its engine fallback.
@@ -4129,6 +4133,43 @@ final class AVPlayerProgressDriver {
         perfTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.logPerfSummary() }
         }
+        // Presentation-freeze detector (2026-08-25 UHD soak): the user saw
+        // freezing while the access log swore stalls=0 and dropped=0 for
+        // the whole session. A held frame with the playback clock still
+        // advancing is invisible to every counter above; a held CLOCK
+        // while timeControlStatus stays .playing is invisible too, because
+        // numberOfStalls only counts re-buffer events AVPlayer itself
+        // declares. Sample currentTime once a second and call out any
+        // second where it moved less than a quarter of the way while the
+        // player claims to be playing.
+        freezeTimer?.invalidate()
+        freezeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.freezeTick() }
+        }
+    }
+
+    private func freezeTick() {
+        guard player.timeControlStatus == .playing,
+              let item = player.currentItem else {
+            freezeLastMediaTime = .invalid
+            freezeConsecutiveTicks = 0
+            return
+        }
+        let now = item.currentTime()
+        defer { freezeLastMediaTime = now }
+        guard freezeLastMediaTime.isValid else { return }
+        let advanced = (now - freezeLastMediaTime).seconds
+        if advanced < 0.25 {
+            freezeConsecutiveTicks += 1
+            debugLog(String(format:
+                "[AVP-FREEZE] clock advanced %.3fs in the last 1.0s wall (tick %d, pos %.1fs, status playing)",
+                advanced, freezeConsecutiveTicks, now.seconds))
+        } else if freezeConsecutiveTicks > 0 {
+            debugLog(String(format:
+                "[AVP-FREEZE] recovered after ~%ds frozen (pos %.1fs)",
+                freezeConsecutiveTicks, now.seconds))
+            freezeConsecutiveTicks = 0
+        }
     }
 
     private func logPerfSummary() {
@@ -4330,6 +4371,8 @@ final class AVPlayerProgressDriver {
         itemNotificationTokens.removeAll()
         perfTimer?.invalidate()
         perfTimer = nil
+        freezeTimer?.invalidate()
+        freezeTimer = nil
         aspectCancellable?.cancel()
         aspectCancellable = nil
         onUnrecoverable = nil
