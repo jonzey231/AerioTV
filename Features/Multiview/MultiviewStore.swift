@@ -680,6 +680,14 @@ final class MultiviewStore: ObservableObject {
         tiles.count == 1 ? tiles.first(where: { $0.kind == .catchup }) : nil
     }
 
+    /// The sole VOD tile when the session is a single-title VOD play
+    /// (the beginVOD path). The chrome gates its seekable transport
+    /// (timeline band, 30s skips, D-pad scrub) on this, same as
+    /// catch-up: both are fixed-duration seekable programmes.
+    var vodSoloTile: MultiviewTile? {
+        tiles.count == 1 ? tiles.first(where: { $0.kind == .vod }) : nil
+    }
+
     @discardableResult
     func addVOD(
         title: String,

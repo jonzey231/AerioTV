@@ -1026,6 +1026,11 @@ struct PlaybackBottomChrome_tvOS: View {
                 CatchupTimelineBand(progress: ps, playback: cu,
                                     previewMs: preview,
                                     focused: focusedChrome == .timeline)
+            } else if let vod = store.vodSoloTile,
+                      let ps = store.audioProgressStore {
+                VODTimelineBand(progress: ps, title: vod.item.name,
+                                previewMs: preview,
+                                focused: focusedChrome == .timeline)
             } else {
                 LiveRewindTimelineBand(store: store,
                                        previewMs: preview,
@@ -1060,7 +1065,7 @@ struct PlaybackBottomChrome_tvOS: View {
             // bar + time remaining. Non-focusable; informational.
             // With a Live Rewind session rolling, the band becomes the
             // rewind timeline over [buffer tail .. live edge] instead.
-            if store.catchupTile != nil || liveRewind.buffering {
+            if store.catchupTile != nil || store.vodSoloTile != nil || liveRewind.buffering {
                 // Scrubbable timeline (catch-up over the pinned
                 // programme duration / live rewind over the buffer
                 // window). A focus target: D-pad UP from the cells
@@ -1136,7 +1141,7 @@ struct PlaybackBottomChrome_tvOS: View {
                 // catch-up: currentMs ticks in both modes and seekAction
                 // routes to the right seek model per mode (buffer re-tune
                 // vs archive window re-tune).
-                if store.catchupTile != nil || liveRewind.buffering {
+                if store.catchupTile != nil || store.vodSoloTile != nil || liveRewind.buffering {
                     nativeToolButton(
                         .rewind30,
                         icon: "gobackward.30",
@@ -1634,6 +1639,63 @@ struct CatchupTimelineBand: View {
     }
 }
 
+/// Timeline band for a solo VOD tile: the catch-up band's shape with
+/// the duration read from the progress store (the AVPlayer driver
+/// publishes it at readyToPlay) instead of a pinned programme length.
+struct VODTimelineBand: View {
+    @ObservedObject var progress: PlayerProgressStore
+    let title: String
+    var previewMs: Int32? = nil
+    var focused: Bool = false
+
+    var body: some View {
+        let duration = max(Int32(1), progress.durationMs)
+        let current = min(max(0, previewMs ?? progress.currentMs), duration)
+        let fraction = Double(current) / Double(duration)
+
+        VStack(spacing: 8) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.white.opacity(focused ? 0.35 : 0.2))
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.accentColor)
+                        .frame(width: geo.size.width * CGFloat(max(0, min(1, fraction))))
+                    if focused {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 16, height: 16)
+                            .shadow(color: .black.opacity(0.5), radius: 3)
+                            .offset(x: geo.size.width * CGFloat(max(0, min(1, fraction))) - 8)
+                    }
+                }
+            }
+            .frame(height: 6)
+
+            HStack(spacing: 14) {
+                Text(title)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1)
+                Spacer()
+                Text("\(Self.clock(current)) / \(Self.clock(duration))")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .monospacedDigit()
+            }
+        }
+        // NO .focusable(false) here - see LiveRewindTimelineBand.
+    }
+
+    private static func clock(_ ms: Int32) -> String {
+        let total = Int(ms) / 1000
+        if total >= 3600 {
+            return String(format: "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+        }
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
 /// ONE D-pad left/right scrub implementation for live rewind AND
 /// catch-up (task #147 milestone 2). Presses with the chrome hidden
 /// step a PREVIEW position - no seek per press, because a seek is a
@@ -1669,9 +1731,17 @@ final class DpadScrubController: ObservableObject {
     @discardableResult
     func step(_ dir: Int, store: MultiviewStore) -> Bool {
         let endMs: Int32
+        let isVOD = store.vodSoloTile != nil
         let isCatchup = store.catchupTile != nil
         if let cu = store.catchupTile?.catchup {
             endMs = max(1, cu.programDurationMs)
+        } else if isVOD {
+            // VOD scrubs over the title's full duration; the driver
+            // publishes it once the item is ready. 0 = not ready yet,
+            // refuse the scrub rather than divide into a zero window.
+            let d = store.audioProgressStore?.durationMs ?? 0
+            guard d > 0 else { return false }
+            endMs = d
         } else {
             let rewind = LiveRewindEngine.shared
             guard rewind.buffering else { return false }
@@ -1684,7 +1754,7 @@ final class DpadScrubController: ObservableObject {
             accelCount = 0
             // Seed from the playhead. At the live edge (rewind mode,
             // not timeshifting) the playhead IS the window end.
-            if isCatchup || LiveRewindEngine.shared.timeshifting {
+            if isCatchup || isVOD || LiveRewindEngine.shared.timeshifting {
                 targetMs = min(max(0, store.audioProgressStore?.currentMs ?? 0), endMs)
             } else {
                 targetMs = endMs
@@ -1696,7 +1766,7 @@ final class DpadScrubController: ObservableObject {
         let stepped = Int64(targetMs) + Int64(dir) * 10_000 * mult
         targetMs = Int32(max(0, min(Int64(endMs), stepped)))
         active = true
-        debugLog("[DPAD-SCRUB] step dir=\(dir) x\(mult) -> \(targetMs)/\(endMs)ms \(isCatchup ? "catchup" : "rewind")")
+        debugLog("[DPAD-SCRUB] step dir=\(dir) x\(mult) -> \(targetMs)/\(endMs)ms \(isCatchup ? "catchup" : (isVOD ? "vod" : "rewind"))")
         let seek = store.audioProgressStore?.seekAction
         commitTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 650_000_000)
@@ -1735,6 +1805,9 @@ struct DpadScrubHUD: View {
             if let cu = store.catchupTile?.catchup,
                let ps = store.audioProgressStore {
                 CatchupTimelineBand(progress: ps, playback: cu, previewMs: scrub.targetMs)
+            } else if let vod = store.vodSoloTile,
+                      let ps = store.audioProgressStore {
+                VODTimelineBand(progress: ps, title: vod.item.name, previewMs: scrub.targetMs)
             } else {
                 LiveRewindTimelineBand(store: store, previewMs: scrub.targetMs)
             }
