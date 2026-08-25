@@ -1467,6 +1467,21 @@ struct VODDetailView: View {
         // single-stream mode: the multiview-specific branches inside
         // `exit()` are guarded by `if let audioID = store.audioTileID`.
         PlayerSession.shared.exit()
+        // TEST (AVPlayer VOD): the unified container path first; false =
+        // engine off or non-VOD shape, mount the legacy cover unchanged.
+        if PlayerSession.shared.beginVOD(
+            title: title,
+            streamURL: resolvedURL,
+            headers: playingHeaders,
+            posterURL: (playingPosterURL ?? item.posterURL?.absoluteString).flatMap { URL(string: $0) },
+            vodID: playingVodID,
+            serverID: item.serverID.uuidString,
+            vodType: playingVodType,
+            resumePositionMs: WatchProgressManager.getResumePosition(vodID: playingVodID,
+                                                              serverID: item.serverID.uuidString)) {
+            isPlaying = true
+            return
+        }
         playingURL = IdentifiableURL(url: resolvedURL)
         isPlaying = true
     }

@@ -433,6 +433,55 @@ final class PlayerSession: ObservableObject {
         return ResolvedEngine(engine: .mpv, routeURL: url, headers: headers)
     }
 
+    /// TEST (AVPlayer VOD): route a VOD launch through the unified
+    /// container instead of the legacy PlayerView cover, so the tile's
+    /// AVPlayer VOD chain (MP4 direct / MKV cue-indexed remux, resume,
+    /// display criteria, mpv fallback) runs. Returns false when the
+    /// engine toggle is off or the URL is not VOD-shaped - the caller
+    /// then mounts the legacy cover exactly as before, so the mpv path
+    /// is byte-for-byte untouched.
+    ///
+    /// Known v1 gaps vs the legacy cover, accepted for the field test:
+    /// the in-player Switch Version menu and sleep timer are the
+    /// container chrome's versions, and lockscreen/Now Playing mirrors
+    /// the tile item generically.
+    @discardableResult
+    func beginVOD(title: String,
+                  streamURL: URL,
+                  headers: [String: String],
+                  posterURL: URL?,
+                  vodID: String?,
+                  serverID: String?,
+                  vodType: String,
+                  resumePositionMs: Int32?) -> Bool {
+        guard PlaybackFeatureFlags.avPlayerRemuxTS else { return false }
+        let ext = streamURL.pathExtension.lowercased()
+        let vodShape = streamURL.path.contains("/proxy/vod/")
+            || ["mkv", "mp4", "m4v", "mov"].contains(ext)
+        guard vodShape else { return false }
+        let store = MultiviewStore.shared
+        if !store.tiles.isEmpty { exit() }
+        store.lockEngine(ResolvedEngine(engine: .avPlayerRemuxTS,
+                                        routeURL: streamURL,
+                                        headers: headers))
+        let result = store.addVOD(title: title, streamURL: streamURL,
+                                  headers: headers, posterURL: posterURL,
+                                  kind: .vod, vodID: vodID, serverID: serverID,
+                                  vodType: vodType,
+                                  resumePositionMs: resumePositionMs,
+                                  bypassWarning: true)
+        guard result == .added else {
+            DebugLogger.shared.log("[Engine] beginVOD: addVOD -> \(result); falling back to legacy cover",
+                                   category: "Playback", level: .warning)
+            exit()
+            return false
+        }
+        DebugLogger.shared.log("[Engine] beginVOD: \(title) via AVPlayer container (\(ext.isEmpty ? "proxy" : ext))",
+                               category: "Playback", level: .info)
+        mode = .multiview
+        return true
+    }
+
     @discardableResult
     func begin(item: ChannelDisplayItem,
                server: ServerConnection?,
