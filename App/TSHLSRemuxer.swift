@@ -2,6 +2,8 @@ import Foundation
 import Network
 import SwiftUI
 import AVFoundation
+import AVKit
+import CoreMedia
 import Combine
 
 // MARK: - TS-to-HLS remuxer (TEST, branch test/avplayer-hls-engine)
@@ -78,6 +80,15 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     var onReady: ((URL) -> Void)?
     var onError: ((RemuxError) -> Void)?
+    /// Fires once with the stream's measured geometry / frame rate /
+    /// 10-bit flag, from whichever arm is producing. The tile uses it to
+    /// set AVDisplayManager.preferredDisplayCriteria: a bare
+    /// AVPlayerLayer never triggers a display-mode match on its own
+    /// (that is an AVPlayerViewController perk), so without this the
+    /// panel stays at the home-screen 4K SDR 60 regardless of content.
+    /// Width/height are 0 from the TS arm (it never parses the SPS);
+    /// the tile falls back to a nominal geometry there.
+    var onVideoParameters: ((_ width: Int, _ height: Int, _ fps: Double, _ is10Bit: Bool) -> Void)?
 
     // MARK: State
 
@@ -105,6 +116,12 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// what hands the system pipeline its 5.1/Atmos bitstream.
     private var fmp4: LiveFMP4Remuxer?
     private var fmp4InitSegment: Data?
+    /// TS-arm frame-rate measurement: successive video PES PTS deltas.
+    /// The median of ~60 access units nails 25/30/50/59.94 without
+    /// parsing the SPS.
+    private var videoPTSDeltas: [Double] = []
+    private var lastVideoAUPTS: Double = -1
+    private var videoParamsSent = false
 
     // Segmenter state
     private var currentSegment = Data()
@@ -300,6 +317,21 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // Keyframe-aligned cuts: only video PES starts can open segments.
         if pid == videoPID, pusi {
             if let pts = extractPTS(p) {
+                if !videoParamsSent {
+                    if lastVideoAUPTS >= 0 {
+                        let d = pts - lastVideoAUPTS
+                        if d > 0.005, d < 0.1 { videoPTSDeltas.append(d) }
+                    }
+                    lastVideoAUPTS = pts
+                    if videoPTSDeltas.count >= 60 {
+                        videoParamsSent = true
+                        let median = videoPTSDeltas.sorted()[videoPTSDeltas.count / 2]
+                        let fps = 1.0 / median
+                        debugLog("[TS-REMUX] video: measured \(String(format: "%.2f", fps))fps (H.264 arm)")
+                        let cb = onVideoParameters
+                        DispatchQueue.main.async { cb?(0, 0, fps, false) }
+                    }
+                }
                 let isKeyframe = packetStartsKeyframeAccessUnit(p)
                 if awaitingFirstKeyframe {
                     if isKeyframe {
@@ -489,6 +521,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
         mux.onError = { [weak self] error in
             self?.fail(.unsupportedCodec(error.codecName))
+        }
+        mux.onVideoParameters = { [weak self] w, h, fps, tenBit in
+            let cb = self?.onVideoParameters
+            DispatchQueue.main.async { cb?(w, h, fps, tenBit) }
         }
         fmp4 = mux
         codecGatePassed = true
@@ -906,6 +942,11 @@ struct AVPlayerMultiviewTile: View {
     /// reported a video size, the stream is audio-only to AVFoundation
     /// (e.g. HEVC carried in MPEG-TS HLS) and we fall the tile back to mpv.
     @State private var stallWatchdog: AVPStallWatchdog?
+    #if os(tvOS)
+    /// The display manager our criteria landed on, for teardown. Mirrors
+    /// the mpv path's clearDisplayCriteria bookkeeping.
+    @State private var appliedDisplayManager: AVDisplayManager?
+    #endif
 
     var body: some View {
         ZStack {
@@ -983,6 +1024,9 @@ struct AVPlayerMultiviewTile: View {
             mux.onError = { error in
                 debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName); falling back to mpv tile")
                 onEngineFallback("\(error)")
+            }
+            mux.onVideoParameters = { w, h, fps, tenBit in
+                applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
             }
             remuxer = mux
             mux.start()
@@ -1091,6 +1135,67 @@ struct AVPlayerMultiviewTile: View {
         stallWatchdog?.cancel()
         stallWatchdog = nil
         MultiviewStore.shared.unregisterVideoAspect(for: tileID)
+        #if os(tvOS)
+        if let dm = appliedDisplayManager {
+            appliedDisplayManager = nil
+            DispatchQueue.main.async { dm.preferredDisplayCriteria = nil }
+            debugLog("[AVP-DISPLAY] display criteria cleared (panel returns to default mode)")
+        }
+        #endif
+    }
+
+    /// tvOS display-mode match for the AVPlayer tile. A bare
+    /// AVPlayerLayer never triggers Match Content on its own (that is an
+    /// AVPlayerViewController behavior), so the panel would stay at the
+    /// home-screen 4K SDR 60 no matter what plays - the 2026-08-25 field
+    /// report for the fMP4 arm's first run (HDR did not engage, TV stayed
+    /// at 60Hz). Mirrors MPVPlayerView.applyMetalHDRDisplayCriteria: a
+    /// distinctive-shape CMVideoFormatDescription, BT.2020/PQ extensions
+    /// when the mux is 10-bit, at the measured refresh rate. The system
+    /// converts HLG under an HDR10 HDMI mode, same as the mpv Metal path.
+    private func applyDisplayCriteria(width: Int, height: Int, fps: Double, is10Bit: Bool) {
+        #if os(tvOS)
+        guard fps > 10, fps < 130 else { return }
+        let window: UIWindow? = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first(where: { $0.activationState == .foregroundActive })?
+            .keyWindow
+        guard let window else {
+            debugLog("[AVP-DISPLAY] display criteria skipped: no window available")
+            return
+        }
+        var extensions: [CFString: Any]?
+        if is10Bit {
+            extensions = [
+                kCMFormatDescriptionExtension_ColorPrimaries: kCMFormatDescriptionColorPrimaries_ITU_R_2020,
+                kCMFormatDescriptionExtension_TransferFunction: kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ,
+                kCMFormatDescriptionExtension_YCbCrMatrix: kCMFormatDescriptionYCbCrMatrix_ITU_R_2020,
+            ]
+        }
+        var formatDesc: CMVideoFormatDescription?
+        let status = CMVideoFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            codecType: is10Bit ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
+            width: width > 0 ? Int32(width) : 1920,
+            height: height > 0 ? Int32(height) : 1080,
+            extensions: extensions as CFDictionary?,
+            formatDescriptionOut: &formatDesc)
+        guard status == noErr, let formatDesc else {
+            debugLog("[AVP-DISPLAY] CMVideoFormatDescriptionCreate failed: \(status)")
+            return
+        }
+        let dm = window.avDisplayManager
+        appliedDisplayManager = dm
+        dm.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: Float(fps),
+                                                        formatDescription: formatDesc)
+        debugLog("[AVP-DISPLAY] display criteria set: \(width)x\(height) " +
+                 "\(is10Bit ? "bt.2020/PQ" : "SDR") @ \(String(format: "%.2f", fps))Hz " +
+                 "(matchingEnabled=\(dm.isDisplayCriteriaMatchingEnabled))")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak window] in
+            guard let screen = window?.screen else { return }
+            debugLog("[AVP-DISPLAY] panel reports \(screen.maximumFramesPerSecond)Hz 3s after criteria request")
+        }
+        #endif
     }
 }
 

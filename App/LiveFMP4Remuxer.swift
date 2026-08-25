@@ -59,6 +59,14 @@ final class LiveFMP4Remuxer {
     var onMediaSegment: ((Data, Double) -> Void)?
     var onError: ((LiveFMP4UnsupportedError) -> Void)?
     var onPMT: ((String) -> Void)?
+    /// Fires once, after the first segment's worth of samples: the
+    /// stream's real geometry, measured frame rate, and whether it is a
+    /// 10-bit (HDR-class) mux. The tile uses it to set
+    /// AVDisplayManager.preferredDisplayCriteria - a bare AVPlayerLayer
+    /// gets NO automatic display-mode match (that is an
+    /// AVPlayerViewController perk), so without this the panel stays at
+    /// the home-screen 4K SDR 60 no matter what plays.
+    var onVideoParameters: ((_ width: Int, _ height: Int, _ fps: Double, _ is10Bit: Bool) -> Void)?
 
     /// Steady-state cut threshold plus the startup ramp, mirroring the
     /// TS segmenter: the first `rampSegments` cut at `rampSeconds` so
@@ -137,6 +145,8 @@ final class LiveFMP4Remuxer {
     private var lastVideoDuration: Int64 = 1_800 // 50 fps fallback for the first delta
     private var sequenceNumber = 0
     private var emittedSegments = 0
+    private var videoParamsSent = false
+    private var parsedSPSInfo: HEVCSPSInfo?
 
     // MARK: - Ingest
 
@@ -518,6 +528,14 @@ final class LiveFMP4Remuxer {
         for a in audioQueue {
             if a.pts < cutDTS { segAudio.append(a) } else { keepAudio.append(a) }
         }
+        if !videoParamsSent, let info = parsedSPSInfo, durations.count >= 8 {
+            videoParamsSent = true
+            let sorted = durations.sorted()
+            let median = Double(sorted[sorted.count / 2])
+            let fps = median > 0 ? Double(Self.ticksPerSecond) / median : 0
+            log("[FMP4] video: \(info.width)x\(info.height) \(String(format: "%.2f", fps))fps \(info.bitDepthLuma)-bit")
+            onVideoParameters?(info.width, info.height, fps, info.bitDepthLuma > 8)
+        }
         let segment = buildMediaSegment(video: videoQueue, videoDurations: durations, audio: segAudio)
         let durationTicks = cutDTS - segStart
         videoQueue.removeAll(keepingCapacity: true)
@@ -530,6 +548,7 @@ final class LiveFMP4Remuxer {
 
     private func buildInitSegment() -> Data {
         let dims = (try? Self.parseHEVCSPS(sps!)) ?? HEVCSPSInfo.fallback
+        parsedSPSInfo = dims
         var out = Data(capacity: 1500)
         out.append(Self.box("ftyp", Self.bytes("iso5"), Self.u32(0),
                             Self.bytes("iso5"), Self.bytes("iso6"), Self.bytes("mp41")))
