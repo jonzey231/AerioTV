@@ -112,6 +112,145 @@ final class MKVRangeFetcher: @unchecked Sendable {
     func invalidate() { session.invalidateAndCancel() }
 }
 
+// MARK: - Sequential stream reader
+
+/// One long-lived ranged GET with flow control, replacing per-batch
+/// range requests (Logan, 2026-08-25: "We shouldn't have to do constant
+/// provider requests at all. Just one at start of playback."). This is
+/// how mpv consumed the same files: a single upstream connection that
+/// the provider sees as one ordinary VOD play. The task suspends when
+/// the buffer runs far enough ahead and resumes as the remuxer consumes,
+/// so TCP backpressure paces the provider instead of request churn. A
+/// real seek outside the buffered window cancels and reopens - one
+/// request per SEEK is the irreducible floor for any player.
+final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let url: URL
+    private let headers: [String: String]
+    private var session: URLSession!
+    private var task: URLSessionDataTask?
+
+    private let cond = NSCondition()
+    private var buffer = Data()
+    private var bufferStart: Int64 = 0
+    private var finished = false
+    private var failed: String?
+    private var suspended = false
+
+    /// Suspend past this much unread look-ahead; resume below the low mark.
+    private let highWater = 96 * 1024 * 1024
+    private let lowWater = 32 * 1024 * 1024
+    /// Bytes kept BEHIND the consume point for re-reads.
+    private let keepBehind: Int64 = 8 * 1024 * 1024
+    private var consumePoint: Int64 = 0
+
+    private(set) var requestsMade = 0
+    private(set) var bytesStreamed: Int64 = 0
+
+    init(url: URL, headers: [String: String]) {
+        self.url = url
+        self.headers = headers
+        super.init()
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 24 * 3600
+        session = URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue())
+    }
+
+    func open(at offset: Int64) {
+        cond.lock()
+        task?.cancel()
+        buffer.removeAll(keepingCapacity: false)
+        bufferStart = offset
+        consumePoint = offset
+        finished = false
+        failed = nil
+        suspended = false
+        cond.unlock()
+        var request = URLRequest(url: url)
+        for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
+        request.setValue("bytes=\(offset)-", forHTTPHeaderField: "Range")
+        let t = session.dataTask(with: request)
+        task = t
+        requestsMade += 1
+        debugLog(String(format: "[MKV] stream opened at %.1f MB (request #%d this session)",
+                        Double(offset) / 1_048_576, requestsMade))
+        t.resume()
+    }
+
+    /// Blocking read of an exact range. Returns nil when the range lies
+    /// BEFORE the buffered window (caller reopens = a real seek). Throws
+    /// on stream failure or timeout.
+    func read(offset: Int64, length: Int, timeout: TimeInterval = 45) throws -> Data? {
+        cond.lock()
+        defer { cond.unlock() }
+        if task == nil { return nil }
+        if offset < bufferStart { return nil }
+        let deadline = Date().addingTimeInterval(timeout)
+        while bufferStart + Int64(buffer.count) < offset + Int64(length) {
+            if let failed { throw MKVRemuxError(reason: "stream failed: \(failed)") }
+            if finished { break }
+            if !cond.wait(until: deadline) {
+                throw MKVRemuxError(reason: "stream read timed out")
+            }
+        }
+        let lo = Int(offset - bufferStart)
+        let hi = min(buffer.count, lo + length)
+        guard lo >= 0, hi > lo else { return finished ? Data() : nil }
+        let out = buffer.subdata(in: lo..<hi)
+        // Advance the consume point, trim history, and resume the task if
+        // the look-ahead fell below the low mark.
+        consumePoint = max(consumePoint, offset + Int64(out.count))
+        let trimTo = consumePoint - keepBehind
+        if trimTo > bufferStart {
+            buffer.removeFirst(Int(trimTo - bufferStart))
+            // Data keeps its backing allocation on removeFirst (Apple #74
+            // lesson); re-seat so trimmed history is actually released.
+            buffer = Data(buffer)
+            bufferStart = trimTo
+        }
+        let ahead = Int(bufferStart + Int64(buffer.count) - consumePoint)
+        if suspended, ahead < lowWater, !finished {
+            suspended = false
+            task?.resume()
+        }
+        return out
+    }
+
+    func cancel() {
+        cond.lock()
+        task?.cancel()
+        task = nil
+        buffer.removeAll(keepingCapacity: false)
+        cond.broadcast()
+        cond.unlock()
+        session.invalidateAndCancel()
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        cond.lock()
+        buffer.append(data)
+        bytesStreamed += Int64(data.count)
+        let ahead = Int(bufferStart + Int64(buffer.count) - consumePoint)
+        if !suspended, ahead > highWater {
+            suspended = true
+            dataTask.suspend()
+        }
+        cond.broadcast()
+        cond.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        cond.lock()
+        if let error, (error as NSError).code != NSURLErrorCancelled {
+            failed = error.localizedDescription
+        } else {
+            finished = true
+        }
+        cond.broadcast()
+        cond.unlock()
+    }
+}
+
 // MARK: - EBML reader
 
 /// Minimal EBML walker over an in-memory buffer. IDs keep their marker
@@ -258,6 +397,8 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     }
 
     private let fetcher: MKVRangeFetcher
+    private let streamURL: URL
+    private let streamHeaders: [String: String]
     private let log: (String) -> Void
 
     private var timestampScaleNs: Int64 = 1_000_000 // default 1 ms
@@ -271,10 +412,15 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
 
     init(url: URL, headers: [String: String], log: @escaping (String) -> Void) {
         fetcher = MKVRangeFetcher(url: url, headers: headers)
+        streamURL = url
+        streamHeaders = headers
         self.log = log
     }
 
-    func teardown() { fetcher.invalidate() }
+    func teardown() {
+        fetcher.invalidate()
+        if streamOpen { stream.cancel() }
+    }
 
     // MARK: Header + cues parse
 
@@ -662,40 +808,39 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     private var spanCache: [(index: Int, data: Data)] = []
     private var spanCacheBytes = 0
     private let spanCacheByteLimit = 160 * 1024 * 1024
-    private let readAheadSpans = 4
+    private lazy var stream = MKVSequentialStream(url: streamURL, headers: streamHeaders)
+    private var streamOpen = false
 
     private func cachedSpan(_ index: Int) -> Data? {
         spanCache.first(where: { $0.index == index })?.data
     }
 
     private func ensureSpans(_ first: Int, _ last: Int) throws {
-        var i = first
-        while i <= last {
-            if cachedSpan(i) != nil { i += 1; continue }
-            // Miss: batch this span plus read-ahead in one request.
-            let batchEnd = min(segmentsMap.count - 1, max(i + readAheadSpans - 1, last))
+        for i in first...last {
+            if cachedSpan(i) != nil { continue }
             let lo = segmentsMap[i].byteStart
-            let hi = segmentsMap[batchEnd].byteEnd
-            let length = Int(hi - lo)
+            let length = Int(segmentsMap[i].byteEnd - lo)
             guard length > 0, length < 512 * 1024 * 1024 else {
-                throw MKVRemuxError(reason: "absurd batch span \(length) bytes")
+                throw MKVRemuxError(reason: "absurd span \(length) bytes")
             }
-            let batch = try fetcher.fetch(offset: lo, length: length)
-            log(String(format: "[MKV] fetched spans %d-%d (%.1f MB, one request)",
-                       i, batchEnd, Double(length) / 1_048_576))
-            for k in i...batchEnd {
-                guard cachedSpan(k) == nil else { continue }
-                let s0 = Int(segmentsMap[k].byteStart - lo)
-                let s1 = Int(segmentsMap[k].byteEnd - lo)
-                guard s0 >= 0, s1 <= batch.count, s1 > s0 else { continue }
-                let piece = batch.subdata(in: s0..<s1)
-                spanCache.append((k, piece))
-                spanCacheBytes += piece.count
+            if !streamOpen {
+                stream.open(at: lo)
+                streamOpen = true
             }
+            var piece = try stream.read(offset: lo, length: length)
+            if piece == nil || piece!.count < length {
+                // Behind the window or short at EOF-race: a REAL seek.
+                stream.open(at: lo)
+                piece = try stream.read(offset: lo, length: length)
+            }
+            guard let data = piece, data.count == length else {
+                throw MKVRemuxError(reason: "span \(i) unreadable")
+            }
+            spanCache.append((i, data))
+            spanCacheBytes += data.count
             while spanCacheBytes > spanCacheByteLimit, !spanCache.isEmpty {
                 spanCacheBytes -= spanCache.removeFirst().data.count
             }
-            i = batchEnd + 1
         }
     }
 
@@ -977,8 +1122,10 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     // MARK: stats
 
     var summary: String {
-        String(format: "[MKV] fetched %.1f MB of %.1f MB",
+        String(format: "[MKV] header fetches %.1f MB; streamed %.1f MB over %d connection(s), of %.1f MB total",
                Double(fetcher.bytesFetched) / 1_048_576,
+               Double(stream.bytesStreamed) / 1_048_576,
+               stream.requestsMade,
                Double(fetcher.totalLength) / 1_048_576)
     }
 
