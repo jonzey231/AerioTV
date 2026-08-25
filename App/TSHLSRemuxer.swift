@@ -570,7 +570,10 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         if segments.count > maxBufferedSegments {
             segments.removeFirst(segments.count - maxBufferedSegments)
         }
-        if segments.count == 1 || segments.count % 5 == 0 {
+        // nextSeq, not segments.count: the count pins at maxBufferedSegments
+        // once the window fills, and 12 % 5 != 0 silenced every close after
+        // the first ten seconds of the 2026-08-25 UHD soak.
+        if nextSeq == 1 || nextSeq % 5 == 0 {
             debugLog("[TS-REMUX] segment \(nextSeq - 1) closed (\(String(format: "%.2f", duration))s, \(data.count / 1024) KB), buffered \(segments.count)")
         }
         if !readySignaled, segments.count >= readyThreshold, localPort != 0,
