@@ -526,7 +526,18 @@ final class LiveFMP4Remuxer {
         var segAudio: [AudioSample] = []
         var keepAudio: [AudioSample] = []
         for a in audioQueue {
-            if a.pts < cutDTS { segAudio.append(a) } else { keepAudio.append(a) }
+            if a.pts < cutDTS {
+                // Audio that predates the video timeline belongs to the
+                // mid-GOP video we dropped waiting for the first IRAP; a
+                // GOP's worth piles up during tune-in. Shipping it shifts
+                // the WHOLE audio track late by that pile (the tfdt clamp
+                // hid the negative offset) - heard on device 2026-08-25 as
+                // a constant 3-5s A/V desync on the fMP4 arm. Discard it;
+                // the matching video was never sent either.
+                if a.pts >= timelineBase { segAudio.append(a) }
+            } else {
+                keepAudio.append(a)
+            }
         }
         if !videoParamsSent, let info = parsedSPSInfo, durations.count >= 8 {
             videoParamsSent = true
