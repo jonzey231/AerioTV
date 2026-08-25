@@ -647,16 +647,45 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         let keyframe: Bool
     }
 
+    /// Raw span cache: sequential playback re-reads each byte span up to
+    /// three times (as its own segment and as both neighbors); caching the
+    /// last few fetches keeps steady-state network cost at ~1x.
+    private var spanCache: [(offset: Int64, data: Data)] = []
+
+    private func fetchSpan(offset: Int64, length: Int) throws -> Data {
+        if let hit = spanCache.first(where: { $0.offset == offset && $0.data.count == length }) {
+            return hit.data
+        }
+        let data = try fetcher.fetch(offset: offset, length: length)
+        spanCache.append((offset, data))
+        if spanCache.count > 4 { spanCache.removeFirst() }
+        return data
+    }
+
     func buildMediaSegment(_ index: Int) throws -> Data {
         guard index >= 0, index < segmentsMap.count, let v = video else {
             throw MKVRemuxError(reason: "segment index out of range")
         }
         let seg = segmentsMap[index]
-        let length = Int(seg.byteEnd - seg.byteStart)
-        guard length > 0, length < 256 * 1024 * 1024 else {
+        // Parse the NEIGHBOR spans too (2026-08-25 field fix, "weird
+        // stutter then audio sync got messed up", 4K 72 HOURS): frames
+        // whose timestamps belong to this segment can be physically muxed
+        // in the adjacent clusters (audio interleave lead/lag, HEVC
+        // reorder stragglers). Fetching only the exact cue span silently
+        // LOST those frames - both neighbors' time-trims excluded them -
+        // leaving audio holes at boundaries that AVPlayer resyncs over
+        // as stutter + accruing desync. The span cache keeps sequential
+        // playback at ~1x fetch despite the 3-span parse.
+        let loIndex = max(0, index - 1)
+        let hiEnd: Int64 = index + 1 < segmentsMap.count
+            ? segmentsMap[min(index + 1, segmentsMap.count - 1)].byteEnd
+            : seg.byteEnd
+        let lo = segmentsMap[loIndex].byteStart
+        let length = Int(hiEnd - lo)
+        guard length > 0, length < 512 * 1024 * 1024 else {
             throw MKVRemuxError(reason: "absurd segment span \(length) bytes")
         }
-        let raw = try fetcher.fetch(offset: seg.byteStart, length: length)
+        let raw = try fetchSpan(offset: lo, length: length)
 
         var videoSamples: [Sample] = []
         var audioSamples: [Sample] = []
@@ -715,18 +744,24 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             }
         }
 
-        // Trim to the segment's time span: the byte span can bleed into
-        // the next cue's clusters and the previous one already served
-        // those samples... except video, where trimming a leading
-        // non-keyframe run would break decode. Video keeps everything
-        // from its first keyframe; audio trims to [start, nextStart).
-        if let firstKey = videoSamples.firstIndex(where: { $0.keyframe }) {
-            videoSamples.removeFirst(firstKey)
+        // Partition, exact by construction over the 3-span parse:
+        //  - video: decode-order run from this segment's starting
+        //    keyframe (first keyframe with pts >= start, minus half a
+        //    frame of slack) up to the NEXT segment's starting keyframe.
+        //    Reorder stragglers between the two keyframes ride along
+        //    regardless of their pts, which is what decode needs.
+        //  - audio: every frame with pts in [start, nextStart) - complete
+        //    now that both neighbor spans were parsed.
+        let halfFrame = frameDurationTicks / 2
+        if let startKey = videoSamples.firstIndex(where: {
+            $0.keyframe && $0.ptsTicks >= seg.startTicks - halfFrame }) {
+            videoSamples.removeFirst(startKey)
+        } else {
+            videoSamples.removeAll()
         }
-        videoSamples = videoSamples.filter { $0.ptsTicks < nextStart || !$0.keyframe }
-        // Drop the tail keyframe-run belonging to the next segment.
-        if let lastOwnIndex = videoSamples.lastIndex(where: { $0.ptsTicks < nextStart }) {
-            videoSamples = Array(videoSamples[...lastOwnIndex])
+        if let endKey = videoSamples.dropFirst().firstIndex(where: {
+            $0.keyframe && $0.ptsTicks >= nextStart - halfFrame }) {
+            videoSamples = Array(videoSamples[..<endKey])
         }
         audioSamples = audioSamples.filter { $0.ptsTicks >= seg.startTicks && $0.ptsTicks < nextStart }
         guard !videoSamples.isEmpty else { throw MKVRemuxError(reason: "segment \(index): no video samples") }
@@ -831,18 +866,34 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             let med = deltas.sorted()[deltas.count / 2]
             if med > 300 { frameDur = med }
         }
-        var base = video[0].ptsTicks
-        for (i, s) in video.enumerated() {
-            base = min(base, s.ptsTicks - Int64(i) * frameDur)
-        }
+        // Deterministic base: seg.startTicks minus a fixed 4-frame reorder
+        // lead, so consecutive segments' ladders are CONTINUOUS. The old
+        // per-segment min() base made each segment independent and let
+        // seams butt up with duplicate/overlapping dts (ffmpeg: "non
+        // monotonically increasing dts ... 64 >= 64" exactly at seg
+        // boundaries) - a per-seam hiccup. cts floors at 0 for the rare
+        // deeper-than-4 reorder rather than breaking monotonic dts.
+        let base = seg.startTicks - 4 * frameDur
         let dts = (0..<n).map { base + Int64($0) * frameDur }
 
         let videoBytes = video.reduce(0) { $0 + $1.data.count }
         let audioBytes = audio.reduce(0) { $0 + $1.data.count }
-        let audioTick: Int64 = {
-            guard audio.count > 1 else { return 2880 }
-            return max(300, (audio.last!.ptsTicks - audio[0].ptsTicks) / Int64(audio.count - 1))
-        }()
+        // TRUE per-frame durations from successive pts deltas (last frame
+        // gets the median). The old single averaged tick smeared any real
+        // gap across every frame's declared timing - audible as
+        // progressive desync snapping back at each segment (2026-08-25
+        // field find). Explicit deltas keep the timeline honest, holes
+        // included.
+        var audioDurations = [Int64](repeating: 2880, count: audio.count)
+        if audio.count > 1 {
+            var deltas: [Int64] = []
+            for i in 0..<(audio.count - 1) {
+                let d = max(300, audio[i + 1].ptsTicks - audio[i].ptsTicks)
+                audioDurations[i] = d
+                deltas.append(d)
+            }
+            audioDurations[audio.count - 1] = deltas.sorted()[deltas.count / 2]
+        }
 
         func moof(_ vOff: Int, _ aOff: Int) -> Data {
             let mfhd = Self.fullBox("mfhd", 0, 0, Self.u32(index + 1))
@@ -852,7 +903,7 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 vbody.append(Self.u32(Int(frameDur)))
                 vbody.append(Self.u32(video[i].data.count))
                 vbody.append(Self.u32(video[i].keyframe ? 0x02000000 : 0x01010000))
-                vbody.append(Self.u32(Int(video[i].ptsTicks - dts[i])))
+                vbody.append(Self.u32(Int(max(0, video[i].ptsTicks - dts[i]))))
             }
             let vtraf = Self.box("traf",
                 Self.fullBox("tfhd", 0, 0x020000, Self.u32(Self.videoTrackID)),
@@ -862,8 +913,8 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             if let firstAudio = audio.first {
                 var abody = Data(capacity: 16 + audio.count * 8)
                 abody.append(Self.u32(audio.count)); abody.append(Self.u32(aOff))
-                for a in audio {
-                    abody.append(Self.u32(Int(audioTick)))
+                for (i, a) in audio.enumerated() {
+                    abody.append(Self.u32(Int(audioDurations[i])))
                     abody.append(Self.u32(a.data.count))
                 }
                 trafs.append(Self.box("traf",
