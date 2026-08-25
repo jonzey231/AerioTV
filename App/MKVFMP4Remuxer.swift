@@ -647,19 +647,56 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         let keyframe: Bool
     }
 
-    /// Raw span cache: sequential playback re-reads each byte span up to
-    /// three times (as its own segment and as both neighbors); caching the
-    /// last few fetches keeps steady-state network cost at ~1x.
-    private var spanCache: [(offset: Int64, data: Data)] = []
+    /// Per-CUE-SPAN cache with sequential read-ahead. The first cut
+    /// cached whole 3-span fetch windows, whose offsets never repeat
+    /// between consecutive segments - zero hits, ~3x bytes, and a fresh
+    /// Dispatcharr session + UPSTREAM PROVIDER request every ~6.5s
+    /// (2026-08-25, Logan's dispatcharr log: overlapping ranged GETs in a
+    /// continuous churn; ~1,100 provider hits per movie is ban-risk
+    /// territory, see the provider-IP-ban history). Cue spans are the
+    /// stable unit: cache by span index, and on a miss fetch a batch of
+    /// consecutive spans in ONE range request. Sequential playback then
+    /// costs ~1x bytes at roughly one provider request per 25s, in line
+    /// with an ordinary segmented client; seeks miss and fetch a fresh
+    /// batch, same as before.
+    private var spanCache: [(index: Int, data: Data)] = []
+    private var spanCacheBytes = 0
+    private let spanCacheByteLimit = 160 * 1024 * 1024
+    private let readAheadSpans = 4
 
-    private func fetchSpan(offset: Int64, length: Int) throws -> Data {
-        if let hit = spanCache.first(where: { $0.offset == offset && $0.data.count == length }) {
-            return hit.data
+    private func cachedSpan(_ index: Int) -> Data? {
+        spanCache.first(where: { $0.index == index })?.data
+    }
+
+    private func ensureSpans(_ first: Int, _ last: Int) throws {
+        var i = first
+        while i <= last {
+            if cachedSpan(i) != nil { i += 1; continue }
+            // Miss: batch this span plus read-ahead in one request.
+            let batchEnd = min(segmentsMap.count - 1, max(i + readAheadSpans - 1, last))
+            let lo = segmentsMap[i].byteStart
+            let hi = segmentsMap[batchEnd].byteEnd
+            let length = Int(hi - lo)
+            guard length > 0, length < 512 * 1024 * 1024 else {
+                throw MKVRemuxError(reason: "absurd batch span \(length) bytes")
+            }
+            let batch = try fetcher.fetch(offset: lo, length: length)
+            log(String(format: "[MKV] fetched spans %d-%d (%.1f MB, one request)",
+                       i, batchEnd, Double(length) / 1_048_576))
+            for k in i...batchEnd {
+                guard cachedSpan(k) == nil else { continue }
+                let s0 = Int(segmentsMap[k].byteStart - lo)
+                let s1 = Int(segmentsMap[k].byteEnd - lo)
+                guard s0 >= 0, s1 <= batch.count, s1 > s0 else { continue }
+                let piece = batch.subdata(in: s0..<s1)
+                spanCache.append((k, piece))
+                spanCacheBytes += piece.count
+            }
+            while spanCacheBytes > spanCacheByteLimit, !spanCache.isEmpty {
+                spanCacheBytes -= spanCache.removeFirst().data.count
+            }
+            i = batchEnd + 1
         }
-        let data = try fetcher.fetch(offset: offset, length: length)
-        spanCache.append((offset, data))
-        if spanCache.count > 4 { spanCache.removeFirst() }
-        return data
     }
 
     func buildMediaSegment(_ index: Int) throws -> Data {
@@ -677,15 +714,15 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         // as stutter + accruing desync. The span cache keeps sequential
         // playback at ~1x fetch despite the 3-span parse.
         let loIndex = max(0, index - 1)
-        let hiEnd: Int64 = index + 1 < segmentsMap.count
-            ? segmentsMap[min(index + 1, segmentsMap.count - 1)].byteEnd
-            : seg.byteEnd
-        let lo = segmentsMap[loIndex].byteStart
-        let length = Int(hiEnd - lo)
-        guard length > 0, length < 512 * 1024 * 1024 else {
-            throw MKVRemuxError(reason: "absurd segment span \(length) bytes")
+        let hiIndex = min(segmentsMap.count - 1, index + 1)
+        try ensureSpans(loIndex, hiIndex)
+        var raw = Data()
+        for k in loIndex...hiIndex {
+            guard let piece = cachedSpan(k) else {
+                throw MKVRemuxError(reason: "span \(k) missing after ensure")
+            }
+            raw.append(piece)
         }
-        let raw = try fetchSpan(offset: lo, length: length)
 
         var videoSamples: [Sample] = []
         var audioSamples: [Sample] = []
