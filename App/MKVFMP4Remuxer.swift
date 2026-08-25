@@ -434,7 +434,15 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 continue
             }
             if type == 1, video == nil {
-                guard track.codecID == "V_MPEG4/ISO/AVC" || track.codecID == "V_MPEGH/ISO/HEVC" else {
+                // AV1 rides too, as an EXPERIMENT: CodecPrivate is the
+                // av1C payload verbatim, so passthrough costs nothing and
+                // the device gets to vote - A17-class hardware decodes it,
+                // and Plex proves tvOS software decode is at least
+                // plausible. If AVPlayer refuses, the item watchdog falls
+                // the tile back to mpv and the picker note stays honest.
+                guard track.codecID == "V_MPEG4/ISO/AVC"
+                    || track.codecID == "V_MPEGH/ISO/HEVC"
+                    || track.codecID == "V_AV1" else {
                     throw MKVRemuxError(reason: "video codec \(track.codecID)")
                 }
                 guard !track.codecPrivate.isEmpty else {
@@ -557,8 +565,14 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
 
     private func videoTrak(_ v: TrackInfo) -> Data {
         // CodecPrivate IS the configuration record; wrap it and go.
-        let isHEVC = v.codecID == "V_MPEGH/ISO/HEVC"
-        let configBox = Self.box(isHEVC ? "hvcC" : "avcC", Data(v.codecPrivate))
+        let (configType, entryType): (String, String) = {
+            switch v.codecID {
+            case "V_MPEGH/ISO/HEVC": return ("hvcC", "hvc1")
+            case "V_AV1": return ("av1C", "av01")
+            default: return ("avcC", "avc1")
+            }
+        }()
+        let configBox = Self.box(configType, Data(v.codecPrivate))
         var entry = Data(capacity: 96 + configBox.count)
         entry.append(Data(count: 6)); entry.append(Self.u16(1))
         entry.append(Data(count: 16))
@@ -568,7 +582,7 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         entry.append(Data(count: 32))
         entry.append(Self.u16(0x0018)); entry.append(Self.u16(0xFFFF))
         entry.append(configBox)
-        let sample = Self.box(isHEVC ? "hvc1" : "avc1", entry)
+        let sample = Self.box(entryType, entry)
         return Self.trak(trackID: Self.videoTrackID, width: v.width, height: v.height,
                          volume: 0, handler: "vide", handlerName: "VideoHandler",
                          durationTicks: durationTicks,

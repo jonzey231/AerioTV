@@ -434,6 +434,10 @@ struct MoviesView: View {
                     ?? rel.qualityInfo?.quality
                     ?? rel.containerExtension?.uppercased()
                 var label = quality.map { "\(name) · \($0)" } ?? name
+                if let note = AVPlayerSupportNote.note(
+                    containerExtension: rel.containerExtension, videoCodec: nil) {
+                    label += " · ⚠️ \(note)"
+                }
                 let seen = (seenLabels[label] ?? 0) + 1
                 seenLabels[label] = seen
                 if seen > 1 { label += " (\(seen))" }

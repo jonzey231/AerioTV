@@ -1121,8 +1121,13 @@ struct VODDetailView: View {
             let learned = learnedVersionStreams[rel.id]
             let measured = versionMedia[rel.id]?.descriptors(mergedWith: learned)
                 ?? DispatcharrVODProviderMedia.descriptorsForLearnedOnly(learned)
-            guard !measured.isEmpty else { return rel.displayLabel }
-            return ([rel.displayLabel] + measured).joined(separator: " · ")
+            var parts = measured.isEmpty ? [rel.displayLabel] : [rel.displayLabel] + measured
+            if let note = AVPlayerSupportNote.note(
+                containerExtension: rel.containerExtension,
+                videoCodec: versionMedia[rel.id]?.videoCodec) {
+                parts.append("⚠️ \(note)")
+            }
+            return parts.joined(separator: " · ")
         }
         var counts: [String: Int] = [:]
         for rel in versionProviders { counts[base(rel), default: 0] += 1 }
@@ -1290,9 +1295,12 @@ struct VODDetailView: View {
                 guard seen.insert(rel.account.id).inserted,
                       let url = api.proxyEpisodeURL(uuid: episode.dispatcharrUUID,
                                                     m3uAccountID: rel.account.id) else { return nil }
-                return VODVersionOption(id: rel.account.id,
-                                        label: rel.account.name ?? "Source \(rel.account.id)",
-                                        url: url)
+                var label = rel.account.name ?? "Source \(rel.account.id)"
+                if let note = AVPlayerSupportNote.note(
+                    containerExtension: rel.containerExtension, videoCodec: nil) {
+                    label += " · ⚠️ \(note)"
+                }
+                return VODVersionOption(id: rel.account.id, label: label, url: url)
             }
         }
         return []

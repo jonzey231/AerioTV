@@ -710,6 +710,55 @@ struct VODVersionOption: Identifiable, Equatable, Hashable {
     let url: URL
 }
 
+/// AVPlayer-engine playability notes for the Version picker. Only
+/// DEFINITIVE facts get a note - container extension the server recorded,
+/// or a MEASURED video codec - never anything inferred from the
+/// provider's advertised title (the "4K:" copy that measured 1080p is why
+/// that rule exists). Returns nil when the AVPlayer engine is off: on the
+/// mpv engine everything here plays and the note would be noise.
+enum AVPlayerSupportNote {
+    /// Human-facing note like "AVI isn't supported by AVPlayer", or nil
+    /// when nothing definitive disqualifies the copy.
+    static func note(containerExtension: String?, videoCodec: String?) -> String? {
+        guard PlaybackFeatureFlags.avPlayerRemuxTS else { return nil }
+        if let ext = containerExtension?.lowercased(), !ext.isEmpty {
+            switch ext {
+            case "avi", "divx": return "AVI isn't supported by AVPlayer"
+            case "wmv", "asf": return "WMV isn't supported by AVPlayer"
+            case "flv": return "FLV isn't supported by AVPlayer"
+            case "mpg", "mpeg": return "MPEG-PS isn't supported by AVPlayer"
+            default: break
+            }
+        }
+        // Measured codec strings vary by source: server ffprobe gives
+        // "mpeg4"; the mpv learn-cache gives full descriptions. Match by
+        // substring, and check the more specific names first (a plain
+        // "mpeg4" test would also catch "mpeg4/ISO AVC" style strings).
+        if let codec = videoCodec?.lowercased(), !codec.isEmpty {
+            if codec.contains("avc") || codec.contains("h264") || codec.contains("264")
+                || codec.contains("hevc") || codec.contains("h265") || codec.contains("265") {
+                return nil
+            }
+            if codec.contains("mpeg2") || codec.contains("mpeg-2") {
+                return "MPEG-2 video isn't supported by AVPlayer"
+            }
+            if codec.contains("mpeg4") || codec.contains("xvid") || codec.contains("divx")
+                || codec.contains("msmpeg4") {
+                return "MPEG-4 ASP video isn't supported by AVPlayer"
+            }
+            if codec.contains("vc1") || codec.contains("vc-1") {
+                return "VC-1 video isn't supported by AVPlayer"
+            }
+            if codec.contains("av1") || codec.contains("av01") {
+                // Hardware-dependent (A17 Pro/M-class decode it); the MKV
+                // engine passes AV1 through so the device gets to vote.
+                return "AV1 may not play on this device"
+            }
+        }
+        return nil
+    }
+}
+
 // MARK: - VOD Movie (display model — not persisted, fetched on demand)
 struct VODMovie: Identifiable, Hashable {
     let id: String

@@ -348,9 +348,12 @@ struct TVShowsView: View {
                 guard seen.insert(rel.account.id).inserted,
                       let url = api.proxyEpisodeURL(uuid: uuid,
                                                     m3uAccountID: rel.account.id) else { return nil }
-                return VODVersionOption(id: rel.account.id,
-                                        label: rel.account.name ?? "Source \(rel.account.id)",
-                                        url: url)
+                var label = rel.account.name ?? "Source \(rel.account.id)"
+                if let note = AVPlayerSupportNote.note(
+                    containerExtension: rel.containerExtension, videoCodec: nil) {
+                    label += " · ⚠️ \(note)"
+                }
+                return VODVersionOption(id: rel.account.id, label: label, url: url)
             }
             guard options.count > 1 else {
                 debugLog("[VOD-VERSION] episode resume \(progress.vodID): \(options.count) distinct account(s), no picker")
