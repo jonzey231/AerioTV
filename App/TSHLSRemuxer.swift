@@ -1083,6 +1083,10 @@ struct AVPlayerMultiviewTile: View {
         let ext = streamURL.pathExtension.lowercased()
         if ["mp4", "m4v", "mov"].contains(ext) {
             startPlayer(url: streamURL, requestHeaders: headers)
+            // Truthful badge: the generic session label says "Remux TS",
+            // which is a live-arm name; VOD is direct-play or MKV remux
+            // and the dev badge should say which (field ask, 2026-08-25).
+            MultiviewStore.shared.registerEngine("AVPlayer · Direct", for: tileID)
             debugLog("[AVP-MV] VOD playing direct \(ext.uppercased()) title=\(channelName)")
             return
         }
@@ -1090,6 +1094,7 @@ struct AVPlayerMultiviewTile: View {
         let server = MKVVODServer(url: streamURL, headers: headers)
         server.onReady = { url in
             readyLocalURL = url
+            MultiviewStore.shared.registerEngine("AVPlayer · MKV Remux", for: tileID)
         }
         server.onVideoParameters = { w, h, fps, tenBit in
             applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
