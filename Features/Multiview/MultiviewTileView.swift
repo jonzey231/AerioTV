@@ -195,7 +195,10 @@ struct MultiviewTileView: View {
     /// half-mpv. VOD/DVR carve-out stays (proxy redirects, MKV, resume).
     /// Toggle-off sessions lock to .mpv, so this is always false then.
     private var usesAVPlayerEngine: Bool {
-        guard tile.kind == .live else { return false }
+        // Live and VOD ride the AVPlayer engine when the session locked
+        // to it; DVR and catchup stay mpv (their resume/scrub plumbing
+        // has not been ported).
+        guard tile.kind == .live || tile.kind == .vod else { return false }
         return store.sessionEngine.isAVPlayer
     }
 
@@ -685,6 +688,7 @@ struct MultiviewTileView: View {
                         headers: avPlayerTileHeaders,
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
+                        isVOD: tile.kind == .vod,
                         progressStore: progressStore,
                         // A hard AVPlayer failure (codec gate, fatal item
                         // error) downgrades the WHOLE session to mpv,
@@ -971,6 +975,7 @@ struct MultiviewTileView: View {
                         headers: avPlayerTileHeaders,
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
+                        isVOD: tile.kind == .vod,
                         progressStore: progressStore,
                         onEngineFallback: { _ in store.downgradeToMPV() }
                     )

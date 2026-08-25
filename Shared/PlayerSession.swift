@@ -383,9 +383,8 @@ final class PlayerSession: ObservableObject {
     static func resolveEngine(item: ChannelDisplayItem,
                               server: ServerConnection?,
                               isLive: Bool) -> ResolvedEngine {
-        guard isLive, let url = item.streamURL ?? item.streamURLs.first else {
-            let fallback = item.streamURL ?? item.streamURLs.first ?? URL(string: "about:blank")!
-            return ResolvedEngine(engine: .mpv, routeURL: fallback, headers: [:])
+        guard let url = item.streamURL ?? item.streamURLs.first else {
+            return ResolvedEngine(engine: .mpv, routeURL: URL(string: "about:blank")!, headers: [:])
         }
         var headers: [String: String] = [:]
         if let ua = server?.effectiveUserAgent, !ua.isEmpty {
@@ -397,6 +396,20 @@ final class PlayerSession: ObservableObject {
                 headers["X-API-Key"] = key
                 headers["Authorization"] = "ApiKey \(key)"
             }
+        }
+        if !isLive {
+            // VOD (never DVR/catchup: those come through their own URLs
+            // and stay mpv). The AVPlayer VOD path plays MP4 natively and
+            // MKV through the on-device cue-indexed remux
+            // (MKVFMP4Remuxer); anything it cannot open falls back to mpv
+            // per-tile. Gated by the same remux toggle as live.
+            let ext = url.pathExtension.lowercased()
+            let vodShape = url.path.contains("/proxy/vod/")
+                || ["mkv", "mp4", "m4v", "mov"].contains(ext)
+            if PlaybackFeatureFlags.avPlayerRemuxTS, vodShape {
+                return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
+            }
+            return ResolvedEngine(engine: .mpv, routeURL: url, headers: headers)
         }
         let format = classifyStreamURL(url)
         var routeURL = url

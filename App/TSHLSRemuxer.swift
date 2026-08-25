@@ -916,6 +916,9 @@ struct AVPlayerMultiviewTile: View {
     let headers: [String: String]
     let shouldPause: Bool
     let channelName: String
+    /// VOD tile: route MP4 direct / MKV through MKVVODServer, apply the
+    /// resume offset, and never treat the URL as a live TS stream.
+    var isVOD: Bool = false
     /// The per-tile store the container chrome binds to (scrubber,
     /// play-pause, track pickers, stream info). AVPlayerProgressDriver
     /// feeds it from this tile's AVPlayer, so the unified chrome works
@@ -927,6 +930,7 @@ struct AVPlayerMultiviewTile: View {
     @State private var player: AVPlayer?
     @State private var driver: AVPlayerProgressDriver?
     @State private var remuxer: TSHLSRemuxer?
+    @State private var mkvServer: MKVVODServer?
     @State private var statusText: String?
     /// AUDIO CORRECTNESS: the remuxer's onReady closure captures this
     /// view struct BY VALUE at start() time. Adding tiles moves
@@ -1009,6 +1013,10 @@ struct AVPlayerMultiviewTile: View {
     }
 
     private func start() {
+        if isVOD {
+            startVOD()
+            return
+        }
         switch classifyStreamURL(streamURL) {
         case .hls:
             // Full headers, not just UA: server-side HLS upgrades hit the
@@ -1034,6 +1042,38 @@ struct AVPlayerMultiviewTile: View {
             remuxer = mux
             mux.start()
         }
+    }
+
+    /// VOD chain: MP4-family plays direct; everything else attempts the
+    /// MKV cue-indexed remux, and a non-Matroska file gets one direct
+    /// try (Dispatcharr's extensionless proxy URL can front an MP4)
+    /// before the tile falls back to mpv.
+    private func startVOD() {
+        let ext = streamURL.pathExtension.lowercased()
+        if ["mp4", "m4v", "mov"].contains(ext) {
+            startPlayer(url: streamURL, requestHeaders: headers)
+            debugLog("[AVP-MV] VOD playing direct \(ext.uppercased()) title=\(channelName)")
+            return
+        }
+        statusText = "Preparing..."
+        let server = MKVVODServer(url: streamURL, headers: headers)
+        server.onReady = { url in
+            readyLocalURL = url
+        }
+        server.onVideoParameters = { w, h, fps, tenBit in
+            applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+        }
+        server.onError = { reason in
+            if reason.contains("not an EBML") {
+                debugLog("[AVP-MV] VOD not Matroska; trying direct AVPlayer title=\(channelName)")
+                startPlayer(url: streamURL, requestHeaders: headers)
+            } else {
+                debugLog("[AVP-MV] VOD remux failed (\(reason)) title=\(channelName); falling back to mpv tile")
+                onEngineFallback(reason)
+            }
+        }
+        mkvServer = server
+        server.start()
     }
 
     private func startPlayer(url: URL, requestHeaders: [String: String]) {
@@ -1074,6 +1114,14 @@ struct AVPlayerMultiviewTile: View {
         let avPlayer = AVPlayer(playerItem: playerItem)
         // Live truth at this instant, never a captured snapshot.
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)
+        // VOD resume (Continue Watching): the store carries the offset
+        // the container preloaded; AVPlayer queues the seek until the
+        // item is ready, so firing it here is safe and race-free.
+        if isVOD, let ms = progressStore.explicitResumeMs, ms > 2_000 {
+            let t = CMTime(value: CMTimeValue(ms), timescale: 1_000)
+            avPlayer.seek(to: t, toleranceBefore: .positiveInfinity, toleranceAfter: .positiveInfinity)
+            debugLog("[AVP-MV] VOD resume seek to \(ms / 1000)s title=\(channelName)")
+        }
         if !shouldPause { avPlayer.play() }
         player = avPlayer
         // Bridge this tile's AVPlayer into the chrome's store. When this
@@ -1132,6 +1180,8 @@ struct AVPlayerMultiviewTile: View {
         player = nil
         remuxer?.stop()
         remuxer = nil
+        mkvServer?.stop()
+        mkvServer = nil
         statusText = nil
         readyLocalURL = nil
         sizeObservation = nil
