@@ -299,7 +299,8 @@ struct TVShowsView: View {
                 vodID: progress.vodID,
                 serverID: progress.serverID,
                 vodType: "episode",
-                resumePositionMs: progress.positionMs) {
+                resumePositionMs: progress.positionMs,
+                versionSelectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey) {
                 isPlaying = true
                 return
             }
@@ -375,6 +376,12 @@ struct TVShowsView: View {
             }
             resumeVersionOptions = options
             debugLog("[VOD-VERSION] episode resume \(progress.vodID): \(options.count) provider accounts")
+            // Container path (beginVOD): see MoviesView's matching push.
+            MultiviewStore.shared.updateVODVersionContext(
+                vodID: progress.vodID,
+                options: options,
+                selectedID: VODVersionSelectionStore.selection(forKey: resumeVersionSelectionKey),
+                selectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey)
         }
     }
 

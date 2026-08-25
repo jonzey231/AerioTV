@@ -688,6 +688,66 @@ final class MultiviewStore: ObservableObject {
         tiles.count == 1 ? tiles.first(where: { $0.kind == .vod }) : nil
     }
 
+    // MARK: VOD version switching (container parity with the legacy
+    // PlayerView cover's Switch Version; Logan's ask 2026-08-25).
+
+    /// Provider copies of the playing VOD title, for the Options panel.
+    /// Resume covers resolve these ASYNCHRONOUSLY after launch, so they
+    /// arrive via updateVODVersionContext as often as via beginVOD.
+    @Published private(set) var vodVersionOptions: [VODVersionOption] = []
+    @Published private(set) var vodCurrentVersionID: Int?
+    private var vodVersionSelectionKey: String?
+
+    func setVODVersionContext(options: [VODVersionOption],
+                              selectedID: Int?,
+                              selectionKey: String?) {
+        vodVersionOptions = options
+        vodVersionSelectionKey = selectionKey
+        vodCurrentVersionID = selectedID
+            ?? options.first { $0.url == vodSoloTile?.streamURL }?.id
+    }
+
+    /// Late arrival from an async provider-copies fetch. Ignored unless
+    /// the named title is still the playing solo-VOD tile.
+    func updateVODVersionContext(vodID: String,
+                                 options: [VODVersionOption],
+                                 selectedID: Int?,
+                                 selectionKey: String?) {
+        guard let tile = vodSoloTile, tile.vodID == vodID else { return }
+        setVODVersionContext(options: options, selectedID: selectedID,
+                             selectionKey: selectionKey)
+    }
+
+    /// In-place provider-copy swap, mirroring the mpv path's
+    /// switchVersionAction: stamp the position into explicitResumeMs so
+    /// the restarted tile seeks back, persist the pick, update the
+    /// Continue Watching URL, and replace the tile's streamURL (same
+    /// tile id, so the tile view's streamURL onChange restarts the
+    /// pipeline on the new copy).
+    func switchVODVersion(_ option: VODVersionOption) {
+        guard let tile = vodSoloTile,
+              let idx = tiles.firstIndex(where: { $0.id == tile.id }),
+              option.url != tile.streamURL else { return }
+        let resumeMs = audioProgressStore?.currentMs ?? 0
+        audioProgressStore?.explicitResumeMs = resumeMs > 5_000 ? resumeMs : nil
+        audioProgressStore?.vodStreamURL = option.url.absoluteString
+        vodCurrentVersionID = option.id
+        if let key = vodVersionSelectionKey {
+            VODVersionSelectionStore.setSelection(option.id, forKey: key)
+        }
+        DebugLogger.shared.log(
+            "[VOD-VERSION] container switch to '\(option.label)' at \(resumeMs)ms",
+            category: "Playback", level: .info)
+        var swapped = tile
+        swapped = MultiviewTile(
+            id: tile.id, item: tile.item, streamURL: option.url,
+            headers: tile.headers, addedAt: tile.addedAt, kind: tile.kind,
+            vodID: tile.vodID, vodServerID: tile.vodServerID,
+            vodType: tile.vodType,
+            resumePositionMs: resumeMs > 5_000 ? resumeMs : nil)
+        tiles[idx] = swapped
+    }
+
     @discardableResult
     func addVOD(
         title: String,
@@ -953,6 +1013,9 @@ final class MultiviewStore: ObservableObject {
         // store stays unregistered and the Options panel never mounts.
         progressStoreRegistrationEpoch &+= 1
         tileEngines = [:]
+        vodVersionOptions = []
+        vodCurrentVersionID = nil
+        vodVersionSelectionKey = nil
         // Engine lock is per-session: clear it so the next session
         // re-resolves (and honors a freshly-toggled Developer flag).
         clearEngineLock()

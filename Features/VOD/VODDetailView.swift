@@ -1478,7 +1478,10 @@ struct VODDetailView: View {
             serverID: item.serverID.uuidString,
             vodType: playingVodType,
             resumePositionMs: WatchProgressManager.getResumePosition(vodID: playingVodID,
-                                                              serverID: item.serverID.uuidString)) {
+                                                              serverID: item.serverID.uuidString),
+            versionOptions: playingVersionOptions,
+            selectedVersionID: playingVersionOptionID,
+            versionSelectionKey: versionSelectionKey) {
             isPlaying = true
             return
         }

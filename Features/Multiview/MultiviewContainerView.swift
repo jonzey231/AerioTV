@@ -446,11 +446,10 @@ struct MultiviewContainerView: View {
             // Keep the diagnostic log so a future hardware test can
             // confirm or rule out the hypothesis.
             #if os(tvOS)
-            let _ = {
-                if showTVOptions, store.audioProgressStore == nil {
-                    debugLog("[MV-Cmd] OPTIONS PANEL gate failed: showTVOptions=true but audioProgressStore=nil (audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) firstTileID=\(store.tiles.first?.id ?? "nil"))")
-                }
-            }()
+            // Extracted to a func: this interpolation inside the builder
+            // closure blew the type-checker budget once the options panel
+            // gained its version-switching arguments.
+            let _ = logOptionsGateFailureIfNeeded()
             #endif
             if isSoleTile,
                showTVOptions,
@@ -486,46 +485,7 @@ struct MultiviewContainerView: View {
                     )
                     .id(audioTile.id)
                 } else {
-                    TVPlayerOptionsPanel(
-                        audioTracks: audioStore.audioTracks,
-                        currentAudioTrackID: audioStore.currentAudioTrackID,
-                        subtitleTracks: audioStore.subtitleTracks,
-                        currentSubtitleTrackID: audioStore.currentSubtitleTrackID,
-                        speed: audioStore.speed,
-                        isLive: true,  // multiview is always live-only in v1
-                        sleepTimerEnd: $sleepTimerEnd,
-                        showStreamInfo: $showStreamInfo,
-                        setAudioTrack: { audioStore.setAudioTrackAction?($0) },
-                        setSubtitleTrack: { audioStore.setSubtitleTrackAction?($0) },
-                        setSpeed: { audioStore.setSpeedAction?($0) },
-                        onDismiss: {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                showTVOptions = false
-                            }
-                        },
-                        // Deliberately nil — `+` pill is a peer action
-                        // in `PlaybackChromeOverlay`. Listing "Add Stream"
-                        // inside this panel would be a second path to
-                        // the same action, which is the workflow the
-                        // user explicitly asked us to remove.
-                        onEnterMultiview: nil,
-                        // Switch Stream — only for an admin Dispatcharr
-                        // channel with a pk + uuid. Flips to the picker
-                        // PAGE in this same panel (no separate overlay).
-                        onSwitchStream: canSwitchStreamForAudioTile ? {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                streamPickerVisible = true
-                            }
-                        } : nil,
-                        // Issue #48: live layout picker for the current tile
-                        // count. Selecting a mode persists it and the grid
-                        // reflows underneath while the panel stays open.
-                        layoutOptions: MultiviewLayoutMode.available(forTileCount: store.tiles.count),
-                        currentLayout: layoutMode,
-                        onSelectLayout: { mode in
-                            withAnimation(.easeInOut(duration: 0.2)) { layoutMode = mode }
-                        }
-                    )
+                    containerOptionsPanel(audioStore: audioStore)
                     // v1.6.12 (GH #11 follow-up): trap D-pad navigation
                     // inside the panel. Without `.focusSection()` tvOS
                     // lets focus escape down past the last row (Stream
@@ -1388,6 +1348,82 @@ struct MultiviewContainerView: View {
     /// channel (int pk + proxy uuid) on a Direct Connect admin server.
     /// Gates the tvOS Options panel's "Switch Stream" row. The iOS path
     /// has its own copy in `PlaybackChromeOverlay`.
+    /// Switch Version context for a solo VOD tile (container parity
+    /// with the legacy cover's panel; Logan's ask 2026-08-25). Empty
+    /// everywhere else so the panel hides the section.
+    private var vodPanelVersionOptions: [VODVersionOption] {
+        store.vodSoloTile != nil ? store.vodVersionOptions : []
+    }
+
+    private func logOptionsGateFailureIfNeeded() {
+        if showTVOptions, store.audioProgressStore == nil {
+            let tileID = store.audioTileID ?? "nil"
+            let firstID = store.tiles.first?.id ?? "nil"
+            debugLog("[MV-Cmd] OPTIONS PANEL gate failed: showTVOptions=true but audioProgressStore=nil (audioTileID=\(tileID) tiles=\(store.tiles.count) firstTileID=\(firstID))")
+        }
+    }
+
+    /// The options panel construction, extracted whole: inline in the
+    /// container body its argument list blew the type-checker budget
+    /// once version switching joined it.
+    private func containerOptionsPanel(audioStore: PlayerProgressStore) -> some View {
+        TVPlayerOptionsPanel(
+                        audioTracks: audioStore.audioTracks,
+                        currentAudioTrackID: audioStore.currentAudioTrackID,
+                        subtitleTracks: audioStore.subtitleTracks,
+                        currentSubtitleTrackID: audioStore.currentSubtitleTrackID,
+                        speed: audioStore.speed,
+                        // A solo VOD tile (beginVOD) is the one non-live
+                        // container session; everything else stays live.
+                        isLive: store.vodSoloTile == nil,
+                        sleepTimerEnd: $sleepTimerEnd,
+                        showStreamInfo: $showStreamInfo,
+                        setAudioTrack: { audioStore.setAudioTrackAction?($0) },
+                        setSubtitleTrack: { audioStore.setSubtitleTrackAction?($0) },
+                        setSpeed: { audioStore.setSpeedAction?($0) },
+                        onDismiss: {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                showTVOptions = false
+                            }
+                        },
+                        // Deliberately nil — `+` pill is a peer action
+                        // in `PlaybackChromeOverlay`. Listing "Add Stream"
+                        // inside this panel would be a second path to
+                        // the same action, which is the workflow the
+                        // user explicitly asked us to remove.
+                        onEnterMultiview: nil,
+                        // Switch Stream — only for an admin Dispatcharr
+                        // channel with a pk + uuid. Flips to the picker
+                        // PAGE in this same panel (no separate overlay).
+                        onSwitchStream: canSwitchStreamForAudioTile ? {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                streamPickerVisible = true
+                            }
+                        } : nil,
+                        // Issue #48: live layout picker for the current tile
+                        // count. Selecting a mode persists it and the grid
+                        // reflows underneath while the panel stays open.
+                        // Switch Version for a solo VOD tile (container
+                        // parity with the legacy cover's panel).
+                        versionOptions: vodPanelVersionOptions,
+                        currentVersionOptionID: store.vodCurrentVersionID,
+                        onSelectVersion: vodSelectVersionHandler,
+                        layoutOptions: MultiviewLayoutMode.available(forTileCount: store.tiles.count),
+                        currentLayout: layoutMode,
+                        onSelectLayout: { mode in
+                            withAnimation(.easeInOut(duration: 0.2)) { layoutMode = mode }
+                        }
+                    )
+    }
+
+    private var vodSelectVersionHandler: ((VODVersionOption) -> Void)? {
+        guard !vodPanelVersionOptions.isEmpty else { return nil }
+        return { option in
+            withAnimation(.easeInOut(duration: 0.15)) { showTVOptions = false }
+            store.switchVODVersion(option)
+        }
+    }
+
     private var canSwitchStreamForAudioTile: Bool {
         guard let audioID = store.audioTileID,
               let audio = store.tiles.first(where: { $0.id == audioID }),

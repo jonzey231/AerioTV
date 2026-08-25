@@ -372,7 +372,8 @@ struct MoviesView: View {
                 vodID: progress.vodID,
                 serverID: progress.serverID,
                 vodType: "movie",
-                resumePositionMs: progress.positionMs) {
+                resumePositionMs: progress.positionMs,
+                versionSelectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey) {
                 isPlaying = true
                 return
             }
@@ -458,6 +459,14 @@ struct MoviesView: View {
                 return VODVersionOption(id: rel.id, label: label, url: url)
             }
             debugLog("[VOD-VERSION] resume \(progress.vodID): \(resumeVersionOptions.count) provider copies")
+            // Container path (beginVOD): the options resolved AFTER the
+            // launch; hand them to the session so Switch Version works
+            // there too. No-op when the legacy cover is playing.
+            MultiviewStore.shared.updateVODVersionContext(
+                vodID: progress.vodID,
+                options: resumeVersionOptions,
+                selectedID: VODVersionSelectionStore.selection(forKey: resumeVersionSelectionKey),
+                selectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey)
         }
     }
 

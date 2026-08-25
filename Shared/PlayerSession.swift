@@ -453,7 +453,10 @@ final class PlayerSession: ObservableObject {
                   vodID: String?,
                   serverID: String?,
                   vodType: String,
-                  resumePositionMs: Int32?) -> Bool {
+                  resumePositionMs: Int32?,
+                  versionOptions: [VODVersionOption] = [],
+                  selectedVersionID: Int? = nil,
+                  versionSelectionKey: String? = nil) -> Bool {
         guard PlaybackFeatureFlags.avPlayerRemuxTS else { return false }
         let ext = streamURL.pathExtension.lowercased()
         let vodShape = streamURL.path.contains("/proxy/vod/")
@@ -478,6 +481,9 @@ final class PlayerSession: ObservableObject {
         }
         DebugLogger.shared.log("[Engine] beginVOD: \(title) via AVPlayer container (\(ext.isEmpty ? "proxy" : ext))",
                                category: "Playback", level: .info)
+        store.setVODVersionContext(options: versionOptions,
+                                   selectedID: selectedVersionID,
+                                   selectionKey: versionSelectionKey)
         mode = .multiview
         return true
     }
