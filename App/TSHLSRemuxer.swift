@@ -904,6 +904,37 @@ final class AVPStallWatchdog {
     }
 }
 
+#if os(tvOS)
+/// Debounces display-criteria teardown across tile generations. A tile
+/// stop used to clear the criteria immediately, and a session that
+/// started 160ms later set new ones (2026-08-25 log, 72 HOURS): the
+/// panel gets told "revert to SDR 60" and "switch to HDR 24" back to
+/// back, risking two HDMI re-handshakes where one (or zero, when the
+/// formats match) would do. The clear now waits 3s and a new apply
+/// cancels it, so movie-to-movie and channel-zap transitions hand the
+/// panel one coherent instruction.
+@MainActor
+enum DisplayCriteriaCoordinator {
+    private static var pendingClear: DispatchWorkItem?
+
+    static func apply(_ criteria: AVDisplayCriteria, to dm: AVDisplayManager) {
+        pendingClear?.cancel()
+        pendingClear = nil
+        dm.preferredDisplayCriteria = criteria
+    }
+
+    static func scheduleClear(_ dm: AVDisplayManager) {
+        pendingClear?.cancel()
+        let work = DispatchWorkItem {
+            dm.preferredDisplayCriteria = nil
+            debugLog("[AVP-DISPLAY] display criteria cleared (debounced; panel returns to default mode)")
+        }
+        pendingClear = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+    }
+}
+#endif
+
 /// Known evaluation limitations: the chrome scrubber and track pickers
 /// bind to the mpv progress store, so they are inert while the audio
 /// tile is AVPlayer-backed; play/pause via `shouldPause` works.
@@ -1195,8 +1226,7 @@ struct AVPlayerMultiviewTile: View {
         #if os(tvOS)
         if let dm = appliedDisplayManager {
             appliedDisplayManager = nil
-            DispatchQueue.main.async { dm.preferredDisplayCriteria = nil }
-            debugLog("[AVP-DISPLAY] display criteria cleared (panel returns to default mode)")
+            DispatchQueue.main.async { DisplayCriteriaCoordinator.scheduleClear(dm) }
         }
         #endif
     }
@@ -1243,8 +1273,8 @@ struct AVPlayerMultiviewTile: View {
         }
         let dm = window.avDisplayManager
         appliedDisplayManager = dm
-        dm.preferredDisplayCriteria = AVDisplayCriteria(refreshRate: Float(fps),
-                                                        formatDescription: formatDesc)
+        DisplayCriteriaCoordinator.apply(
+            AVDisplayCriteria(refreshRate: Float(fps), formatDescription: formatDesc), to: dm)
         debugLog("[AVP-DISPLAY] display criteria set: \(width)x\(height) " +
                  "\(is10Bit ? "bt.2020/PQ" : "SDR") @ \(String(format: "%.2f", fps))Hz " +
                  "(matchingEnabled=\(dm.isDisplayCriteriaMatchingEnabled))")
