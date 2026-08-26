@@ -884,7 +884,12 @@ final class AVPStallWatchdog {
             // distinguish a true wedge from a brief rebuffer.
             if player.timeControlStatus != .paused {
                 let t = CMTimeGetSeconds(item.currentTime())
-                if t.isFinite, lastTime >= 0, (t - lastTime) < 0.25 {
+                // abs(): a SEEK moves the clock in either direction and is
+                // never a wedge. The signed test read every backward jump
+                // (rewind-30 spam) as "stuck" - two rewinds inside ~8s
+                // killed a perfectly healthy VOD session (field find
+                // 2026-08-26, #7 Seventhdary while rewinding).
+                if t.isFinite, lastTime >= 0, abs(t - lastTime) < 0.25 {
                     stuckPolls += 1
                     if stuckPolls >= 2 {
                         die(String(format: "playback frozen (clock stuck at %.2fs while not paused)", t))
@@ -1275,6 +1280,10 @@ struct AVPlayerMultiviewTile: View {
             return ("Stream Mismatch",
                     "The provider is sending media that doesn't match this copy's index (it may be failing over between sources). Try another version or play again.")
         }
+        if r.contains("playback frozen") {
+            return ("Playback Stalled",
+                    "Playback stopped advancing and couldn't recover. Play again, or try another version if one is available.")
+        }
         if r.contains("timed out") || r.contains("stream failed") || r.contains("stream cancelled") {
             return ("Connection Problem",
                     "The connection to the provider stalled. Check the source and try again.")
@@ -1444,8 +1453,13 @@ struct AVPlayerMultiviewTile: View {
         // item is ready, so firing it here is safe and race-free.
         if isVOD, let ms = progressStore.explicitResumeMs, ms > 2_000 {
             let t = CMTime(value: CMTimeValue(ms), timescale: 1_000)
-            avPlayer.seek(to: t, toleranceBefore: .positiveInfinity, toleranceAfter: .positiveInfinity)
-            debugLog("[AVP-MV] VOD resume seek to \(ms / 1000)s title=\(channelName)")
+            // EXACT seek: infinite tolerance snapped to the nearest
+            // segment boundary - up to ~6s drift per version switch with
+            // 6s cue segments, which read as "doesn't pick back up at
+            // the same time" when A/B-ing copies (field find
+            // 2026-08-26). Exact costs one keyframe-to-target decode.
+            avPlayer.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero)
+            debugLog("[AVP-MV] VOD resume seek to \(ms / 1000)s (exact) title=\(channelName)")
         }
         if !shouldPause { avPlayer.play() }
         player = avPlayer
