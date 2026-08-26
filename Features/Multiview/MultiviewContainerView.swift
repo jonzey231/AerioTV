@@ -2344,6 +2344,24 @@ final class MultiviewChromeState: ObservableObject {
         scheduleHide()
     }
 
+    /// Extended-grace variant for surfaces whose CLOSE event is not
+    /// trustworthy - the iOS overflow `Menu` skips `onDisappear` on some
+    /// dismissals (caught live 2026-08-26: `setPinned(true)` at menu
+    /// open, no release, every scheduleHide "SKIPPED (pinned)" for two
+    /// minutes = "chrome never fades"). Instead of a pin that can leak
+    /// forever, the menu grants a LONG fade delay: a fired close event
+    /// restores the normal 5s, and a swallowed one self-heals when the
+    /// grace expires (chrome fading under a still-open menu is harmless,
+    /// the menu is its own presentation layer). Bypasses the coalesce
+    /// guard so it always re-arms with the requested delay.
+    func reportInteractionWithGrace(_ seconds: Double) {
+        if !isVisible {
+            withAnimation(.easeInOut(duration: 0.25)) { isVisible = true }
+        }
+        reportFocusActivity()
+        scheduleHide(delaySeconds: seconds)
+    }
+
     /// Records the reschedule timestamp and (re)arms the auto-hide task.
     /// Suppressed while pinned. Factored out so both `reportInteraction()`
     /// AND `setPinned(false)` arm the fade through the same path. The latter
@@ -2354,7 +2372,7 @@ final class MultiviewChromeState: ObservableObject {
     /// chrome with no hide task at all (it was cancelled when the pin went
     /// on), stranding it visible forever — the "exit Switch Stream picker via
     /// Menu, chrome never fades" bug.
-    private func scheduleHide() {
+    private func scheduleHide(delaySeconds: Double = 5) {
         lastRescheduleAt = ContinuousClock.now
         hideTask?.cancel()
         // While pinned (e.g. TVOptions panel open) don't schedule the hide
@@ -2364,9 +2382,9 @@ final class MultiviewChromeState: ObservableObject {
             debugLog("[MV-Chrome] scheduleHide SKIPPED (pinned) isVisible=\(isVisible)")
             return
         }
-        debugLog("[MV-Chrome] scheduleHide armed (5s) isVisible=\(isVisible)")
+        debugLog("[MV-Chrome] scheduleHide armed (\(Int(delaySeconds))s) isVisible=\(isVisible)")
         hideTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.fadeDelayNs)
+            try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
             // Re-check the pin at fire time too: it may have been set during
             // the 5s sleep (the panel could open after chrome was summoned),

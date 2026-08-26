@@ -325,11 +325,13 @@ struct PlaybackChromeOverlay: View {
                         // fade clock on dismiss. Without this the 5s
                         // timer could hide the chrome (and the menu's
                         // anchor) out from under the open menu.
-                        onMenuOpen: { chromeState.setPinned(true) },
-                        onMenuClose: {
-                            chromeState.setPinned(false)
-                            chromeState.reportInteraction()
-                        }
+                        // NO pin here: SwiftUI Menu's onDisappear is
+                        // unreliable (a swallowed close leaked the pin
+                        // for two minutes, field-caught 2026-08-26).
+                        // A 30s fade grace self-heals instead; a close
+                        // that DOES fire restores the normal 5s.
+                        onMenuOpen: { chromeState.reportInteractionWithGrace(30) },
+                        onMenuClose: { chromeState.reportInteraction() }
                     )
                 }
                 addButton_iOS
