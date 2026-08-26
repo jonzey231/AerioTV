@@ -1804,6 +1804,21 @@ struct MultiviewContainerView: View {
                 category: "Playback", level: .info
             )
             store.relocatingTileID = nil
+        } else if chromeState.isVisible, !chromeState.isPinned,
+                  store.tiles.count == 1 {
+            // Back with chrome up on ANY solo session (Live, VOD, DVR,
+            // catch-up - Logan 2026-08-26: "everywhere") just dismisses
+            // the chrome; the NEXT Back, with chrome hidden, runs the
+            // session action below (VOD/catch-up exit, live minimize).
+            // Pinned chrome (Options panel, connection issue) falls
+            // through - those states own their own Back handling.
+            // N>=2 multiview keeps chrome-visible Back = exit confirm,
+            // or its exit would become unreachable.
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: solo chrome visible → hide chrome",
+                category: "Playback", level: .info
+            )
+            chromeState.hideNow()
         } else if !chromeState.isVisible
             && !(PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1) {
             // #42 Part 4: only the N>=2 multiview grid uses Menu to SUMMON chrome.
@@ -2249,6 +2264,21 @@ final class MultiviewChromeState: ObservableObject {
 
     /// Delay before auto-hide fires after the last interaction.
     private static let fadeDelayNs: UInt64 = 5_000_000_000
+
+    /// Immediately dismiss the chrome without waiting out the 5s fade
+    /// (Back with chrome visible, solo sessions - Logan 2026-08-26).
+    /// A pinned chrome (Options panel open, connection issue) refuses:
+    /// the pin owners' visibility guarantee outranks the gesture, and
+    /// the Back ladder handles those states earlier anyway.
+    func hideNow() {
+        guard !isPinned else { return }
+        hideTask?.cancel()
+        hideTask = nil
+        lastRescheduleAt = nil
+        if isVisible {
+            withAnimation(.easeInOut(duration: 0.2)) { isVisible = false }
+        }
+    }
 
     /// Reveal chrome + reset the 5s timer. Safe to call as often as
     /// wanted — the cancel+reschedule loop is the whole point, but
