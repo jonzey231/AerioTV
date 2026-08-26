@@ -134,6 +134,9 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
     private var bufferStart: Int64 = 0
     private var finished = false
     private var failed: String?
+    /// Set once by cancel(); the session is invalidated at that point
+    /// and no task may ever be created again (see open's guard).
+    private var cancelled = false
     private var suspended = false
 
     /// Suspend past this much unread look-ahead; resume below the low mark.
@@ -168,6 +171,19 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
 
     func open(at offset: Int64) {
         cond.lock()
+        // A cancelled stream can NEVER reopen: cancel() invalidated the
+        // URLSession, and dataTask(with:) on an invalidated session
+        // throws an ObjC exception = SIGABRT. Hit live 2026-08-26:
+        // rapid version switches - stop() cancels the old engine while
+        // its queue is mid-build; the build's read fails, ensureSpans
+        // retries via open(), crash. Marking failed makes the pending
+        // read throw and the build die as a clean segment error instead.
+        guard !cancelled else {
+            failed = "stream cancelled"
+            cond.broadcast()
+            cond.unlock()
+            return
+        }
         task?.cancel()
         buffer.removeAll(keepingCapacity: false)
         bufferStart = offset
@@ -242,6 +258,10 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
 
     func cancel() {
         cond.lock()
+        cancelled = true
+        // Wake any blocked read() with a terminal failure so the build
+        // it belongs to dies as a clean segment error, not a 45s wait.
+        failed = "stream cancelled"
         task?.cancel()
         task = nil
         buffer.removeAll(keepingCapacity: false)
