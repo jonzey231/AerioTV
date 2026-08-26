@@ -1202,6 +1202,30 @@ struct AVPlayerMultiviewTile: View {
     /// failure stays ON SCREEN instead of being silently rescued - the
     /// whole point of the no-mpv field test is to see what breaks.
     private func failOrFallback(_ reason: String) {
+        // One silent full-chain retry per stream URL for the transient
+        // classes, BEFORE any mpv fallback or error card: provider
+        // mid-rotation mismatches and the wedges they cause downstream
+        // (the 13:33 field freeze was a dead upstream connection
+        // starving the buffer - the watchdog's 'playback frozen'
+        // never passed the old server.onError retry). A fresh start
+        // re-indexes and reconnects; a second failure proceeds below.
+        let retryable = reason.contains("file changed upstream")
+            || reason.contains("no video samples")
+            || reason.contains("segment build failures")
+            || reason.contains("playback frozen")
+            || reason.contains("playback failed")
+            || reason.contains("never became ready")
+            || (reason.contains("span") && reason.contains("unreadable"))
+        if isVOD, retryable, !mismatchAutoRetried, tileError == nil {
+            mismatchAutoRetried = true
+            debugLog("[AVP-MV] recoverable failure (\(reason)); auto-retrying with a fresh pipeline title=\(channelName)")
+            if progressStore.currentMs > 2_000 {
+                progressStore.explicitResumeMs = progressStore.currentMs
+            }
+            stop()
+            start()
+            return
+        }
         if PlaybackFeatureFlags.mpvEngineEnabled {
             onEngineFallback(reason)
             return
@@ -1367,25 +1391,9 @@ struct AVPlayerMultiviewTile: View {
             if reason.contains("not an EBML") {
                 debugLog("[AVP-MV] VOD not Matroska; trying direct AVPlayer title=\(channelName)")
                 startPlayer(url: streamURL, requestHeaders: headers)
-            } else if !mismatchAutoRetried,
-                      reason.contains("file changed upstream")
-                        || reason.contains("no video samples")
-                        || reason.contains("segment build failures") {
-                // Index/media mismatch = the provider swapped or is
-                // rotating the file behind this URL. A fresh start
-                // re-indexes whatever the upstream serves NOW, which
-                // fixes the transient case (measured: the same pin that
-                // failed every build at 12:52 indexed and built cleanly
-                // minutes later). One silent retry from the current
-                // position; a second failure shows the error card.
-                mismatchAutoRetried = true
-                debugLog("[AVP-MV] stream/index mismatch (\(reason)); auto-retrying with a fresh index title=\(channelName)")
-                if progressStore.currentMs > 2_000 {
-                    progressStore.explicitResumeMs = progressStore.currentMs
-                }
-                stop()
-                start()
             } else {
+                // failOrFallback owns the one-shot auto-retry for the
+                // transient mismatch/wedge classes.
                 debugLog("[AVP-MV] VOD remux failed (\(reason)) title=\(channelName)")
                 failOrFallback(reason)
             }

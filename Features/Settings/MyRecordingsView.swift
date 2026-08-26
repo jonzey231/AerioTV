@@ -641,6 +641,26 @@ struct MyRecordingsView: View {
         // window: drive the live-edge-aware timeline. Completed recordings
         // and the legacy /file/ fallback are fixed files (plain VOD).
         let isDVR = rec.isInProgress && urlSource == "server-hls"
+        // COMPLETED recordings ride the AVPlayer VOD container (Logan
+        // 2026-08-26): that path carries the 10s WatchProgress saver,
+        // exact-position Back exit, resume, and iCloud sync - none of
+        // which the legacy cover ever had for recordings. The vodID is
+        // a dvr-scoped key so recording progress can never collide with
+        // a movie's numeric id. In-progress recordings (growing HLS
+        // window) keep the legacy DVR cover; beginVOD declining (engine
+        // toggle off with mpv enabled) also falls through unchanged.
+        if !isDVR {
+            let dvrVodID = "dvr-\(remoteID)"
+            let resume = fromStart ? nil
+                : WatchProgressManager.getResumePosition(vodID: dvrVodID, serverID: rec.serverID)
+            if PlayerSession.shared.beginVOD(
+                title: rec.programTitle, streamURL: url, headers: headers,
+                posterURL: nil, vodID: dvrVodID, serverID: rec.serverID,
+                vodType: "recording", resumePositionMs: resume) {
+                debugLog("▶️ Completed recording via AVPlayer container: id=\(remoteID) resume=\(resume.map(String.init) ?? "none")ms")
+                return
+            }
+        }
         playingRecording = PlayingRecording(
             id: rec.id, url: url, title: rec.programTitle, headers: headers, isDVR: isDVR
         )

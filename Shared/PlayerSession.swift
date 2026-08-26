@@ -476,6 +476,14 @@ final class PlayerSession: ObservableObject {
         // mpv disabled: no legacy-cover escape hatch; every VOD launch
         // goes through the container and fails visibly if it must.
         guard vodShape || !PlaybackFeatureFlags.mpvEngineEnabled else { return false }
+        // PERSISTED URLs (Continue Watching rows saved before the
+        // session-minting change) arrive WITHOUT a session segment, and
+        // sessionless requests go through Dispatcharr's idle-session
+        // adoption - the pin is discarded and the play can land on a
+        // stale provider connection (13:33 field failure: dead upstream
+        // on a resumed sessionless URL). Normalize: mint a session into
+        // any bare /proxy/vod/ URL at launch time.
+        let streamURL = Self.ensureVODSession(streamURL)
         let store = MultiviewStore.shared
         if !store.tiles.isEmpty { exit() }
         store.lockEngine(ResolvedEngine(engine: .avPlayerRemuxTS,
@@ -500,6 +508,19 @@ final class PlayerSession: ObservableObject {
                                    selectionKey: versionSelectionKey)
         mode = .multiview
         return true
+    }
+
+    /// Mint a VOD session id into a bare Dispatcharr /proxy/vod/ URL
+    /// (see DispatcharrAPI.mintVODSession for why sessionless requests
+    /// are unsafe). URLs that already carry a session, and non-proxy
+    /// URLs, pass through untouched.
+    static func ensureVODSession(_ url: URL) -> URL {
+        let comps = url.pathComponents // ["/", "proxy", "vod", type, uuid, session?]
+        guard comps.count == 5, comps[1] == "proxy", comps[2] == "vod" else { return url }
+        guard var c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        let session = "vod_\(Int(Date().timeIntervalSince1970 * 1000))_\(Int.random(in: 1000...9999))"
+        c.path = url.path + "/" + session
+        return c.url ?? url
     }
 
     @discardableResult
