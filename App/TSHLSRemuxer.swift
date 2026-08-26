@@ -1110,6 +1110,11 @@ struct AVPlayerMultiviewTile: View {
         }
         mkvServer = server
         server.start()
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil, queue: .main) { [weak server] _ in
+            server?.purgeOnMemoryWarning()
+        }
     }
 
     private func startPlayer(url: URL, requestHeaders: [String: String]) {

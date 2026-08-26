@@ -462,6 +462,23 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     func teardown() {
         fetcher.invalidate()
         if streamOpen { stream.cancel() }
+        spanCache.removeAll()
+        spanCacheBytes = 0
+    }
+
+    /// Thread-safe immediate teardown of the network side, callable from
+    /// ANY thread ahead of the queue-serialized teardown(): a version
+    /// switch overlaps the old engine's drain with the new engine's
+    /// spin-up, and the old 96MB stream buffer + connection must die at
+    /// switch time, not when the old queue gets around to it.
+    func cancelStreamingNow() {
+        if streamOpen { stream.cancel() }
+    }
+
+    /// Queue-confined cache purge for memory-warning response.
+    func purgeCaches() {
+        spanCache.removeAll()
+        spanCacheBytes = 0
     }
 
     // MARK: Header + cues parse
@@ -563,8 +580,11 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         if v.defaultDurationNs > 0 {
             frameDurationTicks = max(300, v.defaultDurationNs * Self.ticksPerSecond / 1_000_000_000)
         }
+        // 3 spans is what one build needs; +margin. 4x a 63MB span plus
+        // the server's segment cache is how a 57GB UHD remux jetsammed
+        // the app at 1.4GB during a version switch (2026-08-26).
         let maxSpan = segmentsMap.map { Int($0.byteEnd - $0.byteStart) }.max() ?? 0
-        spanCacheByteLimit = max(160 * 1024 * 1024, 4 * maxSpan)
+        spanCacheByteLimit = max(160 * 1024 * 1024, 3 * maxSpan + 16 * 1024 * 1024)
         let mins = Double(durationTicks) / Double(Self.ticksPerSecond) / 60
         log(String(format: "[MKV] prepared: %@ %dx%d + %@, %.0f min, %d segments, cues %@",
                    v.codecID, v.width, v.height, audio?.codecID ?? "no-audio",
@@ -1292,8 +1312,13 @@ final class MKVVODServer: @unchecked Sendable {
     private var listener: NWListener?
     private(set) var localPort: UInt16 = 0
     /// Tiny LRU so AVPlayer's occasional segment re-request (seek
-    /// landing, bitrate probe) does not refetch megabytes.
+    /// landing, bitrate probe) does not refetch megabytes. BYTE-capped:
+    /// four 60MB UHD-remux segments were ~240MB of the 1.4GB that
+    /// jetsammed the app (2026-08-26).
     private var cache: [(index: Int, data: Data)] = []
+    private var cacheBytes = 0
+    private let cacheByteLimit = 128 * 1024 * 1024
+    private var stopped = false
 
     var onReady: ((URL) -> Void)?
     var onError: ((String) -> Void)?
@@ -1348,12 +1373,32 @@ final class MKVVODServer: @unchecked Sendable {
     }
 
     func stop() {
+        // Kill the network side NOW, from the caller's thread: a version
+        // switch overlaps this server's drain with its successor's
+        // spin-up, and two full engines resident at once is what
+        // jetsammed the app on a 57GB UHD remux.
+        stopped = true
+        remuxer.cancelStreamingNow()
         queue.async { [weak self] in
             guard let self else { return }
             debugLog("\(self.remuxer.summary)")
             self.listener?.cancel()
             self.listener = nil
+            self.cache.removeAll()
+            self.cacheBytes = 0
             self.remuxer.teardown()
+        }
+    }
+
+    /// Memory-warning response: drop every cache; steady playback
+    /// refetches what it needs at ~1x.
+    func purgeOnMemoryWarning() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.cache.removeAll()
+            self.cacheBytes = 0
+            self.remuxer.purgeCaches()
+            debugLog("[MKV-VOD] caches purged on memory warning")
         }
     }
 
@@ -1395,9 +1440,14 @@ final class MKVVODServer: @unchecked Sendable {
                 body = hit.data
             } else {
                 do {
+                    guard !stopped else { throw MKVRemuxError(reason: "server stopped") }
                     body = try remuxer.buildMediaSegment(index)
                     cache.append((index, body))
-                    if cache.count > 4 { cache.removeFirst() }
+                    cacheBytes += body.count
+                    while cacheBytes > cacheByteLimit || cache.count > 4 {
+                        guard cache.count > 1 else { break }
+                        cacheBytes -= cache.removeFirst().data.count
+                    }
                 } catch {
                     debugLog("[MKV-VOD] segment \(index) failed: \(error)")
                     body = Data("segment error".utf8)
