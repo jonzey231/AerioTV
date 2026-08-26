@@ -395,6 +395,22 @@ struct MultiviewContainerView: View {
                 }
             }
 
+            #if os(iOS)
+            // Tap-to-dismiss (Logan 2026-08-26, phone parity with the
+            // tvOS Back-hides-chrome rule): while chrome is up on a solo
+            // session, a tap on the video / empty space hides it. This
+            // clear catcher sits BETWEEN the tiles and the chrome, so
+            // chrome buttons above it keep their taps; when chrome is
+            // hidden it unmounts and the container's show-gesture (which
+            // now only fires with chrome hidden) takes over.
+            if chromeState.isVisible, !chromeState.isPinned, store.tiles.count == 1 {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea()
+                    .onTapGesture { chromeState.hideNow() }
+            }
+            #endif
+
             // N=1 chrome overlay — top bar (iOS) / bottom pill (tvOS).
             // Only mounted for unified-path users at N=1; legacy
             // users get a bare no-op mount (overlay renders nothing)
@@ -755,12 +771,17 @@ struct MultiviewContainerView: View {
         }
         #endif
         #if os(iOS)
-        // iPad: any tap anywhere in multiview reveals chrome +
+        // iPad/iPhone: any tap anywhere in multiview reveals chrome +
         // resets the 5s fade timer. `.simultaneousGesture` so it
         // fires alongside the tile's own `.onTapGesture` (which
-        // takes audio) rather than stealing it.
+        // takes audio) rather than stealing it. Gated to chrome-HIDDEN:
+        // with chrome up, the solo tap-catcher above owns the tap
+        // (dismiss), and an unguarded report here would instantly
+        // re-show what the catcher just hid.
         .simultaneousGesture(
-            TapGesture().onEnded { chromeState.reportInteraction() }
+            TapGesture().onEnded {
+                if !chromeState.isVisible { chromeState.reportInteraction() }
+            }
         )
         // v1.6.18: vertical swipe = channel flip (single-stream
         // live only). Gated on chrome being VISIBLE — the user
@@ -2270,11 +2291,19 @@ final class MultiviewChromeState: ObservableObject {
     /// A pinned chrome (Options panel open, connection issue) refuses:
     /// the pin owners' visibility guarantee outranks the gesture, and
     /// the Back ladder handles those states earlier anyway.
+    /// Explicit-dismiss timestamp: `reportInteraction()` within 300ms of
+    /// a `hideNow()` is ignored, because the SAME tap that hit the
+    /// dismiss catcher also fires the container's simultaneous
+    /// show-gesture, and their order is undefined - without the window
+    /// the dismiss could instantly re-show.
+    private var lastHideNowAt: ContinuousClock.Instant?
+
     func hideNow() {
         guard !isPinned else { return }
         hideTask?.cancel()
         hideTask = nil
         lastRescheduleAt = nil
+        lastHideNowAt = ContinuousClock.now
         if isVisible {
             withAnimation(.easeInOut(duration: 0.2)) { isVisible = false }
         }
@@ -2286,6 +2315,10 @@ final class MultiviewChromeState: ObservableObject {
     /// churning `Task` allocations.
     func reportInteraction() {
         let now = ContinuousClock.now
+        // See lastHideNowAt: the dismissing tap must not re-show.
+        if let hid = lastHideNowAt, hid.duration(to: now) < .milliseconds(300) {
+            return
+        }
         // Fast path: chrome is already visible AND we just
         // rescheduled within the last 500ms. Dropping this call
         // still leaves > 4s of visible chrome, so it's indistinct
@@ -2426,16 +2459,13 @@ private struct MultiviewSafeAreaModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         #if os(iOS)
-        if UIDevice.current.userInterfaceIdiom == .phone {
-            // Phone — respect the safe area on every edge so the
-            // notch / Dynamic Island / home indicator / landscape
-            // speaker carve-out never overlaps a tile's video frame.
-            content
-        } else {
-            // iPad — preserve the legacy "tiles bleed to the
-            // hardware edge" multiview look.
-            content.ignoresSafeArea()
-        }
+        // Phone AND iPad both bleed to the hardware edges now. The
+        // phone's respect-every-edge carve-out shrank the whole video
+        // frame ("zoomed out", 2026-08-26 field find): with aspect-fit
+        // content the letterboxing keeps the picture clear of the
+        // Dynamic Island by itself, exactly like every system video
+        // app, and the chrome overlay manages its own insets.
+        content.ignoresSafeArea()
         #else
         // tvOS — no notch, edge-to-edge is right for fullscreen; the corner
         // mini player must stay inside its proposed frame (see `minimized`).

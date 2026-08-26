@@ -4675,7 +4675,12 @@ struct MainTabView: View {
             } else if !companionClient.devices.isEmpty,
                !companionClient.isControlling,
                !castController.isCasting,
-               nowPlaying.playingItem == nil || nowPlaying.isMinimized {
+               nowPlaying.playingItem == nil || nowPlaying.isMinimized,
+               // Container sessions (VOD/DVR/live via PlayerSession) never
+               // set nowPlaying.playingItem, so the FAB floated over the
+               // fullscreen player (field find 2026-08-26, "rogue cast
+               // button"). Gate on the session mode too.
+               playerSession.mode == .idle || nowPlaying.isMinimized {
                 CompanionControlFAB { showCompanionPickerGlobal = true }
                     .padding(.trailing, 20)
                     .padding(.bottom, 52)

@@ -1048,32 +1048,47 @@ enum DisplayCriteriaCoordinator {
 struct AVPSubtitleOverlay: View {
     @ObservedObject var store: AVPSubtitleCueStore
     let timeMs: () -> Int64
+    /// The playing video's aspect ratio (width/height) when known, so
+    /// the cue text anchors to the VIDEO's bottom edge, not the tile's.
+    /// iPhone portrait letterboxes a 16:9 movie mid-screen, and a
+    /// tile-anchored cue sat way below the picture (field find
+    /// 2026-08-26). nil = assume 16:9.
+    var videoAspect: () -> CGFloat? = { nil }
     @State private var text: String?
     private let tick = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
 
     #if os(tvOS)
     private var fontSize: CGFloat { 38 }
-    private var bottomInset: CGFloat { 90 }
+    private var baseInset: CGFloat { 90 }
     #else
     private var fontSize: CGFloat { 18 }
-    private var bottomInset: CGFloat { 44 }
+    private var baseInset: CGFloat { 24 }
     #endif
 
+    private func bottomInset(_ geo: GeometryProxy) -> CGFloat {
+        let aspect = max(0.2, videoAspect() ?? (16.0 / 9.0))
+        let videoHeight = min(geo.size.height, geo.size.width / aspect)
+        return (geo.size.height - videoHeight) / 2 + baseInset
+    }
+
     var body: some View {
-        VStack {
-            Spacer()
-            if let text, store.activeTrack != nil {
-                Text(text)
-                    .font(.system(size: fontSize, weight: .semibold))
-                    .multilineTextAlignment(.center)
-                    .foregroundColor(.white)
-                    .shadow(color: .black.opacity(0.9), radius: 2, x: 0, y: 1)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
-                    .padding(.bottom, bottomInset)
-                    .padding(.horizontal, 40)
+        GeometryReader { geo in
+            VStack {
+                Spacer()
+                if let text, store.activeTrack != nil {
+                    Text(text)
+                        .font(.system(size: fontSize, weight: .semibold))
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(.white)
+                        .shadow(color: .black.opacity(0.9), radius: 2, x: 0, y: 1)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.bottom, bottomInset(geo))
+                        .padding(.horizontal, 40)
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .allowsHitTesting(false)
         .onReceive(tick) { _ in
@@ -1161,6 +1176,8 @@ struct AVPlayerMultiviewTile: View {
                 AVPSubtitleOverlay(store: subtitleStore, timeMs: {
                     let s = player.currentTime().seconds
                     return s.isFinite ? Int64(s * 1000) : 0
+                }, videoAspect: { [tileID] in
+                    MultiviewStore.shared.tileVideoAspects[tileID]
                 })
             }
             if let statusText, tileError == nil {
