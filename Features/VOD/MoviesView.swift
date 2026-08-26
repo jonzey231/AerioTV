@@ -598,7 +598,9 @@ struct MoviesView: View {
                         vodType: "movie",
                         activeServerID: (servers.first(where: { $0.isActive }) ?? servers.first)?.id.uuidString,
                         headers: dispatcharrHeaders,
-                        onPlay: { progress in resumeFromContinueWatching(progress) }
+                        onPlay: { progress in resumeFromContinueWatching(progress) },
+                        movies: vodStore.movies,
+                        onOpenMovie: { item in navPath.append(item) }
                     )
 
                     LazyVGrid(columns: columns, spacing: gridRowSpacing) {

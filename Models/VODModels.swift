@@ -282,12 +282,18 @@ struct ContinueWatchingSection: View {
     /// only carries the episode's own still + title, so the show poster
     /// and name come from here (looked up by `seriesID`).
     var series: [VODDisplayItem] = []
-    /// Optional "Open Series" action for episode cards. When provided,
-    /// long-pressing an episode card offers Open Series, which navigates
+    /// Optional "View Series" action for episode cards. When provided,
+    /// long-pressing an episode card offers View Series, which navigates
     /// to that show's detail page (all seasons and episodes), the same
     /// destination as selecting the series from the main grid. Movies and
     /// not-yet-loaded series do not surface the option.
     var onOpenSeries: ((VODDisplayItem) -> Void)?
+    /// Loaded movies for the active server; drives the movie cards'
+    /// long-press "View Movie" action (Logan 2026-08-26: jumping to the
+    /// full detail page used to require finding the grid listing by
+    /// search/scroll). Same lookup-by-id pattern as `series`.
+    var movies: [VODDisplayItem] = []
+    var onOpenMovie: ((VODDisplayItem) -> Void)?
 
     @Query(
         filter: #Predicate<WatchProgress> { !$0.isFinished },
@@ -353,14 +359,24 @@ struct ContinueWatchingSection: View {
                             .buttonStyle(.plain)
                             #endif
                             .contextMenu {
-                                // Episodes with a loaded parent series get an
-                                // Open Series action that jumps to the full
+                                // Episodes with a loaded parent series get a
+                                // View Series action that jumps to the full
                                 // show page, same as picking it from the grid.
                                 if let parentSeries, let onOpenSeries {
                                     Button {
                                         onOpenSeries(parentSeries)
                                     } label: {
-                                        Label("Open Series", systemImage: "rectangle.stack")
+                                        Label("View Series", systemImage: "rectangle.stack")
+                                    }
+                                }
+                                // Movies get the mirror: View Movie jumps to
+                                // the detail page without hunting the grid.
+                                if progress.vodType == "movie", let onOpenMovie,
+                                   let movie = movies.first(where: { $0.id == progress.vodID }) {
+                                    Button {
+                                        onOpenMovie(movie)
+                                    } label: {
+                                        Label("View Movie", systemImage: "info.circle")
                                     }
                                 }
                                 Button(role: .destructive) {
