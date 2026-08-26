@@ -1144,7 +1144,21 @@ struct AVPlayerMultiviewTile: View {
             guard let failed = note.object as? AVPlayerItem,
                   failed === player?.currentItem else { return }
             debugLog("[AVP-MV] tile playback failed channel=\(channelName); falling back to mpv tile")
-            onEngineFallback("playback failed")
+            failOrFallback("playback failed")
+        }
+    }
+
+    /// Every mpv-fallback trigger routes through here. With the mpv
+    /// engine disabled (test flag, see PlaybackFeatureFlags), the
+    /// failure stays ON SCREEN instead of being silently rescued - the
+    /// whole point of the no-mpv field test is to see what breaks.
+    private func failOrFallback(_ reason: String) {
+        if PlaybackFeatureFlags.mpvEngineEnabled {
+            onEngineFallback(reason)
+        } else {
+            debugLog("[AVP-NO-MPV] tile \(channelName) FAILED, mpv disabled: \(reason)")
+            player?.pause()
+            statusText = "Playback failed (mpv disabled)\n\(reason)"
         }
     }
 
@@ -1169,8 +1183,8 @@ struct AVPlayerMultiviewTile: View {
                 readyLocalURL = url
             }
             mux.onError = { error in
-                debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName); falling back to mpv tile")
-                onEngineFallback("\(error)")
+                debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName)")
+                failOrFallback("\(error)")
             }
             mux.onVideoParameters = { w, h, fps, tenBit in
                 applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
@@ -1219,8 +1233,8 @@ struct AVPlayerMultiviewTile: View {
                 debugLog("[AVP-MV] VOD not Matroska; trying direct AVPlayer title=\(channelName)")
                 startPlayer(url: streamURL, requestHeaders: headers)
             } else {
-                debugLog("[AVP-MV] VOD remux failed (\(reason)) title=\(channelName); falling back to mpv tile")
-                onEngineFallback(reason)
+                debugLog("[AVP-MV] VOD remux failed (\(reason)) title=\(channelName)")
+                failOrFallback(reason)
             }
         }
         mkvServer = server
@@ -1326,7 +1340,7 @@ struct AVPlayerMultiviewTile: View {
         // Fast path: AVFoundation's own diagnosis of a rejected playlist / failed
         // reload arrives as an errorLog entry; escalate the fatal codes straight
         // to the mpv engine instead of logging and stranding the tile.
-        driver?.onUnrecoverable = onEngineFallback
+        driver?.onUnrecoverable = { failOrFallback($0) }
         // Report the real video aspect once decode knows it, so the
         // focus border can trace the picture instead of the tile frame.
         // presentationSize fires repeatedly (often with the SAME size) as the
@@ -1359,7 +1373,7 @@ struct AVPlayerMultiviewTile: View {
         stallWatchdog?.cancel()
         let watchdog = AVPStallWatchdog(
             player: avPlayer, item: playerItem, label: "tile \(channelName)",
-            onDead: onEngineFallback)
+            onDead: { failOrFallback($0) })
         watchdog.start()
         stallWatchdog = watchdog
     }

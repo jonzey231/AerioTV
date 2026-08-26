@@ -409,6 +409,13 @@ final class PlayerSession: ObservableObject {
             if PlaybackFeatureFlags.avPlayerRemuxTS, vodShape {
                 return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
             }
+            // mpv disabled (test flag): EVERYTHING non-live rides the
+            // AVPlayer container chain (direct / MKV remux / visible
+            // failure) - including DVR and catchup URLs that used to be
+            // mpv's by fiat. Sink or swim is the point.
+            if !PlaybackFeatureFlags.mpvEngineEnabled {
+                return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
+            }
             return ResolvedEngine(engine: .mpv, routeURL: url, headers: headers)
         }
         let format = classifyStreamURL(url)
@@ -428,6 +435,11 @@ final class PlayerSession: ObservableObject {
             return ResolvedEngine(engine: .avPlayerDirectHLS, routeURL: routeURL, headers: headers)
         }
         if PlaybackFeatureFlags.avPlayerRemuxTS, format == .mpegTS {
+            return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
+        }
+        // mpv disabled (test flag): unknown live formats go through the
+        // TS remux arm and fail visibly if they are not TS.
+        if !PlaybackFeatureFlags.mpvEngineEnabled {
             return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
         }
         return ResolvedEngine(engine: .mpv, routeURL: url, headers: headers)
@@ -461,7 +473,9 @@ final class PlayerSession: ObservableObject {
         let ext = streamURL.pathExtension.lowercased()
         let vodShape = streamURL.path.contains("/proxy/vod/")
             || ["mkv", "mp4", "m4v", "mov"].contains(ext)
-        guard vodShape else { return false }
+        // mpv disabled: no legacy-cover escape hatch; every VOD launch
+        // goes through the container and fails visibly if it must.
+        guard vodShape || !PlaybackFeatureFlags.mpvEngineEnabled else { return false }
         let store = MultiviewStore.shared
         if !store.tiles.isEmpty { exit() }
         store.lockEngine(ResolvedEngine(engine: .avPlayerRemuxTS,
@@ -776,5 +790,22 @@ enum PlaybackFeatureFlags {
             return true
         }
         return defaults.bool(forKey: "playback.modernChrome")
+    }
+
+    /// TEST BRANCH (Logan, 2026-08-26): mpv disabled by DEFAULT so every
+    /// AVPlayer gap surfaces as a visible failure instead of a silent
+    /// rescue - the point of the field test is to find what still needs
+    /// mpv. OFF means: the resolver never picks mpv (DVR/catchup route
+    /// to AVPlayer too and sink or swim), tile engine fallbacks show an
+    /// on-tile error instead of swapping engines, and downgradeToMPV is
+    /// a logged no-op. The Developer toggle re-enables mpv for
+    /// comparison. MUST default back to ON before this branch ships to
+    /// anyone but Logan.
+    static var mpvEngineEnabled: Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "dev.mpvEngineEnabled") == nil {
+            return false
+        }
+        return defaults.bool(forKey: "dev.mpvEngineEnabled")
     }
 }

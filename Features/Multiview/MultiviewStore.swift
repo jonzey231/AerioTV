@@ -201,6 +201,14 @@ final class MultiviewStore: ObservableObject {
     /// life, so no tile or re-begin can flip back. Idempotent.
     func downgradeToMPV() {
         guard sessionEngine.isAVPlayer else { return }
+        // Test flag: with mpv disabled the session NEVER downgrades -
+        // the failing tile shows its own error (failOrFallback) and the
+        // log records what would have been silently rescued.
+        guard PlaybackFeatureFlags.mpvEngineEnabled else {
+            DebugLogger.shared.log("[Engine] AVPlayer failure would downgrade to mpv, but mpv is disabled (dev flag)",
+                                   category: "Playback", level: .warning)
+            return
+        }
         sessionEngine = .mpv
         sessionRouteURL = nil
         DebugLogger.shared.log("[Engine] session downgraded to mpv (AVPlayer failure)",
