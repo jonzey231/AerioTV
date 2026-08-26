@@ -1432,20 +1432,31 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         //    regardless of their pts, which is what decode needs.
         //  - audio: every frame with pts in [start, nextStart) - complete
         //    now that both neighbor spans were parsed.
-        let halfFrame = frameDurationTicks / 2
+        // Boundary slack: how far BEFORE the cue time a keyframe may sit
+        // and still count as the segment's starting keyframe. Half a
+        // frame was too strict for the wild: In the Grey's rotated
+        // 1080p HEVC copy (2026-08-26) writes cue times ~56ms AFTER the
+        // keyframes they index (cue 1453.800 -> keyframe pts 1453.744),
+        // which zeroed every build of that window ("no video samples",
+        // 3 keyframes parsed, none eligible). Six frames (~250ms @24fps)
+        // absorbs that class. The partition stays EXACT regardless of
+        // slack size because the end-trim below and the NEXT segment's
+        // start-search use the same threshold - every frame belongs to
+        // exactly one segment, seams stay continuous.
+        let boundarySlack = 6 * frameDurationTicks
         // Pre-partition census, kept for the failure diagnostic below.
         let parsedCount = videoSamples.count
         let parsedKeyframes = videoSamples.lazy.filter(\.keyframe).count
         let parsedPtsLo = videoSamples.map(\.ptsTicks).min() ?? 0
         let parsedPtsHi = videoSamples.map(\.ptsTicks).max() ?? 0
         if let startKey = videoSamples.firstIndex(where: {
-            $0.keyframe && $0.ptsTicks >= seg.startTicks - halfFrame }) {
+            $0.keyframe && $0.ptsTicks >= seg.startTicks - boundarySlack }) {
             videoSamples.removeFirst(startKey)
         } else {
             videoSamples.removeAll()
         }
         if let endKey = videoSamples.dropFirst().firstIndex(where: {
-            $0.keyframe && $0.ptsTicks >= nextStart - halfFrame }) {
+            $0.keyframe && $0.ptsTicks >= nextStart - boundarySlack }) {
             videoSamples = Array(videoSamples[..<endKey])
         }
         audioSamples = audioSamples.filter { $0.ptsTicks >= seg.startTicks && $0.ptsTicks < nextStart }
@@ -1614,7 +1625,12 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         // monotonically increasing dts ... 64 >= 64" exactly at seg
         // boundaries) - a per-seam hiccup. cts floors at 0 for the rare
         // deeper-than-4 reorder rather than breaking monotonic dts.
-        let base = seg.startTicks - 4 * frameDur
+        // 10-frame lead: 4 frames of reorder depth plus the 6-frame
+        // boundary slack (a starting keyframe may sit up to 6 frames
+        // BEFORE seg.startTicks and its pts must not dip below its dts).
+        // Still deterministic/continuous across segments - same formula
+        // every build.
+        let base = seg.startTicks - 10 * frameDur
         let dts = (0..<n).map { base + Int64($0) * frameDur }
 
         let videoBytes = video.reduce(0) { $0 + $1.data.count }
