@@ -3948,8 +3948,12 @@ final class AVPlayerProgressDriver {
     private var firedUnrecoverable = false
     /// Consecutive non-fatal fetch errors (segment/part 404, playlist not
     /// received); escalated only after a few strikes so a single transient
-    /// blip does not bounce the engine.
+    /// blip does not bounce the engine. Reset whenever the clock advances.
     private var softErrorCount = 0
+    /// First moment the live playlist went stale (-12888 "unchanged")
+    /// with no recovery since. Cleared on any clock advance; a 60s hold
+    /// = the feed is genuinely dead and a re-tune is warranted.
+    private var playlistStaleSince: Date?
 
     init(player: AVPlayer,
          store: PlayerProgressStore,
@@ -4045,6 +4049,7 @@ final class AVPlayerProgressDriver {
         itemObservations.removeAll()
         // New item gets a fresh error-escalation budget.
         softErrorCount = 0
+        playlistStaleSince = nil
         firedUnrecoverable = false
         appliedDefaultSubtitleOff = false
         guard let item else { return }
@@ -4136,10 +4141,34 @@ final class AVPlayerProgressDriver {
                     self.onUnrecoverable?(reason)
                     return
                 }
+                // "Playlist File unchanged for longer than 1.5 * target
+                // duration" is AVPlayer's ADVISORY during a feed gap - the
+                // upstream starves 7-14s routinely (Sky), the playlist is
+                // legitimately static, and AVPlayer resumes by itself when
+                // the next segment lands. Counting three of these as fatal
+                // is what caused the 15-minute blackout-and-retune cycle
+                // (2026-08-26, Logan: "unacceptable in a production app") -
+                // the escalation KILLED sessions that would have healed in
+                // seconds. Only a playlist frozen for a full 60s means the
+                // feed is truly dead, and THAT is when a re-tune helps.
+                if code == -12888, (event.errorComment ?? "").contains("unchanged") {
+                    let since = self.playlistStaleSince ?? Date()
+                    self.playlistStaleSince = since
+                    let stale = Date().timeIntervalSince(since)
+                    if stale > 60 {
+                        self.firedUnrecoverable = true
+                        let reason = "live feed stalled (playlist unchanged \(Int(stale))s)"
+                        debugLog("[AVP-STREAM] \(reason); escalating to engine fallback")
+                        self.onUnrecoverable?(reason)
+                    }
+                    return
+                }
                 // Persistent (not one-off) fetch failures: playlist not received
                 // (-12888) or segment/part 404 out of the window (-12938).
                 // Escalate only after 3 strikes so a single transient blip does
-                // not bounce the engine.
+                // not bounce the engine. (The counter resets whenever the
+                // clock advances - see freezeTick - so sporadic singles
+                // can never accumulate to a kill across a long session.)
                 if code == -12888 || code == -12938 {
                     self.softErrorCount += 1
                     if self.softErrorCount >= 3 {
@@ -4223,11 +4252,18 @@ final class AVPlayerProgressDriver {
             debugLog(String(format:
                 "[AVP-FREEZE] clock advanced %.3fs in the last 1.0s wall (tick %d, pos %.1fs, status playing)",
                 advanced, freezeConsecutiveTicks, now.seconds))
-        } else if freezeConsecutiveTicks > 0 {
-            debugLog(String(format:
-                "[AVP-FREEZE] recovered after ~%ds frozen (pos %.1fs)",
-                freezeConsecutiveTicks, now.seconds))
-            freezeConsecutiveTicks = 0
+        } else {
+            // Healthy playback resets the escalation ledgers: a stale
+            // playlist that recovered, or sporadic fetch blips hours
+            // apart, must never accumulate into an engine bounce.
+            playlistStaleSince = nil
+            softErrorCount = 0
+            if freezeConsecutiveTicks > 0 {
+                debugLog(String(format:
+                    "[AVP-FREEZE] recovered after ~%ds frozen (pos %.1fs)",
+                    freezeConsecutiveTicks, now.seconds))
+                freezeConsecutiveTicks = 0
+            }
         }
     }
 
