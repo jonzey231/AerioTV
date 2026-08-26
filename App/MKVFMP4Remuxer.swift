@@ -142,6 +142,10 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
     /// Bytes kept BEHIND the consume point for re-reads.
     private let keepBehind: Int64 = 8 * 1024 * 1024
     private var consumePoint: Int64 = 0
+    /// End of the range a read() is currently WAITING for. Flow control
+    /// must never suspend below this, or a span larger than the
+    /// high-water mark deadlocks the reader until its timeout.
+    private var neededThrough: Int64 = 0
 
     private(set) var requestsMade = 0
     private(set) var bytesStreamed: Int64 = 0
@@ -192,12 +196,18 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         if task == nil { return nil }
         if offset < bufferStart { return nil }
         // A FORWARD seek far past the buffered head must reopen, not
-        // wait: blocking until the stream naturally reaches a target
-        // gigabytes ahead is the other half of the segment-246 field
-        // failure. 48MB (~a couple of spans) is the wait-worthy window.
-        if offset + Int64(length) > bufferStart + Int64(buffer.count) + 48 * 1024 * 1024 {
+        // wait. Measure the gap to the START of the requested range only:
+        // the first version added the requested LENGTH into this test, so
+        // on a high-bitrate 4K remux whose ~6s spans exceed 48MB every
+        // read at the freshly-opened offset classified itself as a far
+        // seek and failed instantly (2026-08-26 field failure, In the
+        // Grey: "span 91 unreadable" in the same millisecond as open,
+        // -> watchdog -> mpv fallback).
+        if offset > bufferStart + Int64(buffer.count) + 48 * 1024 * 1024 {
             return nil
         }
+        neededThrough = max(neededThrough, offset + Int64(length))
+        defer { neededThrough = 0 }
         let deadline = Date().addingTimeInterval(timeout)
         while bufferStart + Int64(buffer.count) < offset + Int64(length) {
             if let failed { throw MKVRemuxError(reason: "stream failed: \(failed)") }
@@ -222,7 +232,8 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
             bufferStart = trimTo
         }
         let ahead = Int(bufferStart + Int64(buffer.count) - consumePoint)
-        if suspended, ahead < lowWater, !finished {
+        if suspended, !finished,
+           ahead < lowWater || bufferStart + Int64(buffer.count) < neededThrough {
             suspended = false
             task?.resume()
         }
@@ -251,8 +262,11 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         guard dataTask === task else { cond.unlock(); return }
         buffer.append(data)
         bytesStreamed += Int64(data.count)
-        let ahead = Int(bufferStart + Int64(buffer.count) - consumePoint)
-        if !suspended, ahead > highWater {
+        let head = bufferStart + Int64(buffer.count)
+        let ahead = Int(head - consumePoint)
+        // Never suspend below what a waiting read() needs: a span larger
+        // than the high-water mark must still stream to completion.
+        if !suspended, ahead > highWater, head >= neededThrough + 1_048_576 || neededThrough == 0 {
             suspended = true
             dataTask.suspend()
         }
@@ -549,6 +563,8 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         if v.defaultDurationNs > 0 {
             frameDurationTicks = max(300, v.defaultDurationNs * Self.ticksPerSecond / 1_000_000_000)
         }
+        let maxSpan = segmentsMap.map { Int($0.byteEnd - $0.byteStart) }.max() ?? 0
+        spanCacheByteLimit = max(160 * 1024 * 1024, 4 * maxSpan)
         let mins = Double(durationTicks) / Double(Self.ticksPerSecond) / 60
         log(String(format: "[MKV] prepared: %@ %dx%d + %@, %.0f min, %d segments, cues %@",
                    v.codecID, v.width, v.height, audio?.codecID ?? "no-audio",
@@ -835,7 +851,12 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     /// batch, same as before.
     private var spanCache: [(index: Int, data: Data)] = []
     private var spanCacheBytes = 0
-    private let spanCacheByteLimit = 160 * 1024 * 1024
+    /// Scales with the file: a high-bitrate 4K remux has ~54MB cue spans
+    /// (In the Grey, 2026-08-26), and a fixed 160MB cap evicted the
+    /// FIRST span of a 3-span build while caching its neighbors -
+    /// "span 91 missing after ensure". Sized at prepare() to hold a full
+    /// build plus read-ahead.
+    private var spanCacheByteLimit = 160 * 1024 * 1024
     private lazy var stream = MKVSequentialStream(url: streamURL, headers: streamHeaders)
     private var streamOpen = false
 
@@ -846,6 +867,7 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     private func ensureSpans(_ first: Int, _ last: Int) throws {
         for i in first...last {
             if cachedSpan(i) != nil { continue }
+            _ = (first, last) // protected below: never evict the current build's spans
             let lo = segmentsMap[i].byteStart
             let length = Int(segmentsMap[i].byteEnd - lo)
             guard length > 0, length < 512 * 1024 * 1024 else {
@@ -868,8 +890,11 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             }
             spanCache.append((i, data))
             spanCacheBytes += data.count
-            while spanCacheBytes > spanCacheByteLimit, !spanCache.isEmpty {
-                spanCacheBytes -= spanCache.removeFirst().data.count
+            // Evict oldest-first, but NEVER a span the current build
+            // still needs (first...last).
+            while spanCacheBytes > spanCacheByteLimit {
+                guard let evictIdx = spanCache.firstIndex(where: { $0.index < first || $0.index > last }) else { break }
+                spanCacheBytes -= spanCache.remove(at: evictIdx).data.count
             }
         }
     }
