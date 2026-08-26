@@ -4968,6 +4968,7 @@ private struct GuideProgramButton: View {
     private var hasScheduledRecording: Bool {
         RecordingCoordinator.shared.hasGuideRecordingMarker(
             channelID: channelItem.id, channelName: channelItem.name,
+            dispatcharrChannelID: channelItem.dispatcharrChannelID,
             title: prog.title, start: prog.start, end: prog.end)
     }
 

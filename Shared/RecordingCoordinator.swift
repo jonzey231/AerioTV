@@ -148,20 +148,28 @@ final class RecordingCoordinator: ObservableObject {
 
     /// Guide-cell query: is a Scheduled/in-progress recording set for this
     /// programme slot? Channel identity is matched on whichever field the
-    /// row actually carries (server-imported rows have a Dispatcharr
-    /// numeric channelID and an empty name; sheet-created rows carry the
-    /// guide's own id + name), with a case-insensitive title fallback so a
-    /// mismatched id space can't hide the dot. The window overlap keeps
-    /// the title fallback from lighting every airing of a series -- the
-    /// stored window is the original EPG slot (`scheduledStart/End`, no
-    /// pre/post-roll), so it lines up with the cell's own times.
+    /// row actually carries: server-imported rows store the Dispatcharr
+    /// numeric channel id (and an empty name), so the cell's own
+    /// `dispatcharrChannelID` bridges that id space; sheet-created rows
+    /// carry the guide's own id + name.
+    ///
+    /// There is deliberately NO title fallback (field report 2026-08-25,
+    /// di5cord20): a simulcast - America's Got Talent airing the same slot
+    /// on WGRZ, Citytv AND WNBC - lit the record dot on every channel
+    /// carrying the programme, because same title + same window matches
+    /// every airing. Channel identity must decide; a recording whose ids
+    /// genuinely can't be bridged loses its dot rather than painting
+    /// phantom ones across the guide.
     func hasGuideRecordingMarker(channelID: String, channelName: String,
+                                 dispatcharrChannelID: Int?,
                                  title: String, start: Date, end: Date) -> Bool {
-        guideRecordingMarkers.contains { m in
+        let dispatcharrIDString = dispatcharrChannelID.map(String.init)
+        return guideRecordingMarkers.contains { m in
             guard m.start < end, start < m.end else { return false }
             if m.channelID == channelID { return true }
+            if let did = dispatcharrIDString, m.channelID == did { return true }
             if !m.channelName.isEmpty && m.channelName == channelName { return true }
-            return m.title.compare(title, options: .caseInsensitive) == .orderedSame
+            return false
         }
     }
 
