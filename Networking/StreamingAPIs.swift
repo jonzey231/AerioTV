@@ -2914,9 +2914,24 @@ struct DispatcharrAPI {
     }
 
     // MARK: - Proxy stream URLs
+    /// Client-minted VOD session id, baked into pinned URLs. Mirrors the
+    /// server's own format (vod_<millis>_<rand>). WHY (2026-08-26, read
+    /// from Dispatcharr 0.29.0 source): a request WITHOUT a session id
+    /// runs idle-session adoption first, and the match scoring
+    /// (content+10, ip+5, ua+3, empty-timeshift+7, threshold 13) adopts
+    /// ANY idle session for the same movie - content+timeshift alone
+    /// scores 17 - throwing the stream_id/m3u_account_id pin away. So a
+    /// version switch kept riding the OLD session's provider, and even
+    /// another device's session could capture ours. A session id in the
+    /// PATH skips adoption entirely and the pin is honored per request.
+    private static func mintVODSession() -> String {
+        "vod_\(Int(Date().timeIntervalSince1970 * 1000))_\(Int.random(in: 1000...9999))"
+    }
+
     func proxyMovieURL(uuid: String, preferredStreamID: Int? = nil, m3uAccountID: Int? = nil) -> URL? {
-        // Trailing slash helps Django/DRF route matching and avoids extra redirects in some setups.
-        var urlString = baseURL + "/proxy/vod/movie/\(uuid)"
+        // Session id in the path (see mintVODSession): pins survive, and
+        // the server skips its 301-to-session redirect round trip.
+        var urlString = baseURL + "/proxy/vod/movie/\(uuid)/\(Self.mintVODSession())"
         // v1.8.17 version switching: m3u_account_id pins the provider copy
         // (server matches stream_id first, then account, else priority
         // failover). Omitting both keeps server-side priority + failover.
@@ -2928,8 +2943,7 @@ struct DispatcharrAPI {
     }
 
     func proxyEpisodeURL(uuid: String, preferredStreamID: Int? = nil, m3uAccountID: Int? = nil) -> URL? {
-        // Dispatcharr commonly redirects this to a session URL: /proxy/vod/episode/<uuid>/<session>
-        var urlString = baseURL + "/proxy/vod/episode/\(uuid)"
+        var urlString = baseURL + "/proxy/vod/episode/\(uuid)/\(Self.mintVODSession())"
         var params: [String] = []
         if let sid = preferredStreamID { params.append("stream_id=\(sid)") }
         if let aid = m3uAccountID { params.append("m3u_account_id=\(aid)") }
