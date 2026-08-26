@@ -270,6 +270,36 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         session.invalidateAndCancel()
     }
 
+    /// Total file size prepare() indexed, set before the first open().
+    /// Every ranged response reports the file's CURRENT total in
+    /// Content-Range; a mismatch means the provider swapped the file
+    /// behind the URL between connections (field find 2026-08-26: an
+    /// upstream mid-rotation served the 4K file's bytes to prepare and
+    /// the 8Mbps file's bytes to the media stream seconds apart, so
+    /// every build parsed 0 frames). Failing the read with a SPECIFIC
+    /// reason lets the tile auto-retry with a fresh index instead of
+    /// grinding out doomed builds against a stale one.
+    var expectedTotalLength: Int64 = 0
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                    didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        cond.lock()
+        defer { cond.unlock() }
+        guard dataTask === task else { completionHandler(.cancel); return }
+        if expectedTotalLength > 0,
+           let http = response as? HTTPURLResponse,
+           let range = http.value(forHTTPHeaderField: "Content-Range"),
+           let total = range.split(separator: "/").last.flatMap({ Int64($0) }),
+           total != expectedTotalLength {
+            failed = "file changed upstream (indexed \(expectedTotalLength) bytes, stream now \(total))"
+            cond.broadcast()
+            completionHandler(.cancel)
+            return
+        }
+        completionHandler(.allow)
+    }
+
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         cond.lock()
         // Identity guard (2026-08-25 field failure, "movie restarted"): a
@@ -1302,6 +1332,7 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 throw MKVRemuxError(reason: "absurd span \(length) bytes")
             }
             if !streamOpen {
+                stream.expectedTotalLength = fetcher.totalLength
                 stream.open(at: lo)
                 streamOpen = true
             }

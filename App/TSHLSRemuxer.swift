@@ -1074,6 +1074,10 @@ struct AVPlayerMultiviewTile: View {
         let diagnostic: String
     }
     @State private var tileError: TileError?
+    /// One silent re-index retry per stream URL for index/media
+    /// mismatches (provider rotating the file behind the URL). Reset on
+    /// URL change so every copy gets its own retry.
+    @State private var mismatchAutoRetried = false
     /// Harvested-cue subtitle state for MKV VOD playback (see
     /// AVPSubtitleCueStore). A class ref, so the server callbacks can
     /// capture it directly without the stale-struct hazard below.
@@ -1173,6 +1177,7 @@ struct AVPlayerMultiviewTile: View {
         // In-place channel swap on the same tile id (the container
         // swaps `tile.streamURL` without changing tile identity).
         .onChange(of: streamURL) { _, _ in
+            mismatchAutoRetried = false
             stop()
             start()
         }
@@ -1262,6 +1267,10 @@ struct AVPlayerMultiviewTile: View {
             return ("File Can't Be Streamed",
                     "This copy uses compressed or encrypted tracks that can't be streamed. Try another version if one is available.")
         }
+        if r.contains("file changed upstream") {
+            return ("Stream Changed",
+                    "The provider replaced this file while it was playing. Play again to pick up the new copy, or try another version.")
+        }
         if r.contains("no video samples") || r.contains("segment build failures") {
             return ("Stream Mismatch",
                     "The provider is sending media that doesn't match this copy's index (it may be failing over between sources). Try another version or play again.")
@@ -1349,6 +1358,24 @@ struct AVPlayerMultiviewTile: View {
             if reason.contains("not an EBML") {
                 debugLog("[AVP-MV] VOD not Matroska; trying direct AVPlayer title=\(channelName)")
                 startPlayer(url: streamURL, requestHeaders: headers)
+            } else if !mismatchAutoRetried,
+                      reason.contains("file changed upstream")
+                        || reason.contains("no video samples")
+                        || reason.contains("segment build failures") {
+                // Index/media mismatch = the provider swapped or is
+                // rotating the file behind this URL. A fresh start
+                // re-indexes whatever the upstream serves NOW, which
+                // fixes the transient case (measured: the same pin that
+                // failed every build at 12:52 indexed and built cleanly
+                // minutes later). One silent retry from the current
+                // position; a second failure shows the error card.
+                mismatchAutoRetried = true
+                debugLog("[AVP-MV] stream/index mismatch (\(reason)); auto-retrying with a fresh index title=\(channelName)")
+                if progressStore.currentMs > 2_000 {
+                    progressStore.explicitResumeMs = progressStore.currentMs
+                }
+                stop()
+                start()
             } else {
                 debugLog("[AVP-MV] VOD remux failed (\(reason)) title=\(channelName)")
                 failOrFallback(reason)
