@@ -3933,6 +3933,9 @@ final class AVPlayerProgressDriver {
     /// mpv vo_drops/dec_drops deltas.
     private var lastStallCount = 0
     private var lastDroppedFrames = 0
+    /// Throttle for the periodic VOD WatchProgress save (10s cadence,
+    /// matching the mpv coordinator's saver).
+    private var lastProgressSaveAt = Date.distantPast
     /// Presentation-freeze detector state (see the 1s sampler below).
     private var freezeLastMediaTime = CMTime.invalid
     private var freezeConsecutiveTicks = 0
@@ -3976,6 +3979,23 @@ final class AVPlayerProgressDriver {
             guard let self, !self.isLive else { return }
             let secs = time.seconds
             if secs.isFinite { self.store.currentMs = Int32(secs * 1000) }
+            // Periodic WatchProgress save, mpv-coordinator parity: the
+            // container AVPlayer path previously never persisted VOD
+            // position at all - Continue Watching only advanced when the
+            // legacy cover or a version switch happened to write it
+            // (found 2026-08-26 wiring the Back-exits-VOD behavior).
+            if let vodID = self.store.vodID, !vodID.isEmpty,
+               self.store.durationMs > 0, self.store.currentMs > 2_000,
+               Date().timeIntervalSince(self.lastProgressSaveAt) >= 10 {
+                self.lastProgressSaveAt = Date()
+                let s = self.store
+                WatchProgressManager.save(
+                    vodID: vodID, title: s.vodTitle ?? "",
+                    positionMs: s.currentMs, durationMs: s.durationMs,
+                    posterURL: s.vodPosterURL, vodType: s.vodType,
+                    isFinished: s.currentMs > Int32(Double(s.durationMs) * 0.9),
+                    streamURL: s.vodStreamURL, serverID: s.vodServerID)
+            }
         }
 
         // Play/pause. timeControlStatus is authoritative (covers the

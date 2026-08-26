@@ -1519,20 +1519,30 @@ struct MultiviewContainerView: View {
     /// falls through to the legacy handling / focus wake).
     @discardableResult
     private func executePlayerAction(_ action: PlayerRemoteAction) -> Bool {
+        // A VOD session has no channels: the channel-flavored actions
+        // (flip, last, Channels/Recents overlays - D-pad Left's default)
+        // fall through to the plain focus/chrome wake instead of
+        // surfacing live-TV surfaces over a movie (Logan 2026-08-26).
+        let isVODSession = store.vodSoloTile != nil
         switch action {
         case .channelUp:
+            guard !isVODSession else { return false }
             nowPlaying.changeChannel(direction: +1)
             return true
         case .channelDown:
+            guard !isVODSession else { return false }
             nowPlaying.changeChannel(direction: -1)
             return true
         case .lastChannel:
+            guard !isVODSession else { return false }
             nowPlaying.zapToPreviousChannel()
             return true
         case .channelList:
+            guard !isVODSession else { return false }
             withAnimation(.easeInOut(duration: 0.2)) { showChannelsOverlay = true }
             return true
         case .recentChannels:
+            guard !isVODSession else { return false }
             withAnimation(.easeInOut(duration: 0.2)) { showRecentsOverlay = true }
             return true
         case .toggleControls:
@@ -1546,6 +1556,13 @@ struct MultiviewContainerView: View {
             showTVOptions = true
             return true
         case .minimizeToGuide:
+            if isVODSession {
+                // No corner-mini for VOD: the mapped gesture exits with
+                // the position saved, same as Back.
+                store.saveVODProgressNow()
+                PlayerSession.shared.exit()
+                return true
+            }
             withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() }
             return true
         case .playPause:
@@ -1800,6 +1817,18 @@ struct MultiviewContainerView: View {
                         "[MV-Cmd]   → branch: catch-up N=1 → exit session",
                         category: "Playback", level: .info
                     )
+                    PlayerSession.shared.exit()
+                    return
+                }
+                if store.vodSoloTile != nil {
+                    // VOD has no corner-mini model either (Logan
+                    // 2026-08-26): Back saves the exact position and
+                    // returns to the previous screen, like catch-up.
+                    DebugLogger.shared.log(
+                        "[MV-Cmd]   → branch: VOD N=1 → save progress + exit session",
+                        category: "Playback", level: .info
+                    )
+                    store.saveVODProgressNow()
                     PlayerSession.shared.exit()
                     return
                 }

@@ -696,6 +696,24 @@ final class MultiviewStore: ObservableObject {
         tiles.count == 1 ? tiles.first(where: { $0.kind == .vod }) : nil
     }
 
+    /// Persist the playing VOD's position RIGHT NOW (Back-to-exit path:
+    /// "stop the video at that exact time"). The AVPlayer driver also
+    /// saves every 10s during playback; this closes the last-10s gap so
+    /// Continue Watching resumes exactly where the user left.
+    func saveVODProgressNow() {
+        guard let ps = audioProgressStore, let vodID = ps.vodID, !vodID.isEmpty,
+              ps.durationMs > 0, ps.currentMs > 2_000 else { return }
+        let finished = ps.currentMs > Int32(Double(ps.durationMs) * 0.9)
+        WatchProgressManager.save(
+            vodID: vodID, title: ps.vodTitle ?? "", positionMs: ps.currentMs,
+            durationMs: ps.durationMs, posterURL: ps.vodPosterURL,
+            vodType: ps.vodType, isFinished: finished,
+            streamURL: ps.vodStreamURL, serverID: ps.vodServerID)
+        DebugLogger.shared.log(
+            "[VOD-PROGRESS] exit save at \(ps.currentMs)ms / \(ps.durationMs)ms",
+            category: "Playback", level: .info)
+    }
+
     // MARK: VOD version switching (container parity with the legacy
     // PlayerView cover's Switch Version; Logan's ask 2026-08-25).
 
