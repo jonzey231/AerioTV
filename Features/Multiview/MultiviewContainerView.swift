@@ -868,6 +868,17 @@ struct MultiviewContainerView: View {
             // as `RemoteControlMap.legacyScheme` slot values a user
             // can restore per-slot in Settings > Remote Control.
             #if os(tvOS)
+            // VOD/DVR sessions (Logan 2026-08-26): a D-pad press while
+            // chrome is HIDDEN only SUMMONS chrome - left/right used to
+            // scrub the timeline immediately (and up/down fell into the
+            // remote map). Scrubbing now lives on the visible chrome's
+            // timeline band and hold-to-scrub; catch-up keeps its
+            // always-scrubs Android-parity behavior.
+            if store.vodSoloTile != nil, !chromeState.isVisible,
+               !dpadScrub.active, !dpadScrub.holdActive {
+                chromeState.reportInteraction()
+                return
+            }
             if barePlayerState {
                 let slot: RemoteSlot? = {
                     switch direction {
