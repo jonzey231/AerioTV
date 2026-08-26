@@ -263,6 +263,13 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         return out
     }
 
+    /// Thread-safe total of media bytes received this session.
+    var totalBytesStreamed: Int64 {
+        cond.lock()
+        defer { cond.unlock() }
+        return bytesStreamed
+    }
+
     /// Locked one-line state snapshot for span-failure diagnostics.
     var debugState: String {
         cond.lock()
@@ -565,8 +572,15 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         fetcher = MKVRangeFetcher(url: url, headers: headers)
         streamURL = url
         streamHeaders = headers
+        stream = MKVSequentialStream(url: url, headers: headers)
         self.log = log
     }
+
+    /// Total media bytes received by the sequential stream, safe from
+    /// any thread. The stall watchdog reads this to tell "slow link,
+    /// still working" (a resumed 4K title's first segment build is
+    /// ~190MB - nearly a minute at 30Mbps Wi-Fi) from "actually dead".
+    var mediaBytesStreamed: Int64 { stream.totalBytesStreamed }
 
     func teardown() {
         fetcher.invalidate()
@@ -1331,7 +1345,11 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     /// "span 91 missing after ensure". Sized at prepare() to hold a full
     /// build plus read-ahead.
     private var spanCacheByteLimit = 160 * 1024 * 1024
-    private lazy var stream = MKVSequentialStream(url: streamURL, headers: streamHeaders)
+    // NOT lazy: the stall watchdog reads byte progress from the MAIN
+    // thread while the server queue may be first-touching the stream -
+    // a lazy var double-init race. Constructing eagerly is cheap and
+    // makes cross-thread reads of the locked counters safe.
+    private let stream: MKVSequentialStream
     private var streamOpen = false
 
     private func cachedSpan(_ index: Int) -> Data? {
@@ -1970,6 +1988,10 @@ final class MKVVODServer: @unchecked Sendable {
             self.remuxer.teardown()
         }
     }
+
+    /// Media bytes received so far (thread-safe); the tile's stall
+    /// watchdog polls this to distinguish slow links from dead streams.
+    var mediaBytesStreamed: Int64 { remuxer.mediaBytesStreamed }
 
     /// Memory-warning response: drop every cache; steady playback
     /// refetches what it needs at ~1x.

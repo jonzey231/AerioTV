@@ -839,13 +839,35 @@ final class AVPStallWatchdog {
     private var cancelled = false
     private var fired = false      // onDead is strictly one-shot
 
+    /// Media-byte progress probe (MKV VOD tiles): the engine's total
+    /// received bytes. A stream that is still ADVANCING is a slow link,
+    /// not a wedge - a resumed 4K title's first segment build is ~190MB,
+    /// nearly a minute at 30Mbps Wi-Fi, and the fixed 12s no-ready kill
+    /// was exactly why iPhone UHD VOD "would not play at all"
+    /// (2026-08-26; the watchdog's own retry cancelled every healthy
+    /// build mid-flight). nil = no probe (live/direct), old behavior.
+    private let mediaBytes: (() -> Int64)?
+    private var lastMediaBytes: Int64 = -1
+
     init(player: AVPlayer, item: AVPlayerItem, label: String,
-         interval: TimeInterval = 4.0, onDead: @escaping (String) -> Void) {
+         interval: TimeInterval = 4.0,
+         mediaBytes: (() -> Int64)? = nil,
+         onDead: @escaping (String) -> Void) {
         self.player = player
         self.item = item
         self.label = label
         self.interval = interval
+        self.mediaBytes = mediaBytes
         self.onDead = onDead
+    }
+
+    /// True when the media stream received bytes since the last poll.
+    /// Call at most once per poll (it advances the baseline).
+    private func pollStreamingProgress() -> Bool {
+        guard let mediaBytes else { return false }
+        let now = mediaBytes()
+        defer { lastMediaBytes = now }
+        return now > lastMediaBytes
     }
 
     func start() { schedule() }
@@ -865,13 +887,25 @@ final class AVPStallWatchdog {
             debugLog("[AVP-WATCHDOG] \(label): \(reason); falling back to mpv")
             onDead(reason)
         }
+        let progressing = pollStreamingProgress()
         switch item.status {
         case .failed:
             die("item failed (\(item.error.map { "\($0)" } ?? "unknown error"))")
             return
         case .unknown:
             unknownPolls += 1
-            if unknownPolls >= 3 { die("never became ready (~\(Int(interval * 3))s at .unknown)"); return }
+            if unknownPolls >= 15 {
+                die("never became ready (~\(Int(interval * 15))s, stream \(progressing ? "still advancing" : "stalled"))")
+                return
+            }
+            if unknownPolls >= 3 {
+                if progressing {
+                    debugLog("[AVP-WATCHDOG] \(label): .unknown ~\(Int(interval) * unknownPolls)s but media stream advancing (slow link); waiting")
+                } else {
+                    die("never became ready (~\(Int(interval * 3))s at .unknown)")
+                    return
+                }
+            }
         case .readyToPlay:
             unknownPolls = 0
             let size = item.presentationSize
@@ -879,10 +913,15 @@ final class AVPStallWatchdog {
                 die("ready but no renderable video (audio-only / undecodable video)")
                 return
             }
-            // Frozen clock: the player is trying to play (not user-paused) but
-            // the playhead is not advancing. Two consecutive polls (~2*interval)
-            // distinguish a true wedge from a brief rebuffer.
-            if player.timeControlStatus != .paused {
+            // Frozen clock: only count when the player claims to be
+            // PLAYING with a stuck playhead (a true wedge), or when it is
+            // waiting AND the media stream has stopped advancing. A
+            // waiting player whose stream is still receiving bytes is a
+            // slow-link rebuffer (UHD seek at 30Mbps takes ~a minute) and
+            // must be left alone.
+            let status = player.timeControlStatus
+            if status == .playing
+                || (status == .waitingToPlayAtSpecifiedRate && !progressing) {
                 let t = CMTimeGetSeconds(item.currentTime())
                 // abs(): a SEEK moves the clock in either direction and is
                 // never a wedge. The signed test read every backward jump
@@ -891,7 +930,11 @@ final class AVPStallWatchdog {
                 // 2026-08-26, #7 Seventhdary while rewinding).
                 if t.isFinite, lastTime >= 0, abs(t - lastTime) < 0.25 {
                     stuckPolls += 1
-                    if stuckPolls >= 2 {
+                    // A PLAYING player with a stuck clock is a wedge in
+                    // ~2 polls. A WAITING one gets a longer fuse (4): a
+                    // flow-control-suspended stream can look idle for a
+                    // poll while the pipeline is healthy.
+                    if stuckPolls >= (status == .playing ? 2 : 4) {
                         die(String(format: "playback frozen (clock stuck at %.2fs while not paused)", t))
                         return
                     }
@@ -1168,6 +1211,12 @@ struct AVPlayerMultiviewTile: View {
             statusText = nil
             startPlayer(url: url, requestHeaders: [:])
             debugLog("[AVP-MV] tile playing REMUXED channel=\(channelName) muted=\(player?.isMuted == true)")
+        }
+        // Clear the VOD "Buffering..." spinner the moment the playhead
+        // actually advances (the driver's periodic observer writes
+        // currentMs for VOD only, so live is untouched).
+        .onReceive(progressStore.$currentMs) { ms in
+            if ms > 0, statusText == "Buffering..." { statusText = nil }
         }
         // Mute follows the store's published audio owner directly:
         // independent of SwiftUI prop diffing, fires for every change,
@@ -1493,6 +1542,12 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[AVP-MV] VOD resume seek to \(ms / 1000)s (exact) title=\(channelName)")
         }
         if !shouldPause { avPlayer.play() }
+        // Loopback VOD: keep a spinner up until the clock actually
+        // moves. The first segment build on a resumed 4K title over
+        // slow Wi-Fi can take close to a minute, and the screen was
+        // pure black the whole time (2026-08-26 iPhone find). Cleared
+        // by the currentMs observer below the body.
+        if isLoopbackVOD { statusText = "Buffering..." }
         player = avPlayer
         // Bridge this tile's AVPlayer into the chrome's store. When this
         // tile is the audio tile, the container chrome's scrubber /
@@ -1560,8 +1615,10 @@ struct AVPlayerMultiviewTile: View {
         // first frame still self-heals to the mpv engine. Self-invalidates on
         // channel swap (currentItem changes); stop() invalidates it on teardown.
         stallWatchdog?.cancel()
+        let progressServer = mkvServer
         let watchdog = AVPStallWatchdog(
             player: avPlayer, item: playerItem, label: "tile \(channelName)",
+            mediaBytes: progressServer.map { s in { s.mediaBytesStreamed } },
             onDead: { failOrFallback($0) })
         watchdog.start()
         stallWatchdog = watchdog
