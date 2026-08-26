@@ -1067,6 +1067,10 @@ struct AVPlayerMultiviewTile: View {
     struct TileError {
         let title: String
         let message: String
+        /// Which provider copy was playing ("#1 Primary · 8.0 Mbps"),
+        /// nil outside a version-switching session. Field ask
+        /// 2026-08-26: the card must say WHICH version failed.
+        let version: String?
         let diagnostic: String
     }
     @State private var tileError: TileError?
@@ -1127,6 +1131,11 @@ struct AVPlayerMultiviewTile: View {
                         .font(.subheadline)
                         .foregroundColor(.white.opacity(0.85))
                         .multilineTextAlignment(.center)
+                    if let version = tileError.version {
+                        Text("Version: \(version)")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.7))
+                    }
                     Text(tileError.diagnostic)
                         .font(.caption2)
                         .foregroundColor(.white.opacity(0.45))
@@ -1185,20 +1194,41 @@ struct AVPlayerMultiviewTile: View {
     private func failOrFallback(_ reason: String) {
         if PlaybackFeatureFlags.mpvEngineEnabled {
             onEngineFallback(reason)
-        } else {
-            // One line with everything an iteration needs: what, where,
-            // which file (sanitized), how far in, which chain.
-            debugLog("[AVP-NO-MPV] FAILED \(isVOD ? "VOD" : "live") '\(channelName)' "
-                + "reason=\(reason) pos=\(progressStore.currentMs)ms "
-                + "engine=\(mkvServer != nil ? "mkv-remux" : (remuxer != nil ? "ts-remux" : "direct")) "
-                + "url=\(DebugLogger.sanitize(streamURL.absoluteString))")
-            player?.pause()
-            statusText = nil
-            let friendly = Self.userFacingError(reason)
-            tileError = TileError(title: friendly.title,
-                                  message: friendly.message,
-                                  diagnostic: "\(reason) · mpv engine disabled (Developer setting)")
+            return
         }
+        // Which provider copy was playing, for the card and the log
+        // (field ask: "Stream Mismatch on WHICH version?"). Nil when
+        // this session has no version context (single-copy titles,
+        // live).
+        let store = MultiviewStore.shared
+        let versionLabel: String? = {
+            guard isVOD, !store.vodVersionOptions.isEmpty else { return nil }
+            guard let id = store.vodCurrentVersionID else { return "Auto" }
+            return store.vodVersionOptions.first(where: { $0.id == id })?.label
+        }()
+        // One line with everything an iteration needs: what, where,
+        // which copy, which file (sanitized), how far in, which chain.
+        debugLog("[AVP-NO-MPV] FAILED \(isVOD ? "VOD" : "live") '\(channelName)' "
+            + "version=\(versionLabel ?? "-") reason=\(reason) pos=\(progressStore.currentMs)ms "
+            + "engine=\(mkvServer != nil ? "mkv-remux" : (remuxer != nil ? "ts-remux" : "direct")) "
+            + "url=\(DebugLogger.sanitize(streamURL.absoluteString))")
+        // FIRST error wins the card: the root failure (e.g. Stream
+        // Mismatch with its census) must not be papered over by the
+        // startup watchdog firing a generic "never became ready" a few
+        // seconds later (field find, 2026-08-26: two cards back to
+        // back, the informative one lost).
+        guard tileError == nil else { return }
+        player?.pause()
+        statusText = nil
+        // Terminal for this tile: stop the engines so AVPlayer's retry
+        // loop can't keep hammering dead segment builds every 5s.
+        mkvServer?.stop()
+        remuxer?.stop()
+        let friendly = Self.userFacingError(reason)
+        tileError = TileError(title: friendly.title,
+                              message: friendly.message,
+                              version: versionLabel,
+                              diagnostic: "\(reason) · mpv engine disabled (Developer setting)")
     }
 
     /// Map internal failure reasons to something a viewer can act on.
