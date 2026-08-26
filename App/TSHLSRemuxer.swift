@@ -938,6 +938,103 @@ enum DisplayCriteriaCoordinator {
 /// Known evaluation limitations: the chrome scrubber and track pickers
 /// bind to the mpv progress store, so they are inert while the audio
 /// tile is AVPlayer-backed; play/pause via `shouldPause` works.
+/// Accumulates subtitle cues harvested by the MKV engine's A/V builds
+/// and answers "what text is on screen at time T". Rendering is our own
+/// overlay (mpv also drew its own subs): native VTT renditions were
+/// measured unusable - AVPlayer prefetches subtitle segments ~2 minutes
+/// ahead, each costing a 3-span media fetch on a UHD remux. Harvested
+/// cues instead ride the spans the A/V build already parsed, so
+/// coverage always leads the playhead by the forward buffer for free.
+@MainActor final class AVPSubtitleCueStore: ObservableObject {
+    struct Cue { let startMs: Int64; let endMs: Int64; let text: String }
+    private(set) var tracks: [(number: Int, name: String, language: String)] = []
+    private var cuesByTrack: [Int: [Cue]] = [:]
+    /// MKV track number of the enabled subtitle track; nil = off.
+    @Published var activeTrack: Int?
+
+    func setTracks(_ t: [(number: Int, name: String, language: String)]) { tracks = t }
+
+    func add(track: Int, newCues: [MKVFMP4Remuxer.SubtitleCue]) {
+        cuesByTrack[track, default: []].append(contentsOf: newCues.map {
+            Cue(startMs: $0.ptsTicks / 90,
+                endMs: ($0.ptsTicks + $0.durTicks) / 90,
+                text: Self.displayText($0.text))
+        })
+    }
+
+    /// Linear scan is fine: a feature film carries ~1-2k cues per track
+    /// and this runs 4x/second.
+    func text(atMs ms: Int64) -> String? {
+        guard let t = activeTrack, let list = cuesByTrack[t] else { return nil }
+        var lines: [String] = []
+        for cue in list where ms >= cue.startMs && ms < cue.endMs {
+            lines.append(cue.text)
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    func reset() {
+        tracks = []
+        cuesByTrack = [:]
+        activeTrack = nil
+    }
+
+    /// SRT markup (<i>, <font ...>) means nothing to a Text view; strip
+    /// every angle-bracket tag for display.
+    private static func displayText(_ raw: String) -> String {
+        guard raw.contains("<") else { return raw }
+        var out = ""
+        var depth = 0
+        for c in raw {
+            if c == "<" { depth += 1 }
+            else if c == ">" { if depth > 0 { depth -= 1 } }
+            else if depth == 0 { out.append(c) }
+        }
+        return out
+    }
+}
+
+/// Bottom-center subtitle text over an AVPlayer tile, driven by a 4Hz
+/// clock against the harvested-cue store. Hidden entirely while no
+/// track is enabled.
+struct AVPSubtitleOverlay: View {
+    @ObservedObject var store: AVPSubtitleCueStore
+    let timeMs: () -> Int64
+    @State private var text: String?
+    private let tick = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
+
+    #if os(tvOS)
+    private var fontSize: CGFloat { 38 }
+    private var bottomInset: CGFloat { 90 }
+    #else
+    private var fontSize: CGFloat { 18 }
+    private var bottomInset: CGFloat { 44 }
+    #endif
+
+    var body: some View {
+        VStack {
+            Spacer()
+            if let text, store.activeTrack != nil {
+                Text(text)
+                    .font(.system(size: fontSize, weight: .semibold))
+                    .multilineTextAlignment(.center)
+                    .foregroundColor(.white)
+                    .shadow(color: .black.opacity(0.9), radius: 2, x: 0, y: 1)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 8))
+                    .padding(.bottom, bottomInset)
+                    .padding(.horizontal, 40)
+            }
+        }
+        .allowsHitTesting(false)
+        .onReceive(tick) { _ in
+            let now = store.activeTrack == nil ? nil : store.text(atMs: timeMs())
+            if now != text { text = now }
+        }
+    }
+}
+
 struct AVPlayerMultiviewTile: View {
     /// The owning tile's id; mute state derives from comparing this to
     /// the store's audioTileID LIVE (never from a captured snapshot,
@@ -963,6 +1060,10 @@ struct AVPlayerMultiviewTile: View {
     @State private var remuxer: TSHLSRemuxer?
     @State private var mkvServer: MKVVODServer?
     @State private var statusText: String?
+    /// Harvested-cue subtitle state for MKV VOD playback (see
+    /// AVPSubtitleCueStore). A class ref, so the server callbacks can
+    /// capture it directly without the stale-struct hazard below.
+    @StateObject private var subtitleStore = AVPSubtitleCueStore()
     /// AUDIO CORRECTNESS: the remuxer's onReady closure captures this
     /// view struct BY VALUE at start() time. Adding tiles moves
     /// audioTileID to the newest tile while older tiles' remuxers are
@@ -991,6 +1092,10 @@ struct AVPlayerMultiviewTile: View {
             Color.black
             if let player {
                 AVPlayerLayerView(player: player)
+                AVPSubtitleOverlay(store: subtitleStore, timeMs: {
+                    let s = player.currentTime().seconds
+                    return s.isFinite ? Int64(s * 1000) : 0
+                })
             }
             if let statusText {
                 VStack(spacing: 8) {
@@ -1099,6 +1204,16 @@ struct AVPlayerMultiviewTile: View {
         server.onVideoParameters = { w, h, fps, tenBit in
             applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
         }
+        // Class ref captured directly - safe across view-struct copies
+        // (unlike @State value snapshots, see AUDIO CORRECTNESS above).
+        let subStore = subtitleStore
+        server.onSubtitleTracks = { tracks in
+            subStore.setTracks(tracks)
+            debugLog("[AVP-MV] subtitle tracks: \(tracks.map(\.name).joined(separator: ", "))")
+        }
+        server.onSubtitleCues = { track, cues in
+            subStore.add(track: track, newCues: cues)
+        }
         server.onError = { reason in
             if reason.contains("not an EBML") {
                 debugLog("[AVP-MV] VOD not Matroska; trying direct AVPlayer title=\(channelName)")
@@ -1188,6 +1303,26 @@ struct AVPlayerMultiviewTile: View {
         // layout (field find: "can't scrub at all", Speak No Evil).
         driver = AVPlayerProgressDriver(
             player: avPlayer, store: progressStore, isLive: !isVOD, applyGravity: { _ in })
+        // MKV subtitle picker: the overlay store owns subtitle state, so
+        // the store's subtitle fields are OURS, not the driver's (the
+        // legible group is empty - subs never ride the HLS master, see
+        // AVPSubtitleCueStore). Must come AFTER the driver init above:
+        // wireCommands just reassigned setSubtitleTrackAction.
+        if isVOD, mkvServer != nil, !subtitleStore.tracks.isEmpty {
+            let subStore = subtitleStore
+            let store = progressStore
+            store.externalSubtitleControl = true
+            store.subtitleTracks = subStore.tracks.map {
+                MediaTrack(id: $0.number, type: "sub", title: $0.name,
+                           lang: $0.language, codec: "", isDefault: false)
+            }
+            store.currentSubtitleTrackID = 0
+            store.setSubtitleTrackAction = { id in
+                subStore.activeTrack = id == 0 ? nil : id
+                store.currentSubtitleTrackID = id
+                debugLog("[AVP-MV] subtitle track -> \(id == 0 ? "off" : String(id))")
+            }
+        }
         // Fast path: AVFoundation's own diagnosis of a rejected playlist / failed
         // reload arrives as an errorLog entry; escalate the fatal codes straight
         // to the mpv engine instead of logging and stranding the tile.
@@ -1243,6 +1378,8 @@ struct AVPlayerMultiviewTile: View {
         sizeObservation = nil
         stallWatchdog?.cancel()
         stallWatchdog = nil
+        subtitleStore.reset()
+        progressStore.externalSubtitleControl = false
         MultiviewStore.shared.unregisterVideoAspect(for: tileID)
         #if os(tvOS)
         if let dm = appliedDisplayManager {

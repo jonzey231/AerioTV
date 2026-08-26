@@ -275,6 +275,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var setAudioTrackAction: ((Int) -> Void)?
     /// Closure set by the Coordinator; sets subtitle track (0 = off).
     var setSubtitleTrackAction: ((Int) -> Void)?
+    /// True while something OTHER than the AVPlayer driver owns the
+    /// store's subtitle fields (the MKV tile's harvested-cue overlay).
+    /// AVPlayerProgressDriver.populateTracks must then leave
+    /// subtitleTracks / currentSubtitleTrackID / setSubtitleTrackAction
+    /// alone - the legible group is empty on that path and would wipe
+    /// the picker. Cleared by the tile's stop().
+    var externalSubtitleControl = false
     /// v1.8.17 VOD version switching (Dispatcharr Direct Connect): the
     /// pre-built provider-copy URLs for the playing item (empty = row
     /// hidden), which copy is currently playing, and the Coordinator's
@@ -3904,6 +3911,12 @@ final class AVPlayerProgressDriver {
     private var legibleGroup: AVMediaSelectionGroup?
     private var audioOptionByID: [Int: AVMediaSelectionOption] = [:]
     private var subtitleOptionByID: [Int: AVMediaSelectionOption] = [:]
+    /// One-shot per item: subtitles start OFF (mpv parity). Without the
+    /// explicit deselect, the device's system caption preference
+    /// auto-enables a legible rendition (field find 2026-08-26,
+    /// "subtitles seem to be enabled by default"). The flag keeps a
+    /// re-fired ready callback from clobbering a user's later pick.
+    private var appliedDefaultSubtitleOff = false
 
     // MARK: instrumentation ([AVP-STREAM]/[AVP-PERF], mpv-path parity)
     /// Wall clock at construction; time-to-first-frame is measured from
@@ -4013,6 +4026,7 @@ final class AVPlayerProgressDriver {
         // New item gets a fresh error-escalation budget.
         softErrorCount = 0
         firedUnrecoverable = false
+        appliedDefaultSubtitleOff = false
         guard let item else { return }
         // Duration (VOD / seekable). Live HLS reports indefinite, which
         // we leave as durationMs == 0.
@@ -4273,18 +4287,31 @@ final class AVPlayerProgressDriver {
         }
 
         store.audioTracks = audioTracks
-        store.subtitleTracks = subtitleTracks
-        // Reflect the current selection back as the highlighted id.
-        let selection = item.currentMediaSelection
-        if let audioGroup, let selected = selection.selectedMediaOption(in: audioGroup),
+        debugLog("[AVP-TRACKS] audible=\(audioTracks.count) [\(audioTracks.map(\.title).joined(separator: ", "))] legible=\(subtitleTracks.count) externalSubs=\(store.externalSubtitleControl)")
+        if !store.externalSubtitleControl {
+            store.subtitleTracks = subtitleTracks
+            // Subtitles start OFF, once per item: the system caption
+            // preference otherwise auto-selects a legible rendition.
+            if let subGroup, !appliedDefaultSubtitleOff {
+                appliedDefaultSubtitleOff = true
+                if item.currentMediaSelection.selectedMediaOption(in: subGroup) != nil {
+                    item.select(nil, in: subGroup)
+                    debugLog("[AVP-TRACKS] deselected auto-enabled subtitles (default off)")
+                }
+            }
+            if let subGroup,
+               let selected = item.currentMediaSelection.selectedMediaOption(in: subGroup),
+               let id = subtitleOptionByID.first(where: { $0.value == selected })?.key {
+                store.currentSubtitleTrackID = id
+            } else {
+                store.currentSubtitleTrackID = 0
+            }
+        }
+        // Reflect the current audio selection back as the highlighted id.
+        if let audioGroup,
+           let selected = item.currentMediaSelection.selectedMediaOption(in: audioGroup),
            let id = audioOptionByID.first(where: { $0.value == selected })?.key {
             store.currentAudioTrackID = id
-        }
-        if let subGroup, let selected = selection.selectedMediaOption(in: subGroup),
-           let id = subtitleOptionByID.first(where: { $0.value == selected })?.key {
-            store.currentSubtitleTrackID = id
-        } else {
-            store.currentSubtitleTrackID = 0
         }
     }
 
