@@ -6094,6 +6094,18 @@ struct MainTabView: View {
             // Edit Server). SettingsView resets the flag.
             debugLog("🎮 Menu pressed: Settings subview pushed → popping")
             settingsPopRequested = true
+        } else if nowPlaying.isActive && nowPlaying.isMinimized
+                    && selectedTab != .liveTV {
+            // Logan 2026-08-26: Back on another tab's ROOT (e.g. Settings)
+            // with a mini playing must first return to the Live TV tab -
+            // expanding immediately put the fullscreen player ON TOP of
+            // Settings. The NEXT Back, now on Live TV, runs the expand
+            // branch below. Same focus re-seat as the no-mini tab hop.
+            debugLog("🎮 [HMP]   → branch: mini on \(selectedTab.rawValue) tab → switch to Live TV first")
+            selectedTab = .liveTV
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+            }
         } else if nowPlaying.isActive && nowPlaying.isMinimized {
             // #42 Part 3: with a mini-player active, a SINGLE Back restores it to
             // fullscreen; a DOUBLE Back jumps to the top channel (the long-press

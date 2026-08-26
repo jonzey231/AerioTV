@@ -1215,15 +1215,30 @@ struct AVPlayerMultiviewTile: View {
             || reason.contains("playback frozen")
             || reason.contains("playback failed")
             || reason.contains("never became ready")
+            || reason.contains("range fetch HTTP 5")
+            || reason.contains("persistent fetch error")
             || (reason.contains("span") && reason.contains("unreadable"))
-        if isVOD, retryable, !mismatchAutoRetried, tileError == nil {
+        // LIVE included (2026-08-26 field: Sky Sports UHD died with
+        // 'persistent fetch error -12888 x3' after 8 healthy minutes -
+        // a one-shot re-tune is what any viewer would do before giving
+        // up; the old mpv downgrade used to absorb exactly this class).
+        if retryable, !mismatchAutoRetried, tileError == nil {
             mismatchAutoRetried = true
             debugLog("[AVP-MV] recoverable failure (\(reason)); auto-retrying with a fresh pipeline title=\(channelName)")
-            if progressStore.currentMs > 2_000 {
+            if isVOD, progressStore.currentMs > 2_000 {
                 progressStore.explicitResumeMs = progressStore.currentMs
             }
             stop()
-            start()
+            // A beat before the fresh start: a version switch's outgoing
+            // AVPlayer drops its provider connections ASYNCHRONOUSLY, and
+            // the incoming prepare landing ~250ms later can hit the
+            // provider's connection cap (field find 2026-08-26, Her
+            // Private Hell #7: 'range fetch HTTP 503' on every switch to
+            // it). One second lets the old connections die first.
+            statusText = "Retrying..."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                start()
+            }
             return
         }
         if PlaybackFeatureFlags.mpvEngineEnabled {
@@ -1308,7 +1323,9 @@ struct AVPlayerMultiviewTile: View {
             return ("Playback Stalled",
                     "Playback stopped advancing and couldn't recover. Play again, or try another version if one is available.")
         }
-        if r.contains("timed out") || r.contains("stream failed") || r.contains("stream cancelled") {
+        if r.contains("timed out") || r.contains("stream failed")
+            || r.contains("stream cancelled") || r.contains("range fetch http")
+            || r.contains("persistent fetch error") {
             return ("Connection Problem",
                     "The connection to the provider stalled. Check the source and try again.")
         }
@@ -1390,6 +1407,12 @@ struct AVPlayerMultiviewTile: View {
         server.onError = { reason in
             if reason.contains("not an EBML") {
                 debugLog("[AVP-MV] VOD not Matroska; trying direct AVPlayer title=\(channelName)")
+                // Clear the loading text: only the remux-READY path did,
+                // so the direct fallback played underneath a permanent
+                // "Preparing..." (field find 2026-08-26, Her Private
+                // Hell - the provider had rotated the 'MKV' copies to
+                // MP4s, making direct the common path for that title).
+                statusText = nil
                 startPlayer(url: streamURL, requestHeaders: headers)
             } else {
                 // failOrFallback owns the one-shot auto-retry for the
