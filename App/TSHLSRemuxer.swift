@@ -1060,6 +1060,16 @@ struct AVPlayerMultiviewTile: View {
     @State private var remuxer: TSHLSRemuxer?
     @State private var mkvServer: MKVVODServer?
     @State private var statusText: String?
+    /// Terminal playback failure shown when mpv is disabled: a plain
+    /// English explanation plus the raw internal reason in small print
+    /// (users report bugs with screenshots - the diagnostic line is the
+    /// iteration hook). Distinct from statusText, which means loading.
+    struct TileError {
+        let title: String
+        let message: String
+        let diagnostic: String
+    }
+    @State private var tileError: TileError?
     /// Harvested-cue subtitle state for MKV VOD playback (see
     /// AVPSubtitleCueStore). A class ref, so the server callbacks can
     /// capture it directly without the stale-struct hazard below.
@@ -1097,13 +1107,33 @@ struct AVPlayerMultiviewTile: View {
                     return s.isFinite ? Int64(s * 1000) : 0
                 })
             }
-            if let statusText {
+            if let statusText, tileError == nil {
                 VStack(spacing: 8) {
                     ProgressView()
                     Text(statusText)
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.8))
                 }
+            }
+            if let tileError {
+                VStack(spacing: 10) {
+                    Image(systemName: "play.slash.fill")
+                        .font(.system(size: 34, weight: .medium))
+                        .foregroundColor(.white.opacity(0.85))
+                    Text(tileError.title)
+                        .font(.headline)
+                        .foregroundColor(.white)
+                    Text(tileError.message)
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.85))
+                        .multilineTextAlignment(.center)
+                    Text(tileError.diagnostic)
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.45))
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                }
+                .padding(36)
             }
         }
         .onAppear {
@@ -1156,13 +1186,70 @@ struct AVPlayerMultiviewTile: View {
         if PlaybackFeatureFlags.mpvEngineEnabled {
             onEngineFallback(reason)
         } else {
-            debugLog("[AVP-NO-MPV] tile \(channelName) FAILED, mpv disabled: \(reason)")
+            // One line with everything an iteration needs: what, where,
+            // which file (sanitized), how far in, which chain.
+            debugLog("[AVP-NO-MPV] FAILED \(isVOD ? "VOD" : "live") '\(channelName)' "
+                + "reason=\(reason) pos=\(progressStore.currentMs)ms "
+                + "engine=\(mkvServer != nil ? "mkv-remux" : (remuxer != nil ? "ts-remux" : "direct")) "
+                + "url=\(DebugLogger.sanitize(streamURL.absoluteString))")
             player?.pause()
-            statusText = "Playback failed (mpv disabled)\n\(reason)"
+            statusText = nil
+            let friendly = Self.userFacingError(reason)
+            tileError = TileError(title: friendly.title,
+                                  message: friendly.message,
+                                  diagnostic: "\(reason) · mpv engine disabled (Developer setting)")
         }
     }
 
+    /// Map internal failure reasons to something a viewer can act on.
+    /// The raw reason still shows in the small diagnostic line.
+    private static func userFacingError(_ reason: String) -> (title: String, message: String) {
+        let r = reason.lowercased()
+        func codecName(_ marker: String) -> String {
+            // "audio codec A_DTS" / "video codec V_MS/VFW/FOURCC"
+            guard let range = reason.range(of: marker, options: .caseInsensitive) else { return "" }
+            let raw = reason[range.upperBound...].trimmingCharacters(in: .whitespaces)
+            return raw.replacingOccurrences(of: "A_", with: "")
+                .replacingOccurrences(of: "V_", with: "")
+                .replacingOccurrences(of: "MPEGH/ISO/", with: "")
+                .replacingOccurrences(of: "MPEG4/ISO/", with: "")
+        }
+        if r.contains("audio codec") {
+            let codec = codecName("audio codec ")
+            return ("Audio Not Supported",
+                    "This copy's audio format (\(codec)) can't be decoded by this device's native player. Try another version if one is available.")
+        }
+        if r.contains("video codec") {
+            let codec = codecName("video codec ")
+            return ("Video Not Supported",
+                    "This copy's video format (\(codec)) can't be decoded by this device's native player. Try another version if one is available.")
+        }
+        if r.contains("no cues") || r.contains("empty cues") {
+            return ("File Can't Be Streamed",
+                    "This copy is missing its seek index, so it can't be streamed. Try another version if one is available.")
+        }
+        if r.contains("contentencodings") {
+            return ("File Can't Be Streamed",
+                    "This copy uses compressed or encrypted tracks that can't be streamed. Try another version if one is available.")
+        }
+        if r.contains("no video samples") || r.contains("segment build failures") {
+            return ("Stream Mismatch",
+                    "The provider is sending media that doesn't match this copy's index (it may be failing over between sources). Try another version or play again.")
+        }
+        if r.contains("timed out") || r.contains("stream failed") || r.contains("stream cancelled") {
+            return ("Connection Problem",
+                    "The connection to the provider stalled. Check the source and try again.")
+        }
+        if r.contains("never became ready") || r.contains("no video size") {
+            return ("Playback Didn't Start",
+                    "The stream loaded but never produced playable video. Try again, or try another version if one is available.")
+        }
+        return ("Unable to Play",
+                "This stream couldn't be played by the native engine.")
+    }
+
     private func start() {
+        tileError = nil
         if isVOD {
             startVOD()
             return
@@ -1388,6 +1475,7 @@ struct AVPlayerMultiviewTile: View {
         mkvServer?.stop()
         mkvServer = nil
         statusText = nil
+        tileError = nil
         readyLocalURL = nil
         sizeObservation = nil
         stallWatchdog?.cancel()
