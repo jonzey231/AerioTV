@@ -732,6 +732,25 @@ struct MultiviewContainerView: View {
                 // lives INSIDE this panel presentation on tvOS, so closing
                 // the panel closes it too — no separate chrome wiring.)
                 streamPickerVisible = false
+                // Panel dismissed with chrome still up: land focus back on
+                // the Options pill. Without this the focus engine re-picks
+                // the VIDEO TILE when the panel's focus section vanishes,
+                // and visible chrome is then unreachable until it fades
+                // and gets re-summoned (Logan, 2026-08-26: "select an
+                // option, then wait for chrome to fade, press OK, reopen
+                // Options"). Same three-step dance as the chrome-summon
+                // fix above: release the tile's active hold, then claim
+                // the pill on the NEXT runloop so the write lands after
+                // the focus sections settle. The legacy PlayerView has
+                // done the equivalent (tvFocus = .gearIcon) all along.
+                dpadScrub.cancel()
+                focusedTileID = nil
+                Task { @MainActor in
+                    await Task.yield()
+                    if chromeState.isVisible && !showTVOptions {
+                        focusedChrome = .options
+                    }
+                }
             }
         }
         #endif
