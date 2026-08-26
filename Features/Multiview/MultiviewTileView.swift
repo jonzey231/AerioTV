@@ -283,6 +283,7 @@ struct MultiviewTileView: View {
         progressStore.vodServerID = tile.vodServerID
         progressStore.vodType = tile.vodType
         progressStore.explicitResumeMs = tile.resumePositionMs
+        progressStore.isDVRWindow = (tile.kind == .dvr)
     }
 
     /// Phase 2: when a VOD tile reaches the end of its file it stops
@@ -691,6 +692,7 @@ struct MultiviewTileView: View {
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
                         isVOD: tile.kind == .vod,
+                        isDVR: tile.kind == .dvr,
                         progressStore: progressStore,
                         // A hard AVPlayer failure (codec gate, fatal item
                         // error) downgrades the WHOLE session to mpv,
@@ -978,6 +980,7 @@ struct MultiviewTileView: View {
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
                         isVOD: tile.kind == .vod,
+                        isDVR: tile.kind == .dvr,
                         progressStore: progressStore,
                         onEngineFallback: { _ in store.downgradeToMPV() }
                     )

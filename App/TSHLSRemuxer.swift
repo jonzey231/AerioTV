@@ -1110,6 +1110,11 @@ struct AVPlayerMultiviewTile: View {
     /// VOD tile: route MP4 direct / MKV through MKVVODServer, apply the
     /// resume offset, and never treat the URL as a live TS stream.
     var isVOD: Bool = false
+    /// In-progress server recording over its live-style HLS playlist.
+    /// Plays direct (AVPlayer speaks HLS natively - no remuxer, no MKV
+    /// server) with the driver in DVR-window mode: growing scrubber,
+    /// live-edge default, exact seeks anywhere in the recorded window.
+    var isDVR: Bool = false
     /// The per-tile store the container chrome binds to (scrubber,
     /// play-pause, track pickers, stream info). AVPlayerProgressDriver
     /// feeds it from this tile's AVPlayer, so the unified chrome works
@@ -1405,6 +1410,15 @@ struct AVPlayerMultiviewTile: View {
 
     private func start() {
         tileError = nil
+        if isDVR {
+            // Growing HLS window from the server's DVR pipeline: direct
+            // play, no remux chain. The driver (DVR-window mode via
+            // progressStore.isDVRWindow) owns the timeline.
+            startPlayer(url: streamURL, requestHeaders: headers)
+            MultiviewStore.shared.registerEngine("AVPlayer · DVR HLS", for: tileID)
+            debugLog("[AVP-MV] DVR tile playing direct HLS title=\(channelName)")
+            return
+        }
         if isVOD {
             startVOD()
             return
@@ -1442,6 +1456,15 @@ struct AVPlayerMultiviewTile: View {
     /// before the tile falls back to mpv.
     private func startVOD() {
         let ext = streamURL.pathExtension.lowercased()
+        if ext == "m3u8" {
+            // HLS-fronted VOD (e.g. a finished server recording exposed
+            // as a playlist): native AVPlayer territory, never the MKV
+            // chain (the magic-bytes probe would just bounce it anyway).
+            startPlayer(url: streamURL, requestHeaders: headers)
+            MultiviewStore.shared.registerEngine("AVPlayer · Direct HLS", for: tileID)
+            debugLog("[AVP-MV] VOD playing direct HLS title=\(channelName)")
+            return
+        }
         if ["mp4", "m4v", "mov"].contains(ext) {
             startPlayer(url: streamURL, requestHeaders: headers)
             // Truthful badge: the generic session label says "Remux TS",
@@ -1548,7 +1571,16 @@ struct AVPlayerMultiviewTile: View {
         // VOD resume (Continue Watching): the store carries the offset
         // the container preloaded; AVPlayer queues the seek until the
         // item is ready, so firing it here is safe and race-free.
-        if isVOD, let ms = progressStore.explicitResumeMs, ms > 2_000 {
+        if isDVR, progressStore.explicitResumeMs == 0 {
+            // "Watch from Beginning" on an in-progress recording: without
+            // a seek, a live-shaped playlist starts at the live edge.
+            // AVPlayer queues the seek until the item is ready, and the
+            // DVR playlist never rolls anything off, so position 0 is
+            // always in the window.
+            avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+            debugLog("[AVP-MV] DVR from-beginning seek queued title=\(channelName)")
+        }
+        if isVOD || isDVR, let ms = progressStore.explicitResumeMs, ms > 2_000 {
             let t = CMTime(value: CMTimeValue(ms), timescale: 1_000)
             // EXACT seek: infinite tolerance snapped to the nearest
             // segment boundary - up to ~6s drift per version switch with
@@ -1577,7 +1609,7 @@ struct AVPlayerMultiviewTile: View {
         // durationMs 0 and the chrome renders the scrubber-less live
         // layout (field find: "can't scrub at all", Speak No Evil).
         driver = AVPlayerProgressDriver(
-            player: avPlayer, store: progressStore, isLive: !isVOD, applyGravity: { _ in })
+            player: avPlayer, store: progressStore, isLive: !(isVOD || isDVR), applyGravity: { _ in })
         // MKV subtitle picker: the overlay store owns subtitle state, so
         // the store's subtitle fields are OURS, not the driver's (the
         // legible group is empty - subs never ride the HLS master, see

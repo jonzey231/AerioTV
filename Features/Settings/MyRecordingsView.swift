@@ -649,17 +649,33 @@ struct MyRecordingsView: View {
         // a movie's numeric id. In-progress recordings (growing HLS
         // window) keep the legacy DVR cover; beginVOD declining (engine
         // toggle off with mpv enabled) also falls through unchanged.
-        if !isDVR {
-            let dvrVodID = "dvr-\(remoteID)"
-            let resume = fromStart ? nil
-                : WatchProgressManager.getResumePosition(vodID: dvrVodID, serverID: rec.serverID)
-            if PlayerSession.shared.beginVOD(
-                title: rec.programTitle, streamURL: url, headers: headers,
-                posterURL: nil, vodID: dvrVodID, serverID: rec.serverID,
-                vodType: "recording", resumePositionMs: resume) {
-                debugLog("▶️ Completed recording via AVPlayer container: id=\(remoteID) resume=\(resume.map(String.init) ?? "none")ms")
-                return
-            }
+        // Both shapes now ride the AVPlayer container. In-progress
+        // recordings (growing HLS window) go in as `.dvr` tiles: direct
+        // AVPlayer HLS with the driver in DVR-window mode (growing
+        // scrubber, live-edge default). resumePositionMs semantics for
+        // DVR: 0 = explicit from-the-beginning seek, nil = live edge,
+        // >2s = saved resume. beginVOD declining (engine toggle off with
+        // mpv enabled) still falls through to the legacy cover unchanged.
+        let dvrVodID = "dvr-\(remoteID)"
+        let resume: Int32?
+        if fromStart {
+            resume = isDVR ? 0 : nil
+        } else {
+            resume = WatchProgressManager.getResumePosition(vodID: dvrVodID, serverID: rec.serverID)
+        }
+        // The from-beginning sentinel is an mpv-only in-process signal
+        // (setupMPV consumes and strips it); the AVPlayer path would
+        // send it to the server as a real header. The container gets
+        // resumePositionMs == 0 instead.
+        var containerHeaders = headers
+        containerHeaders.removeValue(forKey: "X-Aerio-Start-From-Beginning")
+        if PlayerSession.shared.beginVOD(
+            title: rec.programTitle, streamURL: url, headers: containerHeaders,
+            posterURL: nil, vodID: dvrVodID, serverID: rec.serverID,
+            vodType: "recording", resumePositionMs: resume,
+            kind: isDVR ? .dvr : .vod) {
+            debugLog("▶️ \(isDVR ? "In-progress" : "Completed") recording via AVPlayer container: id=\(remoteID) resume=\(resume.map(String.init) ?? "none")ms")
+            return
         }
         playingRecording = PlayingRecording(
             id: rec.id, url: url, title: rec.programTitle, headers: headers, isDVR: isDVR

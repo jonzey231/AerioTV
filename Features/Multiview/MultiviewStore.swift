@@ -693,7 +693,7 @@ final class MultiviewStore: ObservableObject {
     /// (timeline band, 30s skips, D-pad scrub) on this, same as
     /// catch-up: both are fixed-duration seekable programmes.
     var vodSoloTile: MultiviewTile? {
-        tiles.count == 1 ? tiles.first(where: { $0.kind == .vod }) : nil
+        tiles.count == 1 ? tiles.first(where: { $0.kind == .vod || $0.kind == .dvr }) : nil
     }
 
     /// Persist the playing VOD's position RIGHT NOW (Back-to-exit path:
@@ -703,7 +703,7 @@ final class MultiviewStore: ObservableObject {
     func saveVODProgressNow() {
         guard let ps = audioProgressStore, let vodID = ps.vodID, !vodID.isEmpty,
               ps.durationMs > 0, ps.currentMs > 2_000 else { return }
-        let finished = ps.currentMs > Int32(Double(ps.durationMs) * 0.9)
+        let finished = !ps.isDVRWindow && ps.currentMs > Int32(Double(ps.durationMs) * 0.9)
         WatchProgressManager.save(
             vodID: vodID, title: ps.vodTitle ?? "", positionMs: ps.currentMs,
             durationMs: ps.durationMs, posterURL: ps.vodPosterURL,

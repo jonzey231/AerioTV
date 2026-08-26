@@ -251,6 +251,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var vodServerID: String?    // Server UUID (for Continue Watching auth headers)
     var vodType: String = "movie"  // "movie" or "episode" — determines which Continue Watching section
     var explicitResumeMs: Int32?  // Pre-loaded resume position (bypasses DB lookup)
+    /// True for an in-progress server recording played over its live-style
+    /// HLS playlist (no ENDLIST, nothing rolls off). The AVPlayer driver
+    /// then grows `durationMs` from `seekableTimeRanges` every tick so the
+    /// chrome renders a growing scrubber instead of the scrubber-less live
+    /// layout, and periodic WatchProgress saves never mark it finished
+    /// (position rides the live edge, which would trip the >90% rule).
+    var isDVRWindow: Bool = false
     /// Closure set by the Coordinator; call with a target position in ms to seek.
     var seekAction: ((Int32) -> Void)?
     /// Closure set by the Coordinator; replays the current VOD file from
@@ -3983,6 +3990,17 @@ final class AVPlayerProgressDriver {
             guard let self, !self.isLive else { return }
             let secs = time.seconds
             if secs.isFinite { self.store.currentMs = Int32(secs * 1000) }
+            // DVR window: the playlist is live-shaped (no ENDLIST) so the
+            // duration observer below never fires. The seekable range end
+            // IS the recorded-so-far duration; monotonic max() so playlist
+            // reload jitter can't shrink the timeline under the scrubber.
+            if self.store.isDVRWindow,
+               let range = self.player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
+                let endSecs = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                if endSecs.isFinite, endSecs > 0 {
+                    self.store.durationMs = max(self.store.durationMs, Int32(endSecs * 1000))
+                }
+            }
             // Periodic WatchProgress save, mpv-coordinator parity: the
             // container AVPlayer path previously never persisted VOD
             // position at all - Continue Watching only advanced when the
@@ -3997,7 +4015,7 @@ final class AVPlayerProgressDriver {
                     vodID: vodID, title: s.vodTitle ?? "",
                     positionMs: s.currentMs, durationMs: s.durationMs,
                     posterURL: s.vodPosterURL, vodType: s.vodType,
-                    isFinished: s.currentMs > Int32(Double(s.durationMs) * 0.9),
+                    isFinished: !s.isDVRWindow && s.currentMs > Int32(Double(s.durationMs) * 0.9),
                     streamURL: s.vodStreamURL, serverID: s.vodServerID)
             }
         }

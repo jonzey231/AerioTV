@@ -468,11 +468,14 @@ final class PlayerSession: ObservableObject {
                   resumePositionMs: Int32?,
                   versionOptions: [VODVersionOption] = [],
                   selectedVersionID: Int? = nil,
-                  versionSelectionKey: String? = nil) -> Bool {
+                  versionSelectionKey: String? = nil,
+                  kind: TilePlaybackKind = .vod) -> Bool {
         guard PlaybackFeatureFlags.avPlayerRemuxTS else { return false }
         let ext = streamURL.pathExtension.lowercased()
+        // m3u8 = HLS-shaped (in-progress DVR windows, HLS-fronted VOD);
+        // AVPlayer plays those natively, so they belong in the container.
         let vodShape = streamURL.path.contains("/proxy/vod/")
-            || ["mkv", "mp4", "m4v", "mov"].contains(ext)
+            || ["mkv", "mp4", "m4v", "mov", "m3u8"].contains(ext)
         // mpv disabled: no legacy-cover escape hatch; every VOD launch
         // goes through the container and fails visibly if it must.
         guard vodShape || !PlaybackFeatureFlags.mpvEngineEnabled else { return false }
@@ -491,7 +494,7 @@ final class PlayerSession: ObservableObject {
                                         headers: headers))
         let result = store.addVOD(title: title, streamURL: streamURL,
                                   headers: headers, posterURL: posterURL,
-                                  kind: .vod, vodID: vodID, serverID: serverID,
+                                  kind: kind, vodID: vodID, serverID: serverID,
                                   vodType: vodType,
                                   resumePositionMs: resumePositionMs,
                                   bypassWarning: true)
