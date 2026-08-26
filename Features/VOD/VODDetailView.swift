@@ -1113,37 +1113,12 @@ struct VODDetailView: View {
     private var versionLabels: [Int: String] {
         // Account + container, then whatever the server MEASURED for that
         // copy (resolution, codec, audio, bitrate). Nothing here is derived
-        // from the provider's advertised title.
-        func base(_ rel: DispatcharrVODProviderRelation) -> String {
-            // Server measurements, with gaps filled from what this device
-            // measured while playing that copy (many upstream panels publish
-            // a bitrate and nothing else).
-            let learned = learnedVersionStreams[rel.id]
-            let measured = versionMedia[rel.id]?.descriptors(mergedWith: learned)
-                ?? DispatcharrVODProviderMedia.descriptorsForLearnedOnly(learned)
-            var parts = measured.isEmpty ? [rel.displayLabel] : [rel.displayLabel] + measured
-            if let note = AVPlayerSupportNote.note(
-                containerExtension: rel.containerExtension,
-                videoCodec: versionMedia[rel.id]?.videoCodec) {
-                parts.append("⚠️ \(note)")
-            }
-            return parts.joined(separator: " · ")
-        }
-        var counts: [String: Int] = [:]
-        for rel in versionProviders { counts[base(rel), default: 0] += 1 }
-        var used: [String: Int] = [:]
-        var out: [Int: String] = [:]
-        for rel in versionProviders {
-            let base = base(rel)
-            if counts[base, default: 0] > 1 {
-                let n = used[base, default: 0] + 1
-                used[base] = n
-                out[rel.id] = "\(base) (\(n))"
-            } else {
-                out[rel.id] = base
-            }
-        }
-        return out
+        // from the provider's advertised title. Shared with the in-player
+        // Switch Version rows (see VODVersionLabeler) so the two pickers
+        // can never drift apart.
+        VODVersionLabeler.labels(providers: versionProviders,
+                                 media: versionMedia,
+                                 learned: learnedVersionStreams)
     }
 
     private func label(for rel: DispatcharrVODProviderRelation) -> String {

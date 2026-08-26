@@ -1151,7 +1151,18 @@ struct AVPlayerMultiviewTile: View {
         // (huge headroom keeps it stall-free), fastest-safe off-LAN. The 9s
         // offset above stays as the only explicit live-edge lever; the real
         // low-latency-AND-no-stall fix off-LAN is server-side LL-HLS.
-        debugLog("[AVP-MV] live offset=server fwdBuf=automatic channel=\(channelName)")
+        // EXCEPTION (2026-08-26 jetsam, second event): the MKV-remux VOD
+        // path serves from loopback, where AVPlayer observes ~1.9 Gbps
+        // and its automatic forward buffer balloons - on a ~65 Mbps UHD
+        // remux that alone is hundreds of MB, and the app died at 1.19GB
+        // footprint DURING SMOOTH PLAYBACK (rss hit 808MB within 90s of
+        // start). Localhost refills 15s in ~1s, so a bounded buffer
+        // costs nothing there; the WAN caveat above does not apply
+        // because the slow hop (provider -> engine) has its own
+        // flow-controlled buffer ahead of the loopback server.
+        let isLoopbackVOD = isVOD && (url.host == "127.0.0.1" || url.host == "localhost")
+        if isLoopbackVOD { playerItem.preferredForwardBufferDuration = 15 }
+        debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : "automatic") channel=\(channelName)")
         let avPlayer = AVPlayer(playerItem: playerItem)
         // Live truth at this instant, never a captured snapshot.
         avPlayer.isMuted = (MultiviewStore.shared.audioTileID != tileID)

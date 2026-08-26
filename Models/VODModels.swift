@@ -759,6 +759,47 @@ enum AVPlayerSupportNote {
     }
 }
 
+/// One label pipeline for EVERY version picker (detail page and the
+/// in-player Switch Version rows): account + container, then whatever was
+/// MEASURED for that copy (server ffprobe merged with this device's
+/// learn-cache), then the AVPlayer support note. Collisions get a
+/// positional "(n)". Extracted 2026-08-26: the resume-cover path built
+/// its own bare "Account · 4K" labels, so the player rows lacked the
+/// quality info the detail picker shows.
+enum VODVersionLabeler {
+    static func labels(providers: [DispatcharrVODProviderRelation],
+                       media: [Int: DispatcharrVODProviderMedia],
+                       learned: [Int: VODLearnedStream]) -> [Int: String] {
+        func base(_ rel: DispatcharrVODProviderRelation) -> String {
+            let l = learned[rel.id]
+            let measured = media[rel.id]?.descriptors(mergedWith: l)
+                ?? DispatcharrVODProviderMedia.descriptorsForLearnedOnly(l)
+            var parts = measured.isEmpty ? [rel.displayLabel] : [rel.displayLabel] + measured
+            if let note = AVPlayerSupportNote.note(
+                containerExtension: rel.containerExtension,
+                videoCodec: media[rel.id]?.videoCodec) {
+                parts.append("⚠️ \(note)")
+            }
+            return parts.joined(separator: " · ")
+        }
+        var counts: [String: Int] = [:]
+        for rel in providers { counts[base(rel), default: 0] += 1 }
+        var used: [String: Int] = [:]
+        var out: [Int: String] = [:]
+        for rel in providers {
+            let b = base(rel)
+            if counts[b, default: 0] > 1 {
+                let n = used[b, default: 0] + 1
+                used[b] = n
+                out[rel.id] = "\(b) (\(n))"
+            } else {
+                out[rel.id] = b
+            }
+        }
+        return out
+    }
+}
+
 // MARK: - VOD Movie (display model — not persisted, fetched on demand)
 struct VODMovie: Identifiable, Hashable {
     let id: String

@@ -412,6 +412,12 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         static let simpleBlock: UInt32 = 0xA3
         static let blockGroup: UInt32 = 0xA0
         static let block: UInt32 = 0xA1
+        static let blockDuration: UInt32 = 0x9B
+        static let trackLanguage: UInt32 = 0x22B59C
+        static let trackLanguageBCP47: UInt32 = 0x22B59D
+        static let trackName: UInt32 = 0x536E
+        static let flagDefault: UInt32 = 0x88
+        static let flagForced: UInt32 = 0x55AA
     }
 
     struct TrackInfo {
@@ -423,6 +429,12 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         var sampleRate = 48000
         var channels = 2
         var defaultDurationNs: Int64 = 0
+        // Subtitle-track metadata (type 17), used to build the HLS
+        // master playlist's #EXT-X-MEDIA renditions.
+        var language = "und"     // ISO 639-2 unless BCP47 was present
+        var trackName = ""
+        var isDefault = false
+        var isForced = false
     }
 
     struct CuePointInfo {
@@ -448,6 +460,11 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     private var segmentDataStart: Int64 = 0
     private(set) var video: TrackInfo?
     private(set) var audio: TrackInfo?
+    /// Text subtitle tracks (SRT/ASS), served as WebVTT renditions in an
+    /// HLS master playlist so AVPlayer's native legible-group picker and
+    /// renderer handle them. PGS (bitmap) tracks are skipped: they need
+    /// a custom overlay renderer (Phase 2 if ever needed).
+    private(set) var subtitles: [TrackInfo] = []
     private(set) var segmentsMap: [SegmentInfo] = []
     /// Median video frame duration in ticks, for the dts ladder.
     private var frameDurationTicks: Int64 = 1_800
@@ -586,9 +603,9 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         let maxSpan = segmentsMap.map { Int($0.byteEnd - $0.byteStart) }.max() ?? 0
         spanCacheByteLimit = max(160 * 1024 * 1024, 3 * maxSpan + 16 * 1024 * 1024)
         let mins = Double(durationTicks) / Double(Self.ticksPerSecond) / 60
-        log(String(format: "[MKV] prepared: %@ %dx%d + %@, %.0f min, %d segments, cues %@",
+        log(String(format: "[MKV] prepared: %@ %dx%d + %@ + %d text sub(s), %.0f min, %d segments, cues %@",
                    v.codecID, v.width, v.height, audio?.codecID ?? "no-audio",
-                   mins, segmentsMap.count, cuesParsed ? "in-head" : "from-tail"))
+                   subtitles.count, mins, segmentsMap.count, cuesParsed ? "in-head" : "from-tail"))
     }
 
     private func parseTracks(_ reader: EBMLReader) throws {
@@ -611,6 +628,18 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 case ID.codecID: track.codecID = String(decoding: try t.readBytes(Int(tsize)), as: UTF8.self)
                 case ID.codecPrivate: track.codecPrivate = try t.readBytes(Int(tsize))
                 case ID.defaultDuration: track.defaultDurationNs = Int64(try t.readUInt(Int(tsize)))
+                case ID.trackLanguage:
+                    // BCP47 (0x22B59D) wins when both are present; the
+                    // legacy 639-2 field defaults to "eng" per spec so it
+                    // must not overwrite a BCP47 value already read.
+                    let lang = String(decoding: try t.readBytes(Int(tsize)), as: UTF8.self)
+                    if track.language == "und" { track.language = lang }
+                case ID.trackLanguageBCP47:
+                    track.language = String(decoding: try t.readBytes(Int(tsize)), as: UTF8.self)
+                case ID.trackName:
+                    track.trackName = String(decoding: try t.readBytes(Int(tsize)), as: UTF8.self)
+                case ID.flagDefault: track.isDefault = (try t.readUInt(Int(tsize))) != 0
+                case ID.flagForced: track.isForced = (try t.readUInt(Int(tsize))) != 0
                 case ID.contentEncodings: encrypted = true; t.skip(tsize)
                 case ID.videoBox:
                     var vb = EBMLReader(try t.readBytes(Int(tsize)))
@@ -661,6 +690,14 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 video = track
             } else if type == 2 {
                 audioCandidates.append(track)
+            } else if type == 17 {
+                // Text subtitles only; PGS bitmaps need a renderer we
+                // don't have (Phase 2). A ContentEncodings (zlib) track
+                // never reaches here - the shared guard above skips it.
+                let textCodecs = ["S_TEXT/UTF8", "S_TEXT/SUBRIP", "S_TEXT/ASS", "S_TEXT/SSA"]
+                if textCodecs.contains(track.codecID) {
+                    subtitles.append(track)
+                }
             }
         }
         // First SUPPORTED audio track, not first track: a
@@ -754,6 +791,284 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         }
         text += "#EXT-X-ENDLIST\n"
         return text
+    }
+
+    // MARK: Subtitles (WebVTT renditions)
+
+    /// Master playlist wrapping the media playlist so text subtitle
+    /// tracks ride as native #EXT-X-MEDIA renditions. AVPlayer surfaces
+    /// them in its legible selection group, which the existing player
+    /// Options picker already reads - no chrome changes.
+    func masterPlaylistText() -> String {
+        var text = "#EXTM3U\n#EXT-X-VERSION:7\n"
+        var usedNames = Set<String>()
+        for t in subtitles {
+            // "English (SDH)" reads better in Apple's picker than a bare
+            // track name like "SDH" or "Latin American".
+            let lang = Self.languageDisplayName(t.language)
+            let baseName = t.trackName.isEmpty ? lang : "\(lang) (\(t.trackName))"
+            var name = baseName
+            var n = 2
+            while usedNames.contains(name) {
+                name = "\(baseName) (\(n))"
+                n += 1
+            }
+            usedNames.insert(name)
+            // Quotes/commas inside a NAME would corrupt the attribute list.
+            let safeName = name.replacingOccurrences(of: "\"", with: "'")
+                .replacingOccurrences(of: ",", with: " ")
+            var line = "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"\(safeName)\""
+            line += ",LANGUAGE=\"\(t.language)\",AUTOSELECT=YES,DEFAULT=NO"
+            if t.isForced { line += ",FORCED=YES" }
+            line += ",URI=\"sub\(t.number).m3u8\"\n"
+            text += line
+        }
+        // BANDWIDTH is required on STREAM-INF; estimate from the file
+        // itself (it feeds AVPlayer's stats only - one variant, no ABR).
+        let secs = max(1.0, Double(durationTicks) / Double(Self.ticksPerSecond))
+        let bandwidth = max(1_000_000, Int(Double(fetcher.totalLength) * 8.0 / secs))
+        text += "#EXT-X-STREAM-INF:BANDWIDTH=\(bandwidth),SUBTITLES=\"subs\"\nvod.m3u8\n"
+        return text
+    }
+
+    /// Subtitle media playlist for one track: the SAME segment timeline
+    /// as the video playlist, so a sub segment's clusters are the spans
+    /// the A/V build just fetched - span-cache hits, not re-downloads.
+    func subtitlePlaylistText(trackNumber: Int) -> String {
+        var text = """
+        #EXTM3U
+        #EXT-X-VERSION:7
+        #EXT-X-PLAYLIST-TYPE:VOD
+        #EXT-X-TARGETDURATION:\(Int((segmentsMap.map { Double($0.durationTicks) }.max() ?? 0) / Double(Self.ticksPerSecond) + 1))
+        #EXT-X-MEDIA-SEQUENCE:0
+
+        """
+        for seg in segmentsMap {
+            let dur = Double(seg.durationTicks) / Double(Self.ticksPerSecond)
+            text += "#EXTINF:\(String(format: "%.3f", dur)),\nsub\(trackNumber)_\(seg.index).vtt\n"
+        }
+        text += "#EXT-X-ENDLIST\n"
+        return text
+    }
+
+    /// One WebVTT segment: cues from this track overlapping the video
+    /// segment's time window, with absolute timestamps anchored to the
+    /// fMP4 timeline via X-TIMESTAMP-MAP (both count from file time 0).
+    func buildSubtitleSegment(trackNumber: Int, index: Int) throws -> Data {
+        guard index >= 0, index < segmentsMap.count,
+              let track = subtitles.first(where: { $0.number == trackNumber }) else {
+            throw MKVRemuxError(reason: "subtitle segment out of range")
+        }
+        let seg = segmentsMap[index]
+        let windowEnd = seg.startTicks + seg.durationTicks
+        // Same 3-span neighborhood as the A/V build: a cue is muxed in a
+        // cluster at its start time, and neighbor parsing catches cues
+        // that start just before the window (still showing inside it).
+        let loIndex = max(0, index - 1)
+        let hiIndex = min(segmentsMap.count - 1, index + 1)
+        try ensureSpans(loIndex, hiIndex)
+
+        struct SubCue { let ptsTicks: Int64; let durTicks: Int64; let text: String }
+        var cues: [SubCue] = []
+        // Span-by-span like the A/V build: no concatenated transient.
+        for k in loIndex...hiIndex {
+        guard let piece = cachedSpan(k) else {
+            throw MKVRemuxError(reason: "span \(k) missing after ensure (sub)")
+        }
+        var r = EBMLReader([UInt8](piece))
+        while r.remaining > 4 {
+            let id: UInt32
+            do { id = try r.readID() } catch { break }
+            let size: Int64
+            do { size = try r.readSize() } catch { break }
+            guard id == ID.cluster else {
+                if size < 0 { break }
+                r.skip(size); continue
+            }
+            let clusterEnd = size >= 0 ? min(r.pos + Int(size), r.data.count) : r.data.count
+            var clusterTS: Int64 = 0
+            while r.pos < clusterEnd, r.remaining > 2 {
+                if size < 0, r.remaining >= 4,
+                   r.data[r.pos] == 0x1F, r.data[r.pos + 1] == 0x43,
+                   r.data[r.pos + 2] == 0xB6, r.data[r.pos + 3] == 0x75 { break }
+                let cid: UInt32
+                do { cid = try r.readID() } catch { break }
+                let csize: Int64
+                do { csize = try r.readSize() } catch { break }
+                guard csize >= 0 else { break }
+                switch cid {
+                case ID.clusterTimestamp:
+                    clusterTS = Int64(try r.readUInt(Int(csize)))
+                case ID.simpleBlock:
+                    // Rare for subs (no duration field); default 3s.
+                    if let cue = Self.subCueFromBlock(try r.readBytes(Int(csize)),
+                                                     clusterTS: clusterTS,
+                                                     durationScaled: -1,
+                                                     trackNumber: trackNumber,
+                                                     codecID: track.codecID,
+                                                     ticks: ticks(fromScaled:),
+                                                     ticksPerSecond: Self.ticksPerSecond) {
+                        cues.append(SubCue(ptsTicks: cue.0, durTicks: cue.1, text: cue.2))
+                    }
+                case ID.blockGroup:
+                    var bg = EBMLReader(try r.readBytes(Int(csize)))
+                    var blockBytes: [UInt8] = []
+                    var durationScaled: Int64 = -1
+                    while bg.remaining > 2 {
+                        let bid = try bg.readID()
+                        let bsize = try bg.readSize()
+                        switch bid {
+                        case ID.block: blockBytes = try bg.readBytes(Int(bsize))
+                        case ID.blockDuration: durationScaled = Int64(try bg.readUInt(Int(bsize)))
+                        default: bg.skip(bsize)
+                        }
+                    }
+                    if !blockBytes.isEmpty,
+                       let cue = Self.subCueFromBlock(blockBytes, clusterTS: clusterTS,
+                                                      durationScaled: durationScaled,
+                                                      trackNumber: trackNumber,
+                                                      codecID: track.codecID,
+                                                      ticks: ticks(fromScaled:),
+                                                      ticksPerSecond: Self.ticksPerSecond) {
+                        cues.append(SubCue(ptsTicks: cue.0, durTicks: cue.1, text: cue.2))
+                    }
+                default:
+                    r.skip(csize)
+                }
+            }
+        }
+        }
+
+        var vtt = "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n"
+        for cue in cues {
+            let start = cue.ptsTicks
+            let end = cue.ptsTicks + cue.durTicks
+            // Only cues overlapping this window; HLS wants boundary
+            // spanners REPEATED in each segment they touch.
+            guard end > seg.startTicks, start < windowEnd, !cue.text.isEmpty else { continue }
+            vtt += "\(Self.vttTimestamp(start)) --> \(Self.vttTimestamp(max(start + Self.ticksPerSecond / 2, end)))\n"
+            vtt += cue.text + "\n\n"
+        }
+        return Data(vtt.utf8)
+    }
+
+    /// Decode one subtitle block into (pts, duration, sanitized text).
+    /// Static + explicit dependencies so it stays testable in the CLI
+    /// harness. Returns nil for other tracks or undecodable payloads.
+    private static func subCueFromBlock(_ block: [UInt8], clusterTS: Int64,
+                                        durationScaled: Int64, trackNumber: Int,
+                                        codecID: String,
+                                        ticks: (Int64) -> Int64,
+                                        ticksPerSecond: Int64) -> (Int64, Int64, String)? {
+        guard !block.isEmpty else { return nil }
+        var r = EBMLReader(block)
+        let first = block[0]
+        let tlen = EBMLReader.vintLength(first)
+        guard tlen >= 1, tlen <= 4, block.count > tlen + 3 else { return nil }
+        var num = Int(first & (0xFF >> tlen))
+        for i in 1..<tlen { num = (num << 8) | Int(block[i]) }
+        guard num == trackNumber else { return nil }
+        r.pos = tlen
+        guard let rel = try? r.readUInt(2), let _ = try? r.readUInt(1) else { return nil }
+        let pts = ticks(clusterTS + Int64(Int16(bitPattern: UInt16(rel))))
+        let dur = durationScaled > 0 ? ticks(clusterTS + durationScaled) - ticks(clusterTS)
+                                     : 3 * ticksPerSecond
+        guard let payload = try? r.readBytes(r.remaining) else { return nil }
+        var text = String(decoding: payload, as: UTF8.self)
+        if codecID == "S_TEXT/ASS" || codecID == "S_TEXT/SSA" {
+            text = assDialogueText(text)
+        }
+        return (pts, dur, sanitizeVTT(text))
+    }
+
+    /// MKV ASS block payload: "ReadOrder,Layer,Style,Name,MarginL,
+    /// MarginR,MarginV,Effect,Text" - text is everything after the 8th
+    /// comma. \N = line break; {...} override blocks are styling noise.
+    private static func assDialogueText(_ line: String) -> String {
+        var rest = Substring(line)
+        for _ in 0..<8 {
+            guard let comma = rest.firstIndex(of: ",") else { break }
+            rest = rest[rest.index(after: comma)...]
+        }
+        var out = ""
+        var depth = 0
+        var i = rest.startIndex
+        while i < rest.endIndex {
+            let c = rest[i]
+            if c == "{" { depth += 1 }
+            else if c == "}" { if depth > 0 { depth -= 1 } }
+            else if depth == 0 {
+                if c == "\\", rest.index(after: i) < rest.endIndex {
+                    let nxt = rest[rest.index(after: i)]
+                    if nxt == "N" || nxt == "n" {
+                        out += "\n"; i = rest.index(i, offsetBy: 2); continue
+                    } else if nxt == "h" {
+                        out += " "; i = rest.index(i, offsetBy: 2); continue
+                    }
+                    out.append(c)
+                } else {
+                    out.append(c)
+                }
+            }
+            i = rest.index(after: i)
+        }
+        return out
+    }
+
+    /// WebVTT-safe cue text: normalize line endings, drop tags VTT does
+    /// not know (SRT font tags), keep i/b/u, and neutralize the one
+    /// sequence that would corrupt cue framing.
+    private static func sanitizeVTT(_ raw: String) -> String {
+        var text = raw.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "-->", with: "\u{2192}")
+        for tag in ["font", "FONT"] {
+            while let open = text.range(of: "<\(tag)"),
+                  let close = text.range(of: ">", range: open.upperBound..<text.endIndex) {
+                text.removeSubrange(open.lowerBound..<close.upperBound)
+            }
+            text = text.replacingOccurrences(of: "</\(tag)>", with: "")
+        }
+        // Collapse blank interior lines: an empty line ends a VTT cue.
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
+        return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func vttTimestamp(_ ticks: Int64) -> String {
+        let totalMs = max(0, ticks) * 1000 / ticksPerSecond
+        let h = totalMs / 3_600_000
+        let m = (totalMs / 60_000) % 60
+        let s = (totalMs / 1000) % 60
+        let ms = totalMs % 1000
+        return String(format: "%02d:%02d:%02d.%03d", h, m, s, ms)
+    }
+
+    /// Human names for the common MKV language codes, for tracks with no
+    /// Name element. AVPlayer shows the NAME attribute verbatim in its
+    /// picker, so "fin" alone would read as garbage to most users.
+    private static func languageDisplayName(_ code: String) -> String {
+        let base = code.lowercased().split(separator: "-").first.map(String.init) ?? code
+        let names: [String: String] = [
+            "eng": "English", "en": "English", "spa": "Spanish", "es": "Spanish",
+            "fre": "French", "fra": "French", "fr": "French",
+            "ger": "German", "deu": "German", "de": "German",
+            "ita": "Italian", "it": "Italian", "por": "Portuguese", "pt": "Portuguese",
+            "dut": "Dutch", "nld": "Dutch", "nl": "Dutch",
+            "swe": "Swedish", "sv": "Swedish", "nor": "Norwegian", "no": "Norwegian",
+            "dan": "Danish", "da": "Danish", "fin": "Finnish", "fi": "Finnish",
+            "pol": "Polish", "pl": "Polish", "rus": "Russian", "ru": "Russian",
+            "jpn": "Japanese", "ja": "Japanese", "chi": "Chinese", "zho": "Chinese",
+            "zh": "Chinese", "kor": "Korean", "ko": "Korean",
+            "ara": "Arabic", "ar": "Arabic", "hin": "Hindi", "hi": "Hindi",
+            "tur": "Turkish", "tr": "Turkish", "heb": "Hebrew", "he": "Hebrew",
+            "cze": "Czech", "ces": "Czech", "cs": "Czech",
+            "gre": "Greek", "ell": "Greek", "el": "Greek",
+            "hun": "Hungarian", "hu": "Hungarian", "ron": "Romanian", "rum": "Romanian",
+            "tha": "Thai", "th": "Thai", "vie": "Vietnamese", "vi": "Vietnamese",
+            "ind": "Indonesian", "id": "Indonesian", "ukr": "Ukrainian", "uk": "Ukrainian",
+            "und": "Unknown"
+        ]
+        return names[base] ?? code.uppercased()
     }
 
     func buildInitSegment() -> Data {
@@ -936,18 +1251,22 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         let loIndex = max(0, index - 1)
         let hiIndex = min(segmentsMap.count - 1, index + 1)
         try ensureSpans(loIndex, hiIndex)
-        var raw = Data()
-        for k in loIndex...hiIndex {
-            guard let piece = cachedSpan(k) else {
-                throw MKVRemuxError(reason: "span \(k) missing after ensure")
-            }
-            raw.append(piece)
-        }
 
         var videoSamples: [Sample] = []
         var audioSamples: [Sample] = []
-        var r = EBMLReader([UInt8](raw))
         let nextStart = seg.startTicks + seg.durationTicks
+        // Parse SPAN BY SPAN, never a concatenated whole: spans start at
+        // cluster boundaries by construction, and materializing all
+        // three (~190MB on a UHD remux) plus the [UInt8] reader copy of
+        // the same was a ~400MB transient per build - the second jetsam
+        // (2026-08-26, footprint 569MB -> 1.19GB in 11s) was a build
+        // spike, not a leak. Per-span parsing caps the transient at one
+        // span's copy.
+        for k in loIndex...hiIndex {
+        guard let piece = cachedSpan(k) else {
+            throw MKVRemuxError(reason: "span \(k) missing after ensure")
+        }
+        var r = EBMLReader([UInt8](piece))
         while r.remaining > 4 {
             let id: UInt32
             do { id = try r.readID() } catch { break }
@@ -999,6 +1318,7 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                     r.skip(csize)
                 }
             }
+        }
         }
 
         // Partition, exact by construction over the 3-span parse:
@@ -1317,7 +1637,11 @@ final class MKVVODServer: @unchecked Sendable {
     /// jetsammed the app (2026-08-26).
     private var cache: [(index: Int, data: Data)] = []
     private var cacheBytes = 0
-    private let cacheByteLimit = 128 * 1024 * 1024
+    private let cacheByteLimit = 64 * 1024 * 1024
+    /// Built WebVTT segments, keyed by request path. Tiny (a cue window
+    /// is ~1KB), kept for the whole session so a subtitle toggle never
+    /// re-fetches media spans behind an already-built window.
+    private var vttCache: [String: Data] = [:]
     private var stopped = false
 
     var onReady: ((URL) -> Void)?
@@ -1357,7 +1681,12 @@ final class MKVVODServer: @unchecked Sendable {
                     if case .ready = state {
                         self.queue.async {
                             self.localPort = listener.port?.rawValue ?? 0
-                            let url = URL(string: "http://127.0.0.1:\(self.localPort)/vod.m3u8")!
+                            // Master playlist when text subtitles exist, so
+                            // they surface as native legible renditions;
+                            // plain media playlist otherwise (identical
+                            // playback, one fewer fetch).
+                            let entry = self.remuxer.subtitles.isEmpty ? "vod.m3u8" : "master.m3u8"
+                            let url = URL(string: "http://127.0.0.1:\(self.localPort)/\(entry)")!
                             debugLog("[MKV-VOD] READY -> \(url.absoluteString)")
                             DispatchQueue.main.async { self.onReady?(url) }
                         }
@@ -1386,6 +1715,7 @@ final class MKVVODServer: @unchecked Sendable {
             self.listener = nil
             self.cache.removeAll()
             self.cacheBytes = 0
+            self.vttCache.removeAll()
             self.remuxer.teardown()
         }
     }
@@ -1431,6 +1761,40 @@ final class MKVVODServer: @unchecked Sendable {
         if path.hasSuffix("vod.m3u8") {
             body = Data(remuxer.playlistText().utf8)
             contentType = "application/vnd.apple.mpegurl"
+        } else if path.hasSuffix("master.m3u8") {
+            body = Data(remuxer.masterPlaylistText().utf8)
+            contentType = "application/vnd.apple.mpegurl"
+        } else if path.hasPrefix("/sub"), path.hasSuffix(".m3u8"),
+                  let track = Int(path.dropFirst(4).dropLast(6)) {
+            body = Data(remuxer.subtitlePlaylistText(trackNumber: track).utf8)
+            contentType = "application/vnd.apple.mpegurl"
+        } else if path.hasPrefix("/sub"), path.hasSuffix(".vtt") {
+            let core = path.dropFirst(4).dropLast(4) // "<track>_<index>"
+            let parts = core.split(separator: "_")
+            if parts.count == 2, let track = Int(parts[0]), let index = Int(parts[1]) {
+                if let hit = vttCache[path] {
+                    body = hit
+                } else {
+                    do {
+                        guard !stopped else { throw MKVRemuxError(reason: "server stopped") }
+                        body = try remuxer.buildSubtitleSegment(trackNumber: track, index: index)
+                        // Built VTT segments are ~1KB; caching them all
+                        // means toggling subtitles never re-triggers the
+                        // 3-span fetch behind an already-built window.
+                        vttCache[path] = body
+                    } catch {
+                        debugLog("[MKV-VOD] sub segment \(track)/\(index) failed: \(error)")
+                        // An empty-but-valid VTT beats a 500 here: one
+                        // failed sub segment must not stall A/V playback.
+                        body = Data("WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n".utf8)
+                    }
+                }
+                contentType = "text/vtt"
+            } else {
+                body = Data("not found".utf8)
+                contentType = "text/plain"
+                status = "404 Not Found"
+            }
         } else if path.hasSuffix("init.mp4") {
             body = remuxer.buildInitSegment()
             contentType = "video/mp4"

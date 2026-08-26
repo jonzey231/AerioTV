@@ -434,39 +434,66 @@ struct MoviesView: View {
                 debugLog("[VOD-VERSION] resume \(progress.vodID): \(providers.count) copy, no picker")
                 return
             }
-            // Label shape mirrors the detail page: account name, then the
-            // best quality hint the server gave (resolution, else quality,
-            // else container). Duplicates get a positional suffix so two
-            // copies from one account stay distinguishable.
-            var seenLabels: [String: Int] = [:]
-            resumeVersionOptions = providers.compactMap { rel in
-                guard let url = api.proxyMovieURL(uuid: uuid,
-                                                  preferredStreamID: rel.streamID.flatMap(Int.init),
-                                                  m3uAccountID: rel.account.id) else { return nil }
-                let account = rel.account.name?.trimmingCharacters(in: .whitespaces)
-                let name = (account?.isEmpty == false) ? account! : "Provider \(rel.account.id)"
-                let quality = rel.qualityInfo?.resolution
-                    ?? rel.qualityInfo?.quality
-                    ?? rel.containerExtension?.uppercased()
-                var label = quality.map { "\(name) · \($0)" } ?? name
-                if let note = AVPlayerSupportNote.note(
-                    containerExtension: rel.containerExtension, videoCodec: nil) {
-                    label += " · ⚠️ \(note)"
+            // Same label pipeline as the detail page's picker (Logan
+            // 2026-08-26: the in-player rows must show the same measured
+            // quality info): account + container, then measured
+            // descriptors, then the AVPlayer support note. Learn-cache
+            // fills in immediately; server measurements land in a second
+            // context push below.
+            var learned: [Int: VODLearnedStream] = [:]
+            for rel in providers {
+                if let l = VODVersionMeasurementStore.lookup(optionID: rel.id) {
+                    learned[rel.id] = l
                 }
-                let seen = (seenLabels[label] ?? 0) + 1
-                seenLabels[label] = seen
-                if seen > 1 { label += " (\(seen))" }
-                return VODVersionOption(id: rel.id, label: label, url: url)
             }
+            var media: [Int: DispatcharrVODProviderMedia] = [:]
+            // Local funcs are nonisolated by default even inside a
+            // @MainActor Task closure; annotate or the store call fails
+            // to compile under strict concurrency.
+            @MainActor func pushOptions() {
+                let labels = VODVersionLabeler.labels(providers: providers,
+                                                      media: media, learned: learned)
+                resumeVersionOptions = providers.compactMap { rel in
+                    guard let url = api.proxyMovieURL(uuid: uuid,
+                                                      preferredStreamID: rel.streamID.flatMap(Int.init),
+                                                      m3uAccountID: rel.account.id) else { return nil }
+                    return VODVersionOption(id: rel.id,
+                                            label: labels[rel.id] ?? rel.displayLabel,
+                                            url: url)
+                }
+                // Container path (beginVOD): the options resolved AFTER the
+                // launch; hand them to the session so Switch Version works
+                // there too. No-op when the legacy cover is playing.
+                MultiviewStore.shared.updateVODVersionContext(
+                    vodID: progress.vodID,
+                    options: resumeVersionOptions,
+                    selectedID: VODVersionSelectionStore.selection(forKey: resumeVersionSelectionKey),
+                    selectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey)
+            }
+            pushOptions()
             debugLog("[VOD-VERSION] resume \(progress.vodID): \(resumeVersionOptions.count) provider copies")
-            // Container path (beginVOD): the options resolved AFTER the
-            // launch; hand them to the session so Switch Version works
-            // there too. No-op when the legacy cover is playing.
-            MultiviewStore.shared.updateVODVersionContext(
-                vodID: progress.vodID,
-                options: resumeVersionOptions,
-                selectedID: VODVersionSelectionStore.selection(forKey: resumeVersionSelectionKey),
-                selectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey)
+            // Measured stream properties, capped at 3 concurrent fetches
+            // (mirrors VODDetailView.loadVersionMedia): a copy the server
+            // has not inspected yet costs an upstream round trip.
+            let relationIDs = providers.map(\.id)
+            await withTaskGroup(of: (Int, DispatcharrVODProviderMedia?).self) { group in
+                var next = 0
+                func addTask() {
+                    guard next < relationIDs.count else { return }
+                    let relationID = relationIDs[next]
+                    next += 1
+                    group.addTask {
+                        (relationID, try? await api.getMovieProviderMedia(movieID: numericID,
+                                                                          relationID: relationID))
+                    }
+                }
+                for _ in 0..<min(3, relationIDs.count) { addTask() }
+                for await (relationID, m) in group {
+                    if let m, m.hasAnyMeasurement { media[relationID] = m }
+                    addTask()
+                }
+            }
+            if !media.isEmpty { pushOptions() }
         }
     }
 

@@ -4219,8 +4219,13 @@ final class AVPlayerProgressDriver {
         // logged per tune and on an OS memory warning, by which point the
         // jetsam kill is minutes away. A periodic sample turns that class of
         // leak into a visible slope in any ordinary debug log.
+        // "fp" = phys_footprint, the number jetsam actually judges
+        // (ProcessMetrics returns it despite the legacy "rss" name).
+        // Labeled honestly since the 2026-08-26 kill analysis compared
+        // this line against the JetsamEvent pages and needed the
+        // distinction.
         debugLog(String(format:
-            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d edge=%.1fs rss=%.1f MB",
+            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d edge=%.1fs fp=%.1f MB",
             dStalls, stalls, dDropped, dropped,
             event.observedBitrate / 1000,
             event.numberOfMediaRequests, edge,
