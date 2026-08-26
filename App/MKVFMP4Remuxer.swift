@@ -166,7 +166,14 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
         // Liveness is the reader's own 45s wait timeout, not URLSession's.
         config.timeoutIntervalForRequest = 2 * 3600
         config.timeoutIntervalForResource = 24 * 3600
-        session = URLSession(configuration: config, delegate: self, delegateQueue: OperationQueue())
+        // URLSession REQUIRES a serial delegate queue; a default
+        // OperationQueue() is concurrent, so data/response/completion
+        // callbacks could interleave. tvOS happened to survive it; the
+        // iPhone's scheduler did not (2026-08-26: every VOD span read
+        // died within seconds on iOS while tvOS played the same titles).
+        let delegateQueue = OperationQueue()
+        delegateQueue.maxConcurrentOperationCount = 1
+        session = URLSession(configuration: config, delegate: self, delegateQueue: delegateQueue)
     }
 
     func open(at offset: Int64) {
@@ -254,6 +261,15 @@ final class MKVSequentialStream: NSObject, URLSessionDataDelegate, @unchecked Se
             task?.resume()
         }
         return out
+    }
+
+    /// Locked one-line state snapshot for span-failure diagnostics.
+    var debugState: String {
+        cond.lock()
+        defer { cond.unlock() }
+        return "state[task=\(task != nil) cancelled=\(cancelled) finished=\(finished) "
+            + "failed=\(failed ?? "nil") bufStart=\(bufferStart) buffered=\(buffer.count) "
+            + "streamed=\(bytesStreamed) suspended=\(suspended)]"
     }
 
     func cancel() {
@@ -1336,16 +1352,22 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
                 stream.open(at: lo)
                 streamOpen = true
             }
-            var piece = (try? stream.read(offset: lo, length: length)) ?? nil
+            var piece: Data?
+            var firstError: String?
+            do { piece = try stream.read(offset: lo, length: length) }
+            catch { firstError = "\(error)" }
             if piece == nil || piece!.count < length {
                 // Outside the window (seek, either direction), short at an
                 // EOF race, or a failed/timed-out stream: reopen once at
                 // the wanted offset and retry.
                 stream.open(at: lo)
-                piece = try stream.read(offset: lo, length: length)
+                do { piece = try stream.read(offset: lo, length: length) }
+                catch {
+                    throw MKVRemuxError(reason: "span \(i) retry read failed: \(error) (first: \(firstError ?? "nil/short"), \(stream.debugState))")
+                }
             }
             guard let data = piece, data.count == length else {
-                throw MKVRemuxError(reason: "span \(i) unreadable")
+                throw MKVRemuxError(reason: "span \(i) unreadable (got \(piece?.count ?? -1)/\(length) at \(lo), first: \(firstError ?? "nil/short"), \(stream.debugState))")
             }
             spanCache.append((i, data))
             spanCacheBytes += data.count
