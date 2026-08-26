@@ -371,12 +371,22 @@ struct ContinueWatchingSection: View {
                                 }
                                 // Movies get the mirror: View Movie jumps to
                                 // the detail page without hunting the grid.
-                                if progress.vodType == "movie", let onOpenMovie,
-                                   let movie = movies.first(where: { $0.id == progress.vodID }) {
-                                    Button {
-                                        onOpenMovie(movie)
-                                    } label: {
-                                        Label("View Movie", systemImage: "info.circle")
+                                // Catalog row preferred (full metadata);
+                                // otherwise a minimal item synthesized from
+                                // the progress row - the detail page loads
+                                // providers/versions by numeric id anyway,
+                                // so the option never depends on catalog
+                                // load timing.
+                                if progress.vodType == "movie", let onOpenMovie {
+                                    let target = movies.first(where: { $0.id == progress.vodID })
+                                        ?? Self.syntheticMovieItem(from: progress)
+                                    let _ = debugLog("[CW-MENU] vodID=\(progress.vodID) moviesLoaded=\(movies.count) catalogMatch=\(movies.contains(where: { $0.id == progress.vodID })) synthesized=\(target != nil && !movies.contains(where: { $0.id == progress.vodID }))")
+                                    if let target {
+                                        Button {
+                                            onOpenMovie(target)
+                                        } label: {
+                                            Label("View Movie", systemImage: "info.circle")
+                                        }
                                     }
                                 }
                                 Button(role: .destructive) {
@@ -411,6 +421,22 @@ struct ContinueWatchingSection: View {
             .focusSection()
             #endif
         }
+    }
+
+    /// Minimal display item for a movie whose catalog row hasn't loaded
+    /// (or whose id space drifted): enough for VODDetailView to render
+    /// and to fetch providers/versions by the numeric id. Requires a
+    /// serverID on the row - without one the detail page could not auth.
+    private static func syntheticMovieItem(from p: WatchProgress) -> VODDisplayItem? {
+        guard let sid = p.serverID, let serverUUID = UUID(uuidString: sid) else { return nil }
+        let movie = VODMovie(
+            id: p.vodID, name: p.title,
+            posterURL: p.posterURL.flatMap { URL(string: $0) }, backdropURL: nil,
+            rating: "", plot: "", genre: "", releaseDate: "", duration: "",
+            cast: "", director: "", imdbID: "", categoryID: "", categoryName: "",
+            streamURL: p.streamURL.flatMap { URL(string: $0) },
+            containerExtension: "", serverID: serverUUID)
+        return VODDisplayItem(movie: movie)
     }
 
     /// Resolve the card's artwork, title, and subtitle. For an episode we
