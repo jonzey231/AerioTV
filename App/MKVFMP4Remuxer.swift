@@ -1433,6 +1433,11 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         //  - audio: every frame with pts in [start, nextStart) - complete
         //    now that both neighbor spans were parsed.
         let halfFrame = frameDurationTicks / 2
+        // Pre-partition census, kept for the failure diagnostic below.
+        let parsedCount = videoSamples.count
+        let parsedKeyframes = videoSamples.lazy.filter(\.keyframe).count
+        let parsedPtsLo = videoSamples.map(\.ptsTicks).min() ?? 0
+        let parsedPtsHi = videoSamples.map(\.ptsTicks).max() ?? 0
         if let startKey = videoSamples.firstIndex(where: {
             $0.keyframe && $0.ptsTicks >= seg.startTicks - halfFrame }) {
             videoSamples.removeFirst(startKey)
@@ -1444,7 +1449,20 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             videoSamples = Array(videoSamples[..<endKey])
         }
         audioSamples = audioSamples.filter { $0.ptsTicks >= seg.startTicks && $0.ptsTicks < nextStart }
-        guard !videoSamples.isEmpty else { throw MKVRemuxError(reason: "segment \(index): no video samples") }
+        guard !videoSamples.isEmpty else {
+            // Say WHY: "parsed 0" = spans held no clusters (garbage /
+            // HTML mid-stream); a healthy count with a pts range far
+            // from the window = THE INDEX AND THE MEDIA ARE DIFFERENT
+            // FILES (Dispatcharr per-connection failover serving another
+            // provider copy under the same URL - prime suspect from the
+            // 2026-08-26 '8.0 Mbps copy' field fallback); frames present
+            // but 0 keyframes = flag/reference parsing trouble.
+            let sec = { (t: Int64) in Double(t) / Double(Self.ticksPerSecond) }
+            throw MKVRemuxError(reason: String(
+                format: "segment %d: no video samples in window %.1f-%.1fs (parsed %d frames, %d keyframes, pts %.1f-%.1fs)",
+                index, sec(seg.startTicks), sec(nextStart),
+                parsedCount, parsedKeyframes, sec(parsedPtsLo), sec(parsedPtsHi)))
+        }
 
         if let sink = onCuesHarvested {
             for (track, cues) in newCues where !cues.isEmpty { sink(track, cues) }
@@ -1787,6 +1805,10 @@ final class MKVVODServer: @unchecked Sendable {
     /// Alternate-audio segments (a few MB each), small FIFO byte cap.
     private var audCache: [(path: String, data: Data)] = []
     private var audCacheBytes = 0
+    /// Fast engine-fallback trigger: 3 straight failed video-segment
+    /// builds on a LIVE server fire onError once (queue-confined).
+    private var consecutiveBuildFailures = 0
+    private var escalatedBuildFailure = false
     private var stopped = false
 
     var onReady: ((URL) -> Void)?
@@ -1984,6 +2006,7 @@ final class MKVVODServer: @unchecked Sendable {
                 do {
                     guard !stopped else { throw MKVRemuxError(reason: "server stopped") }
                     body = try remuxer.buildMediaSegment(index)
+                    consecutiveBuildFailures = 0
                     cache.append((index, body))
                     cacheBytes += body.count
                     while cacheBytes > cacheByteLimit || cache.count > 4 {
@@ -1995,6 +2018,22 @@ final class MKVVODServer: @unchecked Sendable {
                     body = Data("segment error".utf8)
                     contentType = "text/plain"
                     status = "500 Internal Server Error"
+                    // Escalate quickly instead of leaving AVPlayer to
+                    // retry into the 12s startup watchdog (or to stall
+                    // silently mid-play, where no watchdog runs at all):
+                    // three straight failed builds on a live server means
+                    // this copy cannot be served - hand the tile to mpv
+                    // NOW. Field case 2026-08-26: the '8.0 Mbps' In the
+                    // Grey copy failed every build with 'no video samples
+                    // in window'.
+                    if !stopped {
+                        consecutiveBuildFailures += 1
+                        if consecutiveBuildFailures >= 3, !escalatedBuildFailure {
+                            escalatedBuildFailure = true
+                            debugLog("[MKV-VOD] \(consecutiveBuildFailures) consecutive segment builds failed; escalating to engine fallback")
+                            DispatchQueue.main.async { self.onError?("repeated segment build failures (\(error))") }
+                        }
+                    }
                 }
             }
             if status.hasPrefix("200") { contentType = "video/iso.segment" }
