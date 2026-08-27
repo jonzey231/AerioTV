@@ -1401,9 +1401,9 @@ struct AVPlayerMultiviewTile: View {
         }
         // In-place channel swap on the same tile id (the container
         // swaps `tile.streamURL` without changing tile identity).
-        .onChange(of: streamURL) { _, _ in
+        .onChange(of: streamURL) { oldURL, _ in
             mismatchAutoRetried = false
-            stop()
+            stop(retainKey: oldURL.absoluteString)
             start()
         }
         // A second tile joining drops the rewind UI (grid chrome has no
@@ -1647,7 +1647,13 @@ struct AVPlayerMultiviewTile: View {
                     }
                     remuxer = mux
                     statusText = nil
+                    // The onChange(readyLocalURL) handler starts the player.
+                    // With retain keys correct this always sees a real value
+                    // change (fresh tile: nil -> URL; flip-back: other
+                    // channel's port -> this one's), so no direct start here
+                    // - that would double-start the player.
                     readyLocalURL = entry.localURL
+                    debugLog("[AVP-RETAIN] tile resuming adopted window channel=\(channelName)")
                     return
                 }
                 // Fresh live session takes one of the N retention slots.
@@ -1900,7 +1906,13 @@ struct AVPlayerMultiviewTile: View {
         stallWatchdog = watchdog
     }
 
-    private func stop() {
+    /// `retainKey`: the stream URL this tile was ACTUALLY playing. The
+    /// channel-swap onChange fires with the view struct already holding
+    /// the NEW channel's URL, so the default would file the outgoing
+    /// remuxer under the incoming channel's key - which start() then
+    /// instantly "adopted", playing nothing while the old channel kept
+    /// ingesting (ESPN/ESPN2 field find, 2026-08-27).
+    private func stop(retainKey: String? = nil) {
         if liveRewindArmed {
             LiveRewindEngine.shared.endExternalWindow()
             // Channel retention: hand a HEALTHY rewind session to the
@@ -1909,7 +1921,8 @@ struct AVPlayerMultiviewTile: View {
             if LiveChannelRetention.isEnabled, tileError == nil,
                let mux = remuxer, let url = readyLocalURL {
                 LiveChannelRetention.shared.retain(
-                    key: streamURL.absoluteString, channelName: channelName,
+                    key: retainKey ?? streamURL.absoluteString,
+                    channelName: channelName,
                     remuxer: mux, localURL: url)
                 remuxer = nil
             }
