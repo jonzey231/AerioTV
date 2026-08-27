@@ -367,7 +367,7 @@ struct MyRecordingsView: View {
                 // jumping to the live edge instead (matches Android's
                 // "Start at Live").
                 Button {
-                    playServerRecording(rec)
+                    playServerRecording(rec, liveEdge: true)
                 } label: {
                     Label("Start at Live", systemImage: "play.fill")
                 }
@@ -523,7 +523,11 @@ struct MyRecordingsView: View {
             // THE BEGINNING (not the live edge). Completed rows already play
             // from the start of the file, so fromStart only matters here for
             // the in-progress HLS route (emits X-Aerio-Start-From-Beginning).
-            playServerRecording(rec, fromStart: rec.isInProgress)
+            // Tap = auto: resume saved progress, else from the beginning
+            // (playServerRecording's isDVR branch owns the decision now;
+            // the old fromStart force predates DVR progress sync and
+            // made every tap discard the saved position).
+            playServerRecording(rec)
         }
     }
 
@@ -598,7 +602,8 @@ struct MyRecordingsView: View {
     /// fetches inside the HLS playlist also re-route through
     /// `/api/channels/recordings/<id>/hls/<segment>` so the same
     /// headers carry through.
-    private func playServerRecording(_ rec: Recording, fromStart: Bool = false) {
+    private func playServerRecording(_ rec: Recording, fromStart: Bool = false,
+                                     liveEdge: Bool = false) {
         guard let server = servers.first(where: { $0.id.uuidString == rec.serverID }),
               server.type == .dispatcharrAPI,
               let api = apiForRecording(rec),
@@ -660,6 +665,14 @@ struct MyRecordingsView: View {
         let resume: Int32?
         if fromStart {
             resume = isDVR ? 0 : nil
+        } else if isDVR, liveEdge {
+            // Menu "Start at Live": no seek at all - AVPlayer's default
+            // for a live-shaped playlist IS the live edge.
+            resume = nil
+        } else if isDVR {
+            // Row tap: resume where the user left off; first watch (no
+            // saved progress) starts from the beginning (Android parity).
+            resume = WatchProgressManager.getResumePosition(vodID: dvrVodID, serverID: rec.serverID) ?? 0
         } else {
             resume = WatchProgressManager.getResumePosition(vodID: dvrVodID, serverID: rec.serverID)
         }

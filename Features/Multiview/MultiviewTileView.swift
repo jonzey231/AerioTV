@@ -195,10 +195,14 @@ struct MultiviewTileView: View {
     /// half-mpv. VOD/DVR carve-out stays (proxy redirects, MKV, resume).
     /// Toggle-off sessions lock to .mpv, so this is always false then.
     private var usesAVPlayerEngine: Bool {
-        // Live and VOD ride the AVPlayer engine when the session locked
-        // to it; DVR and catchup stay mpv (their resume/scrub plumbing
-        // has not been ported).
-        guard tile.kind == .live || tile.kind == .vod else { return false }
+        // Live, VOD, and in-progress DVR ride the AVPlayer engine when
+        // the session locked to it (DVR-window driver mode, 2026-08-27);
+        // catchup stays mpv until its port lands. This guard MUST match
+        // the kinds beginVOD/enterMultiview can lock AVPlayer for - the
+        // first DVR field test mounted mpv here despite the lock, with
+        // no from-start hint at all (the sentinel header is stripped on
+        // the container path), so playback landed at the live edge.
+        guard tile.kind != .catchup else { return false }
         return store.sessionEngine.isAVPlayer
     }
 
@@ -209,7 +213,7 @@ struct MultiviewTileView: View {
     private var engineBadgeLabel: String {
         // Same guard as usesAVPlayerEngine - a VOD tile riding AVPlayer
         // must not report "mpv" (field find: Speak No Evil badge).
-        guard tile.kind == .live || tile.kind == .vod else { return "mpv" }
+        guard tile.kind != .catchup else { return "mpv" }
         switch store.sessionEngine {
         case .avPlayerDirectHLS: return "AVPlayer · Direct HLS"
         case .avPlayerRemuxTS:   return "AVPlayer · Remux TS"
