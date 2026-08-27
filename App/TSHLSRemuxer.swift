@@ -1123,18 +1123,19 @@ struct AVPSubtitleOverlay: View {
 // minutes spent away. Costs one concurrent upstream connection per
 // retained channel, which is why it is opt-in and capped at 5.
 @MainActor
-final class LiveChannelRetention {
+final class LiveChannelRetention: ObservableObject {
     static let shared = LiveChannelRetention()
 
     struct Entry {
         let key: String            // resolved stream URL - the channel identity
+        let channelID: String      // guide channel id (solo tile id) - the Jump target
         let channelName: String
         let remuxer: TSHLSRemuxer
         let localURL: URL          // loopback playlist URL (already READY)
         var lastActiveAt: Date
         var videoParams: (width: Int, height: Int, fps: Double, tenBit: Bool)?
     }
-    private(set) var entries: [Entry] = []
+    @Published private(set) var entries: [Entry] = []
 
     private init() {
         NotificationCenter.default.addObserver(
@@ -1157,7 +1158,7 @@ final class LiveChannelRetention {
     }
 
     /// Take over a still-running remuxer from a tile that is going away.
-    func retain(key: String, channelName: String, remuxer: TSHLSRemuxer, localURL: URL) {
+    func retain(key: String, channelID: String, channelName: String, remuxer: TSHLSRemuxer, localURL: URL) {
         guard Self.isEnabled else { remuxer.stop(); return }
         // Replace a stale entry for the same channel outright.
         if let idx = entries.firstIndex(where: { $0.key == key }) {
@@ -1174,7 +1175,7 @@ final class LiveChannelRetention {
                 self?.drop(key: key)
             }
         }
-        let entry = Entry(key: key, channelName: channelName, remuxer: remuxer,
+        let entry = Entry(key: key, channelID: channelID, channelName: channelName, remuxer: remuxer,
                           localURL: localURL, lastActiveAt: Date(), videoParams: nil)
         remuxer.onVideoParameters = { [weak self] w, h, fps, tenBit in
             Task { @MainActor in
@@ -1922,6 +1923,10 @@ struct AVPlayerMultiviewTile: View {
                let mux = remuxer, let url = readyLocalURL {
                 LiveChannelRetention.shared.retain(
                     key: retainKey ?? streamURL.absoluteString,
+                    // Solo seed tiles pin tileID to the guide channel id
+                    // (seedInitialTile), and only solo tiles retain - so
+                    // this IS the Jump-to-Channel deep-link target.
+                    channelID: tileID,
                     channelName: channelName,
                     remuxer: mux, localURL: url)
                 remuxer = nil

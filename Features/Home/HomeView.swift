@@ -3502,6 +3502,11 @@ struct MainTabView: View {
 
     @State private var selectedTab: AppTab = .liveTV
     @State private var showSearch = false
+    /// Channel-retention status circle (tvOS): observed so the count
+    /// circle appears/disappears live as channels are kept or dropped.
+    @ObservedObject private var retention = LiveChannelRetention.shared
+    @State private var retentionListPresented = false
+    @State private var retentionActionKey: String?
     @State private var isPlaying = false  // for Movies / TV Shows player state
     /// Tracks whether a VOD detail view is pushed (Movies or Series).
     /// When true, Menu button should pop the navigation, not switch tabs.
@@ -4319,6 +4324,79 @@ struct MainTabView: View {
                         ) {
                             withAnimation(.easeOut(duration: 0.2)) { showSearch.toggle() }
                         }
+                        // Channel retention status (Logan 2026-08-27): a
+                        // count circle appears while flipped-away channels
+                        // are still ingesting upstream, so background
+                        // provider connections are always one glance -
+                        // and one click - from being cancelled.
+                        if !retention.entries.isEmpty {
+                            TVNavActionCircle(
+                                systemImage: "\(min(retention.entries.count, 5)).circle",
+                                label: "Channels kept live in background"
+                            ) {
+                                if retention.entries.count == 1 {
+                                    retentionActionKey = retention.entries[0].key
+                                } else {
+                                    retentionListPresented = true
+                                }
+                            }
+                        }
+                    }
+                    .confirmationDialog(
+                        "Channels Live in Background",
+                        isPresented: $retentionListPresented,
+                        titleVisibility: .visible
+                    ) {
+                        ForEach(retention.entries, id: \.key) { entry in
+                            Button(entry.channelName) {
+                                // Beat between dialogs: presenting the
+                                // per-channel dialog in the same runloop
+                                // turn as this one's dismissal drops it.
+                                let key = entry.key
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                    retentionActionKey = key
+                                }
+                            }
+                        }
+                        Button("Stop All", role: .destructive) {
+                            LiveChannelRetention.shared.stopAll(reason: "user (status circle)")
+                        }
+                        Button("Close", role: .cancel) {}
+                    } message: {
+                        Text("These channels keep buffering for Live Rewind and each holds a stream connection.")
+                    }
+                    .confirmationDialog(
+                        retention.entries.first(where: { $0.key == retentionActionKey })?.channelName ?? "Channel",
+                        isPresented: Binding(
+                            get: { retentionActionKey != nil },
+                            set: { if !$0 { retentionActionKey = nil } }
+                        ),
+                        titleVisibility: .visible
+                    ) {
+                        Button {
+                            guard let key = retentionActionKey,
+                                  let entry = retention.entries.first(where: { $0.key == key }) else { return }
+                            retentionActionKey = nil
+                            DebugLogger.shared.log(
+                                "[AVP-RETAIN] status circle: jump to '\(entry.channelName)'",
+                                category: "Playback", level: .info)
+                            NotificationCenter.default.post(
+                                name: .aerioOpenChannel, object: nil,
+                                userInfo: ["channelID": entry.channelID])
+                        } label: {
+                            Label("Jump to Channel", systemImage: "play.tv")
+                        }
+                        Button(role: .destructive) {
+                            guard let key = retentionActionKey else { return }
+                            retentionActionKey = nil
+                            DebugLogger.shared.log(
+                                "[AVP-RETAIN] status circle: cancel retained channel",
+                                category: "Playback", level: .info)
+                            LiveChannelRetention.shared.drop(key: key)
+                        } label: {
+                            Label("Cancel", systemImage: "xmark.circle")
+                        }
+                        Button("Keep Running", role: .cancel) { retentionActionKey = nil }
                     }
                     // Own focus region beside the tab bar: LEFT from the
                     // first tab pill (or up-and-left from content) reaches
