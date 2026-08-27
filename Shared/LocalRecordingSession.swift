@@ -780,14 +780,14 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         return currentUsageBytes() + max(0, free - floor)
     }
 
-    /// Total bytes of buffered .ts across all session dirs (rewind
+    /// Total bytes of buffered media (.ts and fMP4 .m4s) across all session dirs (rewind
     /// segments AND AVPlayer spill files), for the free-space budget.
     private func currentUsageBytes() -> Int64 {
         let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: nil)) ?? []
         var total: Int64 = 0
         for dir in dirs where dir.hasDirectoryPath {
             let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-            for f in files where f.pathExtension == "ts" {
+            for f in files where ["ts", "m4s"].contains(f.pathExtension) {
                 total += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
             }
         }
@@ -1104,14 +1104,14 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func enforceBudget() {
-        // Enumerate EVERY .ts under the root by modification date, not
+        // Enumerate every .ts/.m4s under the root by modification date, not
         // just parseable seg_<wallMs> names: the AVPlayer spill files
         // (seg<seq>.ts in avp_sess_ dirs) were invisible to the budget.
         let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: nil)) ?? []
         var segs: [(url: URL, mtime: Date, size: Int64)] = []
         for dir in dirs where dir.hasDirectoryPath {
             let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
-            for f in files where f.pathExtension == "ts" {
+            for f in files where ["ts", "m4s"].contains(f.pathExtension) {
                 let vals = try? f.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
                 segs.append((f, vals?.contentModificationDate ?? .distantPast, Int64(vals?.fileSize ?? 0)))
             }
