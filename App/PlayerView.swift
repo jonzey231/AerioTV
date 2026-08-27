@@ -3900,6 +3900,17 @@ final class AVPlayerProgressDriver {
     private let player: AVPlayer
     private let store: PlayerProgressStore
     private let isLive: Bool
+    /// Live Rewind (AVPlayer container): true when the tile's remuxer is
+    /// spilling a rewind window and the playlist advertises all of it.
+    /// The time observer then pumps currentMs in the chrome's tail-
+    /// relative domain and mirrors the window into LiveRewindEngine's
+    /// external-window state; seekAction remaps tail-domain targets onto
+    /// the playlist timeline. Set by the tile right after driver init.
+    var liveRewindWindowActive = false
+    /// Natural live-edge distance (seconds, EMA) while NOT timeshifting:
+    /// the AVPlayer live cushion self-builds (measured up to ~36s on a
+    /// starved feed), so "behind live" can only be declared beyond it.
+    private var naturalEdgeOffset: Double = 4
     /// Host-provided sink for aspect changes (the overlay has no handle
     /// to the AVPlayerLayer; the host owns it and applies the gravity).
     private let applyGravity: (AVLayerVideoGravity) -> Void
@@ -3987,7 +3998,11 @@ final class AVPlayerProgressDriver {
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: interval, queue: .main) { [weak self] time in
-            guard let self, !self.isLive else { return }
+            guard let self else { return }
+            if self.isLive {
+                self.pumpLiveRewindWindow(time)
+                return
+            }
             let secs = time.seconds
             if secs.isFinite { self.store.currentMs = Int32(secs * 1000) }
             // DVR window: the playlist is live-shaped (no ENDLIST) so the
@@ -4466,13 +4481,71 @@ final class AVPlayerProgressDriver {
     }
 
     /// Intents OUT: store command closures -> AVPlayer.
+    /// Live Rewind window pump (0.5s, main queue): currentMs = playhead
+    /// offset from the seekable start (the chrome domain), engine
+    /// window = wall-clock mapping of the seekable range, timeshifting
+    /// derived from edge distance vs the learned natural cushion.
+    private func pumpLiveRewindWindow(_ time: CMTime) {
+        guard liveRewindWindowActive,
+              let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
+        let start = CMTimeGetSeconds(range.start)
+        let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+        let cur = time.seconds
+        guard start.isFinite, end.isFinite, cur.isFinite, end > start else { return }
+        store.currentMs = Int32(max(0, (cur - start) * 1000))
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let windowMs = Int64((end - start) * 1000)
+        let engine = LiveRewindEngine.shared
+        Task { @MainActor in
+            engine.updateExternalWindow(tailWallMs: now - windowMs, headWallMs: now)
+        }
+        // Edge accounting. While at the edge and actually playing, learn
+        // the natural cushion; flip to timeshifting only when the
+        // playhead falls well beyond it (a pause, or a seek the action
+        // below already flagged). Rejoining within cushion+5s flips back.
+        let behind = end - cur
+        if engine.timeshifting {
+            if behind < naturalEdgeOffset + 5 { engine.noteTimeshifting(false) }
+        } else if player.timeControlStatus == .playing {
+            if behind < naturalEdgeOffset + 10 {
+                naturalEdgeOffset = naturalEdgeOffset * 0.95 + behind * 0.05
+            } else if behind > naturalEdgeOffset + 20 {
+                engine.noteTimeshifting(true)
+            }
+        }
+    }
+
     private func wireCommands(_ player: AVPlayer) {
         store.togglePauseAction = { [weak player] in
             guard let player else { return }
             if player.timeControlStatus == .paused { player.play() } else { player.pause() }
         }
-        store.seekAction = { [weak player] ms in
+        store.seekAction = { [weak self, weak player] ms in
             guard let player else { return }
+            // Live Rewind: incoming targets are ms from the window tail
+            // (the chrome domain). Map onto the playlist timeline;
+            // within 5s of the head = rejoin live.
+            if let self, self.isLive, self.liveRewindWindowActive {
+                guard let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
+                let start = CMTimeGetSeconds(range.start)
+                let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                guard start.isFinite, end.isFinite, end > start else { return }
+                let window = end - start
+                let target = min(max(0, Double(ms) / 1000.0), window)
+                if target >= window - 5 {
+                    LiveRewindEngine.shared.noteTimeshifting(false)
+                    debugLog("[AVP-REWIND] seek -> live edge")
+                    player.seek(to: CMTime(seconds: max(start, end - 1), preferredTimescale: 600))
+                } else {
+                    LiveRewindEngine.shared.noteTimeshifting(true)
+                    debugLog("[AVP-REWIND] seek -> \(Int(target))s into \(Int(window))s window")
+                    player.seek(to: CMTime(seconds: start + target, preferredTimescale: 600),
+                                toleranceBefore: .zero, toleranceAfter: .zero)
+                }
+                self.store.currentMs = Int32(target * 1000)
+                if player.timeControlStatus == .paused { player.play() }
+                return
+            }
             let target = CMTime(value: CMTimeValue(ms), timescale: 1000)
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
         }

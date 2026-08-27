@@ -1154,6 +1154,12 @@ struct AVPlayerMultiviewTile: View {
     /// mismatches (provider rotating the file behind the URL). Reset on
     /// URL change so every copy gets its own retry.
     @State private var mismatchAutoRetried = false
+    /// Live Rewind armed for this tile: the remuxer was created with a
+    /// spill window (solo live + setting on), so the driver runs in
+    /// rewind-window mode and LiveRewindEngine mirrors the window for
+    /// the chrome. Dropped when a second tile joins (grid chrome has no
+    /// scrubber; the spill ring keeps running, disk-bounded).
+    @State private var liveRewindArmed = false
     /// Harvested-cue subtitle state for MKV VOD playback (see
     /// AVPSubtitleCueStore). A class ref, so the server callbacks can
     /// capture it directly without the stale-struct hazard below.
@@ -1264,6 +1270,15 @@ struct AVPlayerMultiviewTile: View {
             mismatchAutoRetried = false
             stop()
             start()
+        }
+        // A second tile joining drops the rewind UI (grid chrome has no
+        // scrubber; mpv parity - its relay falls back to direct too).
+        .onReceive(NotificationCenter.default.publisher(for: .aerioLiveRewindDropRelay)) { _ in
+            guard liveRewindArmed else { return }
+            liveRewindArmed = false
+            driver?.liveRewindWindowActive = false
+            LiveRewindEngine.shared.endExternalWindow()
+            debugLog("[AVP-REWIND] window dropped (second tile)")
         }
         // Direct-HLS playback failures have no remuxer to report them;
         // catch the item-level failure and fall back to mpv.
@@ -1466,7 +1481,22 @@ struct AVPlayerMultiviewTile: View {
             debugLog("[AVP-MV] tile playing direct HLS channel=\(channelName)")
         default:
             statusText = "Preparing..."
-            let mux = TSHLSRemuxer(sourceURL: streamURL, headers: headers)
+            // Live Rewind (task #145, AVPlayer port 2026-08-27): solo
+            // live sessions spill every closed segment to disk and the
+            // playlist advertises the whole window - AVPlayer native
+            // seek IS the rewind. Both arms spill (TS .ts / fMP4 .m4s).
+            let rewindSeconds: Double = {
+                guard MultiviewStore.shared.tiles.count == 1,
+                      UserDefaults.standard.bool(forKey: "liveRewindEnabled") else { return 0 }
+                let mins = UserDefaults.standard.integer(forKey: "liveRewindDepthMinutes")
+                return Double(mins > 0 ? mins : 30) * 60
+            }()
+            liveRewindArmed = rewindSeconds > 0
+            if liveRewindArmed {
+                debugLog("[AVP-REWIND] armed: \(Int(rewindSeconds))s spill window channel=\(channelName)")
+            }
+            let mux = TSHLSRemuxer(sourceURL: streamURL, headers: headers,
+                                   rewindWindowSeconds: rewindSeconds)
             mux.onReady = { url in
                 // @State write only; the fresh-struct onChange handler
                 // does the actual player start (see readyLocalURL doc).
@@ -1645,6 +1675,10 @@ struct AVPlayerMultiviewTile: View {
         // layout (field find: "can't scrub at all", Speak No Evil).
         driver = AVPlayerProgressDriver(
             player: avPlayer, store: progressStore, isLive: !(isVOD || isDVR), applyGravity: { _ in })
+        if liveRewindArmed, !isVOD, !isDVR {
+            driver?.liveRewindWindowActive = true
+            LiveRewindEngine.shared.beginExternalWindow()
+        }
         // MKV subtitle picker: the overlay store owns subtitle state, so
         // the store's subtitle fields are OURS, not the driver's (the
         // legible group is empty - subs never ride the HLS master, see
@@ -1709,6 +1743,9 @@ struct AVPlayerMultiviewTile: View {
     }
 
     private func stop() {
+        if liveRewindArmed {
+            LiveRewindEngine.shared.endExternalWindow()
+        }
         driver?.teardown()
         driver = nil
         player?.pause()

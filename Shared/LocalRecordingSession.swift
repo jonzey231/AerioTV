@@ -826,6 +826,50 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         Task { @MainActor in self.timeshifting = on }
     }
 
+    // MARK: - External window (AVPlayer container Live Rewind)
+    //
+    // The AVPlayer engine's rewind is TSHLSRemuxer's disk spill + a
+    // playlist advertising the whole spilled window - native AVPlayer
+    // seeking IS the rewind, no relay, no LiveRewindBuffer. The chrome,
+    // however, is gated entirely on this engine's published state
+    // (buffering / timeshifting / tailWallMs / headWallMs). External-
+    // window mode lets that path light the same chrome: the AVPlayer
+    // progress driver pumps the window it reads from seekableTimeRanges
+    // into these fields, and nothing else in the engine runs.
+    private(set) var externalWindowActive = false
+
+    @MainActor
+    func beginExternalWindow() {
+        guard !buffering else { return }   // never fight a live mpv relay
+        externalWindowActive = true
+        timeshifting = false
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        tailWallMs = now
+        headWallMs = now
+        buffering = true
+        DebugLogger.shared.log("[LiveRewind] external window began (AVPlayer)",
+                               category: "Playback", level: .info)
+    }
+
+    @MainActor
+    func updateExternalWindow(tailWallMs tail: Int64, headWallMs head: Int64) {
+        guard externalWindowActive else { return }
+        // Same delta-gate as the relay window timer: second resolution
+        // is all the transport needs, and every write re-renders chrome.
+        if abs(tail - tailWallMs) >= 1_000 { tailWallMs = tail }
+        if abs(head - headWallMs) >= 1_000 { headWallMs = head }
+    }
+
+    @MainActor
+    func endExternalWindow() {
+        guard externalWindowActive else { return }
+        externalWindowActive = false
+        buffering = false
+        timeshifting = false
+        DebugLogger.shared.log("[LiveRewind] external window ended",
+                               category: "Playback", level: .info)
+    }
+
     func noteReaderStart(_ wallMs: Int64) {
         stateLock.lock(); readerBaseWallMs = wallMs; stateLock.unlock()
         Task { @MainActor in self.baseWallMs = wallMs }
