@@ -4360,7 +4360,7 @@ struct MainTabView: View {
                                 // turn as this one's dismissal drops it.
                                 let key = entry.key
                                 retentionActionFromList = true
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                     retentionActionKey = key
                                 }
                             }
@@ -4383,7 +4383,7 @@ struct MainTabView: View {
                                 retentionActionResolved = false
                                 if dismissedWithoutChoice, retentionActionFromList,
                                    !retention.entries.isEmpty {
-                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                                         retentionListPresented = true
                                     }
                                 }
@@ -4416,10 +4416,7 @@ struct MainTabView: View {
                         } label: {
                             Label("Stop Playback", systemImage: "xmark.circle")
                         }
-                        Button("Keep Running", role: .cancel) {
-                            retentionActionResolved = true
-                            retentionActionKey = nil
-                        }
+
                     }
                     // Own focus region beside the tab bar: LEFT from the
                     // first tab pill (or up-and-left from content) reaches
