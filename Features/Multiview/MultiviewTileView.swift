@@ -511,14 +511,40 @@ struct MultiviewTileView: View {
                 finishedOverlay
             }
         }
-        // .dvr: proactive "Recording Ending" choice, a SIBLING
-        // overlay (same focus/tap reasoning as Finished above). The
-        // kind gate self-dismisses it if the finalize migration
-        // swaps the tile to .vod underneath it.
-        .overlay {
-            if tile.kind == .dvr, dvrEndPromptVisible {
-                dvrEndingOverlay
+
+        // .dvr: proactive "Recording Ending" choice as a SYSTEM dialog.
+        // The custom sibling-overlay card rendered fine but its buttons
+        // could never take Siri-remote focus - the solo player's focus
+        // model owns the remote (screen recording, 2026-08-27), the same
+        // trap that stripped the error card's tvOS buttons. The system
+        // confirmationDialog brings its own focus handling, like every
+        // recordings menu already does.
+        .confirmationDialog(
+            "Recording Ending",
+            isPresented: $dvrEndPromptVisible,
+            titleVisibility: .visible
+        ) {
+            Button {
+                dvrEndPromptDismissed = true
+                dvrEndContinueOnLive()
+            } label: {
+                Label("Continue on Live TV", systemImage: "play.tv")
             }
+            Button {
+                dvrEndPromptDismissed = true
+                DebugLogger.shared.log(
+                    "[MV-Cmd] DVR ending dialog: back to DVR tile=\(tile.id)",
+                    category: "Playback", level: .info)
+                store.saveVODProgressNow()
+                PlayerSession.shared.exit()
+            } label: {
+                Label("Back to DVR", systemImage: "arrow.backward.circle")
+            }
+            Button("Keep Watching", role: .cancel) {
+                dvrEndPromptDismissed = true
+            }
+        } message: {
+            Text("This recording is about to reach its scheduled end.")
         }
         // Clock source: the driver's 0.5s currentMs pump (a per-init
         // Timer.publish never fires here - the 0.5s re-render replaces
@@ -896,14 +922,40 @@ struct MultiviewTileView: View {
                     finishedOverlay
                 }
             }
-            // .dvr: proactive "Recording Ending" choice, a SIBLING
-            // overlay (same focus/tap reasoning as Finished above). The
-            // kind gate self-dismisses it if the finalize migration
-            // swaps the tile to .vod underneath it.
-            .overlay {
-                if tile.kind == .dvr, dvrEndPromptVisible {
-                    dvrEndingOverlay
+
+            // .dvr: proactive "Recording Ending" choice as a SYSTEM dialog.
+            // The custom sibling-overlay card rendered fine but its buttons
+            // could never take Siri-remote focus - the solo player's focus
+            // model owns the remote (screen recording, 2026-08-27), the same
+            // trap that stripped the error card's tvOS buttons. The system
+            // confirmationDialog brings its own focus handling, like every
+            // recordings menu already does.
+            .confirmationDialog(
+                "Recording Ending",
+                isPresented: $dvrEndPromptVisible,
+                titleVisibility: .visible
+            ) {
+                Button {
+                    dvrEndPromptDismissed = true
+                    dvrEndContinueOnLive()
+                } label: {
+                    Label("Continue on Live TV", systemImage: "play.tv")
                 }
+                Button {
+                    dvrEndPromptDismissed = true
+                    DebugLogger.shared.log(
+                        "[MV-Cmd] DVR ending dialog: back to DVR tile=\(tile.id)",
+                        category: "Playback", level: .info)
+                    store.saveVODProgressNow()
+                    PlayerSession.shared.exit()
+                } label: {
+                    Label("Back to DVR", systemImage: "arrow.backward.circle")
+                }
+                Button("Keep Watching", role: .cancel) {
+                    dvrEndPromptDismissed = true
+                }
+            } message: {
+                Text("This recording is about to reach its scheduled end.")
             }
             // Clock source: the driver's 0.5s currentMs pump (a per-init
             // Timer.publish never fires here - the 0.5s re-render replaces
@@ -1684,65 +1736,6 @@ struct MultiviewTileView: View {
     /// iPad directly. Gated strictly to `.vod`: a `.dvr` tile at its live
     /// edge isn't "finished" and a `.live` tile never finishes, so this
     /// view is only ever mounted for VOD.
-    /// Prompt shown when a watched-at-the-edge recording is about to hit
-    /// its scheduled end (Logan 2026-08-27): choose between handing off
-    /// to the live channel or going back to the DVR tab. Ignoring it is
-    /// fine - the finalize migration rolls playback into the completed
-    /// file and the kind flip dismisses this overlay.
-    @ViewBuilder
-    private var dvrEndingOverlay: some View {
-        ZStack {
-            Color.black.opacity(0.72)
-                .onAppear {
-                    DebugLogger.shared.log(
-                        "[MV-Tile] DVR ending overlay RENDERED tile=\(tile.id)",
-                        category: "Playback", level: .info)
-                }
-            VStack(spacing: 14) {
-                Image(systemName: "record.circle")
-                    .font(.largeTitle)
-                    .foregroundStyle(.red)
-                Text("Recording Ending")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                Text("This recording is about to reach its scheduled end.")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.9))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 10)
-                HStack(spacing: 12) {
-                    Button {
-                        dvrEndContinueOnLive()
-                    } label: {
-                        Label("Continue on Live TV", systemImage: "play.tv")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(Capsule().fill(Color.accentPrimary))
-                    }
-                    .buttonStyle(.plain)
-                    Button {
-                        DebugLogger.shared.log(
-                            "[MV-Cmd] DVR ending overlay: back to DVR tile=\(tile.id)",
-                            category: "Playback", level: .info)
-                        store.saveVODProgressNow()
-                        PlayerSession.shared.exit()
-                    } label: {
-                        Label("Back to DVR", systemImage: "arrow.backward.circle")
-                            .font(.footnote.weight(.semibold))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(Capsule().fill(Color.white.opacity(0.22)))
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(12)
-        }
-    }
-
     /// Raise the prompt when BOTH hold: the scheduled end is within 20s
     /// (or past), and the playhead is within 30s of the recorded edge.
     private func checkDVREndApproaching() {
