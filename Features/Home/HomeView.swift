@@ -4394,7 +4394,7 @@ struct MainTabView: View {
                                 category: "Playback", level: .info)
                             LiveChannelRetention.shared.drop(key: key)
                         } label: {
-                            Label("Cancel", systemImage: "xmark.circle")
+                            Label("Stop Playback", systemImage: "xmark.circle")
                         }
                         Button("Keep Running", role: .cancel) { retentionActionKey = nil }
                     }
