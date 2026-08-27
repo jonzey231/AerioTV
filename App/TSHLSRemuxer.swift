@@ -1115,6 +1115,14 @@ struct AVPlayerMultiviewTile: View {
     /// server) with the driver in DVR-window mode: growing scrubber,
     /// live-edge default, exact seeks anywhere in the recorded window.
     var isDVR: Bool = false
+    /// Resume offset handed straight from tile.resumePositionMs. The
+    /// progress-store copy (explicitResumeMs) is applied by the PARENT
+    /// view's onAppear, which fires AFTER this child's - so a player
+    /// started synchronously in start() (direct HLS/MP4) read nil and
+    /// never seeked (field find 2026-08-27: DVR resume landed at the
+    /// live edge). The store copy still wins when present (version
+    /// switches update it mid-session); this is the launch fallback.
+    var resumePositionMs: Int32? = nil
     /// The per-tile store the container chrome binds to (scrubber,
     /// play-pause, track pickers, stream info). AVPlayerProgressDriver
     /// feeds it from this tile's AVPlayer, so the unified chrome works
@@ -1571,7 +1579,8 @@ struct AVPlayerMultiviewTile: View {
         // VOD resume (Continue Watching): the store carries the offset
         // the container preloaded; AVPlayer queues the seek until the
         // item is ready, so firing it here is safe and race-free.
-        if isDVR, progressStore.explicitResumeMs == 0 {
+        let resumeMs = progressStore.explicitResumeMs ?? resumePositionMs
+        if isDVR, resumeMs == 0 {
             // "Watch from Beginning" on an in-progress recording: without
             // a seek, a live-shaped playlist starts at the live edge.
             // AVPlayer queues the seek until the item is ready, and the
@@ -1580,7 +1589,7 @@ struct AVPlayerMultiviewTile: View {
             avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
             debugLog("[AVP-MV] DVR from-beginning seek queued title=\(channelName)")
         }
-        if isVOD || isDVR, let ms = progressStore.explicitResumeMs, ms > 2_000 {
+        if isVOD || isDVR, let ms = resumeMs, ms > 2_000 {
             let t = CMTime(value: CMTimeValue(ms), timescale: 1_000)
             // EXACT seek: infinite tolerance snapped to the nearest
             // segment boundary - up to ~6s drift per version switch with

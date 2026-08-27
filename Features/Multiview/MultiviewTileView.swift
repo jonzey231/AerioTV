@@ -697,6 +697,7 @@ struct MultiviewTileView: View {
                         channelName: tile.item.name,
                         isVOD: tile.kind == .vod,
                         isDVR: tile.kind == .dvr,
+                        resumePositionMs: tile.resumePositionMs,
                         progressStore: progressStore,
                         // A hard AVPlayer failure (codec gate, fatal item
                         // error) downgrades the WHOLE session to mpv,
@@ -985,6 +986,7 @@ struct MultiviewTileView: View {
                         channelName: tile.item.name,
                         isVOD: tile.kind == .vod,
                         isDVR: tile.kind == .dvr,
+                        resumePositionMs: tile.resumePositionMs,
                         progressStore: progressStore,
                         onEngineFallback: { _ in store.downgradeToMPV() }
                     )
