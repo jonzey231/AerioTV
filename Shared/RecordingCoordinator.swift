@@ -122,7 +122,7 @@ final class RecordingCoordinator: ObservableObject {
     /// hundreds of visible cells a @Published invalidation on every
     /// reconcile would be a real re-render cost. The snapshot refreshes on
     /// every mutation path in this coordinator plus the guide's onAppear.
-    struct GuideRecordingMarker {
+    struct GuideRecordingMarker: Equatable {
         let channelID: String
         /// Empty on rows imported from the server by reconcile.
         let channelName: String
@@ -130,13 +130,22 @@ final class RecordingCoordinator: ObservableObject {
         let start: Date
         let end: Date
     }
-    private(set) var guideRecordingMarkers: [GuideRecordingMarker] = []
+    /// @Published, but assigned ONLY when the snapshot actually changed:
+    /// the refresh runs on every reconcile tick, and an unconditional
+    /// publish would repaint hundreds of guide cells every ~30s for
+    /// nothing. The equatable gate keeps publishes to real mutations
+    /// (schedule/cancel/delete/finish), which is what lets a guide cell
+    /// observe this and drop its red dot when a recording is cancelled
+    /// from the DVR tab (field report 2026-08-27: dot survived the
+    /// delete because the tab switch never re-fired the guide's
+    /// onAppear reseed).
+    @Published private(set) var guideRecordingMarkers: [GuideRecordingMarker] = []
 
     /// Rebuilds `guideRecordingMarkers` from SwiftData. Fetches every row
     /// and filters in memory -- recording counts are tiny.
     func refreshGuideRecordingMarkers(modelContext: ModelContext) {
         let all = (try? modelContext.fetch(FetchDescriptor<Recording>())) ?? []
-        guideRecordingMarkers = all.compactMap { rec in
+        let fresh: [GuideRecordingMarker] = all.compactMap { rec in
             guard rec.status == .scheduled || rec.status == .recording else { return nil }
             return GuideRecordingMarker(channelID: rec.channelID,
                                         channelName: rec.channelName,
@@ -144,6 +153,7 @@ final class RecordingCoordinator: ObservableObject {
                                         start: rec.scheduledStart,
                                         end: rec.scheduledEnd)
         }
+        if fresh != guideRecordingMarkers { guideRecordingMarkers = fresh }
     }
 
     /// Guide-cell query: is a Scheduled/in-progress recording set for this

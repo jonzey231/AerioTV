@@ -4921,6 +4921,14 @@ private struct GuideProgramButton: View {
     // Access ReminderManager directly — @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
     private var reminderManager: ReminderManager { .shared }
+    /// Observed (unlike reminderManager above) so a cancelled/deleted
+    /// recording drops its red dot without waiting for the guide's next
+    /// onAppear (field report 2026-08-27: dot survived a DVR-tab delete
+    /// because a tab switch never re-fires onAppear). Cheap in practice:
+    /// the marker snapshot is equatable-gated to publish only on REAL
+    /// changes, and the coordinator's other @Published fields
+    /// (activeSessions/isRecording) mutate only on local-session events.
+    @ObservedObject private var recordingCoordinator = RecordingCoordinator.shared
     /// v1.7.x: observed so the cell-level tap behavior swaps between
     /// "play this channel" and "toggle in multiview pile" when the
     /// `isStagingFromGuide` flag flips, and so the long-press menu
@@ -4966,7 +4974,7 @@ private struct GuideProgramButton: View {
     /// recording. Read directly off RecordingCoordinator's marker snapshot,
     /// same non-observing pattern as `reminderManager` above.
     private var hasScheduledRecording: Bool {
-        RecordingCoordinator.shared.hasGuideRecordingMarker(
+        recordingCoordinator.hasGuideRecordingMarker(
             channelID: channelItem.id, channelName: channelItem.name,
             dispatcharrChannelID: channelItem.dispatcharrChannelID,
             title: prog.title, start: prog.start, end: prog.end)
