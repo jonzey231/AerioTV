@@ -733,7 +733,17 @@ struct MultiviewTileView: View {
             // relocate, audio routing, chrome, focus) are tile-agnostic,
             // so this branch is the entirety of AVPlayer multiview.
             Group {
-                if usesAVPlayerEngine {
+                if !store.tiles.contains(where: { $0.id == tile.id }) {
+                    // ZOMBIE GUARD (field find 2026-08-27, "Continue on
+                    // Live TV" hand-off): exit() empties the tile list
+                    // and resets the engine lock to .mpv in one beat,
+                    // but this view can re-render 1s+ later while the
+                    // tab transition unwinds - and the .mpv default then
+                    // mounted a FRESH mpv instance playing the dead DVR
+                    // URL over the incoming live session. A tile no
+                    // longer in the store mounts NO engine, ever.
+                    Color.black
+                } else if usesAVPlayerEngine {
                     AVPlayerMultiviewTile(
                         tileID: tile.id,
                         streamURL: avPlayerTileURL,
@@ -1061,7 +1071,17 @@ struct MultiviewTileView: View {
             // branch the tvOS body uses; the surrounding gestures /
             // chrome / focus are engine-agnostic.
             Group {
-                if usesAVPlayerEngine {
+                if !store.tiles.contains(where: { $0.id == tile.id }) {
+                    // ZOMBIE GUARD (field find 2026-08-27, "Continue on
+                    // Live TV" hand-off): exit() empties the tile list
+                    // and resets the engine lock to .mpv in one beat,
+                    // but this view can re-render 1s+ later while the
+                    // tab transition unwinds - and the .mpv default then
+                    // mounted a FRESH mpv instance playing the dead DVR
+                    // URL over the incoming live session. A tile no
+                    // longer in the store mounts NO engine, ever.
+                    Color.black
+                } else if usesAVPlayerEngine {
                     AVPlayerMultiviewTile(
                         tileID: tile.id,
                         streamURL: avPlayerTileURL,
