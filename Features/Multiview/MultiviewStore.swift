@@ -816,7 +816,9 @@ final class MultiviewStore: ObservableObject {
         serverID: String?,
         vodType: String,
         resumePositionMs: Int32? = nil,
-        bypassWarning: Bool = false
+        bypassWarning: Bool = false,
+        dvrScheduledEnd: Date? = nil,
+        dvrChannelID: String? = nil
     ) -> AddResult {
         // Dedup on the VOD id when present. Server recordings have no
         // id, so they can be added more than once (matching channels).
@@ -856,7 +858,9 @@ final class MultiviewStore: ObservableObject {
             vodID: vodID,
             vodServerID: serverID,
             vodType: vodType,
-            resumePositionMs: resumePositionMs
+            resumePositionMs: resumePositionMs,
+            dvrScheduledEnd: dvrScheduledEnd,
+            dvrChannelID: dvrChannelID
         )
         tiles.append(tile)
         if tiles.count == 2 {

@@ -686,7 +686,9 @@ struct MyRecordingsView: View {
             title: rec.programTitle, streamURL: url, headers: containerHeaders,
             posterURL: nil, vodID: dvrVodID, serverID: rec.serverID,
             vodType: "recording", resumePositionMs: resume,
-            kind: isDVR ? .dvr : .vod) {
+            kind: isDVR ? .dvr : .vod,
+            dvrScheduledEnd: isDVR ? rec.effectiveEnd : nil,
+            dvrChannelID: isDVR ? rec.channelID : nil) {
             debugLog("▶️ \(isDVR ? "In-progress" : "Completed") recording via AVPlayer container: id=\(remoteID) resume=\(resume.map(String.init) ?? "none")ms")
             return
         }

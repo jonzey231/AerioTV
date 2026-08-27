@@ -473,10 +473,13 @@ struct ChannelListView: View {
                     tryHandlePendingChannelDeepLink(from: items)
                     #endif
                 }
-                #if os(tvOS)
                 // Warm-launch deep link: the app was already running, channels
-                // are already loaded, and a Top Shelf click posted an
-                // aerioOpenChannel notification. Start playback immediately.
+                // are already loaded, and an aerioOpenChannel notification
+                // arrived (tvOS: Top Shelf click; both platforms: the DVR
+                // "Continue on Live TV" hand-off). Start playback immediately.
+                // Cross-platform since 2026-08-27 - only tvOS ever POSTS the
+                // Top Shelf flavor, so iOS behavior changes only for the new
+                // hand-off path.
                 .onReceive(NotificationCenter.default.publisher(for: .aerioOpenChannel)) { notif in
                     guard let channelID = notif.userInfo?["channelID"] as? String else { return }
                     if let channel = channelStore.channels.first(where: { $0.id == channelID }),
@@ -490,7 +493,6 @@ struct ChannelListView: View {
                         debugLog("🔗 ChannelListView: warm deep link received but channel not loaded yet")
                     }
                 }
-                #endif
                 // EPG-search jump: force guide mode and clear any group
                 // filter so the target channel is visible. EPGGuideView
                 // consumes the pending target (UserDefaults) and scrolls.

@@ -1281,6 +1281,27 @@ struct AVPlayerMultiviewTile: View {
     /// failure stays ON SCREEN instead of being silently rescued - the
     /// whole point of the no-mpv field test is to see what breaks.
     private func failOrFallback(_ reason: String) {
+        // In-progress DVR: ANY terminal error most likely means the
+        // recording just finished (Dispatcharr finalizes and the /hls/
+        // playlist route starts serving the SPA's HTML -> -12646
+        // "Playlist parse error"; a stop without finalize just starves
+        // the edge into the stale-playlist escalation). Runs BEFORE the
+        // generic auto-retry: re-tuning a finalized playlist just flashes
+        // "Retrying..." and fails again (field find 2026-08-27). One shot:
+        // migrate the tile onto the completed /file/ endpoint at the
+        // current position. The store swap changes streamURL, which the
+        // onChange restart picks up; a false return (unexpected URL
+        // shape) falls through to the normal card.
+        if isDVR, tileError == nil {
+            let pos = progressStore.currentMs
+            debugLog("[AVP-MV] DVR terminal (\(reason)); attempting completed-file migration at \(pos)ms title=\(channelName)")
+            if MultiviewStore.shared.migrateDVRTileToCompletedFile(tileID: tileID, positionMs: pos) {
+                statusText = "Recording finished. Reloading..."
+                stop()
+                return
+            }
+        }
+
         // One silent full-chain retry per stream URL for the transient
         // classes, BEFORE any mpv fallback or error card: provider
         // mid-rotation mismatches and the wedges they cause downstream
@@ -1319,24 +1340,6 @@ struct AVPlayerMultiviewTile: View {
                 start()
             }
             return
-        }
-        // In-progress DVR: ANY terminal error most likely means the
-        // recording just finished (Dispatcharr finalizes and the /hls/
-        // playlist route starts serving the SPA's HTML -> -12646
-        // "Playlist parse error"; a stop without finalize just starves
-        // the edge into the stale-playlist escalation). One shot:
-        // migrate the tile onto the completed /file/ endpoint at the
-        // current position. The store swap changes streamURL, which the
-        // onChange restart picks up; a false return (unexpected URL
-        // shape) falls through to the normal card.
-        if isDVR, tileError == nil {
-            let pos = progressStore.currentMs
-            debugLog("[AVP-MV] DVR terminal (\(reason)); attempting completed-file migration at \(pos)ms title=\(channelName)")
-            if MultiviewStore.shared.migrateDVRTileToCompletedFile(tileID: tileID, positionMs: pos) {
-                statusText = "Recording finished. Reloading..."
-                stop()
-                return
-            }
         }
         if PlaybackFeatureFlags.mpvEngineEnabled {
             onEngineFallback(reason)

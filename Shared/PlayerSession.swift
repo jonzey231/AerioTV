@@ -469,7 +469,9 @@ final class PlayerSession: ObservableObject {
                   versionOptions: [VODVersionOption] = [],
                   selectedVersionID: Int? = nil,
                   versionSelectionKey: String? = nil,
-                  kind: TilePlaybackKind = .vod) -> Bool {
+                  kind: TilePlaybackKind = .vod,
+                  dvrScheduledEnd: Date? = nil,
+                  dvrChannelID: String? = nil) -> Bool {
         guard PlaybackFeatureFlags.avPlayerRemuxTS else { return false }
         let ext = streamURL.pathExtension.lowercased()
         // m3u8 = HLS-shaped (in-progress DVR windows, HLS-fronted VOD);
@@ -497,7 +499,9 @@ final class PlayerSession: ObservableObject {
                                   kind: kind, vodID: vodID, serverID: serverID,
                                   vodType: vodType,
                                   resumePositionMs: resumePositionMs,
-                                  bypassWarning: true)
+                                  bypassWarning: true,
+                                  dvrScheduledEnd: dvrScheduledEnd,
+                                  dvrChannelID: dvrChannelID)
         guard result == .added else {
             DebugLogger.shared.log("[Engine] beginVOD: addVOD -> \(result); falling back to legacy cover",
                                    category: "Playback", level: .warning)

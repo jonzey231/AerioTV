@@ -97,4 +97,15 @@ struct MultiviewTile: Identifiable, Equatable {
     /// into the shared player's `catchup` param (window re-tune seek
     /// model, aeriocu relay, pinned duration).
     var catchup: CatchupPlayback? = nil
+
+    /// `.dvr` tiles only: when the recording is scheduled to stop
+    /// (Recording.effectiveEnd, i.e. scheduledEnd + post-roll). Drives
+    /// the proactive "Recording Ending" prompt for a viewer at the live
+    /// edge; nil for tiles that don't know (prompt simply never shows
+    /// and the finalize migration handles the end reactively).
+    var dvrScheduledEnd: Date? = nil
+    /// `.dvr` tiles only: the guide channel id the recording captures,
+    /// for the prompt's "Continue on Live TV" hand-off (posted as an
+    /// aerioOpenChannel deep link after session exit).
+    var dvrChannelID: String? = nil
 }

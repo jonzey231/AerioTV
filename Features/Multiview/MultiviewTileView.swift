@@ -93,6 +93,13 @@ struct MultiviewTileView: View {
     /// button calls `store.remove(id:)`, which takes the tile out of
     /// the grid entirely.
     @State private var decodeErrorMessage: String? = nil
+    /// "Recording Ending" prompt (.dvr tiles only): raised when the
+    /// scheduled end is imminent AND the viewer is at the live edge (a
+    /// viewer 20 minutes behind keeps watching undisturbed - the
+    /// finalize migration serves them silently). One-shot per tile.
+    @State private var dvrEndPromptVisible = false
+    @State private var dvrEndPromptDismissed = false
+    private let dvrEndTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     /// Auto-reconnect state for the playback-error overlay. Each fatal
     /// error schedules a retry through the coordinator's
     /// `progressStore.retryAction` on an escalating delay (5s doubling
@@ -505,6 +512,16 @@ struct MultiviewTileView: View {
                 finishedOverlay
             }
         }
+        // .dvr: proactive "Recording Ending" choice, a SIBLING
+        // overlay (same focus/tap reasoning as Finished above). The
+        // kind gate self-dismisses it if the finalize migration
+        // swaps the tile to .vod underneath it.
+        .overlay {
+            if tile.kind == .dvr, dvrEndPromptVisible {
+                dvrEndingOverlay
+            }
+        }
+        .onReceive(dvrEndTimer) { _ in checkDVREndApproaching() }
         // Playback-error overlay, also a SIBLING so its Retry / Remove
         // buttons are real focus targets on tvOS (same reasoning as the
         // Finished overlay above).
@@ -877,6 +894,16 @@ struct MultiviewTileView: View {
                     finishedOverlay
                 }
             }
+            // .dvr: proactive "Recording Ending" choice, a SIBLING
+            // overlay (same focus/tap reasoning as Finished above). The
+            // kind gate self-dismisses it if the finalize migration
+            // swaps the tile to .vod underneath it.
+            .overlay {
+                if tile.kind == .dvr, dvrEndPromptVisible {
+                    dvrEndingOverlay
+                }
+            }
+            .onReceive(dvrEndTimer) { _ in checkDVREndApproaching() }
             // Playback-error overlay, also OUTSIDE `tappableRegion` so
             // its Retry / Remove buttons receive taps directly.
             .overlay {
@@ -1652,6 +1679,91 @@ struct MultiviewTileView: View {
     /// iPad directly. Gated strictly to `.vod`: a `.dvr` tile at its live
     /// edge isn't "finished" and a `.live` tile never finishes, so this
     /// view is only ever mounted for VOD.
+    /// Prompt shown when a watched-at-the-edge recording is about to hit
+    /// its scheduled end (Logan 2026-08-27): choose between handing off
+    /// to the live channel or going back to the DVR tab. Ignoring it is
+    /// fine - the finalize migration rolls playback into the completed
+    /// file and the kind flip dismisses this overlay.
+    @ViewBuilder
+    private var dvrEndingOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.72)
+            VStack(spacing: 14) {
+                Image(systemName: "record.circle")
+                    .font(.largeTitle)
+                    .foregroundStyle(.red)
+                Text("Recording Ending")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                Text("This recording is about to reach its scheduled end.")
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 10)
+                HStack(spacing: 12) {
+                    Button {
+                        dvrEndContinueOnLive()
+                    } label: {
+                        Label("Continue on Live TV", systemImage: "play.tv")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Color.accentPrimary))
+                    }
+                    .buttonStyle(.plain)
+                    Button {
+                        DebugLogger.shared.log(
+                            "[MV-Cmd] DVR ending overlay: back to DVR tile=\(tile.id)",
+                            category: "Playback", level: .info)
+                        store.saveVODProgressNow()
+                        PlayerSession.shared.exit()
+                    } label: {
+                        Label("Back to DVR", systemImage: "arrow.backward.circle")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(Color.white.opacity(0.22)))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    /// Raise the prompt when BOTH hold: the scheduled end is within 20s
+    /// (or past), and the playhead is within 30s of the recorded edge.
+    private func checkDVREndApproaching() {
+        guard tile.kind == .dvr, !dvrEndPromptVisible, !dvrEndPromptDismissed,
+              let end = tile.dvrScheduledEnd else { return }
+        guard Date() >= end.addingTimeInterval(-20) else { return }
+        let durMs = progressStore.durationMs
+        guard durMs > 0, durMs - progressStore.currentMs < 30_000 else { return }
+        DebugLogger.shared.log(
+            "[MV-Tile] DVR scheduled end imminent (edge viewer); raising prompt tile=\(tile.id)",
+            category: "Playback", level: .info)
+        dvrEndPromptVisible = true
+    }
+
+    /// Hand off to the live channel the recording captures: save + exit
+    /// the session, then ride the Top Shelf deep-link path
+    /// (aerioOpenChannel -> Live TV tab switch + channel playback).
+    private func dvrEndContinueOnLive() {
+        DebugLogger.shared.log(
+            "[MV-Cmd] DVR ending overlay: continue on live channelID=\(tile.dvrChannelID ?? "-") tile=\(tile.id)",
+            category: "Playback", level: .info)
+        let channelID = tile.dvrChannelID
+        store.saveVODProgressNow()
+        PlayerSession.shared.exit()
+        if let channelID, !channelID.isEmpty {
+            NotificationCenter.default.post(
+                name: .aerioOpenChannel, object: nil,
+                userInfo: ["channelID": channelID])
+        }
+    }
+
     @ViewBuilder
     private var finishedOverlay: some View {
         ZStack {
