@@ -99,7 +99,6 @@ struct MultiviewTileView: View {
     /// finalize migration serves them silently). One-shot per tile.
     @State private var dvrEndPromptVisible = false
     @State private var dvrEndPromptDismissed = false
-    private let dvrEndTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
     /// Auto-reconnect state for the playback-error overlay. Each fatal
     /// error schedules a retry through the coordinator's
     /// `progressStore.retryAction` on an escalating delay (5s doubling
@@ -521,7 +520,10 @@ struct MultiviewTileView: View {
                 dvrEndingOverlay
             }
         }
-        .onReceive(dvrEndTimer) { _ in checkDVREndApproaching() }
+        // Clock source: the driver's 0.5s currentMs pump (a per-init
+        // Timer.publish never fires here - the 0.5s re-render replaces
+        // it before its first tick; field find 2026-08-27).
+        .onReceive(progressStore.$currentMs) { _ in checkDVREndApproaching() }
         // Playback-error overlay, also a SIBLING so its Retry / Remove
         // buttons are real focus targets on tvOS (same reasoning as the
         // Finished overlay above).
@@ -903,7 +905,10 @@ struct MultiviewTileView: View {
                     dvrEndingOverlay
                 }
             }
-            .onReceive(dvrEndTimer) { _ in checkDVREndApproaching() }
+            // Clock source: the driver's 0.5s currentMs pump (a per-init
+            // Timer.publish never fires here - the 0.5s re-render replaces
+            // it before its first tick; field find 2026-08-27).
+            .onReceive(progressStore.$currentMs) { _ in checkDVREndApproaching() }
             // Playback-error overlay, also OUTSIDE `tappableRegion` so
             // its Retry / Remove buttons receive taps directly.
             .overlay {
@@ -1688,6 +1693,11 @@ struct MultiviewTileView: View {
     private var dvrEndingOverlay: some View {
         ZStack {
             Color.black.opacity(0.72)
+                .onAppear {
+                    DebugLogger.shared.log(
+                        "[MV-Tile] DVR ending overlay RENDERED tile=\(tile.id)",
+                        category: "Playback", level: .info)
+                }
             VStack(spacing: 14) {
                 Image(systemName: "record.circle")
                     .font(.largeTitle)
