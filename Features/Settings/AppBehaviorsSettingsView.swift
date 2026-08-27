@@ -48,6 +48,8 @@ struct AppBehaviorsSettingsView: View {
     // legacy custom values snap to the nearest stop for display).
     @AppStorage("liveRewindEnabled") private var liveRewindEnabled = false
     @AppStorage("liveRewindDepthMinutes") private var liveRewindDepthMinutes = 30
+    @AppStorage("liveRewindRetainChannels") private var liveRewindRetainChannels = false
+    @AppStorage("liveRewindRetainCount") private var liveRewindRetainCount = 2
 
     /// Keep Available ladder (2026-07-11 rework, user directive round
     /// 2: the user-meaningful knob is HOW FAR BACK you can rewind, not
@@ -360,6 +362,26 @@ struct AppBehaviorsSettingsView: View {
                     Text("Keep Available").sectionHeaderStyle()
                 } footer: {
                     Text("How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+                .listSectionSeparator(.hidden)
+
+                Section {
+                    Toggle(isOn: $liveRewindRetainChannels) {
+                        Text("Keep Recent Channels Live")
+                    }
+                    if liveRewindRetainChannels {
+                        steppedSliderRow_iOS(
+                            title: "Channels to keep",
+                            values: [1, 2, 3, 4, 5],
+                            selection: $liveRewindRetainCount,
+                            label: { "\($0)" }
+                        )
+                    }
+                } header: {
+                    Text("Channel Retention").sectionHeaderStyle()
+                } footer: {
+                    Text("Keeps recently watched channels buffering after you flip away, so returning brings the full rewind timeline back. Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest.")
                         .font(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
@@ -749,6 +771,31 @@ struct AppBehaviorsSettingsView: View {
                             }
                         )
                         Text("How far back you can rewind the channel you are watching. Buffered video is released as soon as you leave the channel. \(depthEstimate(liveRewindDepthMinutes))")
+                            .font(.system(size: 22))
+                            .foregroundColor(.textTertiary)
+                            .padding(.horizontal, 20)
+                            .padding(.top, 4)
+                    }
+                }
+
+                if liveRewindEnabled {
+                    SettingsSection("Channel Retention", style: .card) {
+                        TVSettingsToggleRow(
+                            icon: "rectangle.stack.badge.play",
+                            iconColor: theme.accent,
+                            title: "Keep Recent Channels Live",
+                            subtitle: "Flipped-away channels keep buffering so their rewind timeline survives",
+                            isOn: $liveRewindRetainChannels
+                        ) { _ in }
+                        if liveRewindRetainChannels {
+                            tvSteppedSegmentsRow(
+                                title: "Channels to keep",
+                                values: [1, 2, 3, 4, 5],
+                                selection: $liveRewindRetainCount,
+                                segmentLabel: { "\($0)" }
+                            )
+                        }
+                        Text("Each kept channel holds an extra stream connection and uses bandwidth while it runs. Opening a channel beyond the limit drops the oldest.")
                             .font(.system(size: 22))
                             .foregroundColor(.textTertiary)
                             .padding(.horizontal, 20)

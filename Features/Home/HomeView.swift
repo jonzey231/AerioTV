@@ -5330,6 +5330,9 @@ struct MainTabView: View {
                 nowPlaying.stop()
                 NowPlayingBridge.shared.teardown()
             }
+            // Channel retention never ingests while backgrounded (same
+            // policy as playback itself - the loopback engines suspend).
+            LiveChannelRetention.shared.stopAll(reason: "app backgrounded")
         }
         // Top Shelf deep link for a channel → switch to Live TV tab.
         // ChannelListView itself handles starting playback once channels are loaded.

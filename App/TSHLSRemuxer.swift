@@ -71,6 +71,21 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// Segments retained in memory; old ones beyond this are dropped even
     /// if a slow client might still want them (live TV: it should not).
     private let maxBufferedSegments = 12
+    /// Channel retention: while this remuxer ingests DETACHED (no tile
+    /// playing it), keep only a couple of segments in RAM - the disk
+    /// spill holds the window, and a retained UHD channel at 12 in-RAM
+    /// segments would be ~350MB of dead weight (jetsam bait on tvOS).
+    /// Restored to the full buffer on adoption.
+    private var retainedRAMCap: Int?
+
+    func setRetained(_ on: Bool) {
+        queue.async {
+            self.retainedRAMCap = on ? 2 : nil
+            if on, self.segments.count > 2 {
+                self.segments.removeFirst(self.segments.count - 2)
+            }
+        }
+    }
     /// Segments that must exist before `onReady` fires with the playlist
     /// URL. Two keeps startup low; AVPlayer refreshes the playlist as more
     /// land.
@@ -567,8 +582,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         segments.append((seq: nextSeq, data: data, duration: duration))
         spillSegment(seq: nextSeq, data: data, duration: duration)
         nextSeq += 1
-        if segments.count > maxBufferedSegments {
-            segments.removeFirst(segments.count - maxBufferedSegments)
+        let ramCap = retainedRAMCap ?? maxBufferedSegments
+        if segments.count > ramCap {
+            segments.removeFirst(segments.count - ramCap)
         }
         // nextSeq, not segments.count: the count pins at maxBufferedSegments
         // once the window fills, and 12 % 5 != 0 silenced every close after
@@ -1098,6 +1114,125 @@ struct AVPSubtitleOverlay: View {
     }
 }
 
+// MARK: - Live channel retention (Logan 2026-08-27, Option B)
+//
+// With "Keep Recent Channels Live" on, flipping away from a live channel
+// hands its still-ingesting remuxer (and its rewind spill window) to this
+// manager instead of stopping it. Tuning the channel again ADOPTS the
+// running remuxer, so the rewind timeline is complete - including the
+// minutes spent away. Costs one concurrent upstream connection per
+// retained channel, which is why it is opt-in and capped at 5.
+@MainActor
+final class LiveChannelRetention {
+    static let shared = LiveChannelRetention()
+
+    struct Entry {
+        let key: String            // resolved stream URL - the channel identity
+        let channelName: String
+        let remuxer: TSHLSRemuxer
+        let localURL: URL          // loopback playlist URL (already READY)
+        var lastActiveAt: Date
+        var videoParams: (width: Int, height: Int, fps: Double, tenBit: Bool)?
+    }
+    private(set) var entries: [Entry] = []
+
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didReceiveMemoryWarningNotification,
+            object: nil, queue: .main) { _ in
+            Task { @MainActor in
+                LiveChannelRetention.shared.stopAll(reason: "memory warning")
+            }
+        }
+    }
+
+    static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "liveRewindEnabled")
+            && UserDefaults.standard.bool(forKey: "liveRewindRetainChannels")
+    }
+    /// User-facing "channels to keep going" INCLUDING the one playing.
+    static var maxChannels: Int {
+        let v = UserDefaults.standard.integer(forKey: "liveRewindRetainCount")
+        return min(5, max(1, v == 0 ? 2 : v))
+    }
+
+    /// Take over a still-running remuxer from a tile that is going away.
+    func retain(key: String, channelName: String, remuxer: TSHLSRemuxer, localURL: URL) {
+        guard Self.isEnabled else { remuxer.stop(); return }
+        // Replace a stale entry for the same channel outright.
+        if let idx = entries.firstIndex(where: { $0.key == key }) {
+            entries[idx].remuxer.stop()
+            entries.remove(at: idx)
+        }
+        remuxer.setRetained(true)
+        remuxer.onReady = nil
+        remuxer.onError = { [weak self] error in
+            Task { @MainActor in
+                DebugLogger.shared.log(
+                    "[AVP-RETAIN] retained '\(channelName)' died (\(error)); dropping",
+                    category: "Playback", level: .warning)
+                self?.drop(key: key)
+            }
+        }
+        let entry = Entry(key: key, channelName: channelName, remuxer: remuxer,
+                          localURL: localURL, lastActiveAt: Date(), videoParams: nil)
+        remuxer.onVideoParameters = { [weak self] w, h, fps, tenBit in
+            Task { @MainActor in
+                guard let self, let idx = self.entries.firstIndex(where: { $0.key == key }) else { return }
+                self.entries[idx].videoParams = (w, h, fps, tenBit)
+            }
+        }
+        entries.append(entry)
+        DebugLogger.shared.log(
+            "[AVP-RETAIN] keeping '\(channelName)' live in background (\(entries.count) retained, cap \(Self.maxChannels - 1))",
+            category: "Playback", level: .info)
+    }
+
+    /// A tile tuning `key` takes the running remuxer back, if kept.
+    func adopt(key: String) -> Entry? {
+        guard let idx = entries.firstIndex(where: { $0.key == key }) else { return nil }
+        var e = entries.remove(at: idx)
+        e.lastActiveAt = Date()
+        e.remuxer.setRetained(false)
+        DebugLogger.shared.log(
+            "[AVP-RETAIN] adopting '\(e.channelName)' (window intact; \(entries.count) still retained)",
+            category: "Playback", level: .info)
+        return e
+    }
+
+    /// A NEW channel is starting fresh: the active session takes one of
+    /// the user's N slots, so retained entries shrink to N-1, oldest out
+    /// ("open a 6th, the first drops off").
+    func evictForNewActive() {
+        guard Self.isEnabled else { stopAll(reason: "retention disabled"); return }
+        let keep = Self.maxChannels - 1
+        while entries.count > keep {
+            if let idx = entries.indices.min(by: { entries[$0].lastActiveAt < entries[$1].lastActiveAt }) {
+                let e = entries.remove(at: idx)
+                e.remuxer.stop()
+                DebugLogger.shared.log(
+                    "[AVP-RETAIN] evicted oldest '\(e.channelName)' (over cap)",
+                    category: "Playback", level: .info)
+            } else { break }
+        }
+    }
+
+    func drop(key: String) {
+        guard let idx = entries.firstIndex(where: { $0.key == key }) else { return }
+        entries[idx].remuxer.stop()
+        entries.remove(at: idx)
+    }
+
+    func stopAll(reason: String) {
+        guard !entries.isEmpty else { return }
+        DebugLogger.shared.log(
+            "[AVP-RETAIN] stopping all \(entries.count) retained channels (\(reason))",
+            category: "Playback", level: .info)
+        entries.forEach { $0.remuxer.stop() }
+        entries.removeAll()
+    }
+}
+
 struct AVPlayerMultiviewTile: View {
     /// The owning tile's id; mute state derives from comparing this to
     /// the store's audioTileID LIVE (never from a captured snapshot,
@@ -1494,6 +1629,29 @@ struct AVPlayerMultiviewTile: View {
             liveRewindArmed = rewindSeconds > 0
             if liveRewindArmed {
                 debugLog("[AVP-REWIND] armed: \(Int(rewindSeconds))s spill window channel=\(channelName)")
+                // Channel retention: if this channel's remuxer is still
+                // ingesting from a recent flip, adopt it - the rewind
+                // window (including the time away) comes back intact.
+                if let entry = LiveChannelRetention.shared.adopt(key: streamURL.absoluteString) {
+                    let mux = entry.remuxer
+                    mux.onError = { error in
+                        debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName)")
+                        failOrFallback("\(error)")
+                    }
+                    mux.onVideoParameters = { w, h, fps, tenBit in
+                        applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+                    }
+                    if let vp = entry.videoParams {
+                        applyDisplayCriteria(width: vp.width, height: vp.height,
+                                             fps: vp.fps, is10Bit: vp.tenBit)
+                    }
+                    remuxer = mux
+                    statusText = nil
+                    readyLocalURL = entry.localURL
+                    return
+                }
+                // Fresh live session takes one of the N retention slots.
+                LiveChannelRetention.shared.evictForNewActive()
             }
             let mux = TSHLSRemuxer(sourceURL: streamURL, headers: headers,
                                    rewindWindowSeconds: rewindSeconds)
@@ -1745,6 +1903,16 @@ struct AVPlayerMultiviewTile: View {
     private func stop() {
         if liveRewindArmed {
             LiveRewindEngine.shared.endExternalWindow()
+            // Channel retention: hand a HEALTHY rewind session to the
+            // manager instead of stopping it, so flipping back resumes
+            // the full window. Errored tiles stop as before.
+            if LiveChannelRetention.isEnabled, tileError == nil,
+               let mux = remuxer, let url = readyLocalURL {
+                LiveChannelRetention.shared.retain(
+                    key: streamURL.absoluteString, channelName: channelName,
+                    remuxer: mux, localURL: url)
+                remuxer = nil
+            }
         }
         driver?.teardown()
         driver = nil
