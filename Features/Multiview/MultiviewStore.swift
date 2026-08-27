@@ -750,6 +750,37 @@ final class MultiviewStore: ObservableObject {
     /// Continue Watching URL, and replace the tile's streamURL (same
     /// tile id, so the tile view's streamURL onChange restarts the
     /// pipeline on the new copy).
+    /// An in-progress recording FINISHED while the user was watching it:
+    /// Dispatcharr stops appending, finalizes, and the /hls/ playlist
+    /// route starts falling through to the SPA's HTML (which AVPlayer
+    /// reports as -12646 "Playlist parse error"). Swap the tile in place
+    /// - same id, so SwiftUI identity and the tile's onChange(streamURL)
+    /// restart carry over, exactly like a version switch - onto the
+    /// completed-file endpoint (/file/) as a plain .vod tile, resuming
+    /// at the position the viewer was at. Returns false when the tile
+    /// isn't a DVR-window tile or the URL isn't the HLS DVR shape (the
+    /// caller then shows its normal error card).
+    func migrateDVRTileToCompletedFile(tileID: String, positionMs: Int32) -> Bool {
+        guard let idx = tiles.firstIndex(where: { $0.id == tileID }),
+              tiles[idx].kind == .dvr else { return false }
+        let tile = tiles[idx]
+        let urlString = tile.streamURL.absoluteString
+        let hlsSuffix = "hls/index.m3u8"
+        guard urlString.hasSuffix(hlsSuffix),
+              let fileURL = URL(string: String(urlString.dropLast(hlsSuffix.count)) + "file/")
+        else { return false }
+        DebugLogger.shared.log(
+            "[MV-Tile] DVR recording finished mid-watch; migrating to /file/ at \(positionMs)ms tileID=\(tileID)",
+            category: "Playback", level: .info)
+        tiles[idx] = MultiviewTile(
+            id: tile.id, item: tile.item, streamURL: fileURL,
+            headers: tile.headers, addedAt: tile.addedAt, kind: .vod,
+            vodID: tile.vodID, vodServerID: tile.vodServerID,
+            vodType: tile.vodType,
+            resumePositionMs: positionMs > 2_000 ? positionMs : nil)
+        return true
+    }
+
     func switchVODVersion(_ option: VODVersionOption) {
         guard let tile = vodSoloTile,
               let idx = tiles.firstIndex(where: { $0.id == tile.id }),
