@@ -3507,6 +3507,11 @@ struct MainTabView: View {
     @ObservedObject private var retention = LiveChannelRetention.shared
     @State private var retentionListPresented = false
     @State private var retentionActionKey: String?
+    /// The per-channel dialog was reached from the channel LIST dialog,
+    /// so a Back/Menu dismissal returns to the list instead of closing
+    /// the whole flow (Logan 2026-08-27). Explicit choices still close.
+    @State private var retentionActionFromList = false
+    @State private var retentionActionResolved = false
     @State private var isPlaying = false  // for Movies / TV Shows player state
     /// Tracks whether a VOD detail view is pushed (Movies or Series).
     /// When true, Menu button should pop the navigation, not switch tabs.
@@ -4335,6 +4340,7 @@ struct MainTabView: View {
                                 label: "Channels kept live in background"
                             ) {
                                 if retention.entries.count == 1 {
+                                    retentionActionFromList = false
                                     retentionActionKey = retention.entries[0].key
                                 } else {
                                     retentionListPresented = true
@@ -4353,6 +4359,7 @@ struct MainTabView: View {
                                 // per-channel dialog in the same runloop
                                 // turn as this one's dismissal drops it.
                                 let key = entry.key
+                                retentionActionFromList = true
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                                     retentionActionKey = key
                                 }
@@ -4369,13 +4376,25 @@ struct MainTabView: View {
                         retention.entries.first(where: { $0.key == retentionActionKey })?.channelName ?? "Channel",
                         isPresented: Binding(
                             get: { retentionActionKey != nil },
-                            set: { if !$0 { retentionActionKey = nil } }
+                            set: { presented in
+                                guard !presented else { return }
+                                let dismissedWithoutChoice = retentionActionKey != nil && !retentionActionResolved
+                                retentionActionKey = nil
+                                retentionActionResolved = false
+                                if dismissedWithoutChoice, retentionActionFromList,
+                                   !retention.entries.isEmpty {
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                                        retentionListPresented = true
+                                    }
+                                }
+                            }
                         ),
                         titleVisibility: .visible
                     ) {
                         Button {
                             guard let key = retentionActionKey,
                                   let entry = retention.entries.first(where: { $0.key == key }) else { return }
+                            retentionActionResolved = true
                             retentionActionKey = nil
                             DebugLogger.shared.log(
                                 "[AVP-RETAIN] status circle: jump to '\(entry.channelName)'",
@@ -4388,6 +4407,7 @@ struct MainTabView: View {
                         }
                         Button(role: .destructive) {
                             guard let key = retentionActionKey else { return }
+                            retentionActionResolved = true
                             retentionActionKey = nil
                             DebugLogger.shared.log(
                                 "[AVP-RETAIN] status circle: cancel retained channel",
@@ -4396,7 +4416,10 @@ struct MainTabView: View {
                         } label: {
                             Label("Stop Playback", systemImage: "xmark.circle")
                         }
-                        Button("Keep Running", role: .cancel) { retentionActionKey = nil }
+                        Button("Keep Running", role: .cancel) {
+                            retentionActionResolved = true
+                            retentionActionKey = nil
+                        }
                     }
                     // Own focus region beside the tab bar: LEFT from the
                     // first tab pill (or up-and-left from content) reaches
