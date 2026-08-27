@@ -837,17 +837,24 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     // progress driver pumps the window it reads from seekableTimeRanges
     // into these fields, and nothing else in the engine runs.
     private(set) var externalWindowActive = false
+    /// Which tile owns the external window. Session hand-offs (Jump to
+    /// Channel) run the INCOMING tile's begin before the OUTGOING tile's
+    /// end - without ownership, the begin was refused (buffering still
+    /// true) and the stale end then killed the fresh session's chrome.
+    private var externalWindowOwner: String?
 
     @MainActor
-    func beginExternalWindow() {
-        guard !buffering else { return }   // never fight a live mpv relay
+    func beginExternalWindow(owner: String) {
+        // A live mpv relay owns `buffering` outright; never fight it.
+        guard !buffering || externalWindowActive else { return }
+        externalWindowOwner = owner
         externalWindowActive = true
         timeshifting = false
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         tailWallMs = now
         headWallMs = now
         buffering = true
-        DebugLogger.shared.log("[LiveRewind] external window began (AVPlayer)",
+        DebugLogger.shared.log("[LiveRewind] external window began (AVPlayer, owner \(owner))",
                                category: "Playback", level: .info)
     }
 
@@ -861,12 +868,13 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     @MainActor
-    func endExternalWindow() {
-        guard externalWindowActive else { return }
+    func endExternalWindow(owner: String) {
+        guard externalWindowActive, externalWindowOwner == owner else { return }
+        externalWindowOwner = nil
         externalWindowActive = false
         buffering = false
         timeshifting = false
-        DebugLogger.shared.log("[LiveRewind] external window ended",
+        DebugLogger.shared.log("[LiveRewind] external window ended (owner \(owner))",
                                category: "Playback", level: .info)
     }
 

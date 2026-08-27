@@ -1413,7 +1413,7 @@ struct AVPlayerMultiviewTile: View {
             guard liveRewindArmed else { return }
             liveRewindArmed = false
             driver?.liveRewindWindowActive = false
-            LiveRewindEngine.shared.endExternalWindow()
+            LiveRewindEngine.shared.endExternalWindow(owner: tileID)
             debugLog("[AVP-REWIND] window dropped (second tile)")
         }
         // Direct-HLS playback failures have no remuxer to report them;
@@ -1842,7 +1842,7 @@ struct AVPlayerMultiviewTile: View {
             player: avPlayer, store: progressStore, isLive: !(isVOD || isDVR), applyGravity: { _ in })
         if liveRewindArmed, !isVOD, !isDVR {
             driver?.liveRewindWindowActive = true
-            LiveRewindEngine.shared.beginExternalWindow()
+            LiveRewindEngine.shared.beginExternalWindow(owner: tileID)
         }
         // MKV subtitle picker: the overlay store owns subtitle state, so
         // the store's subtitle fields are OURS, not the driver's (the
@@ -1915,7 +1915,7 @@ struct AVPlayerMultiviewTile: View {
     /// ingesting (ESPN/ESPN2 field find, 2026-08-27).
     private func stop(retainKey: String? = nil) {
         if liveRewindArmed {
-            LiveRewindEngine.shared.endExternalWindow()
+            LiveRewindEngine.shared.endExternalWindow(owner: tileID)
             // Channel retention: hand a HEALTHY rewind session to the
             // manager instead of stopping it, so flipping back resumes
             // the full window. Errored tiles stop as before.
