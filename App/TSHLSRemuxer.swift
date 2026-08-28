@@ -84,6 +84,14 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// escalation - and the tile re-tunes only when the playhead gets
     /// there.
     private var playlistComplete = false
+    /// Catch-up: declare the playlist EXT-X-PLAYLIST-TYPE:EVENT
+    /// (append-only, nothing ever removed - true under full spill).
+    /// Players START event playlists at the BEGINNING, which kills the
+    /// join-at-edge -> seek-back-to-zero dance outright (play() was
+    /// committing to the edge before the queued zero-seek applied:
+    /// double buffering, a frozen edge frame, audio-before-video).
+    /// NEVER set for Live Rewind - live joins want the edge.
+    var eventPlaylist = false
 
     func markComplete() {
         queue.async {
@@ -692,6 +700,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         #EXT-X-MEDIA-SEQUENCE:\(first.seq)
 
         """
+        if eventPlaylist {
+            text += "#EXT-X-PLAYLIST-TYPE:EVENT\n"
+        }
         if fmp4 != nil {
             text += "#EXT-X-MAP:URI=\"init.mp4\"\n"
         }
@@ -1841,6 +1852,7 @@ struct AVPlayerMultiviewTile: View {
         let windowSecs = Double(max(60_000, cu.programDurationMs)) / 1000.0 + 300
         let mux = TSHLSRemuxer(sourceURL: source, headers: headers,
                                rewindWindowSeconds: windowSecs)
+        mux.eventPlaylist = true
         mux.onReady = { url in
             readyLocalURL = url
             MultiviewStore.shared.registerEngine("AVPlayer · Catch-up", for: tileID)
@@ -2124,11 +2136,6 @@ struct AVPlayerMultiviewTile: View {
             driver?.catchupBaseMs = catchupBaseMs
             progressStore.durationMs = cu.programDurationMs
             progressStore.seekAction = { target in performCatchupSeek(target, cu) }
-            // Line-rate ingest pushes the live-shaped playlist's edge far
-            // ahead of the window start within seconds; without an
-            // explicit seek AVPlayer joins at that edge, not at the
-            // re-tune target. Queued exact seek to the window start.
-            avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
         }
         if liveRewindArmed, !isVOD, !isDVR {
             driver?.liveRewindWindowActive = true
@@ -2308,12 +2315,21 @@ struct AVPlayerLayerView: UIViewRepresentable {
     final class HostView: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
         var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
+        /// Diagnostic: when the video plane ACTUALLY has a frame to
+        /// show, vs the item clock/audio (audio-before-video hunts).
+        var readyObservation: NSKeyValueObservation?
+        var attachedAt = Date()
     }
 
     func makeUIView(context: Context) -> HostView {
         let view = HostView()
         view.playerLayer.player = player
         view.playerLayer.videoGravity = videoGravity
+        view.attachedAt = Date()
+        view.readyObservation = view.playerLayer.observe(\.isReadyForDisplay, options: [.initial, .new]) { layer, _ in
+            let ms = Int(Date().timeIntervalSince(view.attachedAt) * 1000)
+            debugLog("[AVP-LAYER] isReadyForDisplay=\(layer.isReadyForDisplay) at +\(ms)ms from layer attach")
+        }
         return view
     }
 
