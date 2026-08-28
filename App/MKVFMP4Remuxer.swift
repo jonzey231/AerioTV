@@ -820,7 +820,7 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         // TrueHD+E-AC-3+DTS release plays via its E-AC-3 track. The
         // REST of the playable tracks (dual-language releases) ride as
         // HLS audio renditions so the in-player audio picker works.
-        let supported = ["A_AC3", "A_EAC3", "A_AAC"]
+        let supported = ["A_AC3", "A_EAC3", "A_AAC", "A_FLAC"]
         let playable = audioCandidates.filter { c in supported.contains(where: { c.codecID.hasPrefix($0) }) }
         audio = playable.first
         audioAlternates = Array(playable.dropFirst())
@@ -1299,6 +1299,33 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
             body.append(Self.u16(sub)); body.append(0)
             entry = Self.box("ec-3", Self.audioSampleEntryBody(channels: a.channels, sampleRate: a.sampleRate),
                              Self.box("dec3", body))
+        } else if a.codecID == "A_FLAC" {
+            // FLAC-in-fMP4 (Apple lossless HLS ships this natively since
+            // 2021): 'fLaC' sample entry + 'dfLa' carrying the stream's
+            // METADATA_BLOCK_STREAMINFO. Matroska CodecPrivate = the
+            // whole FLAC header ("fLaC" magic + metadata blocks); pull
+            // the 34-byte STREAMINFO out and mark it last-metadata.
+            var streamInfo = [UInt8](repeating: 0, count: 34)
+            var priv = a.codecPrivate
+            if priv.count >= 4, Array(priv.prefix(4)) == Array("fLaC".utf8) {
+                priv = Array(priv.dropFirst(4))
+            }
+            var i = 0
+            while i + 4 <= priv.count {
+                let type = priv[i] & 0x7F
+                let len = (Int(priv[i+1]) << 16) | (Int(priv[i+2]) << 8) | Int(priv[i+3])
+                guard i + 4 + len <= priv.count else { break }
+                if type == 0, len >= 34 {
+                    streamInfo = Array(priv[(i+4)..<(i+4+34)])
+                    break
+                }
+                if priv[i] & 0x80 != 0 { break }
+                i += 4 + len
+            }
+            var dfla = Data([0x80, 0x00, 0x00, 0x22])   // last-metadata STREAMINFO, len 34
+            dfla.append(contentsOf: streamInfo)
+            entry = Self.box("fLaC", Self.audioSampleEntryBody(channels: a.channels, sampleRate: a.sampleRate),
+                             Self.fullBox("dfLa", 0, 0, dfla))
         } else {
             var v = 0
             v |= 0 << 22    // fscod 48k
@@ -1667,7 +1694,24 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
         } else {
             // Laced audio frames sit defaultDuration (or frame duration)
             // apart; AC-3/E-AC-3 = 1536 samples, AAC = 1024.
-            let samplesPerFrame: Int64 = (audioTrack?.codecID.hasPrefix("A_AAC") ?? false) ? 1024 : 1536
+            let samplesPerFrame: Int64 = {
+                guard let t = audioTrack else { return 1536 }
+                if t.codecID.hasPrefix("A_AAC") { return 1024 }
+                if t.codecID == "A_FLAC" {
+                    // STREAMINFO max blocksize (bytes 2-3); FLAC encodes at a
+                    // constant blocksize in practice (typically 4096).
+                    var priv = t.codecPrivate
+                    if priv.count >= 4, Array(priv.prefix(4)) == Array("fLaC".utf8) {
+                        priv = Array(priv.dropFirst(4))
+                    }
+                    if priv.count >= 8 {
+                        let maxBlock = (Int(priv[6]) << 8) | Int(priv[7])
+                        if maxBlock > 0 { return Int64(maxBlock) }
+                    }
+                    return 4096
+                }
+                return 1536
+            }()
             let tick = samplesPerFrame * Self.ticksPerSecond / Int64(max(1, audioTrack?.sampleRate ?? 48000))
             for (i, f) in frames.enumerated() {
                 audio.append(Sample(data: f, ptsTicks: pts + Int64(i) * tick, keyframe: true))
