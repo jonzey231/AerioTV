@@ -1161,7 +1161,7 @@ final class LiveChannelRetention: ObservableObject {
     func retain(key: String, channelID: String, channelName: String, remuxer: TSHLSRemuxer, localURL: URL) {
         guard Self.isEnabled else { remuxer.stop(); return }
         // Replace a stale entry for the same channel outright.
-        if let idx = entries.firstIndex(where: { $0.key == key }) {
+        if let idx = entries.firstIndex(where: { $0.key == key || $0.channelID == channelID }) {
             entries[idx].remuxer.stop()
             entries.remove(at: idx)
         }
@@ -1189,9 +1189,13 @@ final class LiveChannelRetention: ObservableObject {
             category: "Playback", level: .info)
     }
 
-    /// A tile tuning `key` takes the running remuxer back, if kept.
-    func adopt(key: String) -> Entry? {
-        guard let idx = entries.firstIndex(where: { $0.key == key }) else { return nil }
+    /// A tile tuning this channel takes the running remuxer back, if
+    /// kept. Channel id is the PRIMARY match: the URL key can drift
+    /// between the flip-away snapshot and a fresh tune's resolution,
+    /// and a missed adopt leaves a stale duplicate ingesting upstream
+    /// (field find 2026-08-27: ESPNU playing AND listed as retained).
+    func adopt(key: String, channelID: String) -> Entry? {
+        guard let idx = entries.firstIndex(where: { $0.channelID == channelID || $0.key == key }) else { return nil }
         var e = entries.remove(at: idx)
         e.lastActiveAt = Date()
         e.remuxer.setRetained(false)
@@ -1204,8 +1208,19 @@ final class LiveChannelRetention: ObservableObject {
     /// A NEW channel is starting fresh: the active session takes one of
     /// the user's N slots, so retained entries shrink to N-1, oldest out
     /// ("open a 6th, the first drops off").
-    func evictForNewActive() {
+    func evictForNewActive(activeChannelID: String? = nil) {
         guard Self.isEnabled else { stopAll(reason: "retention disabled"); return }
+        // Any entry for the channel being tuned is stale by definition
+        // (the tile adopts BEFORE this runs; reaching here means adopt
+        // missed or a duplicate survived) - kill it before it double-
+        // ingests alongside the fresh session.
+        if let id = activeChannelID, let idx = entries.firstIndex(where: { $0.channelID == id }) {
+            let e = entries.remove(at: idx)
+            e.remuxer.stop()
+            DebugLogger.shared.log(
+                "[AVP-RETAIN] dropped stale entry for now-active '\(e.channelName)'",
+                category: "Playback", level: .warning)
+        }
         let keep = Self.maxChannels - 1
         while entries.count > keep {
             if let idx = entries.indices.min(by: { entries[$0].lastActiveAt < entries[$1].lastActiveAt }) {
@@ -1633,7 +1648,8 @@ struct AVPlayerMultiviewTile: View {
                 // Channel retention: if this channel's remuxer is still
                 // ingesting from a recent flip, adopt it - the rewind
                 // window (including the time away) comes back intact.
-                if let entry = LiveChannelRetention.shared.adopt(key: streamURL.absoluteString) {
+                if let entry = LiveChannelRetention.shared.adopt(key: streamURL.absoluteString,
+                                                                 channelID: tileID) {
                     let mux = entry.remuxer
                     mux.onError = { error in
                         debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName)")
@@ -1658,7 +1674,7 @@ struct AVPlayerMultiviewTile: View {
                     return
                 }
                 // Fresh live session takes one of the N retention slots.
-                LiveChannelRetention.shared.evictForNewActive()
+                LiveChannelRetention.shared.evictForNewActive(activeChannelID: tileID)
             }
             let mux = TSHLSRemuxer(sourceURL: streamURL, headers: headers,
                                    rewindWindowSeconds: rewindSeconds)
