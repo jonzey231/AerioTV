@@ -1759,7 +1759,16 @@ struct AVPlayerMultiviewTile: View {
         progressStore.durationMs = cu.programDurationMs
         progressStore.currentMs = catchupBaseMs
         let source = catchupURL ?? streamURL
-        let mux = TSHLSRemuxer(sourceURL: source, headers: headers)
+        // Spill the WHOLE window to disk: archive servers deliver at
+        // line rate, not realtime (the reason mpv's relay spooled to
+        // disk and tailed at playback speed). Without spill the live
+        // arm's 12-segment RAM ring rolls segments off faster than the
+        // player consumes them - stutter, then a dead pipeline (field,
+        // 2026-08-28 First Take). With it, nothing rolls off and
+        // in-window seeks are native.
+        let windowSecs = Double(max(60_000, cu.programDurationMs)) / 1000.0 + 300
+        let mux = TSHLSRemuxer(sourceURL: source, headers: headers,
+                               rewindWindowSeconds: windowSecs)
         mux.onReady = { url in
             readyLocalURL = url
             MultiviewStore.shared.registerEngine("AVPlayer · Catch-up", for: tileID)
@@ -1998,6 +2007,11 @@ struct AVPlayerMultiviewTile: View {
             driver?.catchupBaseMs = catchupBaseMs
             progressStore.durationMs = cu.programDurationMs
             progressStore.seekAction = { target in performCatchupSeek(target, cu) }
+            // Line-rate ingest pushes the live-shaped playlist's edge far
+            // ahead of the window start within seconds; without an
+            // explicit seek AVPlayer joins at that edge, not at the
+            // re-tune target. Queued exact seek to the window start.
+            avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
         }
         if liveRewindArmed, !isVOD, !isDVR {
             driver?.liveRewindWindowActive = true
