@@ -341,8 +341,23 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     private func handlePacket(_ p: Data) {
         guard p.count == 188 else { return }
+        var p = p
         let pid = (Int(p[1] & 0x1F) << 8) | Int(p[2])
         let pusi = (p[1] & 0x40) != 0
+
+        // Catch-up (event) streams from the archive carry MALFORMED
+        // IDR access units: the mux orders them SPS,PPS,AUD,SEI,slice -
+        // the AUD sits mid-AU instead of leading it. ffmpeg/mpv shrug;
+        // VideoToolbox's AU assembler REFUSES the track (AVFoundation
+        // 'Cannot Open' -12430; on HLS the symptom was ~10s of audio
+        // before any video). Non-IDR AUs are already conformant
+        // (AUD,SEI,slice). Fix = length-preserving byte ROTATION inside
+        // the packet: move the AUD block in front of the SPS. Bench-
+        // verified: first video frame went from pos 10.3s to 0.00s.
+        // Gated to eventPlaylist so the proven live path is untouched.
+        if eventPlaylist, pid == videoPID {
+            fixAUDOrder(&p)
+        }
 
         if pid == 0 {
             patPacket = p
@@ -410,6 +425,37 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
         guard !awaitingFirstKeyframe else { return }
         currentSegment.append(p)
+    }
+
+    /// Rotate a malformed IDR AU's AUD in front of its SPS/PPS, in
+    /// place (details at the call site). Both NALs must sit in the same
+    /// TS packet - true in practice: the mux emits SPS,PPS,AUD
+    /// adjacently at each PES start. A straddling case is skipped
+    /// (that one AU stays malformed; VT tolerates isolated ones once
+    /// the stream has opened).
+    private func fixAUDOrder(_ p: inout Data) {
+        guard let off = payloadStart(p), off < p.count else { return }
+        var bytes = [UInt8](p)
+        func find(_ pattern: [UInt8], from: Int) -> Int? {
+            guard bytes.count >= pattern.count, from >= 0 else { return nil }
+            var i = from
+            while i <= bytes.count - pattern.count {
+                if bytes[i] == pattern[0], bytes[i+1] == pattern[1],
+                   bytes[i+2] == pattern[2], bytes[i+3] == pattern[3] { return i }
+                i += 1
+            }
+            return nil
+        }
+        guard let sps = find([0, 0, 1, 0x67], from: off),
+              let aud = find([0, 0, 1, 0x09], from: sps + 4) else { return }
+        let aStart = (aud > off && bytes[aud - 1] == 0) ? aud - 1 : aud
+        let aLen = (aud - aStart) + 5   // startcode(3|4) + type + payload byte
+        guard aStart + aLen <= bytes.count else { return }
+        let sStart = (sps > off && bytes[sps - 1] == 0) ? sps - 1 : sps
+        let audBlock = Array(bytes[aStart..<(aStart + aLen)])
+        let midBlock = Array(bytes[sStart..<aStart])
+        bytes.replaceSubrange(sStart..<(aStart + aLen), with: audBlock + midBlock)
+        p = Data(bytes)
     }
 
     // MARK: PSI parsing
