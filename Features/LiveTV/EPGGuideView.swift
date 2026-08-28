@@ -2934,6 +2934,11 @@ struct EPGGuideView: View {
     /// closes. nil when nothing is focused (GH #72: an empty group has no
     /// cells, and the hold must still open the sidebar).
     var onRequestGroupSidebar: ((String?) -> Void)? = nil
+    /// Single-flight guard for the return-from-player focus restore: the
+    /// notification arrives more than once per minimize (log 2026-08-28:
+    /// two handler runs ~50ms apart), and two overlapping scroll+assert
+    /// tasks ping-pong focus visibly. New trigger cancels the old task.
+    @State private var focusRestoreTask: Task<Void, Never>?
 
     // Observe the shared GuideStore so its loading state is visible to
     // MainTabView's initial-sync loading cover (see HomeView's
@@ -3663,7 +3668,9 @@ struct EPGGuideView: View {
                 // isolated singletons (MultiviewStore, NowPlayingManager)
                 // and @State mutations are accessed safely regardless
                 // of which thread NotificationCenter delivers on.
-                Task { @MainActor in
+                if focusRestoreTask != nil { debugLog("🧭 [GuideFocus] superseding prior restore task") }
+                focusRestoreTask?.cancel()
+                focusRestoreTask = Task { @MainActor in
                     // TEST (branch test/avplayer-hls-engine): the native
                     // AVPlayer cover keeps PlayerSession.mode at .idle,
                     // so without this guard the guide's focus restore
@@ -3687,6 +3694,7 @@ struct EPGGuideView: View {
                     // animation; triggering during it lets tvOS ignore the
                     // reset because the mini tile's frame is still in flux.
                     try? await Task.sleep(nanoseconds: 400_000_000)
+                    if Task.isCancelled { return }
                     // Re-validate against the current (possibly filtered)
                     // channel list AFTER the delay, in case it changed.
                     let valid = candidateID.flatMap { id in
@@ -3713,8 +3721,10 @@ struct EPGGuideView: View {
                     // reset land directly; the loop below is now a backstop.
                     proxy.scrollTo(valid, anchor: .center)
                     try? await Task.sleep(nanoseconds: 120_000_000)
+                    if Task.isCancelled { return }
                     resetFocus(in: guideFocusNS)
                     for attempt in 0..<8 {
+                        if Task.isCancelled { return }
                         proxy.scrollTo(valid, anchor: .center)
                         focusedProgramID = target
                         try? await Task.sleep(nanoseconds: 70_000_000)

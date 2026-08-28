@@ -223,6 +223,8 @@ struct ChannelListView: View {
     // default off). Declared UNCONDITIONALLY (the guide branch is shared with
     // the iPad guide); the tvOS-only behavior is gated inside the members below.
     @State private var guideSidebarOpen = false
+    /// Single-flight guard: see EPGGuideView.focusRestoreTask.
+    @State private var focusRestoreTask: Task<Void, Never>?
     @State private var guideSidebarReturnProgramID: String?
     /// #196 sidebar preview: the group active when the sidebar OPENED, so
     /// Back can revert a live preview. Nil while the sidebar is closed.
@@ -1113,7 +1115,9 @@ struct ChannelListView: View {
                     // realized row, not the watched channel, so after that we
                     // instant-scroll the target to center and re-assert
                     // focusedGuideRowID until the engine accepts it.
-                    Task { @MainActor in
+                    if focusRestoreTask != nil { debugLog("🧭 [GuideFocus] superseding prior restore task") }
+                    focusRestoreTask?.cancel()
+                    focusRestoreTask = Task { @MainActor in
                         // TEST (branch test/avplayer-hls-engine): never
                         // steal focus from the presented native AVPlayer
                         // cover (PlayerSession.mode stays .idle there, so
@@ -1123,6 +1127,7 @@ struct ChannelListView: View {
                             return
                         }
                         try? await Task.sleep(nanoseconds: 400_000_000)  // minimize spring
+                        if Task.isCancelled { return }
                         let resolved = nowPlaying.playingItem?.id ?? nowPlaying.lastPlayedChannelID
                         let valid = resolved.flatMap { id in
                             filteredChannels.contains(where: { $0.id == id }) ? id : nil
@@ -1135,8 +1140,10 @@ struct ChannelListView: View {
                         // of hopping via the top row.
                         proxy.scrollTo(valid, anchor: .center)
                         try? await Task.sleep(nanoseconds: 120_000_000)
+                        if Task.isCancelled { return }
                         resetFocus(in: guideFocusNS)
                         for attempt in 0..<8 {
+                            if Task.isCancelled { return }
                             proxy.scrollTo(valid, anchor: .center)
                             focusedGuideRowID = valid
                             try? await Task.sleep(nanoseconds: 70_000_000)
