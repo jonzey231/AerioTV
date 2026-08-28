@@ -77,6 +77,23 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
     /// segments would be ~350MB of dead weight (jetsam bait on tvOS).
     /// Restored to the full buffer on adoption.
     private var retainedRAMCap: Int?
+    /// Catch-up: the upstream killed (or finished) the ingest but the
+    /// downloaded window is intact on disk. Marking complete finalizes
+    /// the playlist with EXT-X-ENDLIST so AVPlayer treats the window as
+    /// a finished VOD - smooth playback to the end, no stale-playlist
+    /// escalation - and the tile re-tunes only when the playhead gets
+    /// there.
+    private var playlistComplete = false
+
+    func markComplete() {
+        queue.async {
+            // Close any partial segment so its media is in the window.
+            if !self.currentSegment.isEmpty, let start = self.currentStartPTS {
+                self.closeSegment(endPTS: start + self.targetSegmentSeconds)
+            }
+            self.playlistComplete = true
+        }
+    }
 
     func setRetained(_ on: Bool) {
         queue.async {
@@ -680,6 +697,9 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         }
         for segment in window {
             text += "#EXTINF:\(String(format: "%.3f", segment.duration)),\nseg\(segment.seq).\(segmentFileExtension)\n"
+        }
+        if playlistComplete {
+            text += "#EXT-X-ENDLIST\n"
         }
         return text
     }
@@ -1496,6 +1516,23 @@ struct AVPlayerMultiviewTile: View {
             LiveRewindEngine.shared.endExternalWindow(owner: tileID)
             debugLog("[AVP-REWIND] window dropped (second tile)")
         }
+        // Catch-up: EOF of the finalized downloaded window with programme
+        // left = re-tune a fresh session at the playhead. A real
+        // programme end (within 30s of the pinned duration) just stops.
+        .onReceive(NotificationCenter.default.publisher(
+            for: .AVPlayerItemDidPlayToEndTime)) { note in
+            guard let cu = catchup,
+                  let ended = note.object as? AVPlayerItem,
+                  ended === player?.currentItem else { return }
+            let pos = progressStore.currentMs
+            if pos < cu.programDurationMs - 30_000 {
+                debugLog("[AVP-CU] downloaded window exhausted at \(pos / 1000)s; re-tuning for the next window")
+                statusText = "Loading..."
+                retuneCatchupWindow(pos, cu)
+            } else {
+                debugLog("[AVP-CU] programme complete at \(pos / 1000)s")
+            }
+        }
         // Direct-HLS playback failures have no remuxer to report them;
         // catch the item-level failure and fall back to mpv.
         .onReceive(NotificationCenter.default.publisher(
@@ -1808,9 +1845,21 @@ struct AVPlayerMultiviewTile: View {
             readyLocalURL = url
             MultiviewStore.shared.registerEngine("AVPlayer · Catch-up", for: tileID)
         }
-        mux.onError = { error in
-            debugLog("[AVP-CU] remux failed (\(error)) title=\(channelName)")
-            failOrFallback("\(error)")
+        mux.onError = { [weak mux] error in
+            let reason = "\(error)"
+            // The upstream kills greedy line-rate connections every ~2min
+            // with 20+ min of content already spilled. Ingest death is
+            // NOT playback death: finalize the playlist (ENDLIST) and
+            // keep playing the downloaded window; the EOF handler
+            // re-tunes when the playhead reaches its end. Only a death
+            // BEFORE anything played falls through to the error path.
+            if reason.contains("ingest failed"), progressStore.currentMs > 0 || readyLocalURL != nil {
+                debugLog("[AVP-CU] ingest died (\(reason)); window finalized, playback continues title=\(channelName)")
+                mux?.markComplete()
+                return
+            }
+            debugLog("[AVP-CU] remux failed (\(reason)) title=\(channelName)")
+            failOrFallback(reason)
         }
         mux.onVideoParameters = { w, h, fps, tenBit in
             applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
