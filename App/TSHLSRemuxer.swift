@@ -1792,6 +1792,24 @@ struct AVPlayerMultiviewTile: View {
     private func performCatchupSeek(_ targetMs: Int32, _ cu: CatchupPlayback) {
         let dur = max(0, cu.programDurationMs)
         let clamped = min(max(targetMs, 0), max(0, dur - 5_000))
+        // In-window fast path: the whole window spills to disk and the
+        // ingest runs at line rate, so most targets are ALREADY local -
+        // seek the player natively instead of burning a server re-tune
+        // (and, on native sessions, a mint/revoke round trip).
+        if let item = player?.currentItem,
+           let range = item.seekableTimeRanges.last?.timeRangeValue {
+            let start = CMTimeGetSeconds(range.start)
+            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+            let rel = Double(clamped - catchupBaseMs) / 1000.0
+            if start.isFinite, end.isFinite, rel >= start, rel <= end - 2 {
+                debugLog("[AVP-CU] in-window seek -> \(clamped / 1000)s (local)")
+                player?.seek(to: CMTime(seconds: rel, preferredTimescale: 600),
+                             toleranceBefore: .zero, toleranceAfter: .zero)
+                progressStore.currentMs = clamped
+                if player?.timeControlStatus == .paused { player?.play() }
+                return
+            }
+        }
         if cu.nativeChannelUUID != nil {
             guard !catchupMintInFlight else {
                 debugLog("[AVP-CU] seek dropped (mint in flight)")
