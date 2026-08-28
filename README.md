@@ -433,7 +433,32 @@ TopShelfExtension/      Apple TV Top Shelf content provider
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+Copyright (C) 2026 Logan Jones and contributors
+
+AerioTV for iOS, iPadOS, and tvOS is free software: you can redistribute it
+and/or modify it under the terms of the GNU General Public License as published
+by the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version. See [LICENSE](LICENSE).
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+An additional permission under GPL section 7 covers linking with the
+proprietary Google Cast SDK. See [LICENSE-EXCEPTIONS.md](LICENSE-EXCEPTIONS.md).
+
+Releases published before the relicensing commit were under the MIT License.
+That grant is not revoked: any copy obtained under MIT keeps its MIT rights to
+that snapshot in perpetuity. Everything from the relicensing commit forward is
+GPL-3.0-or-later.
+
+### Third-party components
+
+AerioTV links MPVKit (mpv and FFmpeg, LGPL-3.0-or-later as bundled), the
+proprietary Google Cast SDK, SwiftDraw (MIT), and Protobuf (BSD-3-Clause). See
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for the full list, exact
+build configuration, and where to obtain corresponding source. The same
+information is in the app under Settings > About > Open Source Licenses.
 
 ## Support
 
