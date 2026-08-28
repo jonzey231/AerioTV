@@ -1258,6 +1258,14 @@ struct AVPlayerMultiviewTile: View {
     let headers: [String: String]
     let shouldPause: Bool
     let channelName: String
+    /// The GUIDE channel id (tile.item.id). NOT tileID: a tile's id is
+    /// pinned at seed and survives in-place channel flips, so it names
+    /// the ORIGINAL channel forever - keying retention on it made the
+    /// first flip adopt the just-retained old channel back (black
+    /// screen, 2026-08-27). This is the retention identity and the
+    /// Jump-to-Channel deep-link target.
+    var channelID: String = ""
+
     /// VOD tile: route MP4 direct / MKV through MKVVODServer, apply the
     /// resume offset, and never treat the URL as a live TS stream.
     var isVOD: Bool = false
@@ -1649,7 +1657,7 @@ struct AVPlayerMultiviewTile: View {
                 // ingesting from a recent flip, adopt it - the rewind
                 // window (including the time away) comes back intact.
                 if let entry = LiveChannelRetention.shared.adopt(key: streamURL.absoluteString,
-                                                                 channelID: tileID) {
+                                                                 channelID: channelID) {
                     let mux = entry.remuxer
                     mux.onError = { error in
                         debugLog("[AVP-MV] tile remux failed (\(error)) channel=\(channelName)")
@@ -1674,7 +1682,7 @@ struct AVPlayerMultiviewTile: View {
                     return
                 }
                 // Fresh live session takes one of the N retention slots.
-                LiveChannelRetention.shared.evictForNewActive(activeChannelID: tileID)
+                LiveChannelRetention.shared.evictForNewActive(activeChannelID: channelID)
             }
             let mux = TSHLSRemuxer(sourceURL: streamURL, headers: headers,
                                    rewindWindowSeconds: rewindSeconds)
@@ -1942,7 +1950,7 @@ struct AVPlayerMultiviewTile: View {
                     // Solo seed tiles pin tileID to the guide channel id
                     // (seedInitialTile), and only solo tiles retain - so
                     // this IS the Jump-to-Channel deep-link target.
-                    channelID: tileID,
+                    channelID: channelID,
                     channelName: channelName,
                     remuxer: mux, localURL: url)
                 remuxer = nil
