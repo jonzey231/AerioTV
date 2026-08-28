@@ -38,8 +38,6 @@ struct MultiviewContainerView: View {
     @State private var switchDialogChannelName = ""
     @State private var switchDialogUUID = ""
     @State private var switchDialogError = false
-    @State private var tileMenuAudioTracksVisible = false
-    @State private var tileMenuSubtitleTracksVisible = false
 
     /// Presentation for the Swap Stream picker. There is no separate
     /// Bool: the store's `pendingSwapTileID` IS the state, so the tile
@@ -300,7 +298,7 @@ struct MultiviewContainerView: View {
                     // hard focus trap on every direction (no other
                     // focusable view exists outside the panel).
                     #if os(tvOS)
-                    .disabled(showTVOptions || store.pendingStreamSwitchTileID != nil || store.tileMenuTileID != nil)
+                    .disabled(showTVOptions || store.pendingStreamSwitchTileID != nil)
                     // tvOS N=1 chrome floats as a BOTTOM OVERLAY over the
                     // full-bleed video instead of an inline sibling that
                     // shrank the tile (Android-style, far less obtrusive).
@@ -388,7 +386,7 @@ struct MultiviewContainerView: View {
                     // views unless those views are .disabled. With
                     // this guard the panel becomes a true focus trap.
                     #if os(tvOS)
-                    .disabled(showTVOptions || store.pendingStreamSwitchTileID != nil || store.tileMenuTileID != nil)
+                    .disabled(showTVOptions || store.pendingStreamSwitchTileID != nil)
                     // Issue #31: the transport bar is its own focus
                     // section so D-pad-down from ANY tile (including a
                     // left-column one) lands on the right-aligned Add /
@@ -536,25 +534,6 @@ struct MultiviewContainerView: View {
                 }
             }
 
-            // Per-tile menu panel (tile long-press, 2026-08-28): custom
-            // focus-trapped overlay, NOT a system menu - its transport
-            // row (rewind/pause/forward) must survive presses, and
-            // system menus dismiss on every selection (and the OLD
-            // system context menu could race its own dismissal into a
-            // Menu press reaching the system = app suspend). Back
-            // closes; grid focus is trapped via the same .disabled
-            // extension the Options panel uses.
-            if let menuID = store.tileMenuTileID,
-               let menuTile = store.tiles.first(where: { $0.id == menuID }) {
-                tileMenuPanel(for: menuTile)
-                    .focusSection()
-                    .transition(.opacity)
-                    .onExitCommand {
-                        withAnimation(.easeInOut(duration: 0.15)) {
-                            store.tileMenuTileID = nil
-                        }
-                    }
-            }
             #endif
 
             // v1.6.15.x: Stream Info overlay. Mounted when the user
@@ -1294,6 +1273,11 @@ struct MultiviewContainerView: View {
             }
         }
         #endif
+        // Tile context menu's Add Channel: the menu can't reach
+        // showAddSheet directly (it lives deep in the tile view), so it
+        // raises a store flag. Small delay lets the system menu finish
+        // dismissing before the sheet presents.
+        .modifier(AddSheetRequestBridge(store: store, showAddSheet: $showAddSheet))
         #if os(tvOS)
         // Per-tile Switch Stream as a NATIVE dialog (Logan 2026-08-28:
         // the custom picker was a visual break in the tile flow). The
@@ -2253,214 +2237,6 @@ struct MultiviewContainerView: View {
 
     // MARK: - Relocate banner
 
-    #if os(tvOS)
-    // MARK: - Per-tile menu panel (2026-08-28)
-
-    /// Custom focus-trapped action panel for a long-pressed tile. The
-    /// transport row acts on THE TILE's own progress store and never
-    /// dismisses (Logan: press repeatedly, Back closes); action rows
-    /// close the panel as they fire. Styling follows the app's panel
-    /// look; the Switch Stream row hands off to the NATIVE dialog flow.
-    @ViewBuilder
-    private func tileMenuPanel(for tile: MultiviewTile) -> some View {
-        let ps = store.progressStore(forTile: tile.id)
-        ZStack {
-            Color.black.opacity(0.35).ignoresSafeArea()
-            VStack(spacing: 14) {
-                Text(tile.item.name)
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundColor(.white)
-                    .lineLimit(1)
-                    .padding(.bottom, 4)
-
-                // Transport: rewind / pause / forward. Seek rows only for
-                // content with a timeline (VOD, DVR, catch-up); a plain
-                // live tile has no rewind window in multiview.
-                if let ps {
-                    HStack(spacing: 16) {
-                        if tile.kind != .live {
-                            Button {
-                                ps.seekAction?(max(0, ps.currentMs - 30_000))
-                            } label: {
-                                Image(systemName: "gobackward.30")
-                            }
-                            .buttonStyle(TileMenuTransportStyle())
-                        }
-                        Button {
-                            ps.togglePauseAction?()
-                        } label: {
-                            Image(systemName: ps.isPaused ? "play.fill" : "pause.fill")
-                        }
-                        .buttonStyle(TileMenuTransportStyle())
-                        if tile.kind != .live {
-                            Button {
-                                ps.seekAction?(ps.currentMs + 30_000)
-                            } label: {
-                                Image(systemName: "goforward.30")
-                            }
-                            .buttonStyle(TileMenuTransportStyle())
-                        }
-                    }
-                    .padding(.bottom, 6)
-                }
-
-                ScrollView {
-                    VStack(spacing: 12) {
-                        tileMenuRow("Add Channel", icon: "plus") {
-                            store.tileMenuTileID = nil
-                            showAddSheet = true
-                        }
-                        tileMenuRow("Change Channel", icon: "arrow.triangle.2.circlepath") {
-                            store.tileMenuTileID = nil
-                            store.pendingSwapTileID = tile.id
-                        }
-                        if tile.item.dispatcharrChannelID != nil,
-                           tile.item.uuid?.isEmpty == false {
-                            tileMenuRow("Switch Stream", icon: "antenna.radiowaves.left.and.right") {
-                                store.tileMenuTileID = nil
-                                store.pendingStreamSwitchTileID = tile.id
-                            }
-                        }
-                        let isFullscreen = store.fullscreenTileID == tile.id
-                        tileMenuRow(isFullscreen ? "Exit Full-Screen" : "Full-Screen in Grid",
-                                    icon: isFullscreen ? "arrow.down.right.and.arrow.up.left"
-                                                       : "arrow.up.left.and.arrow.down.right") {
-                            store.tileMenuTileID = nil
-                            store.fullscreenTileID = isFullscreen ? nil : tile.id
-                        }
-                        let isSpotlit = store.spotlightTileID == tile.id
-                        tileMenuRow(isSpotlit ? "Remove Spotlight" : "Spotlight",
-                                    icon: isSpotlit ? "rectangle.split.3x1" : "rectangle.inset.filled") {
-                            store.tileMenuTileID = nil
-                            store.spotlightTileID = isSpotlit ? nil : tile.id
-                            if !isSpotlit { store.fullscreenTileID = nil }
-                        }
-                        ForEach(MultiviewLayoutMode.available(forTileCount: store.tiles.count)) { mode in
-                            tileMenuRow("Layout: \(mode.displayName)",
-                                        icon: layoutMode == mode ? "checkmark" : mode.symbolName) {
-                                store.tileMenuTileID = nil
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    layoutMode = mode
-                                    if mode != .spotlight { store.spotlightTileID = nil }
-                                }
-                            }
-                        }
-                        if let ps, ps.audioTracks.count > 1 {
-                            tileMenuRow("Audio Track", icon: "waveform") {
-                                tileMenuAudioTracksVisible = true
-                            }
-                        }
-                        if let ps, !ps.subtitleTracks.isEmpty {
-                            tileMenuRow("Subtitle Track", icon: "captions.bubble") {
-                                tileMenuSubtitleTracksVisible = true
-                            }
-                        }
-                        tileMenuRow("Move Tile", icon: "arrow.up.and.down.and.arrow.left.and.right") {
-                            store.tileMenuTileID = nil
-                            store.relocatingTileID = tile.id
-                        }
-                        tileMenuRow("Remove", icon: "xmark.circle", destructive: true) {
-                            store.tileMenuTileID = nil
-                            store.remove(id: tile.id)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-                .frame(maxHeight: 560)
-            }
-            .padding(.horizontal, 26)
-            .padding(.vertical, 30)
-            .frame(width: 520)
-            .background(
-                RoundedRectangle(cornerRadius: 44, style: .continuous)
-                    .fill(.ultraThinMaterial)
-            )
-        }
-        // Audio / subtitle pickers as native dialogs over the panel.
-        .confirmationDialog("Audio Track", isPresented: $tileMenuAudioTracksVisible,
-                            titleVisibility: .visible) {
-            if let ps {
-                ForEach(ps.audioTracks, id: \.id) { track in
-                    Button(track.id == ps.currentAudioTrackID
-                           ? "\(trackTitle(track))  (Current)" : trackTitle(track)) {
-                        ps.setAudioTrackAction?(track.id)
-                    }
-                }
-            }
-        }
-        .confirmationDialog("Subtitle Track", isPresented: $tileMenuSubtitleTracksVisible,
-                            titleVisibility: .visible) {
-            if let ps {
-                Button(ps.currentSubtitleTrackID == 0 ? "Off  (Current)" : "Off") {
-                    ps.setSubtitleTrackAction?(0)
-                }
-                ForEach(ps.subtitleTracks, id: \.id) { track in
-                    Button(track.id == ps.currentSubtitleTrackID
-                           ? "\(trackTitle(track))  (Current)" : trackTitle(track)) {
-                        ps.setSubtitleTrackAction?(track.id)
-                    }
-                }
-            }
-        }
-    }
-
-    private func trackTitle(_ track: MediaTrack) -> String {
-        let name = track.title.isEmpty ? "Track \(track.id)" : track.title
-        return track.lang.isEmpty ? name : "\(name) (\(track.lang))"
-    }
-
-    /// Dialog-capsule row: mirrors the tvOS confirmationDialog look
-    /// (frosted column, centered text capsules, white-on-focus) that
-    /// Logan pointed at as the correct style - the panel keeps custom
-    /// mechanics (non-dismissing transport) but must not LOOK custom.
-    @ViewBuilder
-    private func tileMenuRow(_ title: String, icon: String,
-                             destructive: Bool = false,
-                             action: @escaping () -> Void) -> some View {
-        Button(title, action: action)
-            .buttonStyle(TileMenuCapsuleStyle(destructive: destructive))
-    }
-
-    #endif
-
-    #if os(tvOS)
-    /// The confirmationDialog capsule look, hand-rolled so rows can
-    /// survive presses (system dialogs always dismiss). White capsule +
-    /// black text on focus; translucent capsule + white text at rest;
-    /// destructive rows read red at rest like the system's.
-    fileprivate struct TileMenuCapsuleStyle: ButtonStyle {
-        @Environment(\.isFocused) private var isFocused
-        var destructive = false
-        func makeBody(configuration: Configuration) -> some View {
-            configuration.label
-                .font(.system(size: 27, weight: .medium))
-                .foregroundColor(isFocused ? .black
-                                 : (destructive ? Color(red: 1.0, green: 0.33, blue: 0.33) : .white))
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 14)
-                .background(Capsule().fill(isFocused ? Color.white : Color.white.opacity(0.14)))
-                .scaleEffect(isFocused ? 1.03 : 1.0)
-                .opacity(configuration.isPressed ? 0.75 : 1.0)
-                .animation(.easeInOut(duration: 0.12), value: isFocused)
-        }
-    }
-
-    /// Round frosted transport button matching the capsule rows.
-    fileprivate struct TileMenuTransportStyle: ButtonStyle {
-        @Environment(\.isFocused) private var isFocused
-        func makeBody(configuration: Configuration) -> some View {
-            configuration.label
-                .font(.system(size: 26, weight: .medium))
-                .foregroundColor(isFocused ? .black : .white)
-                .frame(width: 84, height: 58)
-                .background(Capsule().fill(isFocused ? Color.white : Color.white.opacity(0.14)))
-                .scaleEffect(isFocused ? 1.05 : 1.0)
-                .opacity(configuration.isPressed ? 0.75 : 1.0)
-                .animation(.easeInOut(duration: 0.12), value: isFocused)
-        }
-    }
-    #endif
-
     private var relocateBanner: some View {
         // Banner text differs per-platform because the input model
         // does: tvOS drives swaps from the Siri Remote D-pad
@@ -2805,3 +2581,20 @@ private struct MultiviewSafeAreaModifier: ViewModifier {
     }
 }
 
+/// Tile context menu's Add Channel hand-off. A ViewModifier (not one
+/// more inline .onChange on the container's chain) because that chain
+/// is already at the tvOS type-checker budget - the extra closure blew
+/// it. The delay lets the system menu finish dismissing first.
+private struct AddSheetRequestBridge: ViewModifier {
+    @ObservedObject var store: MultiviewStore
+    @Binding var showAddSheet: Bool
+    func body(content: Content) -> some View {
+        content.onChange(of: store.addSheetRequested) { _, requested in
+            guard requested else { return }
+            store.addSheetRequested = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                showAddSheet = true
+            }
+        }
+    }
+}

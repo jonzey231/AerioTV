@@ -445,26 +445,14 @@ struct MultiviewTileView: View {
         // the tile to the guide via D-pad spatial search. The tile
         // stays focusable (Button default), and the focus indicator
         // continues to work normally.
-        // The tile menu is a long-press confirmationDialog, NOT the
-        // system .contextMenu (2026-08-28): a Menu press landing while
-        // the system menu was mid-dismissal bypassed every handler in
-        // the app and reached the system as "at root", which SUSPENDS
-        // the app (field log: Scene -> background with zero [MV-Cmd]/
-        // [HMP] lines before it; intermittent because it raced the
-        // dismiss animation). confirmationDialog's Menu handling is
-        // native and race-free - the same pattern the guide cells and
-        // recordings rows have used in the field for months. The empty
-        // .contextMenu attachment stays because its PRESENCE changes
-        // tile focus behaviour (see the old N=1 note).
+        // The SYSTEM context menu, by explicit ruling (Logan 2026-08-28:
+        // the native look wins over stay-open transport and over the
+        // rare Menu-press dismissal race - a press landing mid-dismiss
+        // can reach the system unhandled and suspend the app; keep an
+        // eye on field reports). Context-menu at N=1 drops its actions
+        // but keeps the attachment so focus behaviour is unchanged.
         .contextMenu {
-            EmptyView()
-        }
-        .onLongPressGesture(minimumDuration: 0.35) {
-            guard !isSoleTile else { return }
-            DebugLogger.shared.log(
-                "[MV-Cmd] tvOS tile menu opened id=\(tile.id)",
-                category: "Playback", level: .info)
-            store.tileMenuTileID = tile.id
+            if !isSoleTile { tileContextMenu }
         }
         // Relocate-mode D-pad swap is handled at the CONTAINER level
         // (`MultiviewContainerView`'s `.onMoveCommand`), not here.
@@ -622,12 +610,40 @@ struct MultiviewTileView: View {
     /// appear next to each row in the native tvOS menu.
     @ViewBuilder
     private var tileContextMenu: some View {
-        if !isAudioActive {
-            Button {
-                store.setAudio(to: tile.id)
-            } label: {
-                Label("Make Audio", systemImage: "speaker.wave.2.fill")
+        // Transport (Logan 2026-08-28): three compact buttons in a row,
+        // replacing Make Audio (Select on a tile already takes audio).
+        // System menus dismiss on selection - each press closes the
+        // menu; long-press again for another step. Seek rows only for
+        // content with a timeline; a plain live tile gets pause only.
+        ControlGroup {
+            if tile.kind != .live {
+                Button {
+                    progressStore.seekAction?(max(0, progressStore.currentMs - 30_000))
+                } label: {
+                    Label("Back 30s", systemImage: "gobackward.30")
+                }
             }
+            Button {
+                progressStore.togglePauseAction?()
+            } label: {
+                Label(progressStore.isPaused ? "Play" : "Pause",
+                      systemImage: progressStore.isPaused ? "play.fill" : "pause.fill")
+            }
+            if tile.kind != .live {
+                Button {
+                    progressStore.seekAction?(progressStore.currentMs + 30_000)
+                } label: {
+                    Label("Forward 30s", systemImage: "goforward.30")
+                }
+            }
+        }
+
+        // The grid's bottom Add bar is unreachable once inside
+        // multiview; the menu is the way in (Logan 2026-08-28).
+        Button {
+            store.addSheetRequested = true
+        } label: {
+            Label("Add Channel", systemImage: "plus")
         }
 
         // Change Channel (nee "Swap Stream", renamed 2026-08-28 - it
