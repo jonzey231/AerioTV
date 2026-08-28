@@ -354,8 +354,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
         // (AUD,SEI,slice). Fix = length-preserving byte ROTATION inside
         // the packet: move the AUD block in front of the SPS. Bench-
         // verified: first video frame went from pos 10.3s to 0.00s.
-        // Gated to eventPlaylist so the proven live path is untouched.
-        if eventPlaylist, pid == videoPID {
+        // Gated to eventPlaylist so the proven live path is untouched,
+        // and to PES-start packets: the malformed pattern only occurs at
+        // IDR AU starts, which begin a PES - scanning EVERY video packet
+        // (~86k/s at line rate) fell behind ingest and ballooned the
+        // pending buffer past 1GB (field 2026-08-28: stall at 5s,
+        // fp=1061MB, playlist stopped growing).
+        if eventPlaylist, pid == videoPID, pusi {
             fixAUDOrder(&p)
         }
 
