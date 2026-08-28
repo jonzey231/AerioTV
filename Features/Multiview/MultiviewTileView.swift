@@ -97,6 +97,9 @@ struct MultiviewTileView: View {
     /// scheduled end is imminent AND the viewer is at the live edge (a
     /// viewer 20 minutes behind keeps watching undisturbed - the
     /// finalize migration serves them silently). One-shot per tile.
+    /// tvOS tile long-press menu (confirmationDialog; see the
+    /// .contextMenu replacement note in tvOSBody).
+    @State private var showTVTileMenu = false
     @State private var dvrEndPromptVisible = false
     @State private var dvrEndPromptDismissed = false
     /// Auto-reconnect state for the playback-error overlay. Each fatal
@@ -445,11 +448,33 @@ struct MultiviewTileView: View {
         // the tile to the guide via D-pad spatial search. The tile
         // stays focusable (Button default), and the focus indicator
         // continues to work normally.
-        // Context-menu at N=1 drops its actions (meaningless with a
-        // single tile) but keeps the `.contextMenu` attachment so
-        // the focus engine behaviour is unchanged.
+        // The tile menu is a long-press confirmationDialog, NOT the
+        // system .contextMenu (2026-08-28): a Menu press landing while
+        // the system menu was mid-dismissal bypassed every handler in
+        // the app and reached the system as "at root", which SUSPENDS
+        // the app (field log: Scene -> background with zero [MV-Cmd]/
+        // [HMP] lines before it; intermittent because it raced the
+        // dismiss animation). confirmationDialog's Menu handling is
+        // native and race-free - the same pattern the guide cells and
+        // recordings rows have used in the field for months. The empty
+        // .contextMenu attachment stays because its PRESENCE changes
+        // tile focus behaviour (see the old N=1 note).
         .contextMenu {
-            if !isSoleTile { tileContextMenu }
+            EmptyView()
+        }
+        .onLongPressGesture(minimumDuration: 0.35) {
+            guard !isSoleTile else { return }
+            DebugLogger.shared.log(
+                "[MV-Cmd] tvOS tile menu opened id=\(tile.id)",
+                category: "Playback", level: .info)
+            showTVTileMenu = true
+        }
+        .confirmationDialog(
+            tile.item.name,
+            isPresented: $showTVTileMenu,
+            titleVisibility: .visible
+        ) {
+            tileContextMenu
         }
         // Relocate-mode D-pad swap is handled at the CONTAINER level
         // (`MultiviewContainerView`'s `.onMoveCommand`), not here.
