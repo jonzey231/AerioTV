@@ -618,7 +618,7 @@ struct MultiviewTileView: View {
         // in-progress DVR window played away from its end.
         Menu {
             Button {
-                progressStore.seekAction?(max(0, progressStore.currentMs - 60_000))
+                progressStore.relativeSeekAction?(-60_000)
             } label: {
                 Label("RW 60s", systemImage: "gobackward.60")
             }
@@ -629,12 +629,14 @@ struct MultiviewTileView: View {
                       systemImage: progressStore.isPaused ? "play.fill" : "pause.fill")
             }
             Button {
-                progressStore.seekAction?(progressStore.currentMs + 60_000)
+                progressStore.relativeSeekAction?(60_000)
             } label: {
                 Label("FF 60s", systemImage: "goforward.60")
             }
             let showReturnToLive: Bool = {
-                if tile.kind == .live { return progressStore.behindLiveEdge }
+                if tile.kind == .live {
+                    return progressStore.behindLiveEdge || progressStore.isPaused
+                }
                 if tile.kind == .dvr {
                     return progressStore.durationMs > 0
                         && progressStore.durationMs - progressStore.currentMs > 15_000
@@ -653,7 +655,7 @@ struct MultiviewTileView: View {
                 }
             }
         } label: {
-            Label("Scrub", systemImage: "slider.horizontal.below.rectangle")
+            Label("Playback", systemImage: "slider.horizontal.below.rectangle")
         }
 
         // The grid's bottom Add bar is unreachable once inside
