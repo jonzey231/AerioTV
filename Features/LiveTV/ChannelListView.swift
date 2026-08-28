@@ -2992,8 +2992,15 @@ struct ChannelRow: View {
                 // switch - no separate cover, no second player UI.
                 PlayerSession.shared.beginCatchup(pb)
                 #else
-                PlayerSession.shared.exit()
-                playingCatchup = pb
+                // No-mpv regime: iOS rides the same unified container
+                // (AVPlayer catch-up); the legacy mpv cover remains the
+                // mpv-enabled path.
+                if !PlaybackFeatureFlags.mpvEngineEnabled {
+                    PlayerSession.shared.beginCatchup(pb)
+                } else {
+                    PlayerSession.shared.exit()
+                    playingCatchup = pb
+                }
                 #endif
             } catch {
                 catchupErrorMessage = error.localizedDescription

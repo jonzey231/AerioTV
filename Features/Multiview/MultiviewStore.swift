@@ -653,7 +653,17 @@ final class MultiviewStore: ObservableObject {
         reset()
         // Catch-up is mpv-only: the aeriocu relay + window re-tune seek
         // model live in the mpv coordinator. Never route to AVPlayer.
-        clearEngineLock()
+        // Catch-up rides the AVPlayer container in the no-mpv regime
+        // (archive TS through the live remux arm + window re-tune
+        // seeks); with mpv enabled the legacy aeriocu relay path keeps
+        // the tile via MultiviewTileView's engine guard.
+        if PlaybackFeatureFlags.avPlayerRemuxTS, !PlaybackFeatureFlags.mpvEngineEnabled {
+            lockEngine(ResolvedEngine(engine: .avPlayerRemuxTS,
+                                      routeURL: pb.url,
+                                      headers: pb.headers))
+        } else {
+            clearEngineLock()
+        }
         let syntheticItem = ChannelDisplayItem(
             id: "catchup-\(pb.id.uuidString)",
             name: pb.title,

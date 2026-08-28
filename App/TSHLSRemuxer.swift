@@ -1282,6 +1282,11 @@ struct AVPlayerMultiviewTile: View {
     /// live edge). The store copy still wins when present (version
     /// switches update it mid-session); this is the launch fallback.
     var resumePositionMs: Int32? = nil
+    /// Catch-up replay payload (.catchup tiles): archive TS window with
+    /// the mpv-parity re-tune seek model. The remuxer's single plain GET
+    /// is exactly the transport contract the archive needs (one session,
+    /// no range probes, no duration probe).
+    var catchup: CatchupPlayback? = nil
     /// The per-tile store the container chrome binds to (scrubber,
     /// play-pause, track pickers, stream info). AVPlayerProgressDriver
     /// feeds it from this tile's AVPlayer, so the unified chrome works
@@ -1327,6 +1332,13 @@ struct AVPlayerMultiviewTile: View {
     @State private var sessionRetainKey: String?
     @State private var sessionRetainChannelID: String?
     @State private var sessionRetainName: String?
+    /// Catch-up: programme-relative ms offset of the CURRENT window and
+    /// the (re-minted/rebuilt) URL serving it. streamURL stays the
+    /// original programme-start URL.
+    @State private var catchupBaseMs: Int32 = 0
+    @State private var catchupURL: URL?
+    @State private var catchupMintInFlight = false
+    @State private var lastCatchupReportAt = Date.distantPast
     /// Harvested-cue subtitle state for MKV VOD playback (see
     /// AVPSubtitleCueStore). A class ref, so the server callbacks can
     /// capture it directly without the stale-struct hazard below.
@@ -1406,6 +1418,12 @@ struct AVPlayerMultiviewTile: View {
         }
         .onDisappear {
             stop()
+            // Final teardown of a native catch-up session frees its
+            // provider slot server-side (seek re-tunes revoke their own
+            // predecessors; this covers the last window).
+            if let cu = catchup, cu.nativeChannelUUID != nil {
+                CatchupSupport.revokeNative(playback: cu, currentURL: catchupURL ?? streamURL)
+            }
             AudioSessionRefCount.decrement(caller: "avp-tile")
         }
         // Remux READY lands here with fresh property values.
@@ -1420,6 +1438,19 @@ struct AVPlayerMultiviewTile: View {
         // currentMs for VOD only, so live is untouched).
         .onReceive(progressStore.$currentMs) { ms in
             if ms > 0, statusText == "Buffering..." { statusText = nil }
+            // Native catch-up sessions want periodic position reports
+            // (server-side resume + session keepalive), mpv parity 20s.
+            if let cu = catchup, cu.nativeChannelUUID != nil, ms > 0,
+               Date().timeIntervalSince(lastCatchupReportAt) >= 20 {
+                lastCatchupReportAt = Date()
+                let url = catchupURL ?? streamURL
+                let paused = progressStore.isPaused
+                Task {
+                    _ = await CatchupSupport.reportNativePosition(
+                        playback: cu, currentURL: url,
+                        positionSecs: Double(ms) / 1000.0, paused: paused)
+                }
+            }
         }
         // Mute follows the store's published audio owner directly:
         // independent of SwiftUI prop diffing, fires for every change,
@@ -1626,6 +1657,10 @@ struct AVPlayerMultiviewTile: View {
 
     private func start() {
         tileError = nil
+        if let cu = catchup {
+            startCatchup(cu)
+            return
+        }
         if isDVR {
             // Growing HLS window from the server's DVR pipeline: direct
             // play, no remux chain. The driver (DVR-window mode via
@@ -1711,6 +1746,85 @@ struct AVPlayerMultiviewTile: View {
             }
             remuxer = mux
             mux.start()
+        }
+    }
+
+    /// Catch-up: ingest the archive TS window through the live remux arm
+    /// (ONE plain GET - the exact transport contract the single-use
+    /// session needs) and pin the chrome timeline to the EPG duration.
+    /// Seeks are window re-tunes (mpv parity): rebuild/re-mint the URL
+    /// at the target offset and restart the pipeline.
+    private func startCatchup(_ cu: CatchupPlayback) {
+        statusText = "Loading..."
+        progressStore.durationMs = cu.programDurationMs
+        progressStore.currentMs = catchupBaseMs
+        let source = catchupURL ?? streamURL
+        let mux = TSHLSRemuxer(sourceURL: source, headers: headers)
+        mux.onReady = { url in
+            readyLocalURL = url
+            MultiviewStore.shared.registerEngine("AVPlayer · Catch-up", for: tileID)
+        }
+        mux.onError = { error in
+            debugLog("[AVP-CU] remux failed (\(error)) title=\(channelName)")
+            failOrFallback("\(error)")
+        }
+        mux.onVideoParameters = { w, h, fps, tenBit in
+            applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+        }
+        remuxer = mux
+        mux.start()
+        debugLog("[AVP-CU] ingest start base=\(catchupBaseMs / 1000)s title=\(channelName)")
+    }
+
+    /// Chrome seekAction in catch-up mode: target is programme-relative
+    /// ms. Native Dispatcharr sessions re-mint (full-second precision,
+    /// old session revoked); XC-shaped rebuilds the timeshift URL floored
+    /// to the minute. Both restart the remux pipeline at the new window.
+    private func performCatchupSeek(_ targetMs: Int32, _ cu: CatchupPlayback) {
+        let dur = max(0, cu.programDurationMs)
+        let clamped = min(max(targetMs, 0), max(0, dur - 5_000))
+        if cu.nativeChannelUUID != nil {
+            guard !catchupMintInFlight else {
+                debugLog("[AVP-CU] seek dropped (mint in flight)")
+                return
+            }
+            catchupMintInFlight = true
+            statusText = "Loading..."
+            progressStore.currentMs = clamped   // optimistic, mpv parity
+            let previous = catchupURL ?? streamURL
+            debugLog("[AVP-CU] native re-tune -> \(clamped / 1000)s title=\(channelName)")
+            Task { @MainActor in
+                defer { catchupMintInFlight = false }
+                guard let newURL = await CatchupSupport.remintNative(
+                    playback: cu, currentURL: previous,
+                    offsetSeconds: Double(clamped) / 1000.0) else {
+                    debugLog("[AVP-CU] native re-mint failed; keeping current window")
+                    statusText = nil
+                    return
+                }
+                CatchupSupport.revokeNative(playback: cu, currentURL: previous)
+                catchupURL = newURL
+                catchupBaseMs = clamped
+                stop()
+                start()
+            }
+        } else {
+            let flooredSecs = Double((Int(clamped) / 60_000) * 60)
+            guard let newURL = CatchupSupport.rebuildForOffset(
+                url: catchupURL ?? streamURL,
+                panelTimeZoneID: cu.panelTimeZoneID,
+                programStart: cu.programStart, programEnd: cu.programEnd,
+                offsetSeconds: flooredSecs) else {
+                debugLog("[AVP-CU] XC rebuild failed; keeping current window")
+                return
+            }
+            catchupURL = newURL
+            catchupBaseMs = Int32(flooredSecs * 1000)
+            progressStore.currentMs = catchupBaseMs
+            statusText = "Loading..."
+            debugLog("[AVP-CU] XC re-tune -> \(Int(flooredSecs))s (minute-floored) title=\(channelName)")
+            stop()
+            start()
         }
     }
 
@@ -1874,7 +1988,17 @@ struct AVPlayerMultiviewTile: View {
         // durationMs 0 and the chrome renders the scrubber-less live
         // layout (field find: "can't scrub at all", Speak No Evil).
         driver = AVPlayerProgressDriver(
-            player: avPlayer, store: progressStore, isLive: !(isVOD || isDVR), applyGravity: { _ in })
+            player: avPlayer, store: progressStore,
+            isLive: !(isVOD || isDVR || catchup != nil), applyGravity: { _ in })
+        if let cu = catchup {
+            // Pinned EPG duration + base-offset position composition; the
+            // chrome's seekAction becomes the window re-tune (must come
+            // AFTER driver init - wireCommands just installed the plain
+            // seek).
+            driver?.catchupBaseMs = catchupBaseMs
+            progressStore.durationMs = cu.programDurationMs
+            progressStore.seekAction = { target in performCatchupSeek(target, cu) }
+        }
         if liveRewindArmed, !isVOD, !isDVR {
             driver?.liveRewindWindowActive = true
             LiveRewindEngine.shared.beginExternalWindow(owner: tileID)

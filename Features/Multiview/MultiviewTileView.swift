@@ -208,7 +208,9 @@ struct MultiviewTileView: View {
         // first DVR field test mounted mpv here despite the lock, with
         // no from-start hint at all (the sentinel header is stripped on
         // the container path), so playback landed at the live edge.
-        guard tile.kind != .catchup else { return false }
+        // Catch-up included since 2026-08-28: seedCatchup locks the
+        // AVPlayer engine only in the no-mpv regime, so this reduces to
+        // "whatever the session locked".
         return store.sessionEngine.isAVPlayer
     }
 
@@ -219,7 +221,7 @@ struct MultiviewTileView: View {
     private var engineBadgeLabel: String {
         // Same guard as usesAVPlayerEngine - a VOD tile riding AVPlayer
         // must not report "mpv" (field find: Speak No Evil badge).
-        guard tile.kind != .catchup else { return "mpv" }
+
         switch store.sessionEngine {
         case .avPlayerDirectHLS: return "AVPlayer · Direct HLS"
         case .avPlayerRemuxTS:   return "AVPlayer · Remux TS"
@@ -754,6 +756,7 @@ struct MultiviewTileView: View {
                         isVOD: tile.kind == .vod,
                         isDVR: tile.kind == .dvr,
                         resumePositionMs: tile.resumePositionMs,
+                        catchup: tile.catchup,
                         progressStore: progressStore,
                         // A hard AVPlayer failure (codec gate, fatal item
                         // error) downgrades the WHOLE session to mpv,
@@ -1093,6 +1096,7 @@ struct MultiviewTileView: View {
                         isVOD: tile.kind == .vod,
                         isDVR: tile.kind == .dvr,
                         resumePositionMs: tile.resumePositionMs,
+                        catchup: tile.catchup,
                         progressStore: progressStore,
                         onEngineFallback: { _ in store.downgradeToMPV() }
                     )

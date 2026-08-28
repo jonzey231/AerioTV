@@ -3907,6 +3907,11 @@ final class AVPlayerProgressDriver {
     /// external-window state; seekAction remaps tail-domain targets onto
     /// the playlist timeline. Set by the tile right after driver init.
     var liveRewindWindowActive = false
+    /// Catch-up mode: non-nil = the programme-relative ms offset of the
+    /// CURRENT archive window (each re-tune restarts the item clock at
+    /// ~0, mpv parity). currentMs = base + player position, and the
+    /// duration observer never overwrites the pinned EPG duration.
+    var catchupBaseMs: Int32?
     /// Natural live-edge distance (seconds, EMA) while NOT timeshifting:
     /// the AVPlayer live cushion self-builds (measured up to ~36s on a
     /// starved feed), so "behind live" can only be declared beyond it.
@@ -4004,7 +4009,13 @@ final class AVPlayerProgressDriver {
                 return
             }
             let secs = time.seconds
-            if secs.isFinite { self.store.currentMs = Int32(secs * 1000) }
+            if secs.isFinite {
+                if let base = self.catchupBaseMs {
+                    self.store.currentMs = base + Int32(secs * 1000)
+                } else {
+                    self.store.currentMs = Int32(secs * 1000)
+                }
+            }
             // DVR window: the playlist is live-shaped (no ENDLIST) so the
             // duration observer below never fires. The seekable range end
             // IS the recorded-so-far duration; monotonic max() so playlist
@@ -4091,7 +4102,8 @@ final class AVPlayerProgressDriver {
         itemObservations.append(item.observe(\.duration, options: [.initial, .new]) {
             [weak self] i, _ in
             let d = i.duration
-            guard let self, !self.isLive, d.isNumeric, d.seconds.isFinite, d.seconds > 0 else { return }
+            guard let self, !self.isLive, self.catchupBaseMs == nil,
+                  d.isNumeric, d.seconds.isFinite, d.seconds > 0 else { return }
             Task { @MainActor in self.store.durationMs = Int32(d.seconds * 1000) }
         })
         // Ready -> populate tracks + stream info once metadata exists.
