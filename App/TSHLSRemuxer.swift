@@ -2058,8 +2058,16 @@ struct AVPlayerMultiviewTile: View {
         // costs nothing there; the WAN caveat above does not apply
         // because the slow hop (provider -> engine) has its own
         // flow-controlled buffer ahead of the loopback server.
-        let isLoopbackVOD = isVOD && (url.host == "127.0.0.1" || url.host == "localhost")
-        if isLoopbackVOD { playerItem.preferredForwardBufferDuration = 15 }
+        let isLoopback = (url.host == "127.0.0.1" || url.host == "localhost")
+        let isLoopbackVOD = isVOD && isLoopback
+        // Catch-up loopback too: line-rate ingest leaves an hours-deep
+        // "live" window that automatic buffering gorges on at ~3Gbps
+        // during startup - churn that lets audio start while video
+        // decode lags seconds behind (field 2026-08-28). 15s bounds it;
+        // the disk window makes deeper buffering pointless anyway.
+        if isLoopbackVOD || (catchup != nil && isLoopback) {
+            playerItem.preferredForwardBufferDuration = 15
+        }
         debugLog("[AVP-MV] live offset=server fwdBuf=\(isLoopbackVOD ? "15s (loopback VOD)" : "automatic") channel=\(channelName)")
         let avPlayer = AVPlayer(playerItem: playerItem)
         // Live truth at this instant, never a captured snapshot.
