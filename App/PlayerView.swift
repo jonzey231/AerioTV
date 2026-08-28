@@ -260,6 +260,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var isDVRWindow: Bool = false
     /// Closure set by the Coordinator; call with a target position in ms to seek.
     var seekAction: ((Int32) -> Void)?
+    /// Jump to the live edge (AVPlayer driver only; nil on mpv). Used by
+    /// the multiview tile Scrub submenu's "Return to Live".
+    var seekToLiveAction: (() -> Void)?
+    /// True while a LIVE stream's playhead sits well behind its seekable
+    /// edge (paused a while, or drifted). Pumped by the AVPlayer driver
+    /// at 0.5s with a change gate; gates "Return to Live" visibility.
+    @Published var behindLiveEdge = false
     /// Closure set by the Coordinator; replays the current VOD file from
     /// the start. Distinct from `seekAction` because a VOD that has hit
     /// EOF has `playbackEnded` latched, which the normal seek guard
@@ -4006,6 +4013,7 @@ final class AVPlayerProgressDriver {
             guard let self else { return }
             if self.isLive {
                 self.pumpLiveRewindWindow(time)
+                self.pumpBehindLiveEdge(time)
                 return
             }
             let secs = time.seconds
@@ -4527,6 +4535,19 @@ final class AVPlayerProgressDriver {
         }
     }
 
+    /// Live tiles without a rewind window still need a "behind the
+    /// edge?" signal for the tile menu's Return to Live. Cheap: one
+    /// seekable-range read per 0.5s tick, written only on change.
+    private func pumpBehindLiveEdge(_ time: CMTime) {
+        guard !liveRewindWindowActive,
+              let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
+        let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+        let cur = time.seconds
+        guard end.isFinite, cur.isFinite else { return }
+        let behind = (end - cur) > 12
+        if store.behindLiveEdge != behind { store.behindLiveEdge = behind }
+    }
+
     private func wireCommands(_ player: AVPlayer) {
         store.togglePauseAction = { [weak player] in
             guard let player else { return }
@@ -4560,6 +4581,14 @@ final class AVPlayerProgressDriver {
             }
             let target = CMTime(value: CMTimeValue(ms), timescale: 1000)
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        store.seekToLiveAction = { [weak player] in
+            guard let player,
+                  let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
+            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+            guard end.isFinite else { return }
+            player.seek(to: CMTime(seconds: max(0, end - 1), preferredTimescale: 600))
+            if player.timeControlStatus == .paused { player.play() }
         }
         store.replayFromStartAction = { [weak player] in
             guard let player else { return }
@@ -4603,6 +4632,7 @@ final class AVPlayerProgressDriver {
         // Drop the closures so a torn-down driver can't drive a dead player.
         store.togglePauseAction = nil
         store.seekAction = nil
+        store.seekToLiveAction = nil
         store.replayFromStartAction = nil
         store.setSpeedAction = nil
         store.setAudioTrackAction = nil

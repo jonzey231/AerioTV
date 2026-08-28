@@ -610,18 +610,17 @@ struct MultiviewTileView: View {
     /// appear next to each row in the native tvOS menu.
     @ViewBuilder
     private var tileContextMenu: some View {
-        // Transport (Logan 2026-08-28): three compact buttons in a row,
-        // replacing Make Audio (Select on a tile already takes audio).
-        // System menus dismiss on selection - each press closes the
-        // menu; long-press again for another step. Seek rows only for
-        // content with a timeline; a plain live tile gets pause only.
-        ControlGroup {
-            if tile.kind != .live {
-                Button {
-                    progressStore.seekAction?(max(0, progressStore.currentMs - 30_000))
-                } label: {
-                    Label("Back 30s", systemImage: "gobackward.30")
-                }
+        // Scrub submenu (Logan 2026-08-28), replacing Make Audio
+        // (Select on a tile already takes audio). System menus dismiss
+        // on selection - each press closes the menu. Return to Live
+        // appears only when there IS a live edge to return to: a live
+        // tile sitting behind it (driver-pumped behindLiveEdge) or an
+        // in-progress DVR window played away from its end.
+        Menu {
+            Button {
+                progressStore.seekAction?(max(0, progressStore.currentMs - 60_000))
+            } label: {
+                Label("RW 60s", systemImage: "gobackward.60")
             }
             Button {
                 progressStore.togglePauseAction?()
@@ -629,13 +628,32 @@ struct MultiviewTileView: View {
                 Label(progressStore.isPaused ? "Play" : "Pause",
                       systemImage: progressStore.isPaused ? "play.fill" : "pause.fill")
             }
-            if tile.kind != .live {
+            Button {
+                progressStore.seekAction?(progressStore.currentMs + 60_000)
+            } label: {
+                Label("FF 60s", systemImage: "goforward.60")
+            }
+            let showReturnToLive: Bool = {
+                if tile.kind == .live { return progressStore.behindLiveEdge }
+                if tile.kind == .dvr {
+                    return progressStore.durationMs > 0
+                        && progressStore.durationMs - progressStore.currentMs > 15_000
+                }
+                return false
+            }()
+            if showReturnToLive {
                 Button {
-                    progressStore.seekAction?(progressStore.currentMs + 30_000)
+                    if tile.kind == .dvr {
+                        progressStore.seekAction?(progressStore.durationMs)
+                    } else {
+                        progressStore.seekToLiveAction?()
+                    }
                 } label: {
-                    Label("Forward 30s", systemImage: "goforward.30")
+                    Label("Return to Live", systemImage: "livephoto.play")
                 }
             }
+        } label: {
+            Label("Scrub", systemImage: "slider.horizontal.below.rectangle")
         }
 
         // The grid's bottom Add bar is unreachable once inside
