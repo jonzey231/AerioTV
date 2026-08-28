@@ -2253,6 +2253,7 @@ struct MultiviewContainerView: View {
 
     // MARK: - Relocate banner
 
+    #if os(tvOS)
     // MARK: - Per-tile menu panel (2026-08-28)
 
     /// Custom focus-trapped action panel for a long-pressed tile. The
@@ -2264,44 +2265,47 @@ struct MultiviewContainerView: View {
     private func tileMenuPanel(for tile: MultiviewTile) -> some View {
         let ps = store.progressStore(forTile: tile.id)
         ZStack {
-            Color.black.opacity(0.55).ignoresSafeArea()
-            VStack(spacing: 20) {
+            Color.black.opacity(0.35).ignoresSafeArea()
+            VStack(spacing: 14) {
                 Text(tile.item.name)
-                    .font(.system(size: 30, weight: .bold))
-                    .foregroundColor(.textPrimary)
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundColor(.white)
                     .lineLimit(1)
+                    .padding(.bottom, 4)
 
                 // Transport: rewind / pause / forward. Seek rows only for
                 // content with a timeline (VOD, DVR, catch-up); a plain
                 // live tile has no rewind window in multiview.
                 if let ps {
-                    HStack(spacing: 28) {
+                    HStack(spacing: 16) {
                         if tile.kind != .live {
                             Button {
                                 ps.seekAction?(max(0, ps.currentMs - 30_000))
                             } label: {
-                                Image(systemName: "gobackward.30").font(.system(size: 28))
+                                Image(systemName: "gobackward.30")
                             }
+                            .buttonStyle(TileMenuTransportStyle())
                         }
                         Button {
                             ps.togglePauseAction?()
                         } label: {
                             Image(systemName: ps.isPaused ? "play.fill" : "pause.fill")
-                                .font(.system(size: 28))
                         }
+                        .buttonStyle(TileMenuTransportStyle())
                         if tile.kind != .live {
                             Button {
                                 ps.seekAction?(ps.currentMs + 30_000)
                             } label: {
-                                Image(systemName: "goforward.30").font(.system(size: 28))
+                                Image(systemName: "goforward.30")
                             }
+                            .buttonStyle(TileMenuTransportStyle())
                         }
                     }
-                    .padding(.bottom, 4)
+                    .padding(.bottom, 6)
                 }
 
                 ScrollView {
-                    VStack(spacing: 10) {
+                    VStack(spacing: 12) {
                         tileMenuRow("Add Channel", icon: "plus") {
                             store.tileMenuTileID = nil
                             showAddSheet = true
@@ -2364,11 +2368,12 @@ struct MultiviewContainerView: View {
                 }
                 .frame(maxHeight: 560)
             }
-            .padding(36)
-            .frame(maxWidth: 620)
+            .padding(.horizontal, 26)
+            .padding(.vertical, 30)
+            .frame(width: 520)
             .background(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .fill(Color.appBackground)
+                RoundedRectangle(cornerRadius: 44, style: .continuous)
+                    .fill(.ultraThinMaterial)
             )
         }
         // Audio / subtitle pickers as native dialogs over the panel.
@@ -2404,23 +2409,57 @@ struct MultiviewContainerView: View {
         return track.lang.isEmpty ? name : "\(name) (\(track.lang))"
     }
 
+    /// Dialog-capsule row: mirrors the tvOS confirmationDialog look
+    /// (frosted column, centered text capsules, white-on-focus) that
+    /// Logan pointed at as the correct style - the panel keeps custom
+    /// mechanics (non-dismissing transport) but must not LOOK custom.
     @ViewBuilder
     private func tileMenuRow(_ title: String, icon: String,
                              destructive: Bool = false,
                              action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 12) {
-                Image(systemName: icon)
-                    .font(.system(size: 20, weight: .medium))
-                Text(title)
-                    .font(.system(size: 24, weight: .medium))
-                Spacer()
-            }
-            .foregroundColor(destructive ? .red : .textPrimary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+        Button(title, action: action)
+            .buttonStyle(TileMenuCapsuleStyle(destructive: destructive))
+    }
+
+    #endif
+
+    #if os(tvOS)
+    /// The confirmationDialog capsule look, hand-rolled so rows can
+    /// survive presses (system dialogs always dismiss). White capsule +
+    /// black text on focus; translucent capsule + white text at rest;
+    /// destructive rows read red at rest like the system's.
+    fileprivate struct TileMenuCapsuleStyle: ButtonStyle {
+        @Environment(\.isFocused) private var isFocused
+        var destructive = false
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .font(.system(size: 27, weight: .medium))
+                .foregroundColor(isFocused ? .black
+                                 : (destructive ? Color(red: 1.0, green: 0.33, blue: 0.33) : .white))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 14)
+                .background(Capsule().fill(isFocused ? Color.white : Color.white.opacity(0.14)))
+                .scaleEffect(isFocused ? 1.03 : 1.0)
+                .opacity(configuration.isPressed ? 0.75 : 1.0)
+                .animation(.easeInOut(duration: 0.12), value: isFocused)
         }
     }
+
+    /// Round frosted transport button matching the capsule rows.
+    fileprivate struct TileMenuTransportStyle: ButtonStyle {
+        @Environment(\.isFocused) private var isFocused
+        func makeBody(configuration: Configuration) -> some View {
+            configuration.label
+                .font(.system(size: 26, weight: .medium))
+                .foregroundColor(isFocused ? .black : .white)
+                .frame(width: 84, height: 58)
+                .background(Capsule().fill(isFocused ? Color.white : Color.white.opacity(0.14)))
+                .scaleEffect(isFocused ? 1.05 : 1.0)
+                .opacity(configuration.isPressed ? 0.75 : 1.0)
+                .animation(.easeInOut(duration: 0.12), value: isFocused)
+        }
+    }
+    #endif
 
     private var relocateBanner: some View {
         // Banner text differs per-platform because the input model
