@@ -114,6 +114,7 @@
 		81A5CE2643A02F7A26B2B5CF /* AddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F00 /* AddServerView.swift */; };
 		81A5CE2643A02F7A26B2B5D0 /* ServerSyncView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F01 /* ServerSyncView.swift */; };
 		84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D60A8F073408CAFD075C499C /* MyRecordingsView.swift */; };
+		C3E892D1A5B2461D966BE39C /* OpenSourceLicensesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5B3F5A632594CCFBF0752AA /* OpenSourceLicensesView.swift */; };
 		84D478A2A84F9A8A2FEE8EA4 /* PlaylistModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA33B18A62A3411B6425B661 /* PlaylistModels.swift */; };
 		85F0D65172F55DFA1D3DA20B /* Pods-Aerio_iOS-frameworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */; };
 		867C07594A685FB5BDCA5BB3 /* SplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5044B9CD69C05A6836588548 /* SplashView.swift */; };
@@ -133,6 +134,7 @@
 		A2B3C4D5E6F7A80901CD3456 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
 		A41AA69146981E08D85F8439 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
 		A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D60A8F073408CAFD075C499C /* MyRecordingsView.swift */; };
+		DEA6C277657F4CC08322169F /* OpenSourceLicensesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5B3F5A632594CCFBF0752AA /* OpenSourceLicensesView.swift */; };
 		A8E322C238A7CE0B55BA3D4D /* AerioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* AerioApp.swift */; };
 		ACAEB60B5118B283BF99CF16 /* PlaylistImportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */; };
 		AD422FFDD689840F76B8A238 /* MediaServerAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */; };
@@ -418,6 +420,7 @@
 		CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
 		CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "Pods-Aerio_iOS-frameworks.sh"; sourceTree = "<group>"; };
 		D60A8F073408CAFD075C499C /* MyRecordingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MyRecordingsView.swift; sourceTree = "<group>"; };
+		C5B3F5A632594CCFBF0752AA /* OpenSourceLicensesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OpenSourceLicensesView.swift; sourceTree = "<group>"; };
 		D6A98EC87AA5F1A5CD0E5606 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; name = Info.plist; path = TopShelfExtension/Info.plist; sourceTree = "<group>"; };
 		D7F92D3C38870E339A9AF7A9 /* Pods-Aerio_tvOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_tvOS.debug.xcconfig"; path = "Target Support Files/Pods-Aerio_tvOS/Pods-Aerio_tvOS.debug.xcconfig"; sourceTree = "<group>"; };
 		D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVShowsView.swift; sourceTree = "<group>"; };
@@ -812,6 +815,7 @@
 				0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */,
 				0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */,
 				D60A8F073408CAFD075C499C /* MyRecordingsView.swift */,
+				C5B3F5A632594CCFBF0752AA /* OpenSourceLicensesView.swift */,
 				A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */,
 				FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */,
 				F4EDC8A716508CF4B4F1D2DA /* RemoteControlSettingsView.swift */,
@@ -1286,6 +1290,7 @@
 				2B56157F30BF5B5840F399C1 /* SyncCategoriesSettingsView.swift in Sources */,
 				B1AABBCC2DD3EE4FF5006001 /* MultiviewSettingsView.swift in Sources */,
 				A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */,
+				DEA6C277657F4CC08322169F /* OpenSourceLicensesView.swift in Sources */,
 				07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */,
 				F11A12EB07CB46158E23B73E /* ProgramInfoView.swift in Sources */,
 				6308BAE1E16965A379092AE8 /* OnDemandView.swift in Sources */,
@@ -1402,6 +1407,7 @@
 				38A0E8B8ABBD862D5012AC52 /* SyncCategoriesSettingsView.swift in Sources */,
 				B1AABBCC2DD3EE4FF5006002 /* MultiviewSettingsView.swift in Sources */,
 				84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */,
+				C3E892D1A5B2461D966BE39C /* OpenSourceLicensesView.swift in Sources */,
 				115F4DEA73DE0C5C49817C04 /* RecordProgramSheet.swift in Sources */,
 				B997EA931623455C8A931F29 /* ProgramInfoView.swift in Sources */,
 				C9E919E28B95CE15179BBCBD /* OnDemandView.swift in Sources */,
