@@ -1319,6 +1319,14 @@ struct AVPlayerMultiviewTile: View {
     /// the chrome. Dropped when a second tile joins (grid chrome has no
     /// scrubber; the spill ring keeps running, disk-bounded).
     @State private var liveRewindArmed = false
+    /// Identity of the session THIS tile is actually running, snapshotted
+    /// at start(). stop() retains under these - NEVER under the struct's
+    /// current streamURL/channelID, which a channel-flip onChange has
+    /// already advanced to the INCOMING channel (two field black-screens
+    /// from exactly that trap, 2026-08-27).
+    @State private var sessionRetainKey: String?
+    @State private var sessionRetainChannelID: String?
+    @State private var sessionRetainName: String?
     /// Harvested-cue subtitle state for MKV VOD playback (see
     /// AVPSubtitleCueStore). A class ref, so the server callbacks can
     /// capture it directly without the stale-struct hazard below.
@@ -1425,9 +1433,9 @@ struct AVPlayerMultiviewTile: View {
         }
         // In-place channel swap on the same tile id (the container
         // swaps `tile.streamURL` without changing tile identity).
-        .onChange(of: streamURL) { oldURL, _ in
+        .onChange(of: streamURL) { _, _ in
             mismatchAutoRetried = false
-            stop(retainKey: oldURL.absoluteString)
+            stop()
             start()
         }
         // A second tile joining drops the rewind UI (grid chrome has no
@@ -1651,6 +1659,9 @@ struct AVPlayerMultiviewTile: View {
                 return Double(mins > 0 ? mins : 30) * 60
             }()
             liveRewindArmed = rewindSeconds > 0
+            sessionRetainKey = streamURL.absoluteString
+            sessionRetainChannelID = channelID
+            sessionRetainName = channelName
             if liveRewindArmed {
                 debugLog("[AVP-REWIND] armed: \(Int(rewindSeconds))s spill window channel=\(channelName)")
                 // Channel retention: if this channel's remuxer is still
@@ -1931,30 +1942,23 @@ struct AVPlayerMultiviewTile: View {
         stallWatchdog = watchdog
     }
 
-    /// `retainKey`: the stream URL this tile was ACTUALLY playing. The
-    /// channel-swap onChange fires with the view struct already holding
-    /// the NEW channel's URL, so the default would file the outgoing
-    /// remuxer under the incoming channel's key - which start() then
-    /// instantly "adopted", playing nothing while the old channel kept
-    /// ingesting (ESPN/ESPN2 field find, 2026-08-27).
-    private func stop(retainKey: String? = nil) {
+    private func stop() {
         if liveRewindArmed {
             LiveRewindEngine.shared.endExternalWindow(owner: tileID)
             // Channel retention: hand a HEALTHY rewind session to the
             // manager instead of stopping it, so flipping back resumes
             // the full window. Errored tiles stop as before.
             if LiveChannelRetention.isEnabled, tileError == nil,
-               let mux = remuxer, let url = readyLocalURL {
+               let mux = remuxer, let url = readyLocalURL,
+               let key = sessionRetainKey, let chID = sessionRetainChannelID {
                 LiveChannelRetention.shared.retain(
-                    key: retainKey ?? streamURL.absoluteString,
-                    // Solo seed tiles pin tileID to the guide channel id
-                    // (seedInitialTile), and only solo tiles retain - so
-                    // this IS the Jump-to-Channel deep-link target.
-                    channelID: channelID,
-                    channelName: channelName,
+                    key: key, channelID: chID,
+                    channelName: sessionRetainName ?? channelName,
                     remuxer: mux, localURL: url)
                 remuxer = nil
             }
+            sessionRetainKey = nil
+            sessionRetainChannelID = nil
         }
         driver?.teardown()
         driver = nil
