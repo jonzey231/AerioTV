@@ -341,10 +341,25 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
                     if videoPTSDeltas.count >= 60 {
                         videoParamsSent = true
                         let median = videoPTSDeltas.sorted()[videoPTSDeltas.count / 2]
-                        let fps = 1.0 / median
-                        debugLog("[TS-REMUX] video: measured \(String(format: "%.2f", fps))fps (H.264 arm)")
-                        let cb = onVideoParameters
-                        DispatchQueue.main.async { cb?(0, 0, fps, false) }
+                        var fps = 1.0 / median
+                        // Snap to the nearest broadcast rate; B-pyramid PTS
+                        // ordering can skew the median (a catch-up archive
+                        // measured 20.00 on a 60fps feed and Match Content
+                        // asked the panel for it - 5-10s of frozen video
+                        // while HDMI resynced, 2026-08-28). Implausible
+                        // rates never reach the display.
+                        let standards: [Double] = [23.976, 24, 25, 29.97, 30, 50, 59.94, 60]
+                        if let snap = standards.min(by: { abs($0 - fps) < abs($1 - fps) }),
+                           abs(snap - fps) / snap < 0.05 {
+                            fps = snap
+                        }
+                        if fps >= 23, fps <= 61 {
+                            debugLog("[TS-REMUX] video: measured \(String(format: "%.2f", fps))fps (H.264 arm)")
+                            let cb = onVideoParameters
+                            DispatchQueue.main.async { cb?(0, 0, fps, false) }
+                        } else {
+                            debugLog("[TS-REMUX] video: measured \(String(format: "%.2f", fps))fps implausible; NOT driving display criteria")
+                        }
                     }
                 }
                 let isKeyframe = packetStartsKeyframeAccessUnit(p)
@@ -1339,6 +1354,9 @@ struct AVPlayerMultiviewTile: View {
     @State private var catchupURL: URL?
     @State private var catchupMintInFlight = false
     @State private var lastCatchupReportAt = Date.distantPast
+    /// Position of the last dead-pipeline reconnect; a fresh reconnect
+    /// is allowed only after 15s of real progress past it.
+    @State private var lastCatchupReconnectMs: Int32 = -1
     /// Harvested-cue subtitle state for MKV VOD playback (see
     /// AVPSubtitleCueStore). A class ref, so the server callbacks can
     /// capture it directly without the stale-struct hazard below.
@@ -1553,6 +1571,23 @@ struct AVPlayerMultiviewTile: View {
                 start()
             }
             return
+        }
+        // Catch-up: the archive session is single-use and the upstream
+        // KILLS greedy connections (field 2026-08-28: 2GB in ~2min,
+        // then 'network connection was lost'). A generic retry would
+        // replay the dead session URL; re-mint/rebuild at the current
+        // position instead. Allowed again each time playback has
+        // advanced 15s+ since the last reconnect - repeated failures
+        // at the same spot fall through to the card.
+        if let cu = catchup, tileError == nil {
+            let pos = progressStore.currentMs
+            if pos > lastCatchupReconnectMs + 15_000 || lastCatchupReconnectMs < 0 {
+                lastCatchupReconnectMs = max(pos, 0)
+                debugLog("[AVP-CU] pipeline died (\(reason)); reconnecting at \(pos / 1000)s title=\(channelName)")
+                statusText = "Reconnecting..."
+                retuneCatchupWindow(max(pos, 0), cu)
+                return
+            }
         }
         if PlaybackFeatureFlags.mpvEngineEnabled {
             onEngineFallback(reason)
@@ -1810,6 +1845,13 @@ struct AVPlayerMultiviewTile: View {
                 return
             }
         }
+        retuneCatchupWindow(clamped, cu)
+    }
+
+    /// The actual window re-tune (server round trip + pipeline restart),
+    /// shared by out-of-window seeks and dead-pipeline reconnects (which
+    /// must NOT take the in-window fast path - the loopback is dead).
+    private func retuneCatchupWindow(_ clamped: Int32, _ cu: CatchupPlayback) {
         if cu.nativeChannelUUID != nil {
             guard !catchupMintInFlight else {
                 debugLog("[AVP-CU] seek dropped (mint in flight)")
