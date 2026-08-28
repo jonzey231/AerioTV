@@ -141,6 +141,13 @@ final class MultiviewStore: ObservableObject {
     /// DIFFERENT channel ("Change Channel").
     @Published var pendingStreamSwitchTileID: String?
 
+    /// tvOS per-tile menu panel (Logan 2026-08-28): the long-pressed
+    /// tile whose custom action panel the container renders. A custom
+    /// panel (not a system menu/dialog) because its transport row
+    /// (rewind/pause/forward) must survive presses - system dialogs
+    /// always dismiss on selection. Back (onExitCommand) closes it.
+    @Published var tileMenuTileID: String?
+
     /// tvOS relocate mode: when non-nil, the container's D-pad
     /// remap kicks in so arrow keys swap `relocatingTileID` with
     /// its neighbor at the pressed direction. Click commits
@@ -378,6 +385,11 @@ final class MultiviewStore: ObservableObject {
     var audioProgressStore: PlayerProgressStore? {
         guard let id = audioTileID else { return nil }
         return progressStoresByTileID[id]
+    }
+
+    /// Per-tile store lookup for the tile menu panel's transport row.
+    func progressStore(forTile id: String) -> PlayerProgressStore? {
+        progressStoresByTileID[id]
     }
 
     /// Called by `MultiviewTileView.onAppear`. Replaces any existing

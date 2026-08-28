@@ -97,9 +97,6 @@ struct MultiviewTileView: View {
     /// scheduled end is imminent AND the viewer is at the live edge (a
     /// viewer 20 minutes behind keeps watching undisturbed - the
     /// finalize migration serves them silently). One-shot per tile.
-    /// tvOS tile long-press menu (confirmationDialog; see the
-    /// .contextMenu replacement note in tvOSBody).
-    @State private var showTVTileMenu = false
     @State private var dvrEndPromptVisible = false
     @State private var dvrEndPromptDismissed = false
     /// Auto-reconnect state for the playback-error overlay. Each fatal
@@ -467,14 +464,7 @@ struct MultiviewTileView: View {
             DebugLogger.shared.log(
                 "[MV-Cmd] tvOS tile menu opened id=\(tile.id)",
                 category: "Playback", level: .info)
-            showTVTileMenu = true
-        }
-        .confirmationDialog(
-            tile.item.name,
-            isPresented: $showTVTileMenu,
-            titleVisibility: .visible
-        ) {
-            tileContextMenu
+            store.tileMenuTileID = tile.id
         }
         // Relocate-mode D-pad swap is handled at the CONTAINER level
         // (`MultiviewContainerView`'s `.onMoveCommand`), not here.
@@ -1933,11 +1923,6 @@ struct MultiviewTileView: View {
     #if !os(tvOS)
     @ViewBuilder
     private var menuButtons: some View {
-        if !isAudioActive {
-            Button("Make Audio") {
-                store.setAudio(to: tile.id)
-            }
-        }
 
         // Swap Stream: re-point THIS tile at another channel through the same
         // picker as Add Stream. The tvOS menu carries the twin of this item;
