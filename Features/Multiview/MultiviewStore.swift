@@ -423,6 +423,7 @@ final class MultiviewStore: ObservableObject {
     /// LAN services. The app's real streams are always one of these
     /// five, so the allowlist costs nothing in practice.
     private static let allowedSchemes: Set<String> = [
+        "file",   // local-file recordings via the TS-ingest container path
         "http", "https", "rtmp", "rtmps", "rtsp"
     ]
 

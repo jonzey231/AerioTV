@@ -570,6 +570,19 @@ struct MyRecordingsView: View {
         // through `PlayerSession.shared.exit()` so the tile store is
         // reset and mode flips to `.idle`.
         PlayerSession.shared.exit()
+        // Hard-off regime: local files ride the container's TS-ingest
+        // path (the legacy cover below is mpv by construction).
+        if !PlaybackFeatureFlags.mpvEngineEnabled {
+            let vodID = "local-\(rec.id.uuidString)"
+            let resume = WatchProgressManager.getResumePosition(vodID: vodID, serverID: rec.serverID)
+            if PlayerSession.shared.beginVOD(
+                title: rec.programTitle, streamURL: url, headers: [:],
+                posterURL: nil, vodID: vodID, serverID: rec.serverID,
+                vodType: "recording", resumePositionMs: resume) {
+                debugLog("Local recording via AVPlayer container: \(rec.id) resume=\(resume.map(String.init) ?? "none")ms")
+                return
+            }
+        }
         playingRecording = PlayingRecording(
             id: rec.id, url: url, title: rec.programTitle, headers: [:]
         )

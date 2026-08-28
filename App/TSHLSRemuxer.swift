@@ -905,7 +905,18 @@ extension TSHLSRemuxer: URLSessionDataDelegate {
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let error, (error as NSError).code != NSURLErrorCancelled else { return }
+        guard let error, (error as NSError).code != NSURLErrorCancelled else {
+            // Clean EOF. For event (catch-up / local-file) playlists this
+            // IS the happy ending: finalize with ENDLIST so AVPlayer gets
+            // a finite VOD instead of a forever-stale live playlist (the
+            // old behavior wedged the end of a fully-downloaded catch-up
+            // programme into the stale-escalation path).
+            if eventPlaylist {
+                debugLog("[TS-REMUX] ingest complete (clean EOF); finalizing event playlist")
+                markComplete()
+            }
+            return
+        }
         queue.async { [weak self] in self?.fail(.ingestFailed(error.localizedDescription)) }
     }
 }
@@ -2015,6 +2026,33 @@ struct AVPlayerMultiviewTile: View {
     /// before the tile falls back to mpv.
     private func startVOD() {
         let ext = streamURL.pathExtension.lowercased()
+        if streamURL.isFileURL || ext == "ts" {
+            // Local-file recordings (and any raw .ts VOD): AVPlayer can't
+            // open bare TS, so ingest through the live remux arm as an
+            // event playlist - disk-speed ingest finalizes with ENDLIST
+            // within seconds and the file plays as normal seekable VOD.
+            // The spill window temporarily duplicates the file next to
+            // the LiveRewind spill (same budget sweeper bounds it).
+            statusText = "Preparing..."
+            let mux = TSHLSRemuxer(sourceURL: streamURL, headers: headers,
+                                   rewindWindowSeconds: 21_600)
+            mux.eventPlaylist = true
+            mux.onReady = { url in
+                readyLocalURL = url
+                MultiviewStore.shared.registerEngine("AVPlayer · TS Remux", for: tileID)
+            }
+            mux.onError = { error in
+                debugLog("[AVP-MV] TS-file remux failed (\(error)) title=\(channelName)")
+                failOrFallback("\(error)")
+            }
+            mux.onVideoParameters = { w, h, fps, tenBit in
+                applyDisplayCriteria(width: w, height: h, fps: fps, is10Bit: tenBit)
+            }
+            remuxer = mux
+            mux.start()
+            debugLog("[AVP-MV] VOD via TS ingest (\(streamURL.isFileURL ? "local file" : "raw ts")) title=\(channelName)")
+            return
+        }
         if ext == "m3u8" {
             // HLS-fronted VOD (e.g. a finished server recording exposed
             // as a playlist): native AVPlayer territory, never the MKV

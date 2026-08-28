@@ -761,6 +761,10 @@ enum PlaybackFeatureFlags {
     /// (object(forKey:) probe) so existing installs pick the default up
     /// without regressing an explicit user opt-out.
     static var avPlayerForHLS: Bool {
+        // HARD-OFF RULE: an .m3u8 live channel must route direct HLS -
+        // with this flag off and mpv off it would hit the TS remux and
+        // fail on playlist bytes.
+        if !mpvEngineEnabled { return true }
         let defaults = UserDefaults.standard
         if defaults.object(forKey: "playback.avplayerHLS") == nil {
             return true
@@ -781,6 +785,9 @@ enum PlaybackFeatureFlags {
     /// useUnifiedPlayback) so flipping the Developer toggle OFF still works
     /// and is remembered.
     static var avPlayerRemuxTS: Bool {
+        // HARD-OFF RULE: no mpv means the AVPlayer engines must be on -
+        // a disabled remux flag would leave nothing to play with.
+        if !mpvEngineEnabled { return true }
         let defaults = UserDefaults.standard
         if defaults.object(forKey: "playback.avplayerRemuxTS") == nil {
             return true
@@ -799,6 +806,11 @@ enum PlaybackFeatureFlags {
     /// false and silently regress every existing user to the legacy
     /// path on this build.
     static var useUnifiedPlayback: Bool {
+        // HARD-OFF RULE (Logan 2026-08-28): with the mpv engine
+        // disabled, the unified container is the ONLY player - the
+        // legacy single-stream PlayerView is mpv by construction, so no
+        // toggle combination may reach it.
+        if !mpvEngineEnabled { return true }
         let defaults = UserDefaults.standard
         if defaults.object(forKey: "playback.unified") == nil {
             return true
@@ -820,14 +832,16 @@ enum PlaybackFeatureFlags {
         return defaults.bool(forKey: "playback.modernChrome")
     }
 
-    /// TEST BRANCH (Logan, 2026-08-26): mpv disabled by DEFAULT so every
-    /// AVPlayer gap surfaces as a visible failure instead of a silent
-    /// rescue - the point of the field test is to find what still needs
-    /// mpv. OFF means: the resolver never picks mpv (DVR/catchup route
-    /// to AVPlayer too and sink or swim), tile engine fallbacks show an
-    /// on-tile error instead of swapping engines, and downgradeToMPV is
-    /// a logged no-op. The Developer toggle re-enables mpv for
-    /// comparison. MUST default back to ON before this branch ships to
+    /// POLICY (Logan, 2026-08-28): mpv defaults OFF and stays OFF - this
+    /// branch feeds an AVPlayer-only beta group, then the wider
+    /// TestFlight audience. OFF is a HARD guarantee, not a test flag:
+    /// the resolver never picks mpv, tile fallbacks show an on-tile
+    /// error instead of swapping engines, downgradeToMPV is a logged
+    /// no-op, useUnifiedPlayback/avPlayerRemuxTS are forced on so the
+    /// legacy mpv-only surfaces are unreachable, and local-file
+    /// recordings ride the TS-ingest container path. The Developer
+    /// toggle exists for A/B comparison only. (Superseded 2026-08-26
+    /// note said to revert the default before shipping - it now ships
     /// anyone but Logan.
     static var mpvEngineEnabled: Bool {
         let defaults = UserDefaults.standard
