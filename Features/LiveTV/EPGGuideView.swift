@@ -3704,6 +3704,15 @@ struct EPGGuideView: View {
                     guard let target = resolveFocusProgramID(preferringChannel: valid) else {
                         resetFocus(in: guideFocusNS); return
                     }
+                    // Realize the target row BEFORE resetFocus: reset lands on
+                    // the topmost realized cell, so resetting first produced a
+                    // visible hop to the top and then a walk back down as the
+                    // assert loop corrected it (Logan 2026-08-27, return from
+                    // a retention Jump). With the row on screen,
+                    // prefersDefaultFocus (guideFocusTargetChannelID) lets the
+                    // reset land directly; the loop below is now a backstop.
+                    proxy.scrollTo(valid, anchor: .center)
+                    try? await Task.sleep(nanoseconds: 120_000_000)
                     resetFocus(in: guideFocusNS)
                     for attempt in 0..<8 {
                         proxy.scrollTo(valid, anchor: .center)

@@ -1130,6 +1130,11 @@ struct ChannelListView: View {
                         guideFocusTargetID = valid
                         debugLog("🧭 [GuideFocus] forceGuideFocus(list) → playing=\(nowPlaying.playingItem?.id ?? "nil") last=\(nowPlaying.lastPlayedChannelID ?? "nil") valid=\(valid ?? "nil") count=\(filteredChannels.count)")
                         guard let valid else { resetFocus(in: guideFocusNS); return }
+                        // Same reorder as the EPG handler: realize the target
+                        // row first so the reset lands on it directly instead
+                        // of hopping via the top row.
+                        proxy.scrollTo(valid, anchor: .center)
+                        try? await Task.sleep(nanoseconds: 120_000_000)
                         resetFocus(in: guideFocusNS)
                         for attempt in 0..<8 {
                             proxy.scrollTo(valid, anchor: .center)
