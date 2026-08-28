@@ -269,8 +269,11 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     /// currentMs math seeked to nonsense there (field find 2026-08-28).
     var relativeSeekAction: ((Int32) -> Void)?
     /// True while a LIVE stream's playhead sits well behind its seekable
-    /// edge (paused a while, or drifted). Pumped by the AVPlayer driver
-    /// at 0.5s with a change gate; gates "Return to Live" visibility.
+    /// edge. STABLE by construction: set on pause, cleared only by
+    /// Return to Live (seekToLiveAction) or a fresh item. The old
+    /// tick-derived version flapped - the edge distance sawtooths a few
+    /// seconds per arriving segment, and a threshold inside that
+    /// oscillation made the menu item blink (field 2026-08-28).
     @Published var behindLiveEdge = false
     /// Closure set by the Coordinator; replays the current VOD file from
     /// the start. Distinct from `seekAction` because a VOD that has hit
@@ -4018,7 +4021,6 @@ final class AVPlayerProgressDriver {
             guard let self else { return }
             if self.isLive {
                 self.pumpLiveRewindWindow(time)
-                self.pumpBehindLiveEdge(time)
                 return
             }
             let secs = time.seconds
@@ -4113,6 +4115,7 @@ final class AVPlayerProgressDriver {
         itemObservations.forEach { $0.invalidate() }
         itemObservations.removeAll()
         // New item gets a fresh error-escalation budget.
+        if isLive { store.behindLiveEdge = false }
         softErrorCount = 0
         playlistStaleSince = nil
         firedUnrecoverable = false
@@ -4548,19 +4551,6 @@ final class AVPlayerProgressDriver {
         }
     }
 
-    /// Live tiles without a rewind window still need a "behind the
-    /// edge?" signal for the tile menu's Return to Live. Cheap: one
-    /// seekable-range read per 0.5s tick, written only on change.
-    private func pumpBehindLiveEdge(_ time: CMTime) {
-        guard !liveRewindWindowActive,
-              let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
-        let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
-        let cur = time.seconds
-        guard end.isFinite, cur.isFinite else { return }
-        let behind = (end - cur) > 12
-        if store.behindLiveEdge != behind { store.behindLiveEdge = behind }
-    }
-
     private func wireCommands(_ player: AVPlayer) {
         store.togglePauseAction = { [weak player] in
             guard let player else { return }
@@ -4610,9 +4600,10 @@ final class AVPlayerProgressDriver {
             player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
                         toleranceBefore: .zero, toleranceAfter: .zero)
         }
-        store.seekToLiveAction = { [weak player] in
+        store.seekToLiveAction = { [weak self, weak player] in
             guard let player,
                   let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
+            self?.store.behindLiveEdge = false
             let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
             guard end.isFinite else { return }
             player.seek(to: CMTime(seconds: max(0, end - 1), preferredTimescale: 600))

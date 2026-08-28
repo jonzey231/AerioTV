@@ -635,6 +635,8 @@ struct MultiviewTileView: View {
             }
             let showReturnToLive: Bool = {
                 if tile.kind == .live {
+                    // Stable: latched on pause, cleared by Return to Live
+                    // or a fresh item - no blinking while the menu is open.
                     return progressStore.behindLiveEdge || progressStore.isPaused
                 }
                 if tile.kind == .dvr {
