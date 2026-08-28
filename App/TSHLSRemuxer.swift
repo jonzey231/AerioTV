@@ -1657,6 +1657,12 @@ struct AVPlayerMultiviewTile: View {
             || reason.contains("playback failed")
             || reason.contains("never became ready")
             || reason.contains("range fetch HTTP 5")
+            // A fresh live ingest can 500 while the proxy is still
+            // tearing down the previous connection for the same channel
+            // (fast swap-back; field 2026-08-28 ESPN at pos=0). Same
+            // transient class as the version-switch 503 - the 1s-delayed
+            // one-shot retry lets the teardown drain.
+            || reason.contains("ingest failed: HTTP 5")
             || reason.contains("persistent fetch error")
             || (reason.contains("span") && reason.contains("unreadable"))
         // LIVE included (2026-08-26 field: Sky Sports UHD died with
