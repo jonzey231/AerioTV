@@ -4585,8 +4585,14 @@ final class AVPlayerProgressDriver {
             let target = CMTime(value: CMTimeValue(ms), timescale: 1000)
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
         }
-        store.relativeSeekAction = { [weak player] deltaMs in
+        store.relativeSeekAction = { [weak self, weak player] deltaMs in
             guard let player else { return }
+            // Solo-player parity: a deliberate backward seek on live
+            // latches behind-the-edge (their timeshifting flag does the
+            // same on aeriots re-tunes); Return to Live clears it.
+            if let self, self.isLive, deltaMs < 0 {
+                self.store.behindLiveEdge = true
+            }
             let cur = player.currentTime().seconds
             guard cur.isFinite else { return }
             var target = cur + Double(deltaMs) / 1000.0
