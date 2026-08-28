@@ -615,13 +615,28 @@ struct MultiviewTileView: View {
             }
         }
 
-        // Swap Stream: re-point THIS tile at another channel using the
-        // same picker as Add Stream. Setting the store's target is all
-        // that is needed; the container owns the presentation.
+        // Change Channel (nee "Swap Stream", renamed 2026-08-28 - it
+        // re-points the tile at another CHANNEL): same picker as Add
+        // Stream. Setting the store's target is all that is needed; the
+        // container owns the presentation.
         Button {
             store.pendingSwapTileID = tile.id
         } label: {
-            Label("Swap Stream", systemImage: "arrow.triangle.2.circlepath")
+            Label("Change Channel", systemImage: "arrow.triangle.2.circlepath")
+        }
+
+        // Switch Stream (true single-player parity, 2026-08-28): pick a
+        // different PROVIDER stream for this tile's channel. Dispatcharr
+        // Direct Connect only - the picker needs the numeric channel id
+        // + uuid. The switch happens server-side on the proxy, so the
+        // tile keeps playing without a re-tune.
+        if tile.item.dispatcharrChannelID != nil,
+           let uuid = tile.item.uuid, !uuid.isEmpty {
+            Button {
+                store.pendingStreamSwitchTileID = tile.id
+            } label: {
+                Label("Switch Stream", systemImage: "antenna.radiowaves.left.and.right")
+            }
         }
 
         let isFullscreen = store.fullscreenTileID == tile.id
@@ -1903,8 +1918,15 @@ struct MultiviewTileView: View {
         // picker as Add Stream. The tvOS menu carries the twin of this item;
         // they are separate lists, so an action added to one is NOT on the
         // other (that is exactly how iOS shipped without this at first).
-        Button("Swap Stream") {
+        Button("Change Channel") {
             store.pendingSwapTileID = tile.id
+        }
+
+        if tile.item.dispatcharrChannelID != nil,
+           let uuid = tile.item.uuid, !uuid.isEmpty {
+            Button("Switch Stream") {
+                store.pendingStreamSwitchTileID = tile.id
+            }
         }
 
         let isFullscreen = store.fullscreenTileID == tile.id

@@ -292,7 +292,7 @@ struct MultiviewContainerView: View {
                     // hard focus trap on every direction (no other
                     // focusable view exists outside the panel).
                     #if os(tvOS)
-                    .disabled(showTVOptions)
+                    .disabled(showTVOptions || store.pendingStreamSwitchTileID != nil)
                     // tvOS N=1 chrome floats as a BOTTOM OVERLAY over the
                     // full-bleed video instead of an inline sibling that
                     // shrank the tile (Android-style, far less obtrusive).
@@ -380,7 +380,7 @@ struct MultiviewContainerView: View {
                     // views unless those views are .disabled. With
                     // this guard the panel becomes a true focus trap.
                     #if os(tvOS)
-                    .disabled(showTVOptions)
+                    .disabled(showTVOptions || store.pendingStreamSwitchTileID != nil)
                     // Issue #31: the transport bar is its own focus
                     // section so D-pad-down from ANY tile (including a
                     // left-column one) lands on the right-aligned Add /
@@ -524,6 +524,43 @@ struct MultiviewContainerView: View {
                         withAnimation(.easeInOut(duration: 0.15)) {
                             showTVOptions = false
                         }
+                    }
+                }
+            }
+
+            // Per-tile Switch Stream (tile long-press menu, 2026-08-28):
+            // inline overlay, NOT a third fullScreenCover (stacking one
+            // breaks the tvOS 27 focus engine - see the Switch Stream
+            // comment on the presentation chain below). Scrim + centered
+            // panel; Menu closes it; grid focus is trapped via the same
+            // .disabled extension the Options panel uses.
+            if let switchID = store.pendingStreamSwitchTileID,
+               let switchTile = store.tiles.first(where: { $0.id == switchID }),
+               let switchChannelID = switchTile.item.dispatcharrChannelID,
+               let switchUUID = switchTile.item.uuid, !switchUUID.isEmpty {
+                ZStack {
+                    Color.black.opacity(0.6).ignoresSafeArea()
+                    SwitchStreamView(
+                        channelID: switchChannelID,
+                        channelUUID: switchUUID,
+                        channelName: switchTile.item.name,
+                        onClose: {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                store.pendingStreamSwitchTileID = nil
+                            }
+                        }
+                    )
+                    .frame(maxWidth: 980, maxHeight: 760)
+                    .background(
+                        RoundedRectangle(cornerRadius: 24, style: .continuous)
+                            .fill(Color.appBackground)
+                    )
+                }
+                .focusSection()
+                .transition(.opacity)
+                .onExitCommand {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        store.pendingStreamSwitchTileID = nil
                     }
                 }
             }
@@ -1245,6 +1282,25 @@ struct MultiviewContainerView: View {
         #if os(iOS)
         .sheet(isPresented: $showSwitchStream) {
             switchStreamSheetContent
+        }
+        // Per-tile Switch Stream (tile long-press menu, 2026-08-28).
+        .sheet(isPresented: Binding(
+            get: { store.pendingStreamSwitchTileID != nil },
+            set: { if !$0 { store.pendingStreamSwitchTileID = nil } }
+        )) {
+            if let switchID = store.pendingStreamSwitchTileID,
+               let switchTile = store.tiles.first(where: { $0.id == switchID }),
+               let switchChannelID = switchTile.item.dispatcharrChannelID,
+               let switchUUID = switchTile.item.uuid, !switchUUID.isEmpty {
+                SwitchStreamView(
+                    channelID: switchChannelID,
+                    channelUUID: switchUUID,
+                    channelName: switchTile.item.name,
+                    onClose: { store.pendingStreamSwitchTileID = nil }
+                )
+            } else {
+                EmptyView()
+            }
         }
         #endif
         // Exit-confirmation dialog. Presented when the user presses

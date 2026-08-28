@@ -133,6 +133,14 @@ final class MultiviewStore: ObservableObject {
     /// the picker closes, whether or not a channel was chosen.
     @Published var pendingSwapTileID: String?
 
+    /// Per-tile Switch Stream (Logan 2026-08-28): the tile whose CHANNEL
+    /// should get the Dispatcharr provider-stream picker (the same
+    /// SwitchStreamView the single player's Options panel hosts). The
+    /// container owns the presentation; the per-tile menu only sets this.
+    /// Distinct from pendingSwapTileID, which re-points the tile at a
+    /// DIFFERENT channel ("Change Channel").
+    @Published var pendingStreamSwitchTileID: String?
+
     /// tvOS relocate mode: when non-nil, the container's D-pad
     /// remap kicks in so arrow keys swap `relocatingTileID` with
     /// its neighbor at the pressed direction. Click commits
