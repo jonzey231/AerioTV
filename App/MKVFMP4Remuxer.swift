@@ -927,7 +927,64 @@ final class MKVFMP4Remuxer: @unchecked Sendable {
     /// needs a master playlist to surface. (Subtitles deliberately do
     /// NOT ride the master - see SubtitleCue for why VTT renditions
     /// were abandoned.)
-    var needsMasterPlaylist: Bool { !audioAlternates.isEmpty }
+    ///
+    /// EXCEPT when the video's parameter sets would poison the master
+    /// path (field 2026-08-29, "4K: Thor Love and Thunder", ATV):
+    /// loading via a MULTIVARIANT playlist makes CoreMedia parse the
+    /// init segment's parameter sets with a stricter reader for its
+    /// variant-capability filtering, and a UHD-BluRay-class SPS
+    /// carrying full custom scaling lists (673 bytes on that title)
+    /// fails that parse - item error -12927 before the first segment
+    /// is even served. The SAME init via the bare media playlist plays
+    /// fine (bench-bisected: swapping only the SPS flips the result).
+    /// Playing with the primary audio track beats an error card, so a
+    /// file whose parameter sets look oversized skips the master and
+    /// gives up its alternate-audio picker.
+    var needsMasterPlaylist: Bool { !audioAlternates.isEmpty && !masterHostileParameterSets }
+
+    /// Any video parameter-set NAL over this many bytes marks the file
+    /// master-hostile. Normal SPS/PPS run well under 100 bytes; the
+    /// known-bad class (custom scaling lists) runs 600+.
+    private static let masterSafeParameterSetLimit = 256
+
+    var masterHostileParameterSets: Bool {
+        guard let v = video else { return false }
+        let cp = v.codecPrivate
+        var maxLen = 0
+        if v.codecID == "V_MPEGH/ISO/HEVC", cp.count > 23 {
+            // hvcC: 22-byte header, count byte, then arrays of
+            // (type u8, count u16, then count x (len u16, NAL)).
+            var off = 23
+            let arrays = Int(cp[22])
+            for _ in 0..<arrays {
+                guard off + 3 <= cp.count else { break }
+                let cnt = Int(cp[off + 1]) << 8 | Int(cp[off + 2])
+                off += 3
+                for _ in 0..<cnt {
+                    guard off + 2 <= cp.count else { break }
+                    let len = Int(cp[off]) << 8 | Int(cp[off + 1])
+                    maxLen = max(maxLen, len)
+                    off += 2 + len
+                }
+            }
+        } else if v.codecID == "V_MPEG4/ISO/AVC", cp.count > 6 {
+            // avcC: 5-byte header, SPS count (low 5 bits), then
+            // count x (len u16, NAL); PPS block follows the same shape.
+            var off = 5
+            for block in 0..<2 {
+                guard off < cp.count else { break }
+                let cnt = block == 0 ? Int(cp[off] & 0x1F) : Int(cp[off])
+                off += 1
+                for _ in 0..<cnt {
+                    guard off + 2 <= cp.count else { break }
+                    let len = Int(cp[off]) << 8 | Int(cp[off + 1])
+                    maxLen = max(maxLen, len)
+                    off += 2 + len
+                }
+            }
+        }
+        return maxLen > Self.masterSafeParameterSetLimit
+    }
 
     func masterPlaylistText() -> String {
         var text = "#EXTM3U\n#EXT-X-VERSION:7\n"
@@ -1998,6 +2055,9 @@ final class MKVVODServer: @unchecked Sendable {
                             // otherwise (identical playback, one fewer
                             // fetch).
                             let entry = self.remuxer.needsMasterPlaylist ? "master.m3u8" : "vod.m3u8"
+                            if entry == "vod.m3u8", !self.remuxer.audioAlternates.isEmpty {
+                                debugLog("[MKV-VOD] master playlist skipped (oversized video parameter sets, -12927 class); alternate audio tracks not offered")
+                            }
                             let url = URL(string: "http://127.0.0.1:\(self.localPort)/\(entry)")!
                             debugLog("[MKV-VOD] READY -> \(url.absoluteString)")
                             DispatchQueue.main.async { self.onReady?(url) }

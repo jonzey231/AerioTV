@@ -1677,6 +1677,23 @@ struct AVPlayerMultiviewTile: View {
             return
         }
         #endif
+        // MKV master-playlist rejection (field 2026-08-29, -12927 on a
+        // UHD remux whose SPS carries custom scaling lists): CoreMedia's
+        // MULTIVARIANT loader parses the init's parameter sets with a
+        // stricter reader than the plain media-playlist path, and fails
+        // the item before the first segment. The server is healthy -
+        // re-point the SAME session at its bare vod.m3u8 (alternate
+        // audio renditions are lost, playback is not). One-shot by
+        // construction: the retry flips readyLocalURL off master.m3u8.
+        if reason.contains("-12927"), mkvServer != nil,
+           let ready = readyLocalURL, ready.lastPathComponent == "master.m3u8" {
+            let media = ready.deletingLastPathComponent().appendingPathComponent("vod.m3u8")
+            debugLog("[AVP-MV] master playlist rejected (-12927); retrying on plain media playlist (alternate audio dropped) title=\(channelName)")
+            readyLocalURL = media
+            statusText = "Buffering..."
+            startPlayer(url: media, requestHeaders: [:])
+            return
+        }
         // In-progress DVR: ANY terminal error most likely means the
         // recording just finished (Dispatcharr finalizes and the /hls/
         // playlist route starts serving the SPA's HTML -> -12646
