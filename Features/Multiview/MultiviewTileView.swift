@@ -826,6 +826,7 @@ struct MultiviewTileView: View {
                         resumePositionMs: tile.resumePositionMs,
                         catchup: tile.catchup,
                         progressStore: progressStore,
+                        pipEnabled: isSoleTile,
                         // A hard AVPlayer failure (codec gate, fatal item
                         // error) downgrades the WHOLE session to mpv,
                         // one-way, so the grid stays pure rather than
@@ -1166,6 +1167,7 @@ struct MultiviewTileView: View {
                         resumePositionMs: tile.resumePositionMs,
                         catchup: tile.catchup,
                         progressStore: progressStore,
+                        pipEnabled: isSoleTile,
                         onEngineFallback: { _ in store.downgradeToMPV() }
                     )
                 } else {

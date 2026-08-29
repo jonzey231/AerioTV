@@ -5050,7 +5050,8 @@ struct NativeHLSPlayerScreen: View {
                 // could only chase Apple's fade from outside).
                 AVPlayerLayerView(
                     player: player,
-                    videoGravity: progressStore.aspectMode.videoGravity
+                    videoGravity: progressStore.aspectMode.videoGravity,
+                    pipStore: progressStore
                 )
                 .ignoresSafeArea()
                 .contentShape(Rectangle())

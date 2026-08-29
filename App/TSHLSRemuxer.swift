@@ -1400,6 +1400,10 @@ struct AVPlayerMultiviewTile: View {
     /// feeds it from this tile's AVPlayer, so the unified chrome works
     /// identically over an AVPlayer tile as over an mpv tile.
     let progressStore: PlayerProgressStore
+    /// Solo/fullscreen tile: arm Picture in Picture on the video layer
+    /// (grid tiles never PiP, mpv-path parity). Passed by the parent as
+    /// isSoleTile so the flag tracks tile-count changes.
+    var pipEnabled: Bool = false
     /// Parent flips this tile back to the mpv engine.
     let onEngineFallback: (String) -> Void
 
@@ -1450,6 +1454,19 @@ struct AVPlayerMultiviewTile: View {
     /// Position of the last dead-pipeline reconnect; a fresh reconnect
     /// is allowed only after 15s of real progress past it.
     @State private var lastCatchupReconnectMs: Int32 = -1
+    /// The pipeline was quiesced by didEnterBackground (PiP inactive):
+    /// ingest + loopback sockets die under app suspension anyway, so the
+    /// tile tears down CLEANLY on the way out (freeing the provider
+    /// slot) instead of waking up to "ingest failed: The request timed
+    /// out." + a -12888 stale playlist and the error card (field
+    /// 2026-08-29). willEnterForeground rebuilds the pipeline.
+    @State private var backgroundSuspended = false
+    /// Position saved at quiesce for kinds that can resume in place.
+    @State private var backgroundResumeMs: Int32 = 0
+    /// Previous isPiPActive, to catch "PiP closed while the app is
+    /// still backgrounded" - the ONE path where suspension arrives with
+    /// no didEnterBackground left to quiesce for it.
+    @State private var pipWasActive = false
     /// Harvested-cue subtitle state for MKV VOD playback (see
     /// AVPSubtitleCueStore). A class ref, so the server callbacks can
     /// capture it directly without the stale-struct hazard below.
@@ -1481,7 +1498,8 @@ struct AVPlayerMultiviewTile: View {
         ZStack {
             Color.black
             if let player {
-                AVPlayerLayerView(player: player)
+                AVPlayerLayerView(player: player,
+                                  pipStore: pipEnabled ? progressStore : nil)
                 AVPSubtitleOverlay(store: subtitleStore, timeMs: {
                     let s = player.currentTime().seconds
                     return s.isFinite ? Int64(s * 1000) : 0
@@ -1537,6 +1555,29 @@ struct AVPlayerMultiviewTile: View {
             }
             AudioSessionRefCount.decrement(caller: "avp-tile")
         }
+        #if os(iOS)
+        // Background lifecycle (field 2026-08-29): quiesce cleanly on the
+        // way out, rebuild on the way back. PiP-active sessions skip both
+        // (iOS keeps the process running and the pipeline healthy).
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.didEnterBackgroundNotification)) { _ in
+            quiesceForBackground()
+        }
+        .onReceive(NotificationCenter.default.publisher(
+            for: UIApplication.willEnterForegroundNotification)) { _ in
+            resumeFromBackground()
+        }
+        // PiP closed while still backgrounded: suspension follows with no
+        // further lifecycle callback, so quiesce right here.
+        .onReceive(progressStore.$isPiPActive) { active in
+            if pipWasActive, !active,
+               UIApplication.shared.applicationState == .background {
+                debugLog("[AVP-PIP] closed while backgrounded; quiescing pipeline")
+                quiesceForBackground()
+            }
+            pipWasActive = active
+        }
+        #endif
         // Remux READY lands here with fresh property values.
         .onChange(of: readyLocalURL) { _, url in
             guard let url else { return }
@@ -1622,6 +1663,20 @@ struct AVPlayerMultiviewTile: View {
     /// failure stays ON SCREEN instead of being silently rescued - the
     /// whole point of the no-mpv field test is to see what breaks.
     private func failOrFallback(_ reason: String) {
+        #if os(iOS)
+        // Quiesced (or mid-quiesce) for background: any error racing the
+        // teardown is noise from the pipeline we are already stopping;
+        // foreground rebuilds fresh. Same for an error arriving while
+        // suspended-adjacent (state .background with PiP inactive) - the
+        // resume handler owns recovery, not the card.
+        if backgroundSuspended { return }
+        if UIApplication.shared.applicationState == .background,
+           !progressStore.isPiPActive {
+            debugLog("[AVP-MV] failure while backgrounded (\(reason)); deferring to foreground rebuild channel=\(channelName)")
+            quiesceForBackground()
+            return
+        }
+        #endif
         // In-progress DVR: ANY terminal error most likely means the
         // recording just finished (Dispatcharr finalizes and the /hls/
         // playlist route starts serving the SPA's HTML -> -12646
@@ -1663,6 +1718,15 @@ struct AVPlayerMultiviewTile: View {
             // transient class as the version-switch 503 - the 1s-delayed
             // one-shot retry lets the teardown drain.
             || reason.contains("ingest failed: HTTP 5")
+            // Suspension-adjacent socket death that slipped past the
+            // background quiesce (notification shade dwell, brief app
+            // switch): the connection is simply gone, and a fresh
+            // pipeline is what any viewer would try (field 2026-08-29).
+            // NOT for catch-up tiles: their session-bound URL must go
+            // through the position-preserving re-mint branch below, not
+            // a generic programme-start restart.
+            || (catchup == nil && (reason.contains("timed out")
+                    || reason.contains("network connection was lost")))
             || reason.contains("persistent fetch error")
             || (reason.contains("span") && reason.contains("unreadable"))
         // LIVE included (2026-08-26 field: Sky Sports UHD died with
@@ -1805,6 +1869,54 @@ struct AVPlayerMultiviewTile: View {
         return ("Unable to Play",
                 "This stream couldn't be played by the native engine.")
     }
+
+    #if os(iOS)
+    /// didEnterBackground with PiP inactive: the process is about to be
+    /// suspended, which kills the ingest connection and the loopback
+    /// server's sockets no matter what we do - so tear the pipeline down
+    /// CLEANLY now (freeing the provider slot for the whole background
+    /// stay) and remember to rebuild on foreground. Without this, the
+    /// wake-up delivered "ingest failed: The request timed out." plus a
+    /// -12888 stale-playlist error and the terminal card (field log
+    /// 2026-08-29, Clippers game).
+    private func quiesceForBackground() {
+        guard !progressStore.isPiPActive else { return }
+        guard tileError == nil, player != nil || statusText != nil else { return }
+        backgroundResumeMs = progressStore.currentMs
+        if isVOD, progressStore.currentMs > 2_000 {
+            progressStore.explicitResumeMs = progressStore.currentMs
+        }
+        // Never hand the remuxer to LiveChannelRetention from here: the
+        // app is leaving the screen and retention's own app-background
+        // policy stops every kept session anyway. Clearing the retain
+        // snapshot makes stop() release instead of retain.
+        sessionRetainKey = nil
+        sessionRetainChannelID = nil
+        stop()
+        backgroundSuspended = true
+        debugLog("[AVP-MV] pipeline quiesced for background channel=\(channelName) pos=\(backgroundResumeMs)ms")
+    }
+
+    /// willEnterForeground after a quiesce: rebuild the pipeline. Live
+    /// returns at the live edge, VOD resumes via explicitResumeMs, DVR
+    /// returns at its live edge, catch-up re-tunes its window at the
+    /// saved position (the dead-pipeline reconnect path).
+    private func resumeFromBackground() {
+        guard backgroundSuspended else { return }
+        backgroundSuspended = false
+        // Each background cycle earns a fresh silent retry; without the
+        // reset the second background trip went straight to the card.
+        mismatchAutoRetried = false
+        statusText = "Reconnecting..."
+        debugLog("[AVP-MV] rebuilding pipeline after background channel=\(channelName)")
+        if let cu = catchup, backgroundResumeMs > 0 {
+            lastCatchupReconnectMs = backgroundResumeMs
+            retuneCatchupWindow(backgroundResumeMs, cu)
+        } else {
+            start()
+        }
+    }
+    #endif
 
     private func start() {
         tileError = nil
@@ -2406,6 +2518,15 @@ struct AVPlayerLayerView: UIViewRepresentable {
     /// tiles) are unaffected; the unified player chrome drives it from
     /// the shared aspect setting.
     var videoGravity: AVLayerVideoGravity = .resizeAspect
+    /// Non-nil arms Picture in Picture on THIS layer (solo/fullscreen
+    /// hosts only; grid tiles pass nil). PiP under the AVPlayer engine
+    /// is a plain AVPlayerLayer controller - the mpv path's sample-
+    /// buffer PiP never applied here, which is why swipe-home produced
+    /// no PiP window at all on the remux engine (field 2026-08-29).
+    /// Auto-start from inline only, matching the mpv policy; the
+    /// delegate mirrors active state into the store so the tile's
+    /// background handler knows iOS is driving the window.
+    var pipStore: PlayerProgressStore? = nil
 
     final class HostView: UIView {
         override class var layerClass: AnyClass { AVPlayerLayer.self }
@@ -2416,6 +2537,40 @@ struct AVPlayerLayerView: UIViewRepresentable {
         var attachedAt = Date()
     }
 
+    final class PiPCoordinator: NSObject, AVPictureInPictureControllerDelegate {
+        var controller: AVPictureInPictureController?
+        weak var store: PlayerProgressStore?
+
+        func pictureInPictureControllerWillStartPictureInPicture(_ controller: AVPictureInPictureController) {
+            // Synchronous, and iOS fires it BEFORE didEnterBackground -
+            // the tile's background quiesce reads this flag to stand
+            // down while PiP owns playback (mpv-path parity).
+            store?.isPiPActive = true
+            debugLog("[AVP-PIP] will start")
+        }
+
+        func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
+            store?.isPiPActive = false
+            debugLog("[AVP-PIP] did stop")
+        }
+
+        func pictureInPictureController(_ controller: AVPictureInPictureController,
+                                        failedToStartPictureInPictureWithError error: Error) {
+            store?.isPiPActive = false
+            debugLog("[AVP-PIP] failed to start: \(error.localizedDescription)")
+        }
+
+        func pictureInPictureController(_ controller: AVPictureInPictureController,
+                                        restoreUserInterfaceForPictureInPictureStopWithCompletionHandler
+                                        completionHandler: @escaping (Bool) -> Void) {
+            // The hosting SwiftUI screen stays mounted through PiP, so
+            // there is nothing to rebuild - just confirm.
+            completionHandler(true)
+        }
+    }
+
+    func makeCoordinator() -> PiPCoordinator { PiPCoordinator() }
+
     func makeUIView(context: Context) -> HostView {
         let view = HostView()
         view.playerLayer.player = player
@@ -2425,6 +2580,7 @@ struct AVPlayerLayerView: UIViewRepresentable {
             let ms = Int(Date().timeIntervalSince(view.attachedAt) * 1000)
             debugLog("[AVP-LAYER] isReadyForDisplay=\(layer.isReadyForDisplay) at +\(ms)ms from layer attach")
         }
+        syncPiP(view, context.coordinator)
         return view
     }
 
@@ -2435,5 +2591,33 @@ struct AVPlayerLayerView: UIViewRepresentable {
         if view.playerLayer.videoGravity != videoGravity {
             view.playerLayer.videoGravity = videoGravity
         }
+        syncPiP(view, context.coordinator)
+    }
+
+    /// Arm or disarm the PiP controller to match [pipStore]. The
+    /// controller binds to the LAYER, so player swaps on the same host
+    /// view (retry, version switch) keep the same controller.
+    private func syncPiP(_ view: HostView, _ coordinator: PiPCoordinator) {
+        #if os(iOS)
+        if let store = pipStore {
+            coordinator.store = store
+            if coordinator.controller == nil,
+               AVPictureInPictureController.isPictureInPictureSupported() {
+                if let pip = AVPictureInPictureController(playerLayer: view.playerLayer) {
+                    pip.delegate = coordinator
+                    pip.canStartPictureInPictureAutomaticallyFromInline = true
+                    coordinator.controller = pip
+                    debugLog("[AVP-PIP] controller armed (auto-start from inline)")
+                }
+            }
+        } else if let existing = coordinator.controller {
+            // Tile count grew past solo: PiP is a fullscreen-only
+            // affordance, mirror the mpv policy and drop it.
+            existing.delegate = nil
+            coordinator.controller = nil
+            coordinator.store?.isPiPActive = false
+            debugLog("[AVP-PIP] controller disarmed (no longer solo)")
+        }
+        #endif
     }
 }
