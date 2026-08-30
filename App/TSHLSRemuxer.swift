@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import SwiftData
 import SwiftUI
 import AVFoundation
 import AVKit
@@ -1429,7 +1430,14 @@ struct AVPlayerMultiviewTile: View {
     /// One silent re-index retry per stream URL for index/media
     /// mismatches (provider rotating the file behind the URL). Reset on
     /// URL change so every copy gets its own retry.
-    @State private var mismatchAutoRetried = false
+    /// Budget 2 (was a one-shot): Dispatcharr's per-connection VOD
+    /// failover can serve a DIFFERENT provider copy under the same URL
+    /// mid-session, so a fresh re-index can land on a copy whose cues
+    /// disagree with the next connection's media again (field
+    /// 2026-08-29, Thor #6: first mismatch retried at 1min, second at
+    /// 3.6min went straight to the card). Two fresh pipelines before
+    /// giving up absorbs a one-time flip AND a flip-back.
+    @State private var mismatchAutoRetries = 0
     /// Live Rewind armed for this tile: the remuxer was created with a
     /// spill window (solo live + setting on), so the driver runs in
     /// rewind-window mode and LiveRewindEngine mirrors the window for
@@ -1617,7 +1625,7 @@ struct AVPlayerMultiviewTile: View {
         // In-place channel swap on the same tile id (the container
         // swaps `tile.streamURL` without changing tile identity).
         .onChange(of: streamURL) { _, _ in
-            mismatchAutoRetried = false
+            mismatchAutoRetries = 0
             stop()
             start()
         }
@@ -1750,8 +1758,8 @@ struct AVPlayerMultiviewTile: View {
         // 'persistent fetch error -12888 x3' after 8 healthy minutes -
         // a one-shot re-tune is what any viewer would do before giving
         // up; the old mpv downgrade used to absorb exactly this class).
-        if retryable, !mismatchAutoRetried, tileError == nil {
-            mismatchAutoRetried = true
+        if retryable, mismatchAutoRetries < 2, tileError == nil {
+            mismatchAutoRetries += 1
             debugLog("[AVP-MV] recoverable failure (\(reason)); auto-retrying with a fresh pipeline title=\(channelName)")
             if isVOD, progressStore.currentMs > 2_000 {
                 progressStore.explicitResumeMs = progressStore.currentMs
@@ -1789,6 +1797,22 @@ struct AVPlayerMultiviewTile: View {
         if PlaybackFeatureFlags.mpvEngineEnabled {
             onEngineFallback(reason)
             return
+        }
+        // Live ingest 404: the channel's stream UUID is GONE server-side
+        // (Dispatcharr removed or rotated the channel - PGA/event
+        // streams are torn down when coverage ends, and the app's
+        // channel row keeps the stale UUID until the next playlist
+        // sync). Playback cannot be saved, but kick a channel refresh
+        // so the guide corrects itself while the user reads the card
+        // (field 2026-08-30: three PGA event channels 404'd in a row).
+        if !isVOD, !isDVR, catchup == nil, reason.contains("ingest failed: HTTP 404") {
+            Task { @MainActor in
+                guard let container = AerioApp.sharedContainer else { return }
+                let servers = (try? ModelContext(container).fetch(FetchDescriptor<ServerConnection>())) ?? []
+                guard !servers.isEmpty else { return }
+                debugLog("[AVP-MV] live ingest 404; kicking channel refresh to re-resolve the stale channel list")
+                ChannelStore.shared.refresh(servers: servers)
+            }
         }
         // Which provider copy was playing, for the card and the log
         // (field ask: "Stream Mismatch on WHICH version?"). Nil when
@@ -1873,6 +1897,10 @@ struct AVPlayerMultiviewTile: View {
             return ("Playback Stalled",
                     "Playback stopped advancing and couldn't recover. Play again, or try another version if one is available.")
         }
+        if r.contains("ingest failed: http 404") {
+            return ("Channel Unavailable",
+                    "The server no longer offers this stream. Event channels disappear when their coverage ends; the channel list is refreshing now, so check the guide again in a moment.")
+        }
         if r.contains("timed out") || r.contains("stream failed")
             || r.contains("stream cancelled") || r.contains("range fetch http")
             || r.contains("persistent fetch error") {
@@ -1921,9 +1949,9 @@ struct AVPlayerMultiviewTile: View {
     private func resumeFromBackground() {
         guard backgroundSuspended else { return }
         backgroundSuspended = false
-        // Each background cycle earns a fresh silent retry; without the
+        // Each background cycle earns fresh silent retries; without the
         // reset the second background trip went straight to the card.
-        mismatchAutoRetried = false
+        mismatchAutoRetries = 0
         statusText = "Reconnecting..."
         debugLog("[AVP-MV] rebuilding pipeline after background channel=\(channelName)")
         if let cu = catchup, backgroundResumeMs > 0 {
