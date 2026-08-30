@@ -2300,6 +2300,21 @@ struct AVPlayerMultiviewTile: View {
         // override would pin LL latency, and a server that joins us into an
         // unservable edge is recovered by the stall watchdog below.
         playerItem.automaticallyPreservesTimeOffsetFromLive = true
+        // Stream Buffer (Settings > App Behaviors), AVPlayer-live parity
+        // with mpv's cache-secs: a bursty upstream (field 2026-08-30, MLS
+        // event feed arriving at 0.8x realtime for ~25s stretches, then
+        // catching up in bursts) starves a player holding only the
+        // default ~3-target-duration edge distance - one ~2s stall per
+        // window. The user's chosen seconds ride ON TOP of that default
+        // so 0 stays byte-identical to today's low-latency join, and a
+        // 3-5s setting absorbs the deficit at the cost of that much
+        // added latency. Live tiles only: VOD/DVR/catch-up have no edge.
+        let streamBufferSeconds = UserDefaults.standard.double(forKey: "appBehaviorsStreamBufferSeconds")
+        if !isVOD, !isDVR, catchup == nil, streamBufferSeconds > 0 {
+            playerItem.configuredTimeOffsetFromLive =
+                CMTime(seconds: 6 + streamBufferSeconds, preferredTimescale: 600)
+            debugLog("[AVP-MV] live edge offset raised to \(6 + streamBufferSeconds)s (Stream Buffer setting) channel=\(channelName)")
+        }
         // Forward buffer: left at AVPlayer's automatic default (0). A device
         // capture DISPROVED the idea that a forced preferredForwardBufferDuration
         // does not gate first frame: forcing 12s gated tune-in to ~11.8s on a

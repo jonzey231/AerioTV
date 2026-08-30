@@ -4041,6 +4041,12 @@ struct MainTabView: View {
     /// staleness so ordinary app-switching doesn't refetch every time.
     private func refreshGuideIfStaleOnForeground(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
         guard oldPhase != .active, newPhase == .active else { return }
+        refreshGuideIfStale(reason: "foreground")
+    }
+
+    /// Shared staleness gate for the foreground edge AND the 5-minute
+    /// always-active sweep (see the `.task` at the wiring site).
+    private func refreshGuideIfStale(reason: String) {
         guard !allServers.isEmpty else { return }
         // Don't pile on top of an in-flight cold-launch / server-change sync.
         guard !channelStore.isLoading, !channelStore.isEPGLoading else { return }
@@ -4048,7 +4054,7 @@ struct MainTabView: View {
         // short enough that "opened it after a few hours" always lands fresh.
         let staleAfter: TimeInterval = 30 * 60
         guard GuideStore.shared.isEPGStale(olderThan: staleAfter) else { return }
-        debugLog("🔄 Foreground guide refresh: EPG stale (>\(Int(staleAfter / 60))m old) — forcing channels + guide refresh")
+        debugLog("🔄 Guide refresh (\(reason)): EPG stale (>\(Int(staleAfter / 60))m old) — forcing channels + guide refresh")
         let servers = allServers
         let ctx = modelContext
         Task { await channelStore.forceRefresh(servers: servers, modelContext: ctx) }
@@ -5238,6 +5244,24 @@ struct MainTabView: View {
                 }
             }
         ))
+        // Field 2026-08-30 (MLS group): a session that STAYS foregrounded
+        // never refetches - the staleness refresh above only fires on the
+        // background->active edge, so an evening of continuous use rendered
+        // a channel lineup from before teamarr's event-channel rewrite (the
+        // server had removed 12 finished events and regrouped the new MLS
+        // games; the app kept showing its 17:27 snapshot for 80+ minutes).
+        // Sweep the SAME gated check on a 5-minute tick while active: the
+        // 30-minute staleness window still decides whether anything is
+        // actually refetched, so steady state adds one cheap age check per
+        // tick and at most the pull-to-refresh workload per half hour.
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+                if scenePhase == .active {
+                    refreshGuideIfStale(reason: "periodic sweep")
+                }
+            }
+        }
         // Background-work heartbeat logger. When `isAnyBackgroundWork`
         // transitions false → true we start a 15s-tick Task that
         // prints the currently-active task labels. The user-visible
