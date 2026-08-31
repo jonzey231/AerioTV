@@ -1,5 +1,40 @@
 # Changelog
 
+## v1.8.21 - 2026-08-31 (TestFlight beta)
+
+AVPlayer-engine beta: every playback path (live TV, VOD, DVR, catch-up,
+Live Rewind, multiview) now runs on the native AVPlayer engine with the
+mpv engine fully disabled. This build is for the AVPlayer-only test
+group.
+
+### Added
+
+- **Stream Buffer for live TV** now applies to the native engine: the
+  App Behaviors setting adds its seconds behind the live edge, smoothing
+  channels whose feeds arrive in bursts (event streams).
+- **Channel list freshness.** The guide now refreshes itself during long
+  foreground sessions (every 5 minutes past the 30-minute staleness
+  window), so event channels appear and disappear without relaunching.
+- Multiview tile menu: native long-press menu with Playback submenu
+  (RW 60s / Pause / FF 60s / Return to Live), Add Channel, Change
+  Channel, and per-tile Switch Stream on Dispatcharr.
+
+### Fixed
+
+- Returning from the background no longer shows a playback error; the
+  player rebuilds its pipeline silently (live returns at the edge, VOD
+  at position, catch-up in place).
+- Picture in Picture works on the native engine (auto-starts on swipe
+  home; solo playback only).
+- 4K UHD MKV remuxes with oversized codec headers no longer fail with a
+  bare error at start.
+- Playback survives the server switching provider copies mid-stream
+  (silent retry budget instead of an immediate error card).
+- Live channels removed on the server (finished event streams) now show
+  a clear "Channel Unavailable" message and refresh the guide instead of
+  a generic error.
+
+
 ## v1.8.5 - 2026-08-08
 
 ### Added
