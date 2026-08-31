@@ -4039,6 +4039,18 @@ struct MainTabView: View {
     /// kick the same channels + guide refresh that pull-to-refresh uses
     /// (`forceRefresh`, which deliberately does NOT re-pull VOD). Gated on
     /// staleness so ordinary app-switching doesn't refetch every time.
+    /// See the `.task` at the wiring site. A named function, not an
+    /// inline closure: the modifier chain there is at the Release-mode
+    /// type-checker's budget in Xcode 26 (archive-blocking timeout).
+    @Sendable private func runPeriodicGuideStalenessSweep() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            if scenePhase == .active {
+                refreshGuideIfStale(reason: "periodic sweep")
+            }
+        }
+    }
+
     private func refreshGuideIfStaleOnForeground(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
         guard oldPhase != .active, newPhase == .active else { return }
         refreshGuideIfStale(reason: "foreground")
@@ -5254,14 +5266,7 @@ struct MainTabView: View {
         // 30-minute staleness window still decides whether anything is
         // actually refetched, so steady state adds one cheap age check per
         // tick and at most the pull-to-refresh workload per half hour.
-        .task {
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
-                if scenePhase == .active {
-                    refreshGuideIfStale(reason: "periodic sweep")
-                }
-            }
-        }
+        .task(runPeriodicGuideStalenessSweep)
         // Background-work heartbeat logger. When `isAnyBackgroundWork`
         // transitions false → true we start a 15s-tick Task that
         // prints the currently-active task labels. The user-visible

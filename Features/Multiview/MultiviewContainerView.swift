@@ -841,114 +841,7 @@ struct MultiviewContainerView: View {
         // still call `reportInteraction()` — they're the
         // "I intend to use the chrome" signal. Plain D-pad moves
         // are just "I'm looking around".
-        .onMoveCommand { direction in
-            // Relocate mode takes priority: when the user picked
-            // "Move Tile" from the context menu we need D-pad presses
-            // to swap the relocating tile with its neighbour
-            // regardless of where tvOS thinks focus is. Handling this
-            // at the CONTAINER level (instead of the individual
-            // tile's `.onMoveCommand`) dodges the "focus drifted to
-            // the audio tile after context-menu dismiss" race:
-            // `.onMoveCommand` on a `.focusSection()` fires for any
-            // D-pad event while focus is anywhere inside the scope,
-            // so the swap runs even if focus is technically on a
-            // different tile. The tile's own `.onMoveCommand` stays
-            // for historical compatibility (harmless no-op in the
-            // common case).
-            if let relocatingID = store.relocatingTileID,
-               let idx = store.tiles.firstIndex(where: { $0.id == relocatingID }) {
-                let neighborDir: MultiviewGridMath.NeighborDirection
-                switch direction {
-                case .left:  neighborDir = .left
-                case .right: neighborDir = .right
-                case .up:    neighborDir = .up
-                case .down:  neighborDir = .down
-                @unknown default: return
-                }
-                if let neighborIdx = MultiviewGridMath.physicalNeighbor(
-                    of: idx,
-                    count: store.tiles.count,
-                    direction: neighborDir
-                ) {
-                    let neighborID = store.tiles[neighborIdx].id
-                    DebugLogger.shared.log(
-                        "[MV-Cmd] tvOS relocate swap (container-level) dir=\(neighborDir) tile=\(relocatingID) neighbor=\(neighborID)",
-                        category: "Playback", level: .info
-                    )
-                    store.swap(relocatingID, neighborID)
-                    // Keep focus pinned on the relocating tile after
-                    // the swap — its array index changed but its id
-                    // didn't, so the `.focused($focusedTileID)`
-                    // binding keeps working. Reasserting here covers
-                    // the case where tvOS's post-swap focus pass
-                    // tried to move focus elsewhere.
-                    focusedTileID = relocatingID
-                }
-                return
-            }
-            // Remote Control #195: on the BARE fullscreen live player
-            // (sole tile, no replay, chrome hidden, no scrub, no
-            // overlay/sheet) the short-press D-pad slots resolve
-            // through the user's remote map instead of the old
-            // hardcoded scheme. Default map: Up/Down = channel surf,
-            // Left = Channels overlay (Apple GH #54), Right =
-            // last-channel zap. The pre-initiative behaviour lives on
-            // as `RemoteControlMap.legacyScheme` slot values a user
-            // can restore per-slot in Settings > Remote Control.
-            #if os(tvOS)
-            // VOD/DVR sessions (Logan 2026-08-26): a D-pad press while
-            // chrome is HIDDEN only SUMMONS chrome - left/right used to
-            // scrub the timeline immediately (and up/down fell into the
-            // remote map). Scrubbing now lives on the visible chrome's
-            // timeline band and hold-to-scrub; catch-up keeps its
-            // always-scrubs Android-parity behavior.
-            if store.vodSoloTile != nil, !chromeState.isVisible,
-               !dpadScrub.active, !dpadScrub.holdActive {
-                chromeState.reportInteraction()
-                return
-            }
-            if barePlayerState {
-                let slot: RemoteSlot? = {
-                    switch direction {
-                    case .up: return .upShort
-                    case .down: return .downShort
-                    case .left: return .leftShort
-                    case .right: return .rightShort
-                    @unknown default: return nil
-                    }
-                }()
-                if let slot {
-                    let action = RemoteControlStore.shared.playerAction(slot)
-                    // Honor the pre-map App Behaviors flip toggle: users
-                    // who turned the Apple TV channel flip OFF keep
-                    // up/down inert even under the default map (the
-                    // toggle predates the map and still syncs).
-                    let flipSuppressed = (action == .channelUp || action == .channelDown)
-                        && !appleTVChannelFlip
-                    if !flipSuppressed, executePlayerAction(action) {
-                        return
-                    }
-                }
-            }
-            #endif
-            // D-pad left/right = direct timeline step while a REPLAY is
-            // on (catch-up always scrubs, matching Android) or a scrub
-            // is already engaged (HUD up). Plain-live scrub entry moved
-            // to hold-Left/Right (ScrubHoldDetector below) when the
-            // map assigns short-Left/Right elsewhere; remapping
-            // leftShort/rightShort back to seek restores the old
-            // single-press behaviour.
-            if store.tiles.count == 1,
-               !nowPlaying.isMinimized,
-               !chromeState.isVisible,
-               !dpadScrub.holdActive,   // hold loop already stepping
-               direction == .left || direction == .right,
-               dpadScrub.step(direction == .left ? -1 : +1, store: store) {
-                return
-            }
-            // Normal navigation: just wake the focus indicator.
-            chromeState.reportFocusActivity()
-        }
+        .onMoveCommand { direction in handleTVMoveCommand(direction) }
         // Hold-to-scrub: move commands never autorepeat on a held
         // d-pad edge, so a window-level UIKit recognizer detects the
         // hold (0.4s) and a repeat task steps the shared scrub until
@@ -1050,29 +943,7 @@ struct MultiviewContainerView: View {
             // Resumes on dismissal.
             store.isPickerPresented = presenting
         }
-        .task {
-            // Subscribe to thermal-state changes for the lifetime of
-            // the container. The observer posts on the main thread
-            // per Apple docs, so direct @MainActor writes are fine.
-            // Initial state primes the flag for the "already hot when
-            // user opens multiview" case.
-            store.thermalState = ProcessInfo.processInfo.thermalState
-            DebugLogger.shared.log(
-                "[MV-Thermal] initial arrival=\(thermalStateName(store.thermalState))",
-                category: "Playback", level: .info
-            )
-            for await _ in NotificationCenter.default.notifications(
-                named: ProcessInfo.thermalStateDidChangeNotification
-            ) {
-                let new = ProcessInfo.processInfo.thermalState
-                let old = store.thermalState
-                store.thermalState = new
-                DebugLogger.shared.log(
-                    "[MV-Thermal] state \(thermalStateName(old))→\(thermalStateName(new)) tiles=\(store.tiles.count)",
-                    category: "Playback", level: .warning
-                )
-            }
-        }
+        .task(watchThermalState)
         .onReceive(
             NotificationCenter.default.publisher(for: .multiviewRequestOpenAddSheet)
         ) { _ in
@@ -1094,9 +965,7 @@ struct MultiviewContainerView: View {
         // but in practice works because the `.focusSection()` at the
         // grid scope gives us ownership of d-pad + Menu within that
         // region.
-        .onExitCommand {
-            handleMenuPress(source: "onExitCommand")
-        }
+        .onExitCommand { handleTVExitCommand() }
         // GH #11 fix: also listen for the .playerBackPress relay so
         // MainTabView's outer `.onExitCommand` (which fires after the
         // user expands from mini back to fullscreen via Play/Pause —
@@ -1108,51 +977,7 @@ struct MultiviewContainerView: View {
         .onReceive(NotificationCenter.default.publisher(for: .playerBackPress)) { _ in
             handleMenuPress(source: "playerBackPress")
         }
-        .onPlayPauseCommand {
-            // Siri Remote Play/Pause routing:
-            //   - Mini state (container is collapsed to corner) →
-            //     EXPAND back to full-screen. The container-level
-            //     handler fires even when the outer wrapper is
-            //     `.disabled`/hit-testing-off, so we need to
-            //     explicitly short-circuit here to reach
-            //     `nowPlaying.expand()`. Without this the handler
-            //     would toggle pause on the tile while it's still
-            //     in the corner — confusing.
-            //   - Full-screen state → toggle pause on the audio
-            //     tile's mpv handle. Ported from the legacy
-            //     PlayerView path (PlayerView.swift ~line 625).
-            //     `audioProgressStore` resolves to whichever tile
-            //     currently owns audio (tile 0 at N=1, the
-            //     user-picked tile at N≥2).
-            //
-            // In the full-screen case we also call
-            // `reportInteraction()` so the scrubber/overlay reflects
-            // the new pause state immediately — matches the legacy
-            // `showControls = true` after a Play/Pause.
-            if NowPlayingManager.shared.isMinimized {
-                DebugLogger.shared.log(
-                    "[MV-Cmd] tvOS Play/Pause → expand (was mini)",
-                    category: "Playback", level: .info
-                )
-                withAnimation(.spring(response: 0.35)) {
-                    NowPlayingManager.shared.expand()
-                }
-            } else if barePlayerState,
-                      RemoteControlStore.shared.playerAction(.playPause) != .playPause,
-                      executePlayerAction(RemoteControlStore.shared.playerAction(.playPause)) {
-                // Remote Control #195: a REMAPPED Play/Pause slot runs its
-                // mapped action on the bare player; the default (and any
-                // non-bare state: chrome up, N>1, replay) keeps the
-                // toggle below.
-            } else if let toggle = store.audioProgressStore?.togglePauseAction {
-                DebugLogger.shared.log(
-                    "[MV-Cmd] tvOS Play/Pause → toggle pause on audio tile",
-                    category: "Playback", level: .info
-                )
-                toggle()
-                chromeState.reportInteraction()
-            }
-        }
+        .onPlayPauseCommand { handleTVPlayPauseCommand() }
         // Remote Control #195: host the player's Left-press overlays.
         // ZStack overlay (not a cover) so the live picture stays
         // underneath; each overlay owns its focus + Back, and
@@ -2080,6 +1905,199 @@ struct MultiviewContainerView: View {
     /// `String(describing:)` on the raw enum prints "nominal" which
     /// is already what we want, but using a small function keeps
     /// future-proofing simple if Apple adds a new case.
+#if os(tvOS)
+    /// Extracted from the inline .onPlayPauseCommand closure: the
+    /// container's modifier chain is at the Xcode 26 Release
+    /// type-checker budget (archive timeout). Behavior unchanged.
+    private func handleTVPlayPauseCommand() {
+            // Siri Remote Play/Pause routing:
+            //   - Mini state (container is collapsed to corner) →
+            //     EXPAND back to full-screen. The container-level
+            //     handler fires even when the outer wrapper is
+            //     `.disabled`/hit-testing-off, so we need to
+            //     explicitly short-circuit here to reach
+            //     `nowPlaying.expand()`. Without this the handler
+            //     would toggle pause on the tile while it's still
+            //     in the corner — confusing.
+            //   - Full-screen state → toggle pause on the audio
+            //     tile's mpv handle. Ported from the legacy
+            //     PlayerView path (PlayerView.swift ~line 625).
+            //     `audioProgressStore` resolves to whichever tile
+            //     currently owns audio (tile 0 at N=1, the
+            //     user-picked tile at N≥2).
+            //
+            // In the full-screen case we also call
+            // `reportInteraction()` so the scrubber/overlay reflects
+            // the new pause state immediately — matches the legacy
+            // `showControls = true` after a Play/Pause.
+            if NowPlayingManager.shared.isMinimized {
+                DebugLogger.shared.log(
+                    "[MV-Cmd] tvOS Play/Pause → expand (was mini)",
+                    category: "Playback", level: .info
+                )
+                withAnimation(.spring(response: 0.35)) {
+                    NowPlayingManager.shared.expand()
+                }
+            } else if barePlayerState,
+                      RemoteControlStore.shared.playerAction(.playPause) != .playPause,
+                      executePlayerAction(RemoteControlStore.shared.playerAction(.playPause)) {
+                // Remote Control #195: a REMAPPED Play/Pause slot runs its
+                // mapped action on the bare player; the default (and any
+                // non-bare state: chrome up, N>1, replay) keeps the
+                // toggle below.
+            } else if let toggle = store.audioProgressStore?.togglePauseAction {
+                DebugLogger.shared.log(
+                    "[MV-Cmd] tvOS Play/Pause → toggle pause on audio tile",
+                    category: "Playback", level: .info
+                )
+                toggle()
+                chromeState.reportInteraction()
+            }
+    }
+#endif
+
+#if os(tvOS)
+    /// Extracted from the inline .onMoveCommand closure (Xcode 26
+    /// Release type-checker budget on the container chain).
+    private func handleTVMoveCommand(_ direction: MoveCommandDirection) {
+        // Relocate mode takes priority: when the user picked
+        // "Move Tile" from the context menu we need D-pad presses
+        // to swap the relocating tile with its neighbour
+        // regardless of where tvOS thinks focus is. Handling this
+        // at the CONTAINER level (instead of the individual
+        // tile's `.onMoveCommand`) dodges the "focus drifted to
+        // the audio tile after context-menu dismiss" race:
+        // `.onMoveCommand` on a `.focusSection()` fires for any
+        // D-pad event while focus is anywhere inside the scope,
+        // so the swap runs even if focus is technically on a
+        // different tile. The tile's own `.onMoveCommand` stays
+        // for historical compatibility (harmless no-op in the
+        // common case).
+        if let relocatingID = store.relocatingTileID,
+           let idx = store.tiles.firstIndex(where: { $0.id == relocatingID }) {
+            let neighborDir: MultiviewGridMath.NeighborDirection
+            switch direction {
+            case .left:  neighborDir = .left
+            case .right: neighborDir = .right
+            case .up:    neighborDir = .up
+            case .down:  neighborDir = .down
+            @unknown default: return
+            }
+            if let neighborIdx = MultiviewGridMath.physicalNeighbor(
+                of: idx,
+                count: store.tiles.count,
+                direction: neighborDir
+            ) {
+                let neighborID = store.tiles[neighborIdx].id
+                DebugLogger.shared.log(
+                    "[MV-Cmd] tvOS relocate swap (container-level) dir=\(neighborDir) tile=\(relocatingID) neighbor=\(neighborID)",
+                    category: "Playback", level: .info
+                )
+                store.swap(relocatingID, neighborID)
+                // Keep focus pinned on the relocating tile after
+                // the swap — its array index changed but its id
+                // didn't, so the `.focused($focusedTileID)`
+                // binding keeps working. Reasserting here covers
+                // the case where tvOS's post-swap focus pass
+                // tried to move focus elsewhere.
+                focusedTileID = relocatingID
+            }
+            return
+        }
+        // Remote Control #195: on the BARE fullscreen live player
+        // (sole tile, no replay, chrome hidden, no scrub, no
+        // overlay/sheet) the short-press D-pad slots resolve
+        // through the user's remote map instead of the old
+        // hardcoded scheme. Default map: Up/Down = channel surf,
+        // Left = Channels overlay (Apple GH #54), Right =
+        // last-channel zap. The pre-initiative behaviour lives on
+        // as `RemoteControlMap.legacyScheme` slot values a user
+        // can restore per-slot in Settings > Remote Control.
+        #if os(tvOS)
+        // VOD/DVR sessions (Logan 2026-08-26): a D-pad press while
+        // chrome is HIDDEN only SUMMONS chrome - left/right used to
+        // scrub the timeline immediately (and up/down fell into the
+        // remote map). Scrubbing now lives on the visible chrome's
+        // timeline band and hold-to-scrub; catch-up keeps its
+        // always-scrubs Android-parity behavior.
+        if store.vodSoloTile != nil, !chromeState.isVisible,
+           !dpadScrub.active, !dpadScrub.holdActive {
+            chromeState.reportInteraction()
+            return
+        }
+        if barePlayerState {
+            let slot: RemoteSlot? = {
+                switch direction {
+                case .up: return .upShort
+                case .down: return .downShort
+                case .left: return .leftShort
+                case .right: return .rightShort
+                @unknown default: return nil
+                }
+            }()
+            if let slot {
+                let action = RemoteControlStore.shared.playerAction(slot)
+                // Honor the pre-map App Behaviors flip toggle: users
+                // who turned the Apple TV channel flip OFF keep
+                // up/down inert even under the default map (the
+                // toggle predates the map and still syncs).
+                let flipSuppressed = (action == .channelUp || action == .channelDown)
+                    && !appleTVChannelFlip
+                if !flipSuppressed, executePlayerAction(action) {
+                    return
+                }
+            }
+        }
+        #endif
+        // D-pad left/right = direct timeline step while a REPLAY is
+        // on (catch-up always scrubs, matching Android) or a scrub
+        // is already engaged (HUD up). Plain-live scrub entry moved
+        // to hold-Left/Right (ScrubHoldDetector below) when the
+        // map assigns short-Left/Right elsewhere; remapping
+        // leftShort/rightShort back to seek restores the old
+        // single-press behaviour.
+        if store.tiles.count == 1,
+           !nowPlaying.isMinimized,
+           !chromeState.isVisible,
+           !dpadScrub.holdActive,   // hold loop already stepping
+           direction == .left || direction == .right,
+           dpadScrub.step(direction == .left ? -1 : +1, store: store) {
+            return
+        }
+        // Normal navigation: just wake the focus indicator.
+        chromeState.reportFocusActivity()
+    }
+
+    /// Extracted from the inline .onExitCommand closure (same
+    /// type-checker budget note as handleTVMoveCommand).
+    private func handleTVExitCommand() {
+        handleMenuPress(source: "onExitCommand")
+    }
+#endif
+
+    /// Thermal watch for the container's lifetime (named function, not
+    /// an inline .task closure: the modifier chain is at the Xcode 26
+    /// Release type-checker budget and inlining this timed out the
+    /// archive). The observer posts on the main thread per Apple docs,
+    /// so direct @MainActor writes are fine; the initial state primes
+    /// the flag for the "already hot when user opens multiview" case.
+    @Sendable private func watchThermalState() async {
+        store.thermalState = ProcessInfo.processInfo.thermalState
+        DebugLogger.shared.log(
+            "[MV-Thermal] initial arrival=\(thermalStateName(store.thermalState))",
+            category: "Playback", level: .info
+        )
+        for await _ in NotificationCenter.default.notifications(
+            named: ProcessInfo.thermalStateDidChangeNotification
+        ) {
+            let new = ProcessInfo.processInfo.thermalState
+            let old = store.thermalState
+            store.thermalState = new
+            let line = "[MV-Thermal] state \(thermalStateName(old))→\(thermalStateName(new)) tiles=\(store.tiles.count)"
+            DebugLogger.shared.log(line, category: "Playback", level: .warning)
+        }
+    }
+
     private func thermalStateName(_ state: ProcessInfo.ThermalState) -> String {
         switch state {
         case .nominal: return "nominal"
