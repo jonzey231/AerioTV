@@ -1171,15 +1171,9 @@ struct MultiviewContainerView: View {
             isPresented: $showExitConfirmation,
             titleVisibility: .visible
         ) {
-            // Android parity P2: at N>=2 offer a guide-return that KEEPS
-            // the staged set; the guide's staging banner lets the user
-            // resume the same grid via Play. N=1 unified playback keeps
-            // the plain Exit dialog (nothing staged worth keeping).
-            if !(PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1) {
-                Button("Back to TV Guide") {
-                    session.exitMultiviewKeepingStagedTiles()
-                }
-            }
+            // "Back to TV Guide" removed (Logan 2026-08-31, both
+            // platforms): with Add Channel in the tile menu the
+            // keep-staged-tiles exit just duplicated the Back flow.
             Button(exitConfirmationPrimary, role: .destructive) {
                 performConfirmedExit()
             }
@@ -1402,7 +1396,7 @@ struct MultiviewContainerView: View {
         if PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1 {
             return "Stops playback and returns to the channel guide."
         }
-        return "Exit Multiview collapses the grid back to the stream you were listening to. Back to TV Guide keeps your staged tiles so you can resume from the guide."
+        return "Exit Multiview collapses the grid back to the stream you were listening to."
     }
 
     /// Run the actual exit action that the confirmation dialog was
