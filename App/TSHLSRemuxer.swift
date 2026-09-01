@@ -1900,6 +1900,17 @@ struct AVPlayerMultiviewTile: View {
                     + "OTA / HDHomeRun section of the AerioTV GitHub README "
                     + "for a Dispatcharr Stream Profile that fixes this.")
         }
+        if r.contains("range fetch http 503") || r.contains("range fetch http 502") {
+            // Tester 2026-09-01 (iPad over VPN, 1.8.23): every VOD copy on
+            // every provider failed at prepare with HTTP 503 from the
+            // Dispatcharr VOD proxy, and the card said "the connection to
+            // the provider stalled", which implies a link problem the user
+            // cannot act on. A 503 at prepare means the SERVER refused to
+            // open the file (provider connection limit reached, or the
+            // proxy busy); name that so the user checks the right thing.
+            return ("Server Busy",
+                    "The server could not open this video (HTTP 503). This usually means the provider's connection limit is reached or the server is busy. Wait a moment and try again, or check the provider's active connections.")
+        }
         if r.contains("audio codec") {
             let codec = codecName("audio codec ")
             return ("Audio Not Supported",
