@@ -362,6 +362,35 @@ URL — including providers that don't support the Xtream Codes API.
 
 </details>
 
+## OTA / HDHomeRun Channels (MPEG-2)
+
+Over-the-air broadcast channels (ATSC tuners such as HDHomeRun) carry
+MPEG-2 video. Apple devices have no MPEG-2 decoder, so these channels
+cannot play natively and AerioTV will show a "Channel Not Supported"
+message naming MPEG-2 as the reason.
+
+For Dispatcharr users the fix is a one-time server-side transcode:
+create an ffmpeg [Stream Profile](https://dispatcharr.github.io/Dispatcharr-Docs/system/?h=stream+profiles#stream-profiles)
+and assign it to your OTA channels. Command: `ffmpeg`. Parameters
+(paste exactly this, and do NOT include the word `ffmpeg` at the start
+of the parameters field):
+
+```
+-fflags +discardcorrupt+genpts -user_agent {userAgent} -i {streamUrl} -map 0:v:0 -map 0:a? -vf yadif -c:v libx264 -preset veryfast -tune zerolatency -crf 21 -maxrate 12M -bufsize 24M -g 60 -keyint_min 60 -sc_threshold 0 -c:a ac3 -mpegts_flags +pat_pmt_at_frames+resend_headers+initial_discontinuity -f mpegts pipe:1
+```
+
+This deinterlaces the broadcast and re-encodes it to H.264 with AC-3
+audio, which every Apple device plays natively. Expect roughly one CPU
+core per concurrently watched OTA channel; if your server has a
+hardware encoder, substitute `-c:v h264_qsv` or `-c:v h264_nvenc` for
+`-c:v libx264 -crf 21`. Remember to assign the profile to the OTA
+channels themselves: editing a profile does not move any channel onto
+it.
+
+If your HDHomeRun is a transcode-capable model (EXTEND class), enabling
+its built-in H.264 transcoder is an alternative that needs no server
+CPU at all.
+
 ## Requirements for Development
 
 - Xcode 15 or later
