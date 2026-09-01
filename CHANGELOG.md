@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.8.23 - 2026-09-01 (TestFlight beta)
+
+Third AVPlayer-engine beta: OTA channel handling and touch-scrubbing
+polish from the second round of tester feedback.
+
+### Added
+
+- Over-the-air (MPEG-2) channels now show a clear "Channel Not
+  Supported" message explaining the format and pointing at the OTA /
+  HDHomeRun section of the GitHub README, which documents a validated
+  Dispatcharr Stream Profile that transcodes these channels for native
+  playback.
+
+### Fixed
+
+- Dragging the VOD/DVR timeline no longer rubber-bands back to the old
+  position before jumping forward: the scrubber holds at the released
+  spot until the seek actually lands.
+- Error cards no longer show the "mpv engine disabled (Developer
+  setting)" internal note.
+
+
 ## v1.8.22 - 2026-08-31 (TestFlight beta)
 
 Second AVPlayer-engine beta. Fixes for everything raised in the first
