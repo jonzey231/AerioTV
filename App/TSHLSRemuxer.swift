@@ -1889,6 +1889,17 @@ struct AVPlayerMultiviewTile: View {
                 .replacingOccurrences(of: "MPEGH/ISO/", with: "")
                 .replacingOccurrences(of: "MPEG4/ISO/", with: "")
         }
+        if r.contains("unsupported codec: mpeg-2") {
+            // OTA/ATSC broadcast channels (field 2026-08-31, second tester:
+            // every OTA channel failed with a generic card). Apple silicon
+            // has no MPEG-2 decoder; name the real constraint instead of
+            // implying the channel is broken.
+            return ("Channel Not Supported",
+                    "This channel broadcasts MPEG-2 video (over-the-air TV), "
+                    + "which this device can't decode natively. See the "
+                    + "OTA / HDHomeRun section of the AerioTV GitHub README "
+                    + "for a Dispatcharr Stream Profile that fixes this.")
+        }
         if r.contains("audio codec") {
             let codec = codecName("audio codec ")
             return ("Audio Not Supported",
