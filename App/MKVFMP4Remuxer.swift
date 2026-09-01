@@ -2097,6 +2097,38 @@ final class MKVVODServer: @unchecked Sendable {
     /// watchdog polls this to distinguish slow links from dead streams.
     var mediaBytesStreamed: Int64 { remuxer.mediaBytesStreamed }
 
+    /// Maps a playback position onto the source segment/byte range, for
+    /// the failure log. A deterministic CoreMedia item-failed at a fixed
+    /// position (tester 2026-08-31: Code=-4 at 63813ms, twice) means a
+    /// specific cluster the remuxer emits badly -- this line is what lets
+    /// the offending bytes be fetched and benched offline.
+    func diagnostics(forMs ms: Int32) -> String {
+        let map = remuxer.segmentsMap
+        guard !map.isEmpty else { return "no segment map" }
+        let ticks = Int64(ms) * (MKVFMP4Remuxer.ticksPerSecond / 1000)
+        let seg = map.last(where: { $0.startTicks <= ticks }) ?? map[0]
+        return "segment=\(seg.index) ticks=\(seg.startTicks)..\(seg.startTicks + seg.durationTicks) "
+            + "bytes=\(seg.byteStart)..\(seg.byteEnd)"
+    }
+
+    /// User seek notification (scrub commit). Every cached span and
+    /// built segment describes the OLD playhead neighbourhood; on a
+    /// 20Mbps title that is ~200MB of Data that would sit dirty in the
+    /// footprint while the new position fetches its own. Rapid D-pad
+    /// scrubbing stacked several such generations and jetsammed the app
+    /// (tester 2026-08-31, crash at 20:21 during VOD scrubbing). Purge
+    /// them; the new position rebuilds exactly what it needs.
+    func noteSeek() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.cache.removeAll()
+            self.cacheBytes = 0
+            self.audCache.removeAll()
+            self.audCacheBytes = 0
+            self.remuxer.purgeCaches()
+        }
+    }
+
     /// Memory-warning response: drop every cache; steady playback
     /// refetches what it needs at ~1x.
     func purgeOnMemoryWarning() {

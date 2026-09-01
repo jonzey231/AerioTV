@@ -1758,6 +1758,28 @@ struct AVPlayerMultiviewTile: View {
         // 'persistent fetch error -12888 x3' after 8 healthy minutes -
         // a one-shot re-tune is what any viewer would do before giving
         // up; the old mpv downgrade used to absorb exactly this class).
+        // Deterministic mid-file CoreMedia decode failure on the MKV remux
+        // path (tester 2026-08-31: Code=-4 at exactly 63813ms on two
+        // separate attempts of the same 20Mbps title): one cluster in this
+        // copy remuxes into something CoreMedia refuses. A plain retry at
+        // the same position dies identically, so retry once skipping 3s
+        // past the poisonous sample -- and log the segment/byte range so
+        // the copy can be fetched and benched offline. Bounded by the same
+        // retry budget as the generic path.
+        if reason.contains("Code=-4"), isVOD, let srv = mkvServer,
+           mismatchAutoRetries < 2, tileError == nil {
+            let pos = max(progressStore.currentMs, 0)
+            mismatchAutoRetries += 1
+            debugLog("[AVP-MV] CoreMedia -4 at \(pos)ms (\(srv.diagnostics(forMs: pos))); "
+                + "retrying 3s past the failing sample title=\(channelName)")
+            progressStore.explicitResumeMs = pos + 3_000
+            stop()
+            statusText = "Retrying..."
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                start()
+            }
+            return
+        }
         if retryable, mismatchAutoRetries < 2, tileError == nil {
             mismatchAutoRetries += 1
             debugLog("[AVP-MV] recoverable failure (\(reason)); auto-retrying with a fresh pipeline title=\(channelName)")
@@ -2358,10 +2380,25 @@ struct AVPlayerMultiviewTile: View {
         if isDVR, resumeMs == 0 {
             // "Watch from Beginning" on an in-progress recording: without
             // a seek, a live-shaped playlist starts at the live edge.
-            // AVPlayer queues the seek until the item is ready, and the
-            // DVR playlist never rolls anything off, so position 0 is
-            // always in the window.
+            // The pre-ready queued seek alone is NOT enough: when the item
+            // reaches readyToPlay, AVPlayer's live-edge positioning for a
+            // live-shaped playlist stomps it, and playback lands at the
+            // edge anyway (tester 2026-08-31: "Watch from Beginning went
+            // to Live"; log showed the queued seek then edge=-7.0s). So
+            // re-issue the seek at readiness, when it sticks. The DVR
+            // playlist never rolls anything off, so position 0 is always
+            // in the window.
             avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+            var readyObs: NSKeyValueObservation?
+            readyObs = playerItem.observe(\.status, options: [.new]) { item, _ in
+                guard item.status != .unknown else { return }
+                if item.status == .readyToPlay {
+                    avPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+                    debugLog("[AVP-MV] DVR from-beginning seek re-issued at readyToPlay")
+                }
+                readyObs?.invalidate()
+                readyObs = nil
+            }
             debugLog("[AVP-MV] DVR from-beginning seek queued title=\(channelName)")
         }
         if isVOD || isDVR, let ms = resumeMs, ms > 2_000 {
@@ -2407,6 +2444,19 @@ struct AVPlayerMultiviewTile: View {
         if liveRewindArmed, !isVOD, !isDVR {
             driver?.liveRewindWindowActive = true
             LiveRewindEngine.shared.beginExternalWindow(owner: tileID)
+        }
+        // MKV-remux tiles: tell the loopback server about every user seek
+        // so it can drop the old neighbourhood's span/segment caches
+        // (~200MB of stale Data on a high-bitrate title). Wrap must come
+        // AFTER driver init (wireCommands just installed the plain seek)
+        // and stays out of the catch-up branch (mutually exclusive with
+        // mkvServer, but ordering here keeps that obvious).
+        if isVOD, let srv = mkvServer {
+            let baseSeek = progressStore.seekAction
+            progressStore.seekAction = { [weak srv] target in
+                srv?.noteSeek()
+                baseSeek?(target)
+            }
         }
         // MKV subtitle picker: the overlay store owns subtitle state, so
         // the store's subtitle fields are OURS, not the driver's (the

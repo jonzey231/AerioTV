@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.8.22 - 2026-08-31 (TestFlight beta)
+
+Second AVPlayer-engine beta. Fixes for everything raised in the first
+round of tester feedback (VOD/DVR scanning, DVR Watch from Beginning,
+the scrubbing crash, and mid-file VOD failures).
+
+### Added
+
+- Completed recordings now offer "Watch from Beginning" in the
+  long-press menu (previously only in-progress recordings had it).
+
+### Fixed
+
+- Scanning through a VOD or DVR recording no longer jumps back to the
+  previous position: consecutive scrubs now chain from the seek target
+  while the engine is still reopening the stream at the new spot.
+- "Watch from Beginning" on an in-progress recording actually starts at
+  the beginning instead of the live edge (the start seek is re-issued
+  once the player is ready, when it sticks).
+- Fixed a crash when rapidly scanning through high-bitrate VOD files:
+  the engine now drops its stale read-ahead caches on every seek, and
+  the periodic guide refresh no longer runs during active playback.
+- A VOD file that fails mid-play with a decoder error now retries once
+  just past the failing spot instead of stopping with an error card,
+  and logs precise diagnostics for the failing copy.
+
+
 ## v1.8.21 - 2026-08-31 (TestFlight beta)
 
 AVPlayer-engine beta: every playback path (live TV, VOD, DVR, catch-up,

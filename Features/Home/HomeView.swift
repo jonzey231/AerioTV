@@ -4045,7 +4045,12 @@ struct MainTabView: View {
     @Sendable private func runPeriodicGuideStalenessSweep() async {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
-            if scenePhase == .active {
+            // Never refresh under active playback: the tester's 2026-08-31
+            // jetsam died seconds after this sweep fired an 8MB grid fetch +
+            // 7.8k-programme XMLTV parse WHILE a 20Mbps MKV remux was
+            // scrubbing. The guide can be 5 minutes staler; a dead player
+            // cannot. Same policy as Android's PlaylistRefreshWorker gate.
+            if scenePhase == .active, PlayerSession.shared.mode == .idle {
                 refreshGuideIfStale(reason: "periodic sweep")
             }
         }

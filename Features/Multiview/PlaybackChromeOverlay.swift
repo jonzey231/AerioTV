@@ -1838,6 +1838,15 @@ final class DpadScrubController: ObservableObject {
     private var scrubbing = false
     private var commitTask: Task<Void, Never>? = nil
     private var hideTask: Task<Void, Never>? = nil
+    /// Last committed seek target, kept until the playhead actually
+    /// arrives near it. A VOD seek through the MKV remuxer reopens the
+    /// source stream, and for several seconds the player still reports
+    /// the OLD position -- so a scrub sequence started in that window
+    /// used to re-seed from the stale playhead and its commit silently
+    /// cancelled the seek the user just made (tester 2026-08-31:
+    /// "keeps going back to where it was previously playing").
+    private var pendingCommitMs: Int32? = nil
+    private var pendingCommitAt: Date? = nil
 
     /// Returns false when neither mode has a scrubbable timeline (live
     /// with rewind off) so the caller can let the press fall through.
@@ -1868,7 +1877,21 @@ final class DpadScrubController: ObservableObject {
             // Seed from the playhead. At the live edge (rewind mode,
             // not timeshifting) the playhead IS the window end.
             if isCatchup || isVOD || LiveRewindEngine.shared.timeshifting {
-                targetMs = min(max(0, store.audioProgressStore?.currentMs ?? 0), endMs)
+                let playheadMs = max(0, store.audioProgressStore?.currentMs ?? 0)
+                // If the previous commit's seek is still in flight (the
+                // playhead has not moved to within 3s of it and the
+                // commit is recent), seed from the committed target so
+                // consecutive scrubs chain instead of reverting.
+                if let pending = pendingCommitMs,
+                   let at = pendingCommitAt,
+                   Date().timeIntervalSince(at) < 20,
+                   abs(Int64(playheadMs) - Int64(pending)) > 3_000 {
+                    targetMs = min(max(0, pending), endMs)
+                } else {
+                    pendingCommitMs = nil
+                    pendingCommitAt = nil
+                    targetMs = min(playheadMs, endMs)
+                }
             } else {
                 targetMs = endMs
             }
@@ -1886,6 +1909,8 @@ final class DpadScrubController: ObservableObject {
             guard !Task.isCancelled, let self else { return }
             self.scrubbing = false
             debugLog("[DPAD-SCRUB] commit \(self.targetMs)ms")
+            self.pendingCommitMs = self.targetMs
+            self.pendingCommitAt = Date()
             seek?(self.targetMs)
             self.hideTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 1_500_000_000)

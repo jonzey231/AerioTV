@@ -332,6 +332,15 @@ struct MyRecordingsView: View {
                 } label: {
                     Label("Play", systemImage: "play.fill")
                 }
+                // Tester 2026-08-31: Completed-tab recordings only offered
+                // resume (row tap). fromStart on a completed recording maps
+                // to resume=nil, which plays the fixed file from 0 and does
+                // not touch the saved progress until the 10s saver runs.
+                Button {
+                    playServerRecording(rec, fromStart: true)
+                } label: {
+                    Label("Watch from Beginning", systemImage: "backward.end.fill")
+                }
                 Button {
                     recordingToDelete = rec
                     showDownloadConfirmation = true
