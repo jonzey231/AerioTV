@@ -1873,7 +1873,7 @@ struct AVPlayerMultiviewTile: View {
         tileError = TileError(title: friendly.title,
                               message: friendly.message,
                               version: versionLabel,
-                              diagnostic: "\(reason) · mpv engine disabled (Developer setting)")
+                              diagnostic: reason)
     }
 
     /// Map internal failure reasons to something a viewer can act on.
