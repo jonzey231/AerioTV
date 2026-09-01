@@ -647,6 +647,7 @@ struct PlaybackChromeOverlay: View {
 struct VODTransportBar_iOS: View {
     @ObservedObject var store: MultiviewStore
     @State private var dragFraction: CGFloat? = nil
+    @State private var settleTask: Task<Void, Never>? = nil
 
     var body: some View {
         let duration = Int64(max(Int32(1), store.audioProgressStore?.durationMs ?? 1))
@@ -671,12 +672,30 @@ struct VODTransportBar_iOS: View {
                 .highPriorityGesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { v in
+                            settleTask?.cancel()
                             dragFraction = max(0, min(1, v.location.x / geo.size.width))
                         }
                         .onEnded { v in
                             let f = max(0, min(1, v.location.x / geo.size.width))
-                            dragFraction = nil
-                            store.audioProgressStore?.seekAction?(Int32(Double(duration) * Double(f)))
+                            let target = Int32(Double(duration) * Double(f))
+                            store.audioProgressStore?.seekAction?(target)
+                            // Hold the bar at the released spot until playback
+                            // actually lands near it. Dropping dragFraction
+                            // immediately rubber-banded the thumb back to the
+                            // stale pre-seek position for the seconds the MKV
+                            // remuxer spends reopening at the new offset, then
+                            // jumped it forward (tester 2026-08-31, iPad).
+                            settleTask?.cancel()
+                            settleTask = Task { @MainActor in
+                                for _ in 0..<188 {  // ~15s backstop at 80ms
+                                    if Task.isCancelled { return }
+                                    let cur = store.audioProgressStore?.currentMs ?? 0
+                                    if abs(Int64(cur) - Int64(target)) < 4_000 { break }
+                                    try? await Task.sleep(nanoseconds: 80_000_000)
+                                }
+                                guard !Task.isCancelled else { return }
+                                dragFraction = nil
+                            }
                         }
                 )
                 .padding(.vertical, -12)
