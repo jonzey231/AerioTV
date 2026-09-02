@@ -652,10 +652,13 @@ struct MultiviewTileView: View {
             } label: {
                 Label("FF 60s", systemImage: "goforward.60")
             }
+            // Live tiles always offer Return to Live. Gating it on
+            // `behindLiveEdge` made the row appear and vanish as each new
+            // segment moved the live-edge estimate, and SwiftUI rebuilt the
+            // open menu every few seconds (tester report 2026-09-02). At the
+            // edge the action is a harmless no-op.
             let showReturnToLive: Bool = {
-                if tile.kind == .live {
-                    return progressStore.behindLiveEdge || progressStore.isPaused
-                }
+                if tile.kind == .live { return true }
                 if tile.kind == .dvr {
                     return progressStore.durationMs > 0
                         && progressStore.durationMs - progressStore.currentMs > 15_000
