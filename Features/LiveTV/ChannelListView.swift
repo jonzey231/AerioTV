@@ -3812,6 +3812,18 @@ struct FavoritesView: View {
                         message: "Tap the star on a channel in the guide, or a channel's actions button in the list, to add it here."
                     )
                 } else {
+                    #if os(tvOS)
+                    // Apple TV: Favorites is the GUIDE filtered to the starred
+                    // channels in favorites order (Logan 2026-09-02), matching
+                    // the Android TV tab. No group pills or sidebar here.
+                    EPGGuideView(
+                        channels: favoritesStore.favoriteItems,
+                        servers: Array(servers),
+                        onSelectChannel: { item in
+                            startPlayback(item)
+                        }
+                    )
+                    #else
                     List {
                         // Keyed by the unique stream URL (see rowKey) so two
                         // favorited channels sharing a tvg-id stay distinct rows.
@@ -3858,6 +3870,7 @@ struct FavoritesView: View {
                     .background(Color.appBackground)
                     #if os(iOS)
                     .scrollContentBackground(.hidden)
+                    #endif
                     #endif
                 }
             }
