@@ -321,11 +321,12 @@ struct ChannelListOverlay: View {
                             onDismiss()
                         }
                     }
+                    .onAppear { proxy.scrollTo(landingID, anchor: .center) }
                     .onChange(of: activeGroup) { _, _ in
-                        proxy.scrollTo("overlay.top", anchor: .top)
+                        proxy.scrollTo(landingID, anchor: .center)
                     }
                     .onChange(of: sidebarOpen) { _, open in
-                        if !open { proxy.scrollTo("overlay.top", anchor: .top) }
+                        if !open { proxy.scrollTo(landingID, anchor: .center) }
                     }
                 }
             }
@@ -336,16 +337,25 @@ struct ChannelListOverlay: View {
 
     // MARK: Focus
 
-    /// Land focus on the first row. Retries briefly because a single
+    /// Landing row: the channel already playing when it is in this group
+    /// (Logan 2026-09-02: "default focus should be on the channel already
+    /// watching"), else the top row.
+    private var landingID: String {
+        if let playing = playingID, entries.contains(where: { $0.id == playing }) { return playing }
+        return entries.first?.id ?? "overlay.top"
+    }
+
+    /// Land focus on the landing row. Retries briefly because a single
     /// `@FocusState` write is dropped while the LazyVStack row is still laying
     /// out (same pattern the guide + sidebar use).
     private func focusFirstRow() {
-        guard let first = entries.first?.id else { return }
+        guard !entries.isEmpty else { return }
+        let target = landingID
         Task { @MainActor in
             for _ in 0..<10 {
-                focusedRowID = first
+                focusedRowID = target
                 try? await Task.sleep(nanoseconds: 60_000_000)
-                if focusedRowID == first { break }
+                if focusedRowID == target { break }
             }
         }
     }
