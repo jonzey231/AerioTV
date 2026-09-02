@@ -490,7 +490,8 @@ struct ProgramInfoView: View {
                             }
                         }
                     }
-                    if let sub = target.subTitle, !sub.isEmpty {
+                    if let sub = target.subTitle,
+                       !EPGText.subtitleIsRedundant(sub, title: target.title, description: target.description) {
                         Text(sub)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
@@ -585,7 +586,8 @@ struct ProgramInfoView: View {
                                 }
                             }
                         }
-                        if let sub = target.subTitle, !sub.isEmpty {
+                        if let sub = target.subTitle,
+                           !EPGText.subtitleIsRedundant(sub, title: target.title, description: target.description) {
                             Text(sub)
                                 .font(.system(size: 26))
                                 .foregroundColor(.textSecondary)

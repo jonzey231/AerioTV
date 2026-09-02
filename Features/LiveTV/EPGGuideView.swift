@@ -5130,7 +5130,8 @@ private struct GuideProgramButton: View {
             // distinguishes same-title back-to-back programmes. Guarded against
             // the Dispatcharr paths that promote subTitle into description when
             // <desc> is empty, so it never double-prints.
-            if showProgramSubtitles, let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+            if showProgramSubtitles, let sub = prog.subTitle,
+               !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                 Text(sub)
                     .font(.system(size: 18))
                     .italic()

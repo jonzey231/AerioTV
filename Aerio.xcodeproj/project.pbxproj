@@ -131,6 +131,8 @@
 		A133DDDD4444DDDD4444DDDD /* MPMediaItemArtworkShim.m in Sources */ = {isa = PBXBuildFile; fileRef = A111BBBB2222BBBB2222BBBB /* MPMediaItemArtworkShim.m */; };
 		A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		A1B2C3D4E5F67890C10C0001 /* ClockFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */; };
+		A1B2C3D4E5F67890E9600010 /* EPGText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E9600030 /* EPGText.swift */; };
+		A1B2C3D4E5F67890E9600020 /* EPGText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E9600030 /* EPGText.swift */; };
 		A1B2C3D4E5F67890C10C0002 /* ClockFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */; };
 		A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		A2B3C4D5E6F7A80901CD3456 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
@@ -377,6 +379,7 @@
 		A1AB8E6203108C63D4696924 /* Aerio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aerio.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TVPressGesture.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ClockFormat.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F67890E9600030 /* EPGText.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EPGText.swift; sourceTree = "<group>"; };
 		A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewSettingsView.swift; sourceTree = "<group>"; };
 		A1ECC0FF1ED1ABF1ED1ABF11 /* Aerio.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Aerio.xcconfig; path = Config/Aerio.xcconfig; sourceTree = "<group>"; };
 		A2FD31E5C3E95D9CF2F53F4E /* Aerio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aerio.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -927,6 +930,7 @@
 				EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */,
 				A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */,
 				A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */,
+				A1B2C3D4E5F67890E9600030 /* EPGText.swift */,
 				B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */,
 				B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */,
 				B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */,
@@ -1271,6 +1275,7 @@
 				27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */,
 				A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */,
 				A1B2C3D4E5F67890C10C0001 /* ClockFormat.swift in Sources */,
+				A1B2C3D4E5F67890E9600010 /* EPGText.swift in Sources */,
 				B1C2D3E4F5A67890ACE00001 /* AudioSessionRefCount.swift in Sources */,
 				B1C2D3E4F5A67890ACE0A002 /* RemoteInputLogger.swift in Sources */,
 				B1C2D3E4F5A67890ACE00004 /* IdleTimerRefCount.swift in Sources */,
@@ -1389,6 +1394,7 @@
 				8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */,
 				A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */,
 				A1B2C3D4E5F67890C10C0002 /* ClockFormat.swift in Sources */,
+				A1B2C3D4E5F67890E9600020 /* EPGText.swift in Sources */,
 				B1C2D3E4F5A67890ACE00002 /* AudioSessionRefCount.swift in Sources */,
 				B1C2D3E4F5A67890ACE0A003 /* RemoteInputLogger.swift in Sources */,
 				B1C2D3E4F5A67890ACE00005 /* IdleTimerRefCount.swift in Sources */,
