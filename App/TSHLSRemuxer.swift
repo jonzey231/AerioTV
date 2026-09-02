@@ -1438,6 +1438,12 @@ struct AVPlayerMultiviewTile: View {
     /// 3.6min went straight to the card). Two fresh pipelines before
     /// giving up absorbs a one-time flip AND a flip-back.
     @State private var mismatchAutoRetries = 0
+    /// Server-busy (HTTP 502/503) retries at tile start, with backoff:
+    /// Dispatcharr answers 503 while it is still tearing down the previous
+    /// connection for the same channel (fullscreen -> multiview tile, fast
+    /// swap-back), which takes a few seconds; three 1s retries all landed
+    /// inside that window (FS1, Logan 2026-09-02).
+    @State private var serverBusyRetries = 0
     /// Live Rewind armed for this tile: the remuxer was created with a
     /// spill window (solo live + setting on), so the driver runs in
     /// rewind-window mode and LiveRewindEngine mirrors the window for
@@ -1626,6 +1632,8 @@ struct AVPlayerMultiviewTile: View {
         // swaps `tile.streamURL` without changing tile identity).
         .onChange(of: streamURL) { _, _ in
             mismatchAutoRetries = 0
+        serverBusyRetries = 0
+            serverBusyRetries = 0
             stop()
             start()
         }
@@ -1776,6 +1784,19 @@ struct AVPlayerMultiviewTile: View {
             stop()
             statusText = "Retrying..."
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                start()
+            }
+            return
+        }
+        let serverBusy = reason.contains("HTTP 503") || reason.contains("HTTP 502")
+        if serverBusy, serverBusyRetries < 4, tileError == nil {
+            let delays: [Double] = [1.5, 3.0, 5.0, 8.0]
+            let delay = delays[serverBusyRetries]
+            serverBusyRetries += 1
+            debugLog("[AVP-MV] server busy (\(reason)); retry \(serverBusyRetries)/4 in \(delay)s title=\(channelName)")
+            stop()
+            statusText = "Retrying..."
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 start()
             }
             return
