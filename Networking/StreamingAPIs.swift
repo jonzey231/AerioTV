@@ -2898,7 +2898,14 @@ struct DispatcharrAPI {
     private func fetchEpisodesPage(seriesID: Int,
                                     page: Int,
                                     pageSize: Int) async throws -> DispatcharrResultsWrapper<DispatcharrVODEpisode> {
-        let path = "/api/vod/series/\(seriesID)/episodes/?page=\(page)&page_size=\(pageSize)"
+        // NOT /api/vod/series/<id>/episodes/: that action ignores paging,
+        // runs a provider query per episode and embeds the whole series
+        // record (custom_properties included) in every row, so a
+        // long-running show never answers inside the timeout (Android
+        // Streamer, 2026-09-02). The episode list endpoint filters by
+        // series, paginates, and orders by season/episode.
+        let path = "/api/vod/episodes/?series=\(seriesID)&page=\(page)&page_size=\(pageSize)"
+            + "&ordering=season_number,episode_number"
         let url = try buildURL(path: path)
         var request = URLRequest(url: url)
         headers.forEach { request.setValue($1, forHTTPHeaderField: $0) }
