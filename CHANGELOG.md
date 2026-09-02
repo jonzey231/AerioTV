@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.8.24 - 2026-09-02 (TestFlight beta)
+
+Fourth AVPlayer-engine beta: Apple TV multiview and guide polish from the
+third round of tester feedback, plus a stream-start fix for busy servers.
+
+### Fixed
+
+- Apple TV multiview: the tile hold menu now lists Remove, Move Tile,
+  Playback, Switch Stream, Change Channel, Add Channel, Full-Screen,
+  Spotlight and the Layout choices in that order, and every option fits
+  on screen.
+- Apple TV multiview: the tile hold menu no longer flickers or rebuilds
+  every few seconds while it is open.
+- Apple TV guide: a short press of Right steps one slot on release while
+  hold-Right (close the mini player) is armed, instead of being swallowed.
+- A channel that answers HTTP 502/503 at stream start (a server slot still
+  tearing down) is retried with an increasing back-off before an error is
+  shown, instead of failing after three one-second attempts.
+- VOD prepare on HTTP 503 now says the server refused the request rather
+  than reporting a stalled connection.
+
+
 ## v1.8.23 - 2026-09-01 (TestFlight beta)
 
 Third AVPlayer-engine beta: OTA channel handling and touch-scrubbing
