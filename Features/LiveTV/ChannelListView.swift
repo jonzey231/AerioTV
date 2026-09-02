@@ -2222,6 +2222,9 @@ struct ChannelRow: View {
     /// hidden. Cross-platform; defaults on.
     @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    /// Settings > Appearance > Channel List > Show Program Subtitles: some EPG
+    /// feeds repeat the description in the sub-title, so the row reads twice.
+    @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
     @State private var reminderTarget: EPGEntry?
@@ -2560,7 +2563,7 @@ struct ChannelRow: View {
                             // GH #34: XMLTV <sub-title> (match/episode name),
                             // guarded so a Dispatcharr promote-into-description
                             // program doesn't print it twice.
-                            if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+                            if showProgramSubtitles, let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
                                 Text(sub)
                                     .font(.system(size: 18))
                                     .italic()
@@ -2697,7 +2700,7 @@ struct ChannelRow: View {
                     }
                     // GH #34: XMLTV <sub-title> (match/episode name), guarded
                     // against the Dispatcharr promote-into-description case.
-                    if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+                    if showProgramSubtitles, let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
                         Text(sub)
                             .font(.system(size: (isWide ? 12 : 10) * s))
                             .italic()

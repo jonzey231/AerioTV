@@ -5030,6 +5030,8 @@ private struct GuideProgramButton: View {
     #endif
 
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    /// Settings > Appearance > Channel List > Show Program Subtitles.
+    @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
 
     private var hasReminder: Bool {
         isFutureProgram && reminderManager.hasReminder(forKey: reminderKey)
@@ -5135,7 +5137,7 @@ private struct GuideProgramButton: View {
             // distinguishes same-title back-to-back programmes. Guarded against
             // the Dispatcharr paths that promote subTitle into description when
             // <desc> is empty, so it never double-prints.
-            if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+            if showProgramSubtitles, let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
                 Text(sub)
                     .font(.system(size: 18))
                     .italic()

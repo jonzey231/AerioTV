@@ -48,6 +48,7 @@ struct AppearanceSettingsView: View {
     // GH #19 (Android parity): hide channel numbers in the List and Guide.
     @AppStorage("ui.showChannelNumbers")  private var showChannelNumbers = true
     @AppStorage("ui.showChannelNames")    private var showChannelNames = true
+    @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
 
     // MARK: - App Behaviors (moved)
     //
@@ -227,6 +228,16 @@ struct AppearanceSettingsView: View {
                         title: "Show Channel Names",
                         subtitle: "Turn off to hide channel names in the Guide's channel column.",
                         isOn: $showChannelNames,
+                        onChange: { _ in }
+                    )
+                    // Tester report (2026-09-02): some EPG feeds repeat the
+                    // description in the sub-title line.
+                    TVSettingsToggleRow(
+                        icon: "text.alignleft",
+                        iconColor: .accentPrimary,
+                        title: "Show Program Subtitles",
+                        subtitle: "Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there.",
+                        isOn: $showProgramSubtitles,
                         onChange: { _ in }
                     )
                 }
@@ -544,6 +555,19 @@ struct AppearanceSettingsView: View {
                     .tint(theme.accent)
                     .listRowBackground(Color.cardBackground)
                     .onChange(of: showChannelNames) { _, _ in
+                        SyncManager.shared.pushPreferencesImmediate()
+                    }
+                    Toggle(isOn: $showProgramSubtitles) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Show Program Subtitles")
+                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                            Text("Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there.")
+                                .font(.labelSmall).foregroundColor(.textTertiary)
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+                    .onChange(of: showProgramSubtitles) { _, _ in
                         SyncManager.shared.pushPreferencesImmediate()
                     }
                 } header: {
