@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.8.25 - 2026-09-02 (TestFlight beta)
+
+Fifth AVPlayer-engine beta: two new Appearance settings and a player
+channel-list focus fix, shipped alongside the same changes on Android.
+
+### Added
+
+- Settings > Appearance > Time Format: System, 12-hour or 24-hour for every
+  clock in the app (guide header and cell times, program info, search,
+  recordings). Synced across your devices.
+- Settings > Appearance > Channel List > Show Program Subtitles: turn off to
+  hide the episode or match name under each program title, for EPG feeds
+  that repeat the description there.
+
+### Fixed
+
+- Apple TV: the player's channel list (Left while watching) now opens with
+  focus on the channel you are watching instead of the top of the list.
+
+
 ## v1.8.24 - 2026-09-02 (TestFlight beta)
 
 Fourth AVPlayer-engine beta: Apple TV multiview and guide polish from the
