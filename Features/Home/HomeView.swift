@@ -6726,9 +6726,7 @@ private struct ChannelInfoBanner: View {
     /// against inverted EPG payloads).
     private func airingTimeAndDuration(start: Date, end: Date) -> String? {
         guard end > start else { return nil }
-        let f = DateFormatter()
-        f.dateStyle = .none
-        f.timeStyle = .short
+        let f = ClockFormat.short()
         let window = "\(f.string(from: start)) – \(f.string(from: end))"
 
         let totalMinutes = Int(end.timeIntervalSince(start) / 60)

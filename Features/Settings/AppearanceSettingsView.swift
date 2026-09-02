@@ -49,6 +49,13 @@ struct AppearanceSettingsView: View {
     @AppStorage("ui.showChannelNumbers")  private var showChannelNumbers = true
     @AppStorage("ui.showChannelNames")    private var showChannelNames = true
     @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
+    @AppStorage(ClockFormat.defaultsKey) private var timeFormat = "system"
+
+    private static let timeFormatOptions: [(value: String, label: String, subtitle: String)] = [
+        ("system", "System", "Follow the device's clock setting."),
+        ("12", "12-hour", "7:30 PM"),
+        ("24", "24-hour", "19:30"),
+    ]
 
     // MARK: - App Behaviors (moved)
     //
@@ -201,6 +208,24 @@ struct AppearanceSettingsView: View {
                 tvAppearanceSection("Display Scale") {
                     scaleSliderRow_tvOS(title: "Movies & Series", binding: $vodScale)
                     scaleSliderRow_tvOS(title: "Guide", binding: $guideScale)
+                }
+
+                // Time Format: every clock in the app (guide header, cell
+                // ranges, program info, search, recordings).
+                tvAppearanceSection("Time Format") {
+                    ForEach(Self.timeFormatOptions, id: \.value) { option in
+                        TVSettingsSelectionRow(
+                            icon: "clock",
+                            iconColor: .accentPrimary,
+                            label: option.label,
+                            subtitle: option.subtitle,
+                            isSelected: timeFormat == option.value,
+                            action: {
+                                timeFormat = option.value
+                                SyncManager.shared.pushPreferencesImmediate()
+                            }
+                        )
+                    }
                 }
 
                 // Channel List (issue #28 logos + GH #19 numbers)
@@ -511,6 +536,38 @@ struct AppearanceSettingsView: View {
                          : "Independent scale for Movies & Series, the Guide grid, and the Live TV List. 100% matches the default; 85–125% lets you trade density for readability. Changes apply live — no restart needed."
                     )
                     .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+                .listSectionSeparator(.hidden)
+
+                // MARK: Time Format
+                Section {
+                    ForEach(Self.timeFormatOptions, id: \.value) { option in
+                        Button {
+                            timeFormat = option.value
+                            SyncManager.shared.pushPreferencesImmediate()
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(option.label)
+                                        .font(.bodyMedium).foregroundColor(.textPrimary)
+                                    Text(option.subtitle)
+                                        .font(.labelSmall).foregroundColor(.textTertiary)
+                                }
+                                Spacer()
+                                if timeFormat == option.value {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(theme.accent)
+                                }
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
+                } header: {
+                    Text("Time Format").sectionHeaderStyle()
+                } footer: {
+                    Text("System follows your device's clock setting. Applies to the Guide, program info, search, and recordings.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
                 }
                 .listSectionSeparator(.hidden)
 

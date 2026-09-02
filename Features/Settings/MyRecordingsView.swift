@@ -981,11 +981,8 @@ private struct RecordingRow: View {
     }
 
     private func formatDateRange(_ start: Date, _ end: Date) -> String {
-        let df = DateFormatter()
-        df.dateStyle = .medium
-        df.timeStyle = .short
-        let tf = DateFormatter()
-        tf.timeStyle = .short
+        let df = ClockFormat.dateAndShortTime()
+        let tf = ClockFormat.short()
         return "\(df.string(from: start)) – \(tf.string(from: end))"
     }
 }

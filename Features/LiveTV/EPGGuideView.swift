@@ -3130,19 +3130,10 @@ struct EPGGuideView: View {
 
     // Timer removed — time indicator uses TimelineView instead (avoids full view invalidation)
 
-    private let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "h:mma"
-        f.amSymbol = "am"
-        f.pmSymbol = "pm"
-        return f
-    }()
-
-    private let shortTimeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "h:mm"
-        return f
-    }()
+    // Time Format setting (Settings > Appearance): cached per mode inside
+    // ClockFormat, so these stay cheap to read per label.
+    private var timeFormatter: DateFormatter { ClockFormat.guideLabel() }
+    private var shortTimeFormatter: DateFormatter { ClockFormat.guideShort() }
 
     var body: some View {
         bodyContent
@@ -4780,9 +4771,11 @@ private struct GuideCornerClock: View {
     let fontSize: CGFloat
     @State private var now = Date()
     private let tick = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+    /// Re-render when the Time Format setting changes.
+    @AppStorage(ClockFormat.defaultsKey) private var timeFormatMode = "system"
 
     var body: some View {
-        Text(now, format: .dateTime.hour().minute())
+        Text(ClockFormat.short().string(from: now))
             .font(.system(size: fontSize, weight: .semibold).monospacedDigit())
             .foregroundColor(.textPrimary)
             .lineLimit(1)

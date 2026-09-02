@@ -155,12 +155,7 @@ struct ProgramInfoView: View {
 
     // Shared between platforms: a formatter for the start/end time
     // row. 12-hour on iOS (user locale), short style on tvOS.
-    private static let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.timeStyle = .short
-        f.dateStyle = .none
-        return f
-    }()
+    private static var timeFormatter: DateFormatter { ClockFormat.short() }
 
     private static let dateFormatter: DateFormatter = {
         let f = DateFormatter()

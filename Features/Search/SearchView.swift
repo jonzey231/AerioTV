@@ -14,12 +14,7 @@ enum SearchResult: Identifiable {
     case vod(VODDisplayItem)
     case epg(EPGProgram)
 
-    private static let shortTimeFmt: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .none
-        f.timeStyle = .short
-        return f
-    }()
+    private static var shortTimeFmt: DateFormatter { ClockFormat.short() }
 
     var id: String {
         switch self {
@@ -101,12 +96,7 @@ struct SearchView: View {
     /// thumbnail). Rebuilt per search from the active playlist's channels.
     @State private var channelsByID: [String: ChannelDisplayItem] = [:]
 
-    private static let rangeTimeFmt: DateFormatter = {
-        let f = DateFormatter()
-        f.dateStyle = .none
-        f.timeStyle = .short
-        return f
-    }()
+    private static var rangeTimeFmt: DateFormatter { ClockFormat.short() }
 
     /// Shared middle of both layouts: scope chips + the four-way content.
     @ViewBuilder private var searchContent: some View {

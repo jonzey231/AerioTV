@@ -754,11 +754,8 @@ struct RecordProgramSheet: View {
     }
 
     private var timeLabel: String {
-        let df = DateFormatter()
-        df.dateStyle = .medium
-        df.timeStyle = .short
-        let tf = DateFormatter()
-        tf.timeStyle = .short
+        let df = ClockFormat.dateAndShortTime()
+        let tf = ClockFormat.short()
         return "\(df.string(from: scheduledStart)) – \(tf.string(from: scheduledEnd))"
     }
 
