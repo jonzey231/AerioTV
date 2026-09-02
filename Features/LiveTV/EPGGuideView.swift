@@ -3935,6 +3935,13 @@ struct EPGGuideView: View {
     /// Task #188: memoized in GuideStore (cleared on EPG writes) -- the
     /// linear scan ran on every focus change and up to ~5x per horizontal
     /// press via the retarget/assert-retry loops.
+    // Both platforms: the receiver in the view body is unconditional.
+    private var rightReleasePublisher: AnyPublisher<Notification, Never> {
+        NotificationCenter.default.publisher(for: .guideRightHoldEnded)
+            .merge(with: NotificationCenter.default.publisher(for: .guideRightPressEnded))
+            .eraseToAnyPublisher()
+    }
+
     #if os(tvOS)
     /// iOS #66: move focus one viewport of channels up or down, driven by the
     /// CEC channel keys (delivered as pageUp/pageDown). Mirrors the Android
@@ -3990,12 +3997,6 @@ struct EPGGuideView: View {
         default:
             break
         }
-    }
-
-    private var rightReleasePublisher: AnyPublisher<Notification, Never> {
-        NotificationCenter.default.publisher(for: .guideRightHoldEnded)
-            .merge(with: NotificationCenter.default.publisher(for: .guideRightPressEnded))
-            .eraseToAnyPublisher()
     }
 
     /// One half-hour Right step of the timeline plus the focus retarget.
