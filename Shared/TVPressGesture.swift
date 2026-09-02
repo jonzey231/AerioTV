@@ -521,6 +521,7 @@ final class RightHoldHostView: UIView, UIGestureRecognizerDelegate {
     var isEnabled: Bool = false
     private weak var attachedWindow: UIWindow?
     private var recognizer: UILongPressGestureRecognizer?
+    private var pressTracker: UILongPressGestureRecognizer?
     /// True from the recognized Right-hold (.began) until release. While true the
     /// recognizer is not detached even after `isEnabled` flips false (mini closed),
     /// so the `.ended` release still fires and unpins the guide timeline.
@@ -551,9 +552,30 @@ final class RightHoldHostView: UIView, UIGestureRecognizerDelegate {
             lp.delegate = self
             window.addGestureRecognizer(lp)
             recognizer = lp
+            // Zero-duration tracker: reports the RELEASE of any Right press
+            // while armed, so the guide can defer its short Right step to the
+            // release instead of stepping on press-down and reverting when the
+            // hold recognizes (Logan 2026-09-02, Android twin pans on release).
+            let tracker = UILongPressGestureRecognizer(target: self, action: #selector(handleRightPress(_:)))
+            tracker.allowedPressTypes = [NSNumber(value: UIPress.PressType.rightArrow.rawValue)]
+            tracker.minimumPressDuration = 0
+            tracker.cancelsTouchesInView = false
+            tracker.delaysTouchesBegan = false
+            tracker.delegate = self
+            window.addGestureRecognizer(tracker)
+            pressTracker = tracker
             attachedWindow = window
         } else if !isEnabled && !holdInProgress {
             detachRecognizer()
+        }
+    }
+
+    @objc private func handleRightPress(_ gr: UILongPressGestureRecognizer) {
+        switch gr.state {
+        case .ended, .cancelled, .failed:
+            NotificationCenter.default.post(name: .guideRightPressEnded, object: nil)
+        default:
+            break
         }
     }
 
@@ -561,7 +583,9 @@ final class RightHoldHostView: UIView, UIGestureRecognizerDelegate {
         holdSafety?.cancel(); holdSafety = nil
         holdInProgress = false
         if let r = recognizer { attachedWindow?.removeGestureRecognizer(r) }
+        if let t = pressTracker { attachedWindow?.removeGestureRecognizer(t) }
         recognizer = nil
+        pressTracker = nil
         attachedWindow = nil
     }
 

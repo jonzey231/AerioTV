@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import SwiftData
 import Combine  // Xcode 26.5 requires explicit Combine import for the
@@ -3047,6 +3048,10 @@ struct EPGGuideView: View {
     /// move BEFORE the 0.5s hold recognizes, so the guide scrolls one
     /// step it should not have; the holdBegan handler reverts to this.
     @State private var preRightStepOffset: CGFloat?
+    /// A short Right step deferred to the press RELEASE while the hold-Right
+    /// (close mini) detector is armed, so the hold never scrolls first
+    /// (Logan 2026-09-02). Dropped if the hold recognizes before release.
+    @State private var pendingRightStep = false
     /// When the offset above was last touched; lets repeats of one held press
     /// share a single capture while a fresh gesture re-captures.
     @State private var preRightStepAt = Date.distantPast
@@ -3532,6 +3537,8 @@ struct EPGGuideView: View {
             #endif
             .onReceive(NotificationCenter.default.publisher(for: .guideRightHoldBegan)) { _ in
                 #if os(tvOS)
+                // The hold owns this press: the deferred short step is dropped.
+                pendingRightStep = false
                 // Freeze the EPG timeline for the duration of the close-mini hold.
                 // A safety backstop clears the pin if the release event is missed.
                 rightHoldPinningTimeline = true
@@ -3554,11 +3561,20 @@ struct EPGGuideView: View {
                 }
                 #endif
             }
-            .onReceive(NotificationCenter.default.publisher(for: .guideRightHoldEnded)) { _ in
+            // One receiver for both Right release notifications (a second
+            // `.onReceive` in this chain pushes the type-checker past its
+            // budget): the hold's release unpins the timeline; a short press's
+            // release performs the step that was deferred on press-down.
+            .onReceive(rightReleasePublisher) { note in
                 #if os(tvOS)
-                rightHoldPinningTimeline = false
-                rightHoldSafetyTask?.cancel()
-                rightHoldSafetyTask = nil
+                if note.name == .guideRightHoldEnded {
+                    rightHoldPinningTimeline = false
+                    rightHoldSafetyTask?.cancel()
+                    rightHoldSafetyTask = nil
+                } else if pendingRightStep {
+                    pendingRightStep = false
+                    if !rightHoldPinningTimeline { performRightStep() }
+                }
                 #endif
             }
             // Hold Right to close the corner mini-player. The detector was
@@ -3961,6 +3977,30 @@ struct EPGGuideView: View {
             // the still-held Right does not scroll the EPG forward after the
             // mini closes. Short/normal Right scrolling is unaffected.
             if rightHoldPinningTimeline { break }
+            // While a corner mini is minimized this Right may be the start of
+            // a hold-to-close: step on the RELEASE (guideRightPressEnded), not
+            // on press-down, so a hold never scrolls the timeline first.
+            if !TVSearchOverlayState.shared.isUp
+                && NowPlayingManager.shared.isActive
+                && NowPlayingManager.shared.isMinimized {
+                pendingRightStep = true
+                break
+            }
+            performRightStep()
+        default:
+            break
+        }
+    }
+
+    private var rightReleasePublisher: AnyPublisher<Notification, Never> {
+        NotificationCenter.default.publisher(for: .guideRightHoldEnded)
+            .merge(with: NotificationCenter.default.publisher(for: .guideRightPressEnded))
+            .eraseToAnyPublisher()
+    }
+
+    /// One half-hour Right step of the timeline plus the focus retarget.
+    private func performRightStep() {
+        do {
             // Capture the pre-gesture offset ONCE per press train. A
             // held Right emits repeats before the hold recognizes;
             // overwriting per step made the hold's restore land one or
@@ -3976,8 +4016,6 @@ struct EPGGuideView: View {
                 horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * 0.5)
             }
             retargetFocusToViewportColumn()
-        default:
-            break
         }
     }
 
