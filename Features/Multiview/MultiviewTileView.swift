@@ -610,12 +610,31 @@ struct MultiviewTileView: View {
     /// appear next to each row in the native tvOS menu.
     @ViewBuilder
     private var tileContextMenu: some View {
-        // Scrub submenu (Logan 2026-08-28), replacing Make Audio
-        // (Select on a tile already takes audio). System menus dismiss
-        // on selection - each press closes the menu. Return to Live
-        // appears only when there IS a live edge to return to: a live
-        // tile sitting behind it (driver-pumped behindLiveEdge) or an
-        // in-progress DVR window played away from its end.
+        // Order per the AVPlayer testers (Discord, 2026-09-01): the actions
+        // used most often sit at the top, and everything fits on screen
+        // without scrolling because the audio/subtitle items live inside
+        // Playback and the layout modes inside Layout. Top to bottom:
+        // Remove, Move Tile, Playback, Switch Stream, Change Channel,
+        // Add Channel, Full-Screen, Spotlight, Layout.
+        Button(role: .destructive) {
+            store.remove(id: tile.id)
+        } label: {
+            Label("Remove", systemImage: "xmark.circle")
+        }
+
+        Button {
+            store.relocatingTileID = tile.id
+            DebugLogger.shared.log(
+                "[MV-Cmd] tvOS relocate enter tile=\(tile.id)",
+                category: "Playback", level: .info
+            )
+        } label: {
+            Label(
+                "Move Tile",
+                systemImage: "arrow.up.and.down.and.arrow.left.and.right"
+            )
+        }
+
         Menu {
             Button {
                 progressStore.relativeSeekAction?(-60_000)
@@ -635,8 +654,6 @@ struct MultiviewTileView: View {
             }
             let showReturnToLive: Bool = {
                 if tile.kind == .live {
-                    // Stable: latched on pause, cleared by Return to Live
-                    // or a fresh item - no blinking while the menu is open.
                     return progressStore.behindLiveEdge || progressStore.isPaused
                 }
                 if tile.kind == .dvr {
@@ -656,33 +673,34 @@ struct MultiviewTileView: View {
                     Label("Return to Live", systemImage: "livephoto.play")
                 }
             }
+            if progressStore.audioTracks.count > 1 {
+                Button {
+                    Task { @MainActor in showAudioTrackMenu = true }
+                } label: {
+                    Label("Audio Track", systemImage: "waveform")
+                }
+            }
+            if progressStore.setAudioSyncAction != nil {
+                Button {
+                    Task { @MainActor in showAudioSyncMenu = true }
+                } label: {
+                    Label(progressStore.audioSyncMs == 0
+                            ? "Audio Sync"
+                            : "Audio Sync: \(String(format: "%+d", progressStore.audioSyncMs)) ms",
+                          systemImage: "metronome")
+                }
+            }
+            if !progressStore.subtitleTracks.isEmpty {
+                Button {
+                    Task { @MainActor in showSubtitleTrackMenu = true }
+                } label: {
+                    Label("Subtitle Track", systemImage: "captions.bubble")
+                }
+            }
         } label: {
             Label("Playback", systemImage: "slider.horizontal.below.rectangle")
         }
 
-        // The grid's bottom Add bar is unreachable once inside
-        // multiview; the menu is the way in (Logan 2026-08-28).
-        Button {
-            store.addSheetRequested = true
-        } label: {
-            Label("Add Channel", systemImage: "plus")
-        }
-
-        // Change Channel (nee "Swap Stream", renamed 2026-08-28 - it
-        // re-points the tile at another CHANNEL): same picker as Add
-        // Stream. Setting the store's target is all that is needed; the
-        // container owns the presentation.
-        Button {
-            store.pendingSwapTileID = tile.id
-        } label: {
-            Label("Change Channel", systemImage: "arrow.triangle.2.circlepath")
-        }
-
-        // Switch Stream (true single-player parity, 2026-08-28): pick a
-        // different PROVIDER stream for this tile's channel. Dispatcharr
-        // Direct Connect only - the picker needs the numeric channel id
-        // + uuid. The switch happens server-side on the proxy, so the
-        // tile keeps playing without a re-tune.
         if tile.item.dispatcharrChannelID != nil,
            let uuid = tile.item.uuid, !uuid.isEmpty {
             Button {
@@ -690,6 +708,18 @@ struct MultiviewTileView: View {
             } label: {
                 Label("Switch Stream", systemImage: "antenna.radiowaves.left.and.right")
             }
+        }
+
+        Button {
+            store.pendingSwapTileID = tile.id
+        } label: {
+            Label("Change Channel", systemImage: "arrow.triangle.2.circlepath")
+        }
+
+        Button {
+            store.addSheetRequested = true
+        } label: {
+            Label("Add Channel", systemImage: "plus")
         }
 
         let isFullscreen = store.fullscreenTileID == tile.id
@@ -704,8 +734,6 @@ struct MultiviewTileView: View {
             )
         }
 
-        // Issue #27: spotlight this tile (big tile + others stacked small).
-        // Mutually exclusive with fullscreen.
         let isSpotlit = store.spotlightTileID == tile.id
         Button {
             store.spotlightTileID = isSpotlit ? nil : tile.id
@@ -717,81 +745,25 @@ struct MultiviewTileView: View {
             )
         }
 
-        // Issue #48: grid layout picker. The single-player Options panel that
-        // also hosts this never surfaces in multiview, so the layout choices
-        // live here in the per-tile long-press menu as direct items (this
-        // codebase uses sheets rather than nested submenus in its tvOS context
-        // menus, so flat items are the reliable shape). Grid-wide (selecting
-        // from any tile sets the shared layout); hidden when there's no real
-        // choice (<= 1 tile). The active mode shows a checkmark.
         let layoutOptions = MultiviewLayoutMode.available(forTileCount: store.tiles.count)
-        ForEach(layoutOptions) { mode in
-            Button {
-                debugLog("[MV-LAYOUT] select mode=\(mode.rawValue) was=\(layoutMode.rawValue) tile=\(tile.id) tiles=\(store.tiles.count) spotID=\(store.spotlightTileID ?? "nil")")
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    layoutMode = mode
-                    // An explicit non-spotlight layout choice is authoritative:
-                    // clear any per-tile spotlight (#27), which would otherwise
-                    // keep `spotlightActive` true and make this switch a no-op
-                    // (the likely cause of the "switches stop working" report).
-                    if mode != .spotlight { store.spotlightTileID = nil }
+        Menu {
+            ForEach(layoutOptions) { mode in
+                Button {
+                    debugLog("[MV-LAYOUT] select mode=\(mode.rawValue) was=\(layoutMode.rawValue) tile=\(tile.id) tiles=\(store.tiles.count) spotlight=\(store.spotlightTileID ?? "nil")")
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        layoutMode = mode
+                        if mode != .spotlight { store.spotlightTileID = nil }
+                    }
+                } label: {
+                    Label(mode.displayName,
+                          systemImage: layoutMode == mode ? "checkmark" : mode.symbolName)
                 }
-            } label: {
-                Label("Layout: \(mode.displayName)",
-                      systemImage: layoutMode == mode ? "checkmark" : mode.symbolName)
             }
-        }
-
-        if progressStore.audioTracks.count > 1 {
-            Button {
-                Task { @MainActor in showAudioTrackMenu = true }
-            } label: {
-                Label("Audio Track", systemImage: "waveform")
-            }
-        }
-        // Task #184: mpv-engine tiles only (setAudioSyncAction nil on AVPlayer).
-        if progressStore.setAudioSyncAction != nil {
-            Button {
-                Task { @MainActor in showAudioSyncMenu = true }
-            } label: {
-                Label(progressStore.audioSyncMs == 0
-                        ? "Audio Sync"
-                        : "Audio Sync: \(String(format: "%+d", progressStore.audioSyncMs)) ms",
-                      systemImage: "metronome")
-            }
-        }
-        if !progressStore.subtitleTracks.isEmpty {
-            Button {
-                Task { @MainActor in showSubtitleTrackMenu = true }
-            } label: {
-                Label("Subtitle Track", systemImage: "captions.bubble")
-            }
-        }
-
-        Button {
-            store.relocatingTileID = tile.id
-            DebugLogger.shared.log(
-                "[MV-Cmd] tvOS relocate enter tile=\(tile.id)",
-                category: "Playback", level: .info
-            )
         } label: {
-            Label(
-                "Move Tile",
-                systemImage: "arrow.up.and.down.and.arrow.left.and.right"
-            )
-        }
-
-        Button(role: .destructive) {
-            store.remove(id: tile.id)
-        } label: {
-            Label("Remove", systemImage: "xmark.circle")
+            Label("Layout: \(layoutMode.displayName)", systemImage: "rectangle.3.group")
         }
     }
 
-    /// Pure visual content of the tile (no gestures, no focus
-    /// state) — used as the `Button` label on tvOS. The
-    /// surrounding `Button` + `MultiviewTileButtonStyle` handle
-    /// focus chrome + input; this view just draws video + overlays.
     @ViewBuilder
     private var tileVideoContent: some View {
         ZStack {
