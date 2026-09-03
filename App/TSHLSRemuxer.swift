@@ -1519,6 +1519,12 @@ struct AVPlayerMultiviewTile: View {
     /// the mpv path's clearDisplayCriteria bookkeeping.
     @State private var appliedDisplayManager: AVDisplayManager?
     #endif
+    /// Set by stop(). Device log 2026-09-03 18:33: Menu two seconds into
+    /// an MKV movie tore the tile down, then the still-running prepare
+    /// finished and applied HDR display criteria with no tile left to
+    /// clear them (the panel stayed in HDR). Late applies are dropped.
+    /// Declared on every platform (start/stop touch it unconditionally).
+    @State private var tileStopped = false
 
     var body: some View {
         ZStack {
@@ -2063,6 +2069,7 @@ struct AVPlayerMultiviewTile: View {
     #endif
 
     private func start() {
+        tileStopped = false
         tileError = nil
         if let cu = catchup {
             startCatchup(cu)
@@ -2600,6 +2607,7 @@ struct AVPlayerMultiviewTile: View {
     }
 
     private func stop() {
+        tileStopped = true
         if liveRewindArmed {
             LiveRewindEngine.shared.endExternalWindow(owner: tileID)
             // Channel retention: hand a HEALTHY rewind session to the
@@ -2653,6 +2661,10 @@ struct AVPlayerMultiviewTile: View {
     /// converts HLG under an HDR10 HDMI mode, same as the mpv Metal path.
     private func applyDisplayCriteria(width: Int, height: Int, fps: Double, is10Bit: Bool) {
         #if os(tvOS)
+        guard !tileStopped else {
+            debugLog("[AVP-DISPLAY] criteria apply skipped: tile already stopped")
+            return
+        }
         guard fps > 10, fps < 130 else { return }
         let window: UIWindow? = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
