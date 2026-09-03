@@ -720,6 +720,7 @@ struct MoviesView: View {
                     .padding(.top, 60)
                 Spacer()
             } else {
+                ScrollViewReader { proxy in
                 ScrollView {
                     if !searchText.isEmpty {
                         // Search: results grid only, no hero or shelves.
@@ -759,11 +760,27 @@ struct MoviesView: View {
                             libraryHeader
                             posterGrid(libraryMovies)
                         }
+                        .padding(.leading, railWidth)
                     }
 
                     #if os(iOS)
                     Color.clear.frame(height: 96)
                     #endif
+                }
+                // Alphabet rail: pinned to the leading edge, jumps the
+                // library grid to the first title for a letter.
+                .overlay(alignment: .leading) {
+                    if searchText.isEmpty {
+                        AlphabetRail(available: railLetters) { letter in
+                            if let id = firstGridID(for: letter) {
+                                withAnimation(.easeInOut(duration: 0.25)) {
+                                    proxy.scrollTo(id, anchor: .top)
+                                }
+                            }
+                        }
+                        .frame(width: railWidth)
+                    }
+                }
                 }
                 #if os(iOS)
                 .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
@@ -783,6 +800,25 @@ struct MoviesView: View {
                 #endif
             }
         }
+    }
+
+    private var railWidth: CGFloat {
+        #if os(tvOS)
+        return 72
+        #else
+        return 34
+        #endif
+    }
+
+    /// Letters that have at least one title in the library grid.
+    private var railLetters: Set<String> {
+        Set(libraryMovies.map { AlphabetRail.bucket(for: $0.name) })
+    }
+
+    /// Grid row id of the first title in this letter's bucket.
+    private func firstGridID(for letter: String) -> String? {
+        libraryMovies.first { AlphabetRail.bucket(for: $0.name) == letter }
+            .map { "grid-\($0.id)" }
     }
 
     private var sectionSpacing: CGFloat {
@@ -1009,6 +1045,7 @@ struct MoviesView: View {
                 #else
                 .buttonStyle(.plain)
                 #endif
+                .id("grid-\(item.id)")
             }
         }
         .padding(16)
@@ -1421,4 +1458,85 @@ private struct MoviesHeroButtonStyle: ButtonStyle {
             .opacity(configuration.isPressed ? 0.7 : 1.0)
         #endif
     }
+}
+
+// MARK: - Movies tab redesign: alphabet rail
+
+/// # then A to Z down the leading edge. Letters with no titles are dimmed
+/// and inert. On tvOS a letter jumps as soon as it takes focus (and on
+/// click); on iOS a tap jumps.
+struct AlphabetRail: View {
+    let available: Set<String>
+    let onSelect: (String) -> Void
+
+    static let letters: [String] = ["#"] + (65...90).map { String(UnicodeScalar($0)!) }
+
+    /// Rail bucket for a title: its first letter, folded to A to Z, or #
+    /// for anything else (digits, symbols, leading articles kept as-is).
+    static func bucket(for name: String) -> String {
+        guard let first = name.trimmingCharacters(in: .whitespaces).first else { return "#" }
+        let folded = String(first).folding(options: .diacriticInsensitive, locale: nil).uppercased()
+        guard let c = folded.first, c.isLetter, c.isASCII else { return "#" }
+        return String(c)
+    }
+
+    #if os(tvOS)
+    @FocusState private var focused: String?
+    #endif
+
+    var body: some View {
+        VStack(spacing: spacing) {
+            ForEach(Self.letters, id: \.self) { letter in
+                let enabled = available.contains(letter)
+                Button {
+                    onSelect(letter)
+                } label: {
+                    Text(letter)
+                        .font(.system(size: fontSize, weight: .semibold, design: .rounded))
+                        .foregroundColor(letterColor(letter, enabled: enabled))
+                        .frame(width: cell, height: cell)
+                        #if os(tvOS)
+                        .background(
+                            Circle().fill(focused == letter ? Color.accentPrimary.opacity(0.25) : .clear)
+                        )
+                        .overlay(
+                            Circle().stroke(Color.white, lineWidth: focused == letter ? 2 : 0)
+                        )
+                        #endif
+                }
+                .buttonStyle(.plain)
+                .disabled(!enabled)
+                #if os(tvOS)
+                .focused($focused, equals: letter)
+                #endif
+            }
+        }
+        .frame(maxHeight: .infinity)
+        .padding(.leading, leadingInset)
+        #if os(tvOS)
+        .focusSection()
+        .onChange(of: focused) { _, letter in
+            if let letter, available.contains(letter) { onSelect(letter) }
+        }
+        #endif
+    }
+
+    private func letterColor(_ letter: String, enabled: Bool) -> Color {
+        #if os(tvOS)
+        if focused == letter { return .white }
+        #endif
+        return enabled ? .textSecondary : .textTertiary.opacity(0.35)
+    }
+
+    #if os(tvOS)
+    private let spacing: CGFloat = 0
+    private let fontSize: CGFloat = 20
+    private let cell: CGFloat = 34
+    private let leadingInset: CGFloat = 20
+    #else
+    private let spacing: CGFloat = 0
+    private let fontSize: CGFloat = 11
+    private let cell: CGFloat = 18
+    private let leadingInset: CGFloat = 6
+    #endif
 }
