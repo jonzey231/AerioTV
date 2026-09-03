@@ -978,6 +978,14 @@ struct MoviesView: View {
                     guard tvTabBarHidden else { return }
                     scrollMoviesToTop(proxy)
                 }
+                // Player dismissed at the top of the tab: tvOS was re-seating
+                // focus on the rail's # with no way out. Put it on the hero.
+                .onChange(of: isPlaying) { _, playing in
+                    guard !playing, !tvTabBarHidden, navPath.isEmpty else { return }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        heroFocusRequest = true
+                    }
+                }
                 .onScrollGeometryChange(for: CGFloat.self) { geo in
                     geo.contentOffset.y
                 } action: { _, y in
@@ -1032,7 +1040,21 @@ struct MoviesView: View {
                             onExitRight: {
                                 #if os(tvOS)
                                 railHadFocus = false
-                                gridFocus = lastGridFocus ?? libraryMovies.first?.id
+                                // A lazy row that is not built cannot take
+                                // focus (stuck-on-# after playback, Logan
+                                // 2026-09-03), so with no poster to return
+                                // to, land on the hero instead.
+                                if let last = lastGridFocus {
+                                    gridFocus = last
+                                } else {
+                                    heroFocusRequest = true
+                                }
+                                #endif
+                            },
+                            onExitUp: {
+                                #if os(tvOS)
+                                railHadFocus = false
+                                heroFocusRequest = true
                                 #endif
                             }
                         ) { letter in
@@ -2055,6 +2077,8 @@ struct AlphabetRail: View {
     /// on the grid). Moves are handled here because the focus engine did
     /// not cross between the rail and the scroll content on its own.
     var onExitRight: (() -> Void)? = nil
+    /// tvOS: Up from # leaves the rail upward (owner focuses the hero).
+    var onExitUp: (() -> Void)? = nil
     let onSelect: (String) -> Void
 
     nonisolated static let letters: [String] = ["#"] + (65...90).map { String(UnicodeScalar($0)!) }
@@ -2160,7 +2184,11 @@ struct AlphabetRail: View {
         // Only Right is handled; the focus engine steps letters on its own
         // (handling Up/Down here too moved two letters per swipe).
         .onMoveCommand { direction in
-            if direction == .right { onExitRight?() }
+            switch direction {
+            case .right: onExitRight?()
+            case .up: if focused == Self.letters.first { onExitUp?() }
+            default: break
+            }
         }
         #endif
     }
