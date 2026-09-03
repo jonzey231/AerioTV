@@ -1881,7 +1881,7 @@ struct AlphabetRail: View {
     let available: Set<String>
     let onSelect: (String) -> Void
 
-    static let letters: [String] = ["#"] + (65...90).map { String(UnicodeScalar($0)!) }
+    nonisolated static let letters: [String] = ["#"] + (65...90).map { String(UnicodeScalar($0)!) }
 
     /// Full column height (27 cells), for centering the parked rail.
     static var totalHeight: CGFloat {
@@ -1894,7 +1894,7 @@ struct AlphabetRail: View {
 
     /// Rail bucket for a title: its first letter, folded to A to Z, or #
     /// for anything else (digits, symbols, leading articles kept as-is).
-    static func bucket(for name: String) -> String {
+    nonisolated static func bucket(for name: String) -> String {
         guard let first = stripQualityPrefix(name).first else { return "#" }
         let folded = String(first).folding(options: .diacriticInsensitive, locale: nil).uppercased()
         guard let c = folded.first, c.isLetter, c.isASCII else { return "#" }
@@ -1904,7 +1904,7 @@ struct AlphabetRail: View {
     /// Provider quality tags in front of the real title ("4K: Thor",
     /// "[HD] Alien", "UHD - Dune", "FHD | Heat") are dropped so the rail
     /// buckets on the title itself (Logan 2026-09-03).
-    static func stripQualityPrefix(_ name: String) -> Substring {
+    nonisolated static func stripQualityPrefix(_ name: String) -> Substring {
         var s = Substring(name.trimmingCharacters(in: .whitespaces))
         while true {
             var t = s
