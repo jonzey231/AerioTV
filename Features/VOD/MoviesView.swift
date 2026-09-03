@@ -135,6 +135,13 @@ struct MoviesView: View {
     /// Re-sorted library waiting until the user is back at the top: applying
     /// it mid-scroll reordered the grid under the focused poster.
     @State private var pendingDerived: LibraryDerived?
+    /// Rail top edge. Written only while the rail rides with the grid; once
+    /// parked the value stops changing, so scrolling the grid costs no
+    /// body re-evaluation. nil until the grid is first measured.
+    @State private var railTop: CGFloat?
+    #if os(tvOS)
+    @FocusState private var railCatcherFocused: Bool
+    #endif
     @State private var resumePlayingURL: IdentifiableURL?
     @State private var resumePlayingTitle = ""
     @State private var resumePlayingHeaders: [String: String] = [:]
@@ -860,6 +867,7 @@ struct MoviesView: View {
             } else {
                 GeometryReader { outer in
                 ScrollViewReader { proxy in
+                ZStack(alignment: .topLeading) {
                 ScrollView {
                     Color.clear.frame(height: 0).id("movies-top")
                     #if os(tvOS)
@@ -924,47 +932,11 @@ struct MoviesView: View {
                 // Alphabet rail: pinned to the leading edge, jumps the
                 // library grid to the first title for a letter.
                 .coordinateSpace(name: "moviesScroll")
-                .overlayPreferenceValue(GridTopKey.self) { gridTopY in
-                    // Only this overlay re-evaluates as the grid moves.
-                    // nil until the first measurement so the rail cannot
-                    // flash at the top for a frame on tab switch.
-                    if searchText.isEmpty, let gridTopY {
-                        AlphabetRail(
-                            available: railLetters,
-                            focusRequest: railFocusRequestBinding,
-                            onFocusChange: { hasFocus in
-                                #if os(tvOS)
-                                if hasFocus { railHadFocus = true }
-                                #endif
-                            }
-                        ) { letter in
-                            guard let id = firstGridID(for: letter) else { return }
-                            withAnimation(.easeInOut(duration: 0.25)) {
-                                proxy.scrollTo(id, anchor: .top)
-                            }
-                            #if os(tvOS)
-                            // Once the row is on screen, put focus on that
-                            // title so the click lands the user in the grid.
-                            let itemID = String(id.dropFirst("grid-".count))
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                                railHadFocus = false
-                                gridFocus = itemID
-                            }
-                            #endif
-                        }
-                        .frame(width: railWidth)
-                        // Rides with the first poster row, then parks
-                        // vertically centered on screen (Emby behavior,
-                        // Logan 2026-09-03). `position` is a real layout
-                        // placement (so the tvOS focus engine sees the rail
-                        // where it is drawn) that never recenters overflow
-                        // the way padding did. Full height: the ScrollView
-                        // ignores the top inset, the GeometryReader does not.
-                        .position(
-                            x: railWidth / 2,
-                            y: max(railCenteredTop(in: outer.size.height + outer.safeAreaInsets.top),
-                                   gridTopY + railGridOffset) + AlphabetRail.totalHeight / 2)
-                    }
+                .onPreferenceChange(GridTopKey.self) { gridTopY in
+                    guard let gridTopY else { return }
+                    let top = max(railCenteredTop(in: outer.size.height + outer.safeAreaInsets.top),
+                                  gridTopY + railGridOffset)
+                    if railTop != top { railTop = top }
                 }
                 #if os(tvOS)
                 // Menu while the tab bar is hidden: back to the top and
@@ -1002,6 +974,52 @@ struct MoviesView: View {
 
                 .onDisappear { TVTabBarScrollState.shared.isHidden = false }
                 #endif
+
+                // Rail: a sibling of the ScrollView, not an overlay on it and
+                // not in its content, so focusing it never scrolls the grid.
+                if searchText.isEmpty, let railTop {
+                    ZStack(alignment: .topLeading) {
+                        #if os(tvOS)
+                        // Invisible catcher under the letters: if the focus
+                        // engine reaches this instead of a letter, focus is
+                        // forwarded to #.
+                        Color.clear
+                            .frame(width: railWidth, height: outer.size.height + outer.safeAreaInsets.top)
+                            .focusable(true)
+                            .focused($railCatcherFocused)
+                            .onChange(of: railCatcherFocused) { _, focused in
+                                if focused { railFocusRequest = "#" }
+                            }
+                        #endif
+                        AlphabetRail(
+                            available: railLetters,
+                            focusRequest: railFocusRequestBinding,
+                            onFocusChange: { hasFocus in
+                                #if os(tvOS)
+                                if hasFocus { railHadFocus = true }
+                                #endif
+                            }
+                        ) { letter in
+                            guard let id = firstGridID(for: letter) else { return }
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                proxy.scrollTo(id, anchor: .top)
+                            }
+                            #if os(tvOS)
+                            // Once the row is on screen, put focus on that
+                            // title so the click lands the user in the grid.
+                            let itemID = String(id.dropFirst("grid-".count))
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                railHadFocus = false
+                                gridFocus = itemID
+                            }
+                            #endif
+                        }
+                        .frame(width: railWidth)
+                        .padding(.top, railTop)
+                    }
+                    .ignoresSafeArea(.container, edges: .top)
+                }
+                }
                 }
                 }
                 #if os(iOS)
