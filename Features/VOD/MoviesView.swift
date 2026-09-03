@@ -697,7 +697,12 @@ struct MoviesView: View {
     private var content: some View {
         VStack(spacing: 0) {
             #if os(tvOS)
-            tvHeaderRow
+            // Search + sort + filter row scrolls with the content (below);
+            // while a server search is in flight it stays put here so the
+            // field does not vanish under the spinner.
+            if !searchText.isEmpty && vodStore.isSearchingMovies && filteredMovies.isEmpty {
+                tvHeaderRow
+            }
             #endif
 
             // Hidden groups indicator
@@ -730,9 +735,17 @@ struct MoviesView: View {
                     .padding(.top, 60)
                 Spacer()
             } else {
+                GeometryReader { outer in
                 ScrollViewReader { proxy in
                 ScrollView {
                     Color.clear.frame(height: 0).id("movies-top")
+                    #if os(tvOS)
+                    // The tab bar's reserved top inset, owned here so it can
+                    // collapse when the bar hides and the grid gets the whole
+                    // screen (the ScrollView ignores the top safe area).
+                    Color.clear.frame(height: tvTabBarHidden ? 0 : outer.safeAreaInsets.top)
+                    tvHeaderRow
+                    #endif
                     if !searchText.isEmpty {
                         // Search: results grid only, no hero or shelves.
                         posterGrid(filteredMovies)
@@ -819,7 +832,13 @@ struct MoviesView: View {
                         withAnimation(.easeInOut(duration: 0.2)) { tvTabBarHidden = hide }
                     }
                 }
+                .ignoresSafeArea(.container, edges: .top)
+                .onChange(of: tvTabBarHidden) { _, hidden in
+                    TVTabBarScrollState.shared.isHidden = hidden
+                }
+                .onDisappear { TVTabBarScrollState.shared.isHidden = false }
                 #endif
+                }
                 }
                 #if os(iOS)
                 .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
@@ -1312,7 +1331,7 @@ struct MoviesHero: View {
 
     #if os(tvOS)
     private let heroHeight: CGFloat = 420
-    private let corner: CGFloat = 20
+    private let corner: CGFloat = 24
     #else
     private let heroHeight: CGFloat = 220
     private let corner: CGFloat = 16
@@ -1336,7 +1355,10 @@ struct MoviesHero: View {
         }
         .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
-        .clipped()
+        // Rounded to the pill radius (Logan 2026-09-03), art fading into
+        // the background on the left and bottom.
+        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        .padding(.horizontal, 16)
         #else
         ZStack(alignment: .leading) {
             artwork

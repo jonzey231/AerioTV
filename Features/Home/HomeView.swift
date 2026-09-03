@@ -3441,6 +3441,17 @@ enum AppTab: String, CaseIterable {
 /// guide behind the overlay kept reacting to holds aimed at the search
 /// keyboard - a hold-Right while typing closed the corner mini (Logan
 /// 2026-08-12). Detector sites disarm while this is up.
+/// Movies & TV redesign (2026-09): a tab's content has scrolled its tab bar
+/// away, so the nav-bar action circles (Refresh, Search) hide with it. The
+/// TabView's own bar is hidden by the tab through `.toolbar(.hidden, for:
+/// .tabBar)`; the circles are an overlay outside the TabView and need this.
+@MainActor
+final class TVTabBarScrollState: ObservableObject {
+    static let shared = TVTabBarScrollState()
+    @Published var isHidden = false
+    private init() {}
+}
+
 @MainActor
 final class TVSearchOverlayState: ObservableObject {
     static let shared = TVSearchOverlayState()
@@ -3556,6 +3567,7 @@ struct MainTabView: View {
     @State private var tabShowFavorites = false
     @State private var tabShowRecordings = false
     @State private var tabShowVOD = false
+    @ObservedObject private var tabBarScrollState = TVTabBarScrollState.shared
     #endif
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
     @ObservedObject private var favoritesStore = FavoritesStore.shared
@@ -4331,6 +4343,7 @@ struct MainTabView: View {
             // Movies/Series pill row.
             #if os(tvOS)
             if selectedTab != .settings && !isVODDetailPushed
+                && !tabBarScrollState.isHidden
                 && (!nowPlaying.isActive || nowPlaying.isMinimized) {
                 GeometryReader { geo in
                     // Same centered-bar estimate guideHintWidthBudget uses:
