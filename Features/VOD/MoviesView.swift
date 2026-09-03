@@ -1455,7 +1455,7 @@ struct MoviesHeroCarousel: View {
     private let heroHeight: CGFloat = 420
     private let dot: CGFloat = 10
     private let dotInset: CGFloat = 40
-    private let pageFraction: CGFloat = 0.72
+    private let pageFraction: CGFloat = 0.62
     private let pageSpacing: CGFloat = 8
     #else
     private let heroHeight: CGFloat = 220
@@ -1627,14 +1627,14 @@ struct MoviesHero: View {
                     .font(.bodySmall)
                     .foregroundColor(.textPrimary.opacity(0.85))
                     .lineLimit(3)
-                    .frame(maxWidth: 620, alignment: .leading)
+                    .frame(maxWidth: 560, alignment: .leading)
             }
             #endif
             actions
         }
         .padding(copyInset)
         #if os(tvOS)
-        .frame(maxWidth: 820, alignment: .leading)
+        .frame(maxWidth: 720, alignment: .leading)
         #else
         .frame(maxWidth: .infinity, alignment: .leading)
         #endif
