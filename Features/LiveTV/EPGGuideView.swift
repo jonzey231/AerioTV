@@ -353,6 +353,7 @@ final class GuideStore: ObservableObject {
     @discardableResult
     private func commitPrograms(_ dict: [String: [GuideProgram]],
                                 for serverID: String, source: String) -> Bool {
+        debugLog("[MEM] commitPrograms begin rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         guard displayedServerID == nil || displayedServerID == serverID else {
             debugLog("📺 GuideStore: DISCARDED stale \(source) write for \(serverID.prefix(8)) — guide now displays \(displayedServerID!.prefix(8))")
             return false
@@ -384,6 +385,7 @@ final class GuideStore: ObservableObject {
         _isBatching = false
         commitPrograms(_pendingPrograms, for: serverID, source: source)
         _pendingPrograms = [:]
+        debugLog("[MEM] endBatch done rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
     }
 
     private func cancelBatch() {
@@ -1598,6 +1600,7 @@ final class GuideStore: ObservableObject {
     private func fetchXtream(server: ServerConnection, channels: [ChannelDisplayItem],
                               windowStart: Date, windowEnd: Date,
                               replaceExisting: Bool = false) async -> Bool {
+        debugLog("[MEM] fetchXtream begin rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL,
                                   username: server.username,
                                   password: server.effectivePassword)
@@ -1939,6 +1942,7 @@ final class GuideStore: ObservableObject {
                                     extraTVGIDs: [String: [String]] = [:],
                                     categoryServerID: String,
                                     replaceExisting: Bool = false) async -> Bool {
+        debugLog("[MEM] fetchXMLTVFromURL begin rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         let inFlightKey = InFlightXMLTVKey(
             url: url,
             categoryServerID: categoryServerID,
@@ -2088,7 +2092,7 @@ final class GuideStore: ObservableObject {
                 headers: headers,
                 knownChannelIDs: knownChannelKeys.isEmpty ? nil : knownChannelKeys
             )
-            debugLog("📺 XMLTV fetched OK from \(url.host ?? "?") (headers=\(headers.count), \(parsed.count) programs parsed)")
+            debugLog("📺 XMLTV fetched OK from \(url.host ?? "?") (headers=\(headers.count), \(parsed.count) programs parsed) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         } catch let APIError.serverError(code) {
             // v1.6.22: spell out the most common WAN-deployment
             // root cause when we hit 403. Dispatcharr 0.23.0+
@@ -3428,7 +3432,7 @@ struct EPGGuideView: View {
             .aerioContentUnderTabBar()
             #endif
             .onAppear {
-                visibleProgramWidth = geo.size.width - channelColumnWidth
+                    visibleProgramWidth = geo.size.width - channelColumnWidth
                 // Audit #50: seed the guide-cell recording markers so the red
                 // "set to record" dot renders on first guide open, before any
                 // recording mutation or reconcile has refreshed the snapshot.

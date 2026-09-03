@@ -82,12 +82,45 @@ enum EventTimeParser {
         return thisYear < now.addingTimeInterval(-2 * 86_400) ? at(nowYear + 1) : thisYear
     }
 
-    /// "Starts Wed 3:30 PM" style lead-in for an empty guide row, or nil.
-    static func startLabel(for name: String, now: Date = Date()) -> String? {
-        guard let start = parse(name, now: now) else { return nil }
+    /// Per-name cache: the guide evaluates a row's label on every render
+    /// while scrolling, and a DateFormatter plus three regex passes per
+    /// render across thousands of Xtream event rows ballooned the process
+    /// (Apple TV, 2026-09-03: +10 MB per row until jetsam).
+    private static let cacheLock = NSLock()
+    nonisolated(unsafe) private static var startCache: [String: Date?] = [:]
+    nonisolated(unsafe) private static var labelCache: [String: String] = [:]
+    private static let labelFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = .current
         f.setLocalizedDateFormatFromTemplate("EEE jmm")
-        return (start < now ? "Started " : "Starts ") + f.string(from: start)
+        return f
+    }()
+
+    /// Cached `parse` for hot paths (guide rows).
+    static func cachedStart(for name: String, now: Date = Date()) -> Date? {
+        cacheLock.lock()
+        if let hit = startCache[name] { cacheLock.unlock(); return hit }
+        cacheLock.unlock()
+        let d = parse(name, now: now)
+        cacheLock.lock()
+        if startCache.count > 20_000 { startCache.removeAll(keepingCapacity: true) }
+        startCache[name] = d
+        cacheLock.unlock()
+        return d
+    }
+
+    /// "Starts Wed 3:30 PM" style lead-in for an empty guide row, or nil.
+    static func startLabel(for name: String, now: Date = Date()) -> String? {
+        guard let start = cachedStart(for: name, now: now) else { return nil }
+        let key = name + (start < now ? "|p" : "|f")
+        cacheLock.lock()
+        if let hit = labelCache[key] { cacheLock.unlock(); return hit }
+        cacheLock.unlock()
+        let text = (start < now ? "Started " : "Starts ") + labelFormatter.string(from: start)
+        cacheLock.lock()
+        if labelCache.count > 20_000 { labelCache.removeAll(keepingCapacity: true) }
+        labelCache[key] = text
+        cacheLock.unlock()
+        return text
     }
 }
