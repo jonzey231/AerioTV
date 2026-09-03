@@ -123,9 +123,19 @@ struct MoviesView: View {
     @State private var showSortMenu = false
     @State private var showFilterMenu = false
     @State private var searchFieldFocused = false
-    /// Up from the hero carousel lands here (see MoviesHeroCarousel.onExitUp).
-    @FocusState private var headerSearchFocused: Bool
+    /// Rail handoff (same catcher pattern as the hero carousel): a thin
+    /// focusable strip on the grid's left edge takes Left from the first
+    /// column and forwards focus to the rail; Right from the rail lands on
+    /// it and goes back to the last focused poster.
+    @FocusState private var gridFocus: String?
+    @FocusState private var railCatcherFocused: Bool
+    @State private var lastGridFocus: String?
+    @State private var railHadFocus = false
+    @State private var railFocusRequest: String?
     #endif
+    /// Re-sorted library waiting until the user is back at the top: applying
+    /// it mid-scroll reordered the grid under the focused poster.
+    @State private var pendingDerived: LibraryDerived?
     @State private var resumePlayingURL: IdentifiableURL?
     @State private var resumePlayingTitle = ""
     @State private var resumePlayingHeaders: [String: String] = [:]
@@ -282,7 +292,17 @@ struct MoviesView: View {
                 let result = await Task.detached(priority: .userInitiated) {
                     MoviesView.computeDerived(movies: movies, hidden: hidden, genre: genre, sort: sort)
                 }.value
-                if !Task.isCancelled { derived = result }
+                guard !Task.isCancelled else { return }
+                #if os(tvOS)
+                if tvTabBarHidden && !derived.library.isEmpty {
+                    pendingDerived = result
+                } else {
+                    derived = result
+                    pendingDerived = nil
+                }
+                #else
+                derived = result
+                #endif
             }
             .onAppear {
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
@@ -801,11 +821,11 @@ struct MoviesView: View {
     private var content: some View {
         VStack(spacing: 0) {
             #if os(tvOS)
-            // Search + sort + filter row scrolls with the content (below);
-            // while a server search is in flight it stays put here so the
-            // field does not vanish under the spinner.
+            // While a server search is in flight the header (with the
+            // field) stays put here so it does not vanish under the spinner.
             if !searchText.isEmpty && vodStore.isSearchingMovies && filteredMovies.isEmpty {
-                tvHeaderRow
+                libraryHeader(title: "Results", count: 0, showPills: false)
+                    .padding(.leading, railWidth)
             }
             #endif
 
@@ -848,11 +868,15 @@ struct MoviesView: View {
                     // collapse when the bar hides and the grid gets the whole
                     // screen (the ScrollView ignores the top safe area).
                     Color.clear.frame(height: tvTabBarHidden ? 0 : outer.safeAreaInsets.top)
-                    tvHeaderRow
                     #endif
                     if !searchText.isEmpty {
                         // Search: results grid only, no hero or shelves.
-                        posterGrid(filteredMovies)
+                        VStack(alignment: .leading, spacing: sectionSpacing) {
+                            libraryHeader(title: "Results", count: filteredMovies.count, showPills: false)
+                                .padding(.leading, railWidth)
+                            posterGrid(filteredMovies)
+                                .padding(.leading, railWidth)
+                        }
                     } else {
                         VStack(alignment: .leading, spacing: sectionSpacing) {
                             #if os(iOS)
@@ -872,11 +896,6 @@ struct MoviesView: View {
                                     onRemove: { page in
                                         guard let p = page.progress else { return }
                                         WatchProgressManager.delete(vodID: p.vodID, serverID: p.serverID)
-                                    },
-                                    onExitUp: {
-                                        #if os(tvOS)
-                                        headerSearchFocused = true
-                                        #endif
                                     }
                                 )
                                 #if os(tvOS)
@@ -888,10 +907,9 @@ struct MoviesView: View {
                                 posterShelf(title: "Recently Added", items: recentlyAdded)
                             }
 
-                            libraryHeader
+                            libraryHeader(title: "All Movies", count: libraryMovies.count, showPills: true)
                                 .padding(.leading, railWidth)
-                            posterGrid(libraryMovies)
-                                .padding(.leading, railWidth)
+                            railCatcherAndGrid(libraryMovies)
                                 .background(GeometryReader { g in
                                     Color.clear.preference(
                                         key: GridTopKey.self,
@@ -912,7 +930,15 @@ struct MoviesView: View {
                     // nil until the first measurement so the rail cannot
                     // flash at the top for a frame on tab switch.
                     if searchText.isEmpty, let gridTopY {
-                        AlphabetRail(available: railLetters) { letter in
+                        AlphabetRail(
+                            available: railLetters,
+                            focusRequest: railFocusRequestBinding,
+                            onFocusChange: { hasFocus in
+                                #if os(tvOS)
+                                if hasFocus { railHadFocus = true }
+                                #endif
+                            }
+                        ) { letter in
                             if let id = firstGridID(for: letter) {
                                 withAnimation(.easeInOut(duration: 0.25)) {
                                     proxy.scrollTo(id, anchor: .top)
@@ -958,6 +984,24 @@ struct MoviesView: View {
                 .ignoresSafeArea(.container, edges: .top)
                 .onChange(of: tvTabBarHidden) { _, hidden in
                     TVTabBarScrollState.shared.isHidden = hidden
+                    if !hidden, let p = pendingDerived {
+                        derived = p
+                        pendingDerived = nil
+                    }
+                }
+                .onChange(of: gridFocus) { _, id in
+                    if let id { lastGridFocus = id }
+                }
+                .onChange(of: railCatcherFocused) { _, focused in
+                    guard focused else { return }
+                    if railHadFocus {
+                        railHadFocus = false
+                        gridFocus = lastGridFocus ?? libraryMovies.first?.id
+                    } else {
+                        let item = libraryMovies.first { $0.id == lastGridFocus }
+                        let firstAvailable = AlphabetRail.letters.first { railLetters.contains($0) } ?? "#"
+                        railFocusRequest = item.map { AlphabetRail.bucket(for: $0.name) } ?? firstAvailable
+                    }
                 }
                 .onDisappear { TVTabBarScrollState.shared.isHidden = false }
                 #endif
@@ -1030,16 +1074,18 @@ struct MoviesView: View {
     }
 
     #if os(tvOS)
-    /// Search circle + inline field on the left, filter and sort circles
-    /// on the right. Same round platters as the nav bar's Refresh/Search.
-    private var tvHeaderRow: some View {
-        HStack(spacing: 14) {
-            Spacer()
+    private var railFocusRequestBinding: Binding<String?> {
+        Binding(get: { railFocusRequest }, set: { railFocusRequest = $0 })
+    }
 
+    /// Search field (when open) and the Search, Sort, Manage Groups circles.
+    /// Lives in the library header now (Logan 2026-09-03).
+    private var tvHeaderControls: some View {
+        HStack(spacing: 14) {
             if showSearchField {
                 // Same UIKit-backed field Settings uses: transparent, never
-                // paints the system white focus platter. The capsule below
-                // is the resting box and the accent ring is the focus state.
+                // paints the system white focus platter. The box below is
+                // the resting shape and the accent ring is the focus state.
                 DarkFocusTextFieldRepresentable(
                     text: $searchText,
                     placeholder: "Search movies",
@@ -1067,7 +1113,6 @@ struct MoviesView: View {
                     if !showSearchField { searchText = "" }
                 }
             }
-            .focused($headerSearchFocused)
             TVNavActionCircle(systemImage: "arrow.up.arrow.down", label: "Sort") {
                 showSortMenu = true
             }
@@ -1077,9 +1122,15 @@ struct MoviesView: View {
                 showFilterMenu = true
             }
         }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 8)
-        .focusSection()
+        // Native tvOS action list, same surface as the multiview tile menus.
+        .confirmationDialog("Sort Movies", isPresented: $showSortMenu, titleVisibility: .visible) {
+            ForEach(MoviesSortOrder.allCases, id: \.self) { order in
+                Button(order == sortOrder ? "\(order.label)  \u{2713}" : order.label) {
+                    sortOrderRaw = order.rawValue
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
         // Filter: same native action list as Sort. Each group toggles
         // between shown (check) and hidden; the list closes on each pick.
         .confirmationDialog("Show Groups", isPresented: $showFilterMenu, titleVisibility: .visible) {
@@ -1099,15 +1150,26 @@ struct MoviesView: View {
             }
             Button("Cancel", role: .cancel) {}
         }
-        // Native tvOS action list, same surface as the multiview tile menus.
-        .confirmationDialog("Sort Movies", isPresented: $showSortMenu, titleVisibility: .visible) {
-            ForEach(MoviesSortOrder.allCases, id: \.self) { order in
-                Button(order == sortOrder ? "\(order.label)  \u{2713}" : order.label) {
-                    sortOrderRaw = order.rawValue
-                }
-            }
-            Button("Cancel", role: .cancel) {}
+    }
+
+    /// Thin focusable strip on the grid's left edge (under the rail's
+    /// column, right beside the first poster) plus the grid.
+    private func railCatcherAndGrid(_ items: [VODDisplayItem]) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            Color.clear.frame(width: railWidth - 2)
+            Color.clear
+                .frame(width: 2)
+                .frame(maxHeight: .infinity)
+                .focusable(true)
+                .focused($railCatcherFocused)
+            posterGrid(items)
         }
+    }
+    #else
+    private var railFocusRequestBinding: Binding<String?> { .constant(nil) }
+
+    private func railCatcherAndGrid(_ items: [VODDisplayItem]) -> some View {
+        posterGrid(items).padding(.leading, railWidth)
     }
     #endif
 
@@ -1154,26 +1216,32 @@ struct MoviesView: View {
     }
     #endif
 
-    /// "All Movies · N" with the genre pills.
-    private var libraryHeader: some View {
+    /// "All Movies · N" with the genre pills and, on tvOS, the search /
+    /// sort / filter controls on the right.
+    private func libraryHeader(title: String, count: Int, showPills: Bool) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Text("All Movies")
+            HStack(alignment: .center, spacing: 10) {
+                Text(title)
                     .font(.headlineSmall)
                     .foregroundColor(.textPrimary)
-                Text("\(libraryMovies.count)")
+                Text("\(count)")
                     .font(.labelMedium)
                     .foregroundColor(.textTertiary)
-                #if os(iOS)
                 Spacer()
+                #if os(tvOS)
+                tvHeaderControls
+                #else
                 Text(sortOrder.label)
                     .font(.labelSmall)
                     .foregroundColor(.textTertiary)
                 #endif
             }
             .padding(.horizontal, 16)
+            #if os(tvOS)
+            .focusSection()
+            #endif
 
-            if !genrePills.isEmpty {
+            if showPills && !genrePills.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: pillSpacing) {
                         genrePill("All", isSelected: selectedGenre == nil) { selectedGenre = nil }
@@ -1280,6 +1348,7 @@ struct MoviesView: View {
                 }
                 #if os(tvOS)
                 .buttonStyle(TVCardButtonStyle())
+                .focused($gridFocus, equals: item.id)
                 #else
                 .buttonStyle(.plain)
                 #endif
@@ -1467,36 +1536,35 @@ struct MoviesHeroCarousel: View {
     let onRemove: (MoviesHeroPage) -> Void
 
     /// tvOS: focus arriving from above is forwarded to the aligned page's
-    /// Resume (geometry alone landed on the page peeking in on the right);
-    /// focus leaving upward goes back to the header's Search circle.
-    var onExitUp: (() -> Void)? = nil
-
+    /// Resume (geometry alone landed on the page peeking in on the right).
+    /// The catcher exists only while focus is outside the hero, so Up from
+    /// a hero button goes straight to the tab bar.
     @State private var currentID: String?
     #if os(tvOS)
     @FocusState private var heroFocus: String?
     @FocusState private var catcherFocused: Bool
-    @State private var heroHadFocus = false
+    @FocusState private var heroHasFocus: Bool
     #endif
 
     var body: some View {
         VStack(spacing: 0) {
             #if os(tvOS)
-            Color.clear
-                .frame(height: 1)
-                .frame(maxWidth: .infinity)
-                .focusable(true)
-                .focused($catcherFocused)
-                .onChange(of: catcherFocused) { _, focused in
-                    guard focused else { return }
-                    if heroHadFocus {
-                        heroHadFocus = false
-                        onExitUp?()
-                    } else {
+            if !heroHasFocus {
+                Color.clear
+                    .frame(height: 1)
+                    .frame(maxWidth: .infinity)
+                    .focusable(true)
+                    .focused($catcherFocused)
+                    .onChange(of: catcherFocused) { _, focused in
+                        guard focused else { return }
                         heroFocus = currentID ?? pages.first?.id
                     }
-                }
+            }
             #endif
             carousel
+                #if os(tvOS)
+                .focused($heroHasFocus)
+                #endif
         }
     }
 
@@ -1530,9 +1598,6 @@ struct MoviesHeroCarousel: View {
             .scrollClipDisabled()
             #if os(tvOS)
             .focusedHeroPage($heroFocus)
-            .onChange(of: heroFocus) { _, id in
-                if id != nil { heroHadFocus = true }
-            }
             #endif
             .overlay(alignment: .bottomTrailing) {
                 if pages.count > 1 {
@@ -1879,6 +1944,9 @@ private struct MoviesHeroButtonStyle: ButtonStyle {
 /// click); on iOS a tap jumps.
 struct AlphabetRail: View {
     let available: Set<String>
+    /// Set by the owner to move focus onto a letter (tvOS); cleared here.
+    var focusRequest: Binding<String?> = .constant(nil)
+    var onFocusChange: ((Bool) -> Void)? = nil
     let onSelect: (String) -> Void
 
     nonisolated static let letters: [String] = ["#"] + (65...90).map { String(UnicodeScalar($0)!) }
@@ -1962,7 +2030,13 @@ struct AlphabetRail: View {
         #if os(tvOS)
         .focusSection()
         .onChange(of: focused) { _, letter in
+            onFocusChange?(letter != nil)
             if let letter, let target = nearestAvailable(to: letter) { onSelect(target) }
+        }
+        .onChange(of: focusRequest.wrappedValue) { _, letter in
+            guard let letter else { return }
+            focused = letter
+            focusRequest.wrappedValue = nil
         }
         #endif
     }
