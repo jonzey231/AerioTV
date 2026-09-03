@@ -958,12 +958,21 @@ struct MoviesView: View {
                 // bring the bar back, instead of the TabView's default
                 // handling (which landed on the default tab). With the bar
                 // showing, Menu is left alone so it focuses the bar as usual.
-                .onExitCommand(perform: tvTabBarHidden ? {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        proxy.scrollTo("movies-top", anchor: .top)
-                        tvTabBarHidden = false
+                // Always attached: toggling the handler on and off let a
+                // later press reach BOTH this and the TabView's handler
+                // (scrolled to top, then switched to Live TV). When there
+                // is nothing to scroll, the press is forwarded to the
+                // tab-level routing by notification.
+                .onExitCommand {
+                    if tvTabBarHidden {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            proxy.scrollTo("movies-top", anchor: .top)
+                            tvTabBarHidden = false
+                        }
+                    } else {
+                        NotificationCenter.default.post(name: .aerioTabMenuPassthrough, object: nil)
                     }
-                } : nil)
+                }
                 .onScrollGeometryChange(for: CGFloat.self) { geo in
                     geo.contentOffset.y
                 } action: { _, y in
@@ -2171,3 +2180,9 @@ extension View {
     }
 }
 #endif
+
+extension Notification.Name {
+    /// A tab handled Menu itself and found nothing to do; MainTabView runs
+    /// its normal Menu routing (switch to Live TV, etc.).
+    static let aerioTabMenuPassthrough = Notification.Name("aerioTabMenuPassthrough")
+}

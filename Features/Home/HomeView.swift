@@ -5520,6 +5520,10 @@ struct MainTabView: View {
             debugLog("🎮 [MT-INNER] .onExitCommand FIRED (tabContentView/TabView — focus was inside a tab)")
             handleMenuPress()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .aerioTabMenuPassthrough)) { _ in
+            debugLog("🎮 [MT-PASS] Menu forwarded by a tab's own handler")
+            handleMenuPress()
+        }
         .onPlayPauseCommand { handlePlayPauseCommand() }
         .onReceive(NotificationCenter.default.publisher(for: .stopPlaybackForBackground)) { _ in
             if nowPlaying.isActive {
