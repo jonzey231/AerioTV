@@ -917,11 +917,13 @@ struct MoviesView: View {
                             }
                         }
                         .frame(width: railWidth)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         // Rides with the first poster row, then parks
                         // vertically centered on screen (Emby behavior,
-                        // Logan 2026-09-03) rather than at the top.
-                        .padding(.top, max(railCenteredTop(in: outer.size.height), gridTopY + railGridOffset))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        // Logan 2026-09-03). Offset, not padding: padding
+                        // made the rail taller than the overlay frame and
+                        // SwiftUI centered the overflow, pulling it up.
+                        .offset(y: max(railCenteredTop(in: outer.size.height), gridTopY + railGridOffset))
                     }
                 }
                 #if os(tvOS)
