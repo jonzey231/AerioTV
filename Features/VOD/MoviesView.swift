@@ -923,7 +923,11 @@ struct MoviesView: View {
                         // Logan 2026-09-03). Offset, not padding: padding
                         // made the rail taller than the overlay frame and
                         // SwiftUI centered the overflow, pulling it up.
-                        .offset(y: max(railCenteredTop(in: outer.size.height), gridTopY + railGridOffset))
+                        // Full height (the ScrollView ignores the top inset,
+                        // the GeometryReader does not), so centered means
+                        // centered on screen, not in the area below the bar.
+                        .offset(y: max(railCenteredTop(in: outer.size.height + outer.safeAreaInsets.top),
+                                       gridTopY + railGridOffset))
                     }
                 }
                 #if os(tvOS)
