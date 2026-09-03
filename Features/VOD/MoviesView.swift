@@ -115,6 +115,19 @@ struct MoviesView: View {
 
     private let hiddenGroupsKey = "hiddenMovieGroups"
 
+    // Movies tab redesign (2026-09): hero + shelves + library grid.
+    /// Unfinished watch progress, newest first; filtered to movies on the
+    /// active playlist below. Same query ContinueWatchingSection runs, held
+    /// here too so the hero can lead with the newest resume point.
+    @Query(
+        filter: #Predicate<WatchProgress> { !$0.isFinished },
+        sort: \WatchProgress.updatedAt, order: .reverse
+    ) private var allProgress: [WatchProgress]
+    @AppStorage("moviesSortOrder") private var sortOrderRaw = MoviesSortOrder.titleAZ.rawValue
+    /// Genre pill selection; nil = All. Not persisted: a filter that
+    /// silently survives a relaunch reads as "my movies vanished".
+    @State private var selectedGenre: String? = nil
+
     /// User-tunable UI scale (0.85–1.25). Only consumed on iPad / Mac Catalyst
     /// where the default 120 px minimum can feel cramped on wide displays;
     /// iPhone grids stay at their designed minimums (user scale is a no-op in
@@ -497,66 +510,184 @@ struct MoviesView: View {
         }
     }
 
+    // MARK: - Derived data (redesign)
+
+    private var sortOrder: MoviesSortOrder {
+        MoviesSortOrder(rawValue: sortOrderRaw) ?? .titleAZ
+    }
+
+    private var activeServerIDString: String? {
+        (servers.first(where: { $0.isActive }) ?? servers.first)?.id.uuidString
+    }
+
+    /// Movie progress rows scoped to the active playlist (rows with no
+    /// serverID predate per-server progress and stay visible everywhere).
+    private var movieProgress: [WatchProgress] {
+        allProgress.filter { p in
+            guard p.vodType == "movie" else { return false }
+            guard let sid = activeServerIDString else { return true }
+            return p.serverID == nil || p.serverID == sid
+        }
+    }
+
+    /// Newest resume point, if any. The hero leads with it.
+    private var heroProgress: WatchProgress? { movieProgress.first }
+
+    /// Library minus hidden groups, before genre and sort.
+    private var visibleMovies: [VODDisplayItem] {
+        guard !hiddenGroups.isEmpty else { return vodStore.movies }
+        return vodStore.movies.filter { item in
+            guard let cat = item.movie?.categoryName else { return true }
+            return !hiddenGroups.contains(cat)
+        }
+    }
+
+    /// Up to 20 newest titles by source add time. Empty (shelf hidden)
+    /// when the source carries no add dates at all.
+    private var recentlyAdded: [VODDisplayItem] {
+        let dated = visibleMovies.filter { $0.movie?.addedAt != nil }
+        guard !dated.isEmpty else { return [] }
+        return Array(dated.sorted {
+            let a = $0.movie?.addedAt ?? .distantPast
+            let b = $1.movie?.addedAt ?? .distantPast
+            if a != b { return a > b }
+            return $0.id < $1.id
+        }.prefix(20))
+    }
+
+    /// What the hero shows: the resume title when there is one, else the
+    /// newest addition, else the first library title.
+    private var heroItem: VODDisplayItem? {
+        if let p = heroProgress {
+            if let match = vodStore.movies.first(where: { $0.id == p.vodID }) { return match }
+            return MoviesView.syntheticItem(from: p)
+        }
+        return recentlyAdded.first ?? visibleMovies.first
+    }
+
+    /// Genre pills: the visible categories, in store order, "All" first.
+    private var genrePills: [String] {
+        vodStore.movieCategories.map(\.name).filter { !hiddenGroups.contains($0) }
+    }
+
+    /// The library grid: visible movies, genre-filtered, sorted.
+    private var libraryMovies: [VODDisplayItem] {
+        var result = visibleMovies
+        if let g = selectedGenre {
+            result = result.filter { $0.movie?.categoryName == g }
+        }
+        switch sortOrder {
+        case .titleAZ:
+            result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        case .titleZA:
+            result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedDescending }
+        case .yearNewest:
+            result.sort {
+                if $0.releaseYear != $1.releaseYear { return $0.releaseYear > $1.releaseYear }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+        case .recentlyAdded:
+            result.sort {
+                let a = $0.movie?.addedAt ?? .distantPast
+                let b = $1.movie?.addedAt ?? .distantPast
+                if a != b { return a > b }
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+        }
+        return result
+    }
+
+    private func cycleSort() {
+        let all = MoviesSortOrder.allCases
+        let idx = all.firstIndex(of: sortOrder) ?? 0
+        sortOrderRaw = all[(idx + 1) % all.count].rawValue
+    }
+
+    /// Minimal item for a resume row whose catalog entry is not loaded
+    /// (same shape ContinueWatchingSection synthesizes for View Movie).
+    private static func syntheticItem(from p: WatchProgress) -> VODDisplayItem? {
+        guard let sid = p.serverID, let serverUUID = UUID(uuidString: sid) else { return nil }
+        let movie = VODMovie(
+            id: p.vodID, name: p.title,
+            posterURL: p.posterURL.flatMap { URL(string: $0) }, backdropURL: nil,
+            rating: "", plot: "", genre: "", releaseDate: "", duration: "",
+            cast: "", director: "", imdbID: "", categoryID: "", categoryName: "",
+            streamURL: p.streamURL.flatMap { URL(string: $0) },
+            containerExtension: "", serverID: serverUUID)
+        return VODDisplayItem(movie: movie)
+    }
+
+    // MARK: - Hero playback
+
+    /// Hero primary action: resume when there is progress, else play.
+    private func heroPrimary(_ item: VODDisplayItem) {
+        if let p = heroProgress, p.vodID == item.id {
+            resumeFromContinueWatching(p)
+        } else {
+            playMovie(item, resumePositionMs: WatchProgressManager.getResumePosition(
+                vodID: item.id, serverID: item.serverID.uuidString) ?? 0)
+        }
+    }
+
+    /// Direct play, the same steps VODDetailView.startPlayback takes for a
+    /// movie: resolve the Dispatcharr session URL, drop the API key when
+    /// the session lives off-host, tear down live playback, then the
+    /// unified container first and the legacy cover as fallback.
+    private func playMovie(_ item: VODDisplayItem, resumePositionMs startAt: Int32) {
+        guard let movie = item.movie, let url = movie.streamURL else {
+            navPath.append(item)
+            return
+        }
+        let server = servers.first(where: { $0.id == item.serverID })
+        var headers = server?.authHeaders ?? [:]
+        let key = VODVersionSelectionStore.storageKey(serverID: item.serverID,
+                                                      itemType: "movie", itemID: item.id)
+        Task { @MainActor in
+            var resolved = url
+            if let server, server.type == .dispatcharrAPI {
+                let api = DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                                         auth: .apiKey(server.effectiveApiKey),
+                                         userAgent: server.effectiveUserAgent,
+                                         authMode: server.dispatcharrHeaderMode)
+                resolved = (try? await api.resolveFinalURLForPlayback(url)) ?? url
+                if !api.isOwnHost(resolved) {
+                    headers = headers.filter {
+                        $0.key.caseInsensitiveCompare("User-Agent") == .orderedSame
+                    }
+                }
+            }
+            PlayerSession.shared.exit()
+            if PlayerSession.shared.beginVOD(
+                title: item.name,
+                streamURL: resolved,
+                headers: headers,
+                posterURL: item.posterURL,
+                vodID: item.id,
+                serverID: item.serverID.uuidString,
+                vodType: "movie",
+                resumePositionMs: startAt,
+                versionSelectionKey: key) {
+                isPlaying = true
+                return
+            }
+            resumePlayingTitle = item.name
+            resumeVodID = item.id
+            resumePosterURL = item.posterURL?.absoluteString
+            resumeServerID = item.serverID.uuidString
+            resumePositionMs = startAt
+            resumePlayingHeaders = headers
+            resumeVersionOptions = []
+            resumeVersionSelectionKey = key
+            resumePlayingURL = IdentifiableURL(url: resolved)
+            isPlaying = true
+        }
+    }
+
     // MARK: - Content
     private var content: some View {
         VStack(spacing: 0) {
             #if os(tvOS)
-            // tvOS: search toggle + inline text field (replaces .searchable keyboard)
-            HStack(spacing: 12) {
-                Button {
-                    withAnimation(.spring(response: 0.25)) {
-                        showSearchField.toggle()
-                        if !showSearchField { searchText = "" }
-                    }
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 24, weight: .medium))
-                        .foregroundColor(showSearchField ? .accentPrimary : .textSecondary)
-                        .frame(width: 56, height: 56)
-                        .background(
-                            Circle()
-                                .fill(showSearchField ? Color.accentPrimary.opacity(0.15) : Color.elevatedBackground)
-                        )
-                }
-                .buttonStyle(TVNoHighlightButtonStyle())
-
-                if showSearchField {
-                    TextField("Search movies", text: $searchText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 24))
-                        .foregroundColor(.textPrimary)
-                        .frame(width: 400)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(
-                            Capsule()
-                                .fill(Color.elevatedBackground)
-                                .overlay(
-                                    Capsule()
-                                        .stroke(Color.accentPrimary.opacity(0.3), lineWidth: 1)
-                                )
-                        )
-                        .transition(.move(edge: .leading).combined(with: .opacity))
-                }
-
-                Spacer()
-
-                Button {
-                    showManageGroups = true
-                } label: {
-                    Text("Filter")
-                        .font(.headlineSmall)
-                        .foregroundColor(.accentPrimary)
-                }
-                .buttonStyle(TVNoHighlightButtonStyle())
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            // Search + Filter are their own focus section so Down from
-            // the Movies/Series pills lands here and Up from the rows
-            // below returns here, instead of the tvOS focus engine
-            // resolving geometrically and skipping the whole bar.
-            .focusSection()
+            tvHeaderRow
             #endif
 
             // Hidden groups indicator
@@ -579,9 +710,6 @@ struct MoviesView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
                 #if os(tvOS)
-                // Its own focus section so "Show All" is a reachable
-                // stop between the Search/Filter bar and Continue
-                // Watching, instead of being skipped in both directions.
                 .focusSection()
                 #endif
             }
@@ -593,48 +721,51 @@ struct MoviesView: View {
                 Spacer()
             } else {
                 ScrollView {
-                    // Continue Watching section
-                    ContinueWatchingSection(
-                        vodType: "movie",
-                        activeServerID: (servers.first(where: { $0.isActive }) ?? servers.first)?.id.uuidString,
-                        headers: dispatcharrHeaders,
-                        onPlay: { progress in resumeFromContinueWatching(progress) },
-                        movies: vodStore.movies,
-                        onOpenMovie: { item in navPath.append(item) }
-                    )
-
-                    LazyVGrid(columns: columns, spacing: gridRowSpacing) {
-                        ForEach(filteredMovies) { item in
-                            NavigationLink(value: item) {
-                                VODPosterCard(item: item, headers: dispatcharrHeaders)
-                            }
-                            #if os(tvOS)
-                            .buttonStyle(TVCardButtonStyle())
-                            #else
-                            .buttonStyle(.plain)
+                    if !searchText.isEmpty {
+                        // Search: results grid only, no hero or shelves.
+                        posterGrid(filteredMovies)
+                    } else {
+                        VStack(alignment: .leading, spacing: sectionSpacing) {
+                            #if os(iOS)
+                            iOSTitleRow
                             #endif
+                            if let hero = heroItem {
+                                MoviesHero(
+                                    item: hero,
+                                    progress: heroProgress.flatMap { $0.vodID == hero.id ? $0 : nil },
+                                    headers: dispatcharrHeaders,
+                                    onPrimary: { heroPrimary(hero) },
+                                    onPlayFromStart: { playMovie(hero, resumePositionMs: 0) },
+                                    onDetails: { navPath.append(hero) }
+                                )
+                                #if os(tvOS)
+                                .focusSection()
+                                #endif
+                            }
+
+                            ContinueWatchingSection(
+                                vodType: "movie",
+                                activeServerID: activeServerIDString,
+                                headers: dispatcharrHeaders,
+                                onPlay: { progress in resumeFromContinueWatching(progress) },
+                                movies: vodStore.movies,
+                                onOpenMovie: { item in navPath.append(item) }
+                            )
+
+                            if !recentlyAdded.isEmpty {
+                                posterShelf(title: "Recently Added", items: recentlyAdded)
+                            }
+
+                            libraryHeader
+                            posterGrid(libraryMovies)
                         }
                     }
-                    .padding(16)
-                    #if os(tvOS)
-                    // Grid is its own focus section so Down from the
-                    // Continue Watching rail lands here cleanly and Up
-                    // returns to the rail, rather than geometric jumps.
-                    .focusSection()
-                    #endif
 
                     #if os(iOS)
-                    // Bottom content padding for the under-bar extension
-                    // (ignoresSafeArea below) - last poster row scrolls
-                    // clear of the floating tab bar + home indicator.
                     Color.clear.frame(height: 96)
                     #endif
                 }
                 #if os(iOS)
-                // GH #20 (Android parity): auto-hide the iPhone tab bar on
-                // grid scroll. Direction-based (2026-07-12): hide on a
-                // deliberate downward scroll, full bar back on any upward
-                // scroll. Same tracker + phone gate as Live TV.
                 .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
                     scrollGeo.contentOffset.y
                 } action: { oldY, y in
@@ -647,17 +778,243 @@ struct MoviesView: View {
                     }
                 }
                 .scrollAwayTabBar(collapsed: gridTabBarHidden)
-                // GH #20 follow-up (see ChannelListView's twin): extend the
-                // grid's frame under the floating iOS 26 tab bar so content
-                // shows behind/below it instead of a dead band; the spacer
-                // inside the ScrollView is the bottom content padding.
                 .ignoresSafeArea(.container, edges: .bottom)
-                // ...and keep the iOS 26 bottom scroll-edge effect from
-                // painting an opaque platter over that region.
                 .aerioContentUnderTabBar()
                 #endif
             }
         }
+    }
+
+    private var sectionSpacing: CGFloat {
+        #if os(tvOS)
+        return 28
+        #else
+        return 18
+        #endif
+    }
+
+    #if os(tvOS)
+    /// Search circle + inline field on the left, filter and sort circles
+    /// on the right. Same round platters as the nav bar's Refresh/Search.
+    private var tvHeaderRow: some View {
+        HStack(spacing: 14) {
+            TVNavActionCircle(systemImage: "magnifyingglass", label: "Search",
+                              isSelected: showSearchField) {
+                withAnimation(.spring(response: 0.25)) {
+                    showSearchField.toggle()
+                    if !showSearchField { searchText = "" }
+                }
+            }
+
+            if showSearchField {
+                TextField("Search movies", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 24))
+                    .foregroundColor(.textPrimary)
+                    .frame(width: 400)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(
+                        Capsule()
+                            .fill(Color.elevatedBackground)
+                            .overlay(Capsule().stroke(Color.accentPrimary.opacity(0.3), lineWidth: 1))
+                    )
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+            }
+
+            Spacer()
+
+            Text(sortOrder.label)
+                .font(.labelMedium)
+                .foregroundColor(.textTertiary)
+            TVNavActionCircle(systemImage: "arrow.up.arrow.down", label: "Sort") {
+                cycleSort()
+            }
+            TVNavActionCircle(systemImage: "line.3.horizontal.decrease",
+                              label: "Manage Groups",
+                              isSelected: !hiddenGroups.isEmpty) {
+                showManageGroups = true
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 8)
+        .focusSection()
+    }
+    #endif
+
+    #if os(iOS)
+    /// Large title with the sort menu and filter beside it. Search stays
+    /// in the navigation bar drawer.
+    private var iOSTitleRow: some View {
+        HStack(alignment: .center) {
+            Text("Movies")
+                .font(.displayMedium)
+                .foregroundColor(.textPrimary)
+            Spacer()
+            Menu {
+                ForEach(MoviesSortOrder.allCases, id: \.self) { order in
+                    Button {
+                        sortOrderRaw = order.rawValue
+                    } label: {
+                        if order == sortOrder {
+                            Label(order.label, systemImage: "checkmark")
+                        } else {
+                            Text(order.label)
+                        }
+                    }
+                }
+            } label: {
+                iOSCircle("arrow.up.arrow.down")
+            }
+            .accessibilityLabel("Sort")
+            Button { showManageGroups = true } label: {
+                iOSCircle("line.3.horizontal.decrease")
+            }
+            .accessibilityLabel("Manage Groups")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+    }
+
+    private func iOSCircle(_ systemImage: String) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 16, weight: .semibold))
+            .foregroundColor(.accentPrimary)
+            .frame(width: 36, height: 36)
+            .background(Circle().fill(Color.elevatedBackground))
+    }
+    #endif
+
+    /// "All Movies · N" with the genre pills.
+    private var libraryHeader: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text("All Movies")
+                    .font(.headlineSmall)
+                    .foregroundColor(.textPrimary)
+                Text("\(libraryMovies.count)")
+                    .font(.labelMedium)
+                    .foregroundColor(.textTertiary)
+                #if os(iOS)
+                Spacer()
+                Text(sortOrder.label)
+                    .font(.labelSmall)
+                    .foregroundColor(.textTertiary)
+                #endif
+            }
+            .padding(.horizontal, 16)
+
+            if !genrePills.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: pillSpacing) {
+                        genrePill("All", isSelected: selectedGenre == nil) { selectedGenre = nil }
+                        ForEach(genrePills, id: \.self) { g in
+                            genrePill(g, isSelected: selectedGenre == g) {
+                                selectedGenre = (selectedGenre == g) ? nil : g
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    #if os(tvOS)
+                    .padding(.vertical, 12)
+                    #endif
+                }
+                #if os(tvOS)
+                .focusSection()
+                #endif
+            }
+        }
+    }
+
+    private var pillSpacing: CGFloat {
+        #if os(tvOS)
+        return 12
+        #else
+        return 8
+        #endif
+    }
+
+    @ViewBuilder
+    private func genrePill(_ label: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        #if os(tvOS)
+        TVCategoryPill(label: label, isSelected: isSelected, action: action)
+        #else
+        DVRSegmentPill(label: label, isSelected: isSelected, action: action)
+        #endif
+    }
+
+    /// Horizontal poster rail (Recently Added).
+    private func posterShelf(title: String, items: [VODDisplayItem]) -> some View {
+        VStack(alignment: .leading, spacing: shelfTitleSpacing) {
+            Text(title)
+                .font(.headlineSmall)
+                .foregroundColor(.textPrimary)
+                .padding(.horizontal, 16)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: shelfCardSpacing) {
+                    ForEach(items) { item in
+                        NavigationLink(value: item) {
+                            VODPosterCard(item: item, headers: dispatcharrHeaders)
+                                .frame(width: shelfCardWidth)
+                        }
+                        #if os(tvOS)
+                        .buttonStyle(TVCardButtonStyle())
+                        #else
+                        .buttonStyle(.plain)
+                        #endif
+                    }
+                }
+                .padding(.horizontal, 16)
+                #if os(tvOS)
+                .padding(.vertical, 20)
+                #endif
+            }
+        }
+        #if os(tvOS)
+        .focusSection()
+        #endif
+    }
+
+    private var shelfTitleSpacing: CGFloat {
+        #if os(tvOS)
+        return 8
+        #else
+        return 8
+        #endif
+    }
+    private var shelfCardSpacing: CGFloat {
+        #if os(tvOS)
+        return 24
+        #else
+        return 12
+        #endif
+    }
+    private var shelfCardWidth: CGFloat {
+        #if os(tvOS)
+        return 200
+        #else
+        return 120
+        #endif
+    }
+
+    /// The library grid (also the search results grid).
+    private func posterGrid(_ items: [VODDisplayItem]) -> some View {
+        LazyVGrid(columns: columns, spacing: gridRowSpacing) {
+            ForEach(items) { item in
+                NavigationLink(value: item) {
+                    VODPosterCard(item: item, headers: dispatcharrHeaders)
+                }
+                #if os(tvOS)
+                .buttonStyle(TVCardButtonStyle())
+                #else
+                .buttonStyle(.plain)
+                #endif
+            }
+        }
+        .padding(16)
+        #if os(tvOS)
+        .focusSection()
+        #endif
     }
 
     // MARK: - Empty / Error
@@ -795,3 +1152,273 @@ struct VODPosterCard: View {
 }
 
 // TVCategoryPill is defined in Components.swift
+
+// MARK: - Movies tab redesign: sort order
+
+enum MoviesSortOrder: String, CaseIterable {
+    case titleAZ, titleZA, yearNewest, recentlyAdded
+
+    var label: String {
+        switch self {
+        case .titleAZ:       return "Title · A to Z"
+        case .titleZA:       return "Title · Z to A"
+        case .yearNewest:    return "Year · Newest"
+        case .recentlyAdded: return "Recently Added"
+        }
+    }
+}
+
+// MARK: - Movies tab redesign: hero
+
+/// Featured title at the top of the Movies tab: backdrop (poster when the
+/// source has no backdrop), title, metadata line, plot, and the action
+/// row. Leads with the newest resume point when there is one.
+struct MoviesHero: View {
+    let item: VODDisplayItem
+    let progress: WatchProgress?
+    var headers: [String: String] = [:]
+    let onPrimary: () -> Void
+    let onPlayFromStart: () -> Void
+    let onDetails: () -> Void
+
+    private var movie: VODMovie? { item.movie }
+
+    private var eyebrow: String {
+        progress != nil ? "Continue watching" : (movie?.addedAt != nil ? "Recently added" : "Featured")
+    }
+
+    private var metaParts: [String] {
+        var parts: [String] = []
+        if !item.releaseYear.isEmpty { parts.append(item.releaseYear) }
+        if let d = movie?.duration, !d.isEmpty { parts.append(d) }
+        if let g = movie?.genre.components(separatedBy: ",").first?
+            .trimmingCharacters(in: .whitespaces), !g.isEmpty { parts.append(g) }
+        return parts
+    }
+
+    private var remainingLabel: String? {
+        guard let p = progress, p.durationMs > 0 else { return nil }
+        let leftMin = max(0, Int((p.durationMs - p.positionMs) / 60_000))
+        if leftMin >= 60 { return "\(leftMin / 60) h \(leftMin % 60) min left" }
+        return "\(leftMin) min left"
+    }
+
+    private var fraction: Double {
+        guard let p = progress, p.durationMs > 0 else { return 0 }
+        return Double(p.positionMs) / Double(p.durationMs)
+    }
+
+    private var artworkURL: URL? { movie?.backdropURL ?? item.posterURL }
+
+    #if os(tvOS)
+    private let heroHeight: CGFloat = 420
+    private let corner: CGFloat = 20
+    #else
+    private let heroHeight: CGFloat = 220
+    private let corner: CGFloat = 16
+    #endif
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            artwork
+            gradient
+            copy
+        }
+        .frame(height: heroHeight)
+        .frame(maxWidth: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+        .padding(.horizontal, 16)
+    }
+
+    @ViewBuilder
+    private var artwork: some View {
+        GeometryReader { geo in
+            if let url = artworkURL {
+                AuthPosterImage(url: url, headers: headers)
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
+            } else {
+                Rectangle().fill(Color.cardBackground)
+            }
+        }
+    }
+
+    private var gradient: some View {
+        #if os(tvOS)
+        LinearGradient(
+            stops: [
+                .init(color: Color.appBackground, location: 0),
+                .init(color: Color.appBackground.opacity(0.92), location: 0.38),
+                .init(color: Color.appBackground.opacity(0.35), location: 0.7),
+                .init(color: Color.appBackground.opacity(0.05), location: 1)
+            ],
+            startPoint: .leading, endPoint: .trailing)
+        #else
+        LinearGradient(
+            stops: [
+                .init(color: Color.appBackground.opacity(0.05), location: 0),
+                .init(color: Color.appBackground.opacity(0.92), location: 1)
+            ],
+            startPoint: .top, endPoint: .bottom)
+        #endif
+    }
+
+    private var copy: some View {
+        VStack(alignment: .leading, spacing: copySpacing) {
+            Text(eyebrow.uppercased())
+                .font(.system(size: eyebrowSize, weight: .bold))
+                .tracking(1.2)
+                .foregroundColor(.accentPrimary)
+            Text(item.name)
+                .font(titleFont)
+                .foregroundColor(.textPrimary)
+                .lineLimit(2)
+            if !metaParts.isEmpty || !item.rating.isEmpty {
+                HStack(spacing: 10) {
+                    ForEach(Array(metaParts.enumerated()), id: \.offset) { idx, part in
+                        if idx > 0 { Text("·").foregroundColor(.textTertiary) }
+                        Text(part)
+                    }
+                    if !item.rating.isEmpty {
+                        if !metaParts.isEmpty { Text("·").foregroundColor(.textTertiary) }
+                        HStack(spacing: 4) {
+                            Image(systemName: "star.fill").font(.system(size: metaSize - 4))
+                            Text(item.rating)
+                        }
+                        .foregroundColor(.accentPrimary)
+                    }
+                }
+                .font(.system(size: metaSize, weight: .medium))
+                .foregroundColor(.textSecondary)
+            }
+            #if os(tvOS)
+            if let plot = movie?.plot, !plot.isEmpty {
+                Text(plot)
+                    .font(.bodySmall)
+                    .foregroundColor(.textPrimary.opacity(0.85))
+                    .lineLimit(3)
+                    .frame(maxWidth: 680, alignment: .leading)
+            }
+            #endif
+            actions
+        }
+        .padding(copyInset)
+        #if os(tvOS)
+        .frame(maxWidth: 1000, alignment: .leading)
+        #else
+        .frame(maxWidth: .infinity, alignment: .leading)
+        #endif
+        .frame(maxHeight: .infinity, alignment: .bottom)
+    }
+
+    private var actions: some View {
+        HStack(spacing: 12) {
+            MoviesHeroButton(
+                title: progress != nil ? "Resume" : "Play",
+                systemImage: "play.fill", isPrimary: true, action: onPrimary)
+            #if os(tvOS)
+            if progress != nil {
+                MoviesHeroButton(title: "Play from Beginning", systemImage: "gobackward",
+                                 isPrimary: false, action: onPlayFromStart)
+            }
+            MoviesHeroButton(title: "Details", systemImage: "info.circle",
+                             isPrimary: false, action: onDetails)
+            #else
+            if progress != nil {
+                MoviesHeroButton(title: "", systemImage: "gobackward",
+                                 isPrimary: false, action: onPlayFromStart)
+            }
+            MoviesHeroButton(title: "", systemImage: "info.circle",
+                             isPrimary: false, action: onDetails)
+            if let remainingLabel {
+                Text(remainingLabel)
+                    .font(.labelSmall)
+                    .foregroundColor(.textSecondary)
+            }
+            #endif
+        }
+        .padding(.top, 4)
+    }
+
+    #if os(tvOS)
+    private let copySpacing: CGFloat = 12
+    private let copyInset: CGFloat = 44
+    private let eyebrowSize: CGFloat = 16
+    private let metaSize: CGFloat = 20
+    private var titleFont: Font { .displayLarge }
+    #else
+    private let copySpacing: CGFloat = 6
+    private let copyInset: CGFloat = 16
+    private let eyebrowSize: CGFloat = 11
+    private let metaSize: CGFloat = 13
+    private var titleFont: Font { .displayMedium }
+    #endif
+}
+
+/// Hero action: accent-filled primary, elevated secondary. tvOS focus is a
+/// white ring on the primary (an accent ring would vanish on the accent
+/// fill) and the usual accent ring on secondaries.
+struct MoviesHeroButton: View {
+    let title: String
+    let systemImage: String
+    let isPrimary: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: iconSize, weight: .semibold))
+                if !title.isEmpty {
+                    Text(title)
+                        .font(.system(size: textSize, weight: .semibold))
+                }
+            }
+            .foregroundColor(isPrimary ? .appBackground : .textPrimary)
+            .padding(.horizontal, title.isEmpty ? 14 : hPad)
+            .frame(height: height)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(isPrimary ? Color.accentPrimary : Color.elevatedBackground)
+            )
+        }
+        .buttonStyle(MoviesHeroButtonStyle(isPrimary: isPrimary))
+    }
+
+    #if os(tvOS)
+    private let iconSize: CGFloat = 22
+    private let textSize: CGFloat = 22
+    private let hPad: CGFloat = 26
+    private let height: CGFloat = 60
+    #else
+    private let iconSize: CGFloat = 15
+    private let textSize: CGFloat = 15
+    private let hPad: CGFloat = 18
+    private let height: CGFloat = 40
+    #endif
+}
+
+private struct MoviesHeroButtonStyle: ButtonStyle {
+    let isPrimary: Bool
+    #if os(tvOS)
+    @Environment(\.isFocused) private var isFocused
+    #endif
+
+    func makeBody(configuration: Configuration) -> some View {
+        #if os(tvOS)
+        configuration.label
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .stroke(isPrimary ? Color.white : Color.accentPrimary,
+                            lineWidth: isFocused ? 3 : 0)
+            )
+            .scaleEffect(isFocused ? 1.04 : 1.0)
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+        #else
+        configuration.label
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+        #endif
+    }
+}

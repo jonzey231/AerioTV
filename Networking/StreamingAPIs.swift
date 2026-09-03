@@ -1088,6 +1088,9 @@ struct XtreamVODItem: Decodable, Identifiable {
     let genre: String?
     let releaseDate: String?
     let youtubeTrailer: String?
+    /// Movies tab (2026-09): provider add time, unix seconds as a string
+    /// on every panel seen so far. Drives Recently Added; nil when absent.
+    let added: String?
 
     enum CodingKeys: String, CodingKey {
         case streamID = "stream_id"
@@ -1102,6 +1105,7 @@ struct XtreamVODItem: Decodable, Identifiable {
         case genre
         case releaseDate = "releasedate"
         case youtubeTrailer = "youtube_trailer"
+        case added
     }
 
     init(from decoder: Decoder) throws {
@@ -1128,6 +1132,13 @@ struct XtreamVODItem: Decodable, Identifiable {
         genre = try? c.decode(String.self, forKey: .genre)
         releaseDate = try? c.decode(String.self, forKey: .releaseDate)
         youtubeTrailer = try? c.decode(String.self, forKey: .youtubeTrailer)
+        if let s = try? c.decode(String.self, forKey: .added) {
+            added = s
+        } else if let n = try? c.decode(Int.self, forKey: .added) {
+            added = String(n)
+        } else {
+            added = nil
+        }
         id = streamID
     }
 }
@@ -4742,6 +4753,9 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
     let tmdbID: String?
     let imdbID: String?
     let customProperties: DispatcharrVODCustomProperties?
+    /// Movies tab (2026-09): row creation time when the server sends one
+    /// (ISO 8601). Drives Recently Added; nil on builds that omit it.
+    let createdAt: String?
 
     // posterURL is the logo's direct URL (no auth needed — TMDB CDN or similar).
     var posterURL: String? { logo?.url }
@@ -4756,6 +4770,7 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
         case tmdbID          = "tmdb_id"
         case imdbID          = "imdb_id"
         case customProperties = "custom_properties"
+        case createdAt = "created_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -4768,6 +4783,7 @@ struct DispatcharrVODMovie: Decodable, Identifiable {
             id = 0
         }
         uuid   = (try? c.decode(String.self, forKey: .uuid)) ?? ""
+        createdAt = try? c.decode(String.self, forKey: .createdAt)
         title  = (try? c.decode(String.self, forKey: .title)) ?? (try? c.decode(String.self, forKey: .name)) ?? ""
         logo   = try? c.decode(DispatcharrVODLogo.self, forKey: .logo)
         let p1 = try? c.decode(String.self, forKey: .plot)

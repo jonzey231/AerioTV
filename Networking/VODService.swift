@@ -393,6 +393,7 @@ final class VODService {
             // never assigned here, so XC movies never showed a Trailer
             // button (Dispatcharr-native movies already got one).
             movie.youtubeTrailer = item.youtubeTrailer ?? ""
+            movie.addedAt = item.added.flatMap(Double.init).flatMap { $0 > 0 ? Date(timeIntervalSince1970: $0) : nil }
             return movie
         }
         return (movies, vodCats)
@@ -522,6 +523,7 @@ final class VODService {
             movie.tmdbID = m.tmdbID ?? ""
             movie.country = cp?.country ?? ""
             movie.dispatcharrUUID = m.uuid
+            movie.addedAt = m.createdAt.flatMap(VODService.parseISODate)
             return movie
         }
         let cats = genreCounts.sorted { $0.key < $1.key }.map { VODCategory(id: $0.key, name: $0.key, itemCount: $0.value) }
@@ -672,6 +674,7 @@ final class VODService {
             serverID: existing.serverID
         )
 
+        enriched.addedAt = existing.addedAt
         // v1.6.12 external-link payload. `tmdbID` and `country` may
         // already be set on `existing` from the list endpoint; prefer
         // provider-info values when non-empty since /provider-info/
@@ -1601,5 +1604,20 @@ extension TMDBService {
     static func profileImageURL(path: String?, size: String = "w185") -> URL? {
         guard let p = path, !p.isEmpty else { return nil }
         return URL(string: "https://image.tmdb.org/t/p/\(size)\(p)")
+    }
+}
+
+
+// MARK: - Movies tab helpers (2026-09)
+extension VODService {
+    /// ISO 8601 with or without fractional seconds (Dispatcharr sends both
+    /// shapes depending on the DB backend). nil when unparseable.
+    static func parseISODate(_ raw: String) -> Date? {
+        let f1 = ISO8601DateFormatter()
+        f1.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let d = f1.date(from: raw) { return d }
+        let f2 = ISO8601DateFormatter()
+        f2.formatOptions = [.withInternetDateTime]
+        return f2.date(from: raw)
     }
 }

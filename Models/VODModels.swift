@@ -898,6 +898,11 @@ struct VODMovie: Identifiable, Hashable {
     // Default empty so existing initializers don't need updating.
     var dispatcharrUUID: String = ""
 
+    /// Movies tab (2026-09): when the source added this title (XC `added`,
+    /// Dispatcharr `created_at`). nil when the source has no such field;
+    /// Recently Added hides itself when nothing carries one.
+    var addedAt: Date? = nil
+
     // Computed
     var displayRating: String {
         guard !rating.isEmpty, let r = Double(rating), r > 0 else { return "" }

@@ -3401,7 +3401,11 @@ enum AppTab: String, CaseIterable {
     case liveTV    = "livetv"
     case favorites = "favorites"
     case dvr       = "dvr"
-    case onDemand  = "ondemand"
+    // Movies & TV redesign (2026-09): On Demand split into two first-class
+    // tabs. The raw values are new on purpose: a persisted "ondemand"
+    // selection from an older build decodes to nil and falls back to Live TV.
+    case movies    = "movies"
+    case tvShows   = "tvshows"
     case settings  = "settings"
 
     var title: String {
@@ -3409,7 +3413,8 @@ enum AppTab: String, CaseIterable {
         case .liveTV:    return "Live TV"
         case .favorites: return "Favorites"
         case .dvr:       return "DVR"
-        case .onDemand:  return "On Demand"
+        case .movies:    return "Movies"
+        case .tvShows:   return "TV Shows"
         case .settings:  return "Settings"
         }
     }
@@ -3419,10 +3424,14 @@ enum AppTab: String, CaseIterable {
         case .liveTV:    return "antenna.radiowaves.left.and.right"
         case .favorites: return "star.fill"
         case .dvr:       return "record.circle"
-        case .onDemand:  return "play.rectangle.on.rectangle"
+        case .movies:    return "film.stack"
+        case .tvShows:   return "tv"
         case .settings:  return "gearshape.fill"
         }
     }
+
+    /// Either half of the former On Demand tab.
+    var isVOD: Bool { self == .movies || self == .tvShows }
 }
 
 // MARK: - Main Tab View
@@ -3443,7 +3452,7 @@ final class TVSearchOverlayState: ObservableObject {
 /// Search). Sized to read as a sibling of the system tab pills; the focus
 /// visual is a white platter with dark glyph to match how the system bar
 /// renders its focused pill, so the whole top row reads as one control strip.
-private struct TVNavActionCircle: View {
+struct TVNavActionCircle: View {
     let systemImage: String
     let label: String
     var spinning: Bool = false
@@ -3475,7 +3484,7 @@ private struct TVNavActionCircle: View {
 /// system platter on custom chrome). Unfocused it is a quiet translucent
 /// circle like Android TV's action circles; focused it flips to the white
 /// pill-platter look of the adjacent system tab bar.
-private struct TVNavCircleButtonStyle: ButtonStyle {
+struct TVNavCircleButtonStyle: ButtonStyle {
     var isSelected: Bool = false
     @Environment(\.isFocused) private var isFocused
 
@@ -4330,7 +4339,7 @@ struct MainTabView: View {
                     let visibleTabs = 2
                         + (showFavoritesTab ? 1 : 0)
                         + (showRecordingsTab ? 1 : 0)
-                        + (showVODTab ? 1 : 0)
+                        + (showVODTab ? 2 : 0)
                     let barLeading = (geo.size.width - CGFloat(visibleTabs) * 230) / 2
                     HStack(spacing: 16) {
                         TVNavActionCircle(
@@ -5119,9 +5128,15 @@ struct MainTabView: View {
             // ingested) hides the tab entirely, matching the dynamic
             // behaviour of Favorites and DVR.
             if showVODTab {
-                OnDemandView(vodStore: vodStore, isPlaying: $isPlaying, isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
-                    .tabItem { Label(AppTab.onDemand.title, systemImage: AppTab.onDemand.icon) }
-                    .tag(AppTab.onDemand)
+                MoviesView(vodStore: vodStore, isPlaying: $isPlaying,
+                           isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
+                    .tabItem { Label(AppTab.movies.title, systemImage: AppTab.movies.icon) }
+                    .tag(AppTab.movies)
+
+                TVShowsView(vodStore: vodStore, isPlaying: $isPlaying,
+                            isDetailPushed: $isVODDetailPushed, popRequested: $vodNavPopRequested)
+                    .tabItem { Label(AppTab.tvShows.title, systemImage: AppTab.tvShows.icon) }
+                    .tag(AppTab.tvShows)
             }
 
             #if os(tvOS)
@@ -5181,7 +5196,7 @@ struct MainTabView: View {
         // tab whose backing content is gone.
         .onChange(of: hasVOD) { _, nowHasVOD in
             syncTabVisibility()
-            if !nowHasVOD && selectedTab == .onDemand {
+            if !nowHasVOD && selectedTab.isVOD {
                 withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                     selectedTab = .liveTV
                 }
@@ -5476,11 +5491,10 @@ struct MainTabView: View {
             debugLog("🔗 MainTabView: aerioOpenChannel → switch to Live TV tab")
             withAnimation { selectedTab = .liveTV }
         }
-        // Top Shelf deep link for a VOD item → switch to On Demand tab.
-        // OnDemandView handles the Movies/Series segment switch internally.
+        // Top Shelf deep link for a VOD item → switch to the matching tab.
         .onReceive(NotificationCenter.default.publisher(for: .aerioOpenVOD)) { notif in
             guard let vodType = notif.userInfo?["vodType"] as? String else { return }
-            let target: AppTab = .onDemand
+            let target: AppTab = vodType == "movie" ? .movies : .tvShows
             debugLog("🔗 MainTabView: aerioOpenVOD(\(vodType)) → switch to \(target.rawValue) tab")
             withAnimation { selectedTab = target }
         }
@@ -6141,7 +6155,7 @@ struct MainTabView: View {
         let visibleTabs = 2
             + (showFavoritesTab ? 1 : 0)
             + (showRecordingsTab ? 1 : 0)
-            + (showVODTab ? 1 : 0)
+            + (showVODTab ? 2 : 0)
         let barWidthCeiling = CGFloat(visibleTabs) * 230
         let gutter = (containerWidth - barWidthCeiling) / 2
         // Subtract the leading inset (16), the capsule's own horizontal
