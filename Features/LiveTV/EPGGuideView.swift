@@ -578,7 +578,7 @@ final class GuideStore: ObservableObject {
             // measures the real age of what the user is looking at, not
             // just this session's network activity.
             self.newestFetchedAt = Date().addingTimeInterval(-Double(loaded.newestFetchAgoSec))
-            debugLog("📺 GuideStore.loadFromCache: loaded \(loaded.programCount) programs across \(loaded.dict.count) channels (server \(serverID))")
+            debugLog("📺 GuideStore.loadFromCache: loaded \(loaded.programCount) programs across \(loaded.dict.count) channels (server \(serverID)) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
             debugLog("📺 GuideStore.loadFromCache: newest fetch \(loaded.newestFetchAgoSec)s ago, threshold \(Int(stalenessThreshold))s, fresh=\(loaded.isFresh)")
             self.lastLoadFromCacheResult = (serverID: serverID, isFresh: loaded.isFresh)
             return loaded.isFresh
@@ -1017,7 +1017,7 @@ final class GuideStore: ObservableObject {
         // Log final state
         let totalPrograms = programs.values.reduce(0) { $0 + $1.count }
         let channelsWithMultiple = programs.values.filter { $0.count > 1 }.count
-        debugLog("📺 GuideStore done: \(totalPrograms) programs across \(programs.count) channels, \(channelsWithMultiple) channels have >1 program")
+        debugLog("📺 GuideStore done: \(totalPrograms) programs across \(programs.count) channels, \(channelsWithMultiple) channels have >1 program, rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         // A real network refresh landed, so the loaded data is current as of
         // `now`. Resets the warm-foreground staleness clock (issue #24).
         // Guarded on display ownership: a fetch whose merge was discarded
@@ -2185,8 +2185,12 @@ final class GuideStore: ObservableObject {
             // grew beyond what was in the snapshot).
             var touchedChannelIDs = Set<String>()
 
+            // Same in-memory history cap as loadFromCache for huge playlists.
+            let mergeStart = channels.count > GuideStore.largePlaylistChannels
+                ? max(windowStart, Date().addingTimeInterval(-GuideStore.largePlaylistHistorySecs))
+                : windowStart
             for prog in parsed {
-                guard prog.endTime > windowStart && prog.startTime < windowEnd else { continue }
+                guard prog.endTime > mergeStart && prog.startTime < windowEnd else { continue }
                 let key = prog.channelID.lowercased()
                 // v1.7.3 (Issue #20): tvg-id may match multiple
                 // channels (shared-EPG case). `numberToChannelID`

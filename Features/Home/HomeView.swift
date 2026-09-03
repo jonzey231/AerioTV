@@ -5677,7 +5677,13 @@ struct MainTabView: View {
             // inflate coverage.
             let matchedChannelKeys = liveChannelIDs.intersection(guideStore.programs.keys).count
             let coverageRatio = Double(matchedChannelKeys) / Double(totalChannels)
-            let cacheCoverageOK = coverageRatio >= 0.25
+            // Huge playlists (Xtream panels with tens of thousands of channels,
+            // most of which never carry EPG): coverage against ALL channels is
+            // always "sparse", and the forced refetch parsed the provider's
+            // 315k-programme XMLTV on top of the cache every launch, taking the
+            // Apple TV past its memory line (2026-09-03). Treat a fresh cache
+            // as good enough there; the scheduled refresh still runs.
+            let cacheCoverageOK = coverageRatio >= 0.25 || totalChannels > GuideStore.largePlaylistChannels
             if cacheIsFresh && hasFuturePrograms && cacheCoverageOK {
                 debugLog("🟢 [Orchestrator] phase 2 EPG: cache fresh, seeding only (no network), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
                 // Seed EPGCache from GuideStore.programs so the
