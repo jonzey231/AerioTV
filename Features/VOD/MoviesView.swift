@@ -827,7 +827,10 @@ struct MoviesView: View {
                 .onScrollGeometryChange(for: CGFloat.self) { geo in
                     geo.contentOffset.y
                 } action: { _, y in
-                    let hide = y > 260
+                    // Hide as soon as the content moves so the bar, its
+                    // reserved inset, and the nav circles leave together
+                    // (Logan 2026-09-03: the circles lagged behind the bar).
+                    let hide = y > 40
                     if hide != tvTabBarHidden {
                         withAnimation(.easeInOut(duration: 0.2)) { tvTabBarHidden = hide }
                     }
