@@ -936,6 +936,9 @@ struct MoviesView: View {
                             .fill(Color.elevatedBackground)
                             .overlay(Capsule().stroke(Color.accentPrimary.opacity(0.3), lineWidth: 1))
                     )
+                    // tvOS draws its own platter behind a focused field;
+                    // dark scheme keeps it dark instead of white.
+                    .environment(\.colorScheme, .dark)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
