@@ -983,7 +983,13 @@ struct MoviesView: View {
     /// Where the rail parks once the grid has scrolled under it: centered
     /// vertically in the scroll area.
     private func railCenteredTop(in height: CGFloat) -> CGFloat {
-        max(8, (height - AlphabetRail.totalHeight) / 2)
+        // Sits a little below true center (Logan 2026-09-03): the eye reads
+        // the rail against the poster rows, which start below the top edge.
+        #if os(tvOS)
+        return max(8, (height - AlphabetRail.totalHeight) / 2 + 80)
+        #else
+        return max(8, (height - AlphabetRail.totalHeight) / 2)
+        #endif
     }
 
     /// Grid padding (16) plus the card style's own inset so the first
