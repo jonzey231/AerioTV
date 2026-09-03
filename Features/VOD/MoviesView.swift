@@ -1892,10 +1892,33 @@ struct AlphabetRail: View {
     /// Rail bucket for a title: its first letter, folded to A to Z, or #
     /// for anything else (digits, symbols, leading articles kept as-is).
     static func bucket(for name: String) -> String {
-        guard let first = name.trimmingCharacters(in: .whitespaces).first else { return "#" }
+        guard let first = stripQualityPrefix(name).first else { return "#" }
         let folded = String(first).folding(options: .diacriticInsensitive, locale: nil).uppercased()
         guard let c = folded.first, c.isLetter, c.isASCII else { return "#" }
         return String(c)
+    }
+
+    /// Provider quality tags in front of the real title ("4K: Thor",
+    /// "[HD] Alien", "UHD - Dune", "FHD | Heat") are dropped so the rail
+    /// buckets on the title itself (Logan 2026-09-03).
+    static func stripQualityPrefix(_ name: String) -> Substring {
+        var s = Substring(name.trimmingCharacters(in: .whitespaces))
+        while true {
+            var t = s
+            if t.first == "[" || t.first == "(" { t = t.dropFirst() }
+            guard let tag = ["UHD", "FHD", "4K", "HD", "SD"].first(where: {
+                t.uppercased().hasPrefix($0)
+            }) else { break }
+            t = t.dropFirst(tag.count)
+            if t.first == "]" || t.first == ")" { t = t.dropFirst() }
+            // Require a separator (or space) after the tag so "Hidden" is
+            // not mistaken for an HD tag.
+            guard let sep = t.first, sep == ":" || sep == "-" || sep == "|" || sep == " " else { break }
+            while let c = t.first, c == ":" || c == "-" || c == "|" || c == " " { t = t.dropFirst() }
+            guard !t.isEmpty, t != s else { break }
+            s = t
+        }
+        return s
     }
 
     #if os(tvOS)

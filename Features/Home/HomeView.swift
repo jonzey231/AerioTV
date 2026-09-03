@@ -473,6 +473,7 @@ final class VODStore: ObservableObject {
         // branches — without sprinkling resets across each one.
         isRefillingMovies = true
         defer { isRefillingMovies = false }
+        var lastProgressivePublish = Date.distantPast
         moviesError = nil
         DebugLogger.shared.log("VODStore loadMovies — \(server.name) (\(server.type.rawValue)) url=\(server.effectiveBaseURL)",
                                category: "Movies", level: .info)
@@ -612,6 +613,15 @@ final class VODStore: ObservableObject {
                         if isLoadingMovies {
                             movies = accumulated
                             isLoadingMovies = false
+                            lastProgressivePublish = Date()
+                        } else if Date().timeIntervalSince(lastProgressivePublish) >= 5 {
+                            // Movies tab (Logan 2026-09-03): a large panel
+                            // sat at the first 100 titles for minutes until
+                            // the sweep finished. Publish at most every 5 s,
+                            // far from the per-batch churn that tripped the
+                            // tvOS AttributeGraph crash.
+                            movies = accumulated
+                            lastProgressivePublish = Date()
                         }
                         if accumulated.count >= totalCap { break }
                     }
