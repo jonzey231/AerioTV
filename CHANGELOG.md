@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.8.26 - 2026-09-03
+
+First general release of the native AVPlayer engine, after five TestFlight
+betas (1.8.21 to 1.8.25, listed below). Everything in those betas is
+included, plus the items here, shipped alongside AerioTV for Android 0.4.24.
+
+### Added
+
+- Manage Groups has a pinned All Channels row: uncheck it and the guide,
+  the channel list and the in-player channel list start on your first
+  visible group, which keeps very large playlists quick to open.
+- Channel number entry from a keyboard or a remote with digit keys
+  (Apple TV with a Bluetooth keyboard, iPad with a hardware keyboard):
+  type the number and press Return to jump the guide to that channel or
+  change channel while watching. An entry left alone for six seconds
+  clears.
+- Recordings resume where you left off, on every device: playback position
+  for DVR recordings is saved and synced over iCloud, and the recordings
+  list shows the progress.
+- iPhone: lock screen and Control Center controls while controlling an
+  AerioTV TV with the companion remote (program, channel and TV name,
+  channel logo, play/pause, skip 30, next/previous channel).
+
+### Fixed
+
+- Program subtitles that only repeat the start of the description in
+  square brackets (some Schedules Direct lineups) are hidden.
+- Long-running series load every season again; episodes are paged from
+  Dispatcharr instead of loaded in one request that timed out.
+
 ## v1.8.25 - 2026-09-02 (TestFlight beta)
 
 Fifth AVPlayer-engine beta: two new Appearance settings and a player
