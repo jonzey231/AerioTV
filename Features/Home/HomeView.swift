@@ -4365,21 +4365,21 @@ struct MainTabView: View {
                         + (showVODTab ? 2 : 0)
                     let barLeading = (geo.size.width - CGFloat(visibleTabs) * 230) / 2
                     HStack(spacing: 16) {
-                        TVNavActionCircle(
-                            systemImage: "arrow.clockwise",
-                            label: "Refresh channels and guide",
-                            spinning: isAnyBackgroundWork
-                        ) {
-                            let servers = allServers
-                            let ctx = modelContext
-                            Task {
-                                await channelStore.forceRefresh(servers: servers,
-                                                                modelContext: ctx)
-                            }
-                        }
-                        // Live TV only (Logan 2026-09-03): the other tabs
-                        // carry their own search.
+                        // Refresh and Search are Live TV only (Logan
+                        // 2026-09-03): the other tabs carry their own.
                         if selectedTab == .liveTV {
+                            TVNavActionCircle(
+                                systemImage: "arrow.clockwise",
+                                label: "Refresh channels and guide",
+                                spinning: isAnyBackgroundWork
+                            ) {
+                                let servers = allServers
+                                let ctx = modelContext
+                                Task {
+                                    await channelStore.forceRefresh(servers: servers,
+                                                                    modelContext: ctx)
+                                }
+                            }
                             TVNavActionCircle(
                                 systemImage: "magnifyingglass",
                                 label: "Search",
@@ -4488,8 +4488,8 @@ struct MainTabView: View {
                     // 76pt per circle (60 + 16 spacing) so the row hugs the
                     // bar however many circles are showing; Search only
                     // shows on Live TV.
-                    .padding(.leading, max(16, barLeading - 76
-                        - (selectedTab == .liveTV ? 76 : 0)
+                    .padding(.leading, max(16, barLeading
+                        - (selectedTab == .liveTV ? 152 : 0)
                         - (retention.entries.isEmpty ? 0 : 76)))
                     // Mirror-measured against the system tab bar: at .top 2 the
                     // circle centers sat ~12pt below the capsule's center line
