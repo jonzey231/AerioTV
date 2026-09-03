@@ -128,6 +128,8 @@ struct MoviesView: View {
     /// column and forwards focus to the rail; Right from the rail lands on
     /// it and goes back to the last focused poster.
     @FocusState private var gridFocus: String?
+    /// Set to move focus onto the hero's Resume (scroll-to-top landing).
+    @State private var heroFocusRequest = false
     @State private var lastGridFocus: String?
     @State private var railHadFocus = false
     @State private var railFocusRequest: String?
@@ -910,6 +912,7 @@ struct MoviesView: View {
                                 MoviesHeroCarousel(
                                     pages: pages,
                                     headers: dispatcharrHeaders,
+                                    focusRequest: heroFocusRequestBinding,
                                     onPrimary: { heroPrimary($0) },
                                     onPlayFromStart: { playMovie($0.item, resumePositionMs: 0) },
                                     onDetails: { navPath.append($0.item) },
@@ -1141,10 +1144,22 @@ struct MoviesView: View {
         Binding(get: { railFocusRequest }, set: { railFocusRequest = $0 })
     }
 
+    private var heroFocusRequestBinding: Binding<Bool> {
+        Binding(get: { heroFocusRequest }, set: { heroFocusRequest = $0 })
+    }
+
     private func scrollMoviesToTop(_ proxy: ScrollViewProxy) {
         withAnimation(.easeInOut(duration: 0.25)) {
             proxy.scrollTo("movies-top", anchor: .top)
             tvTabBarHidden = false
+        }
+        // Device log 2026-09-03 18:28:48: a press was routed here and the
+        // grid stayed put (the next press two seconds later found the bar
+        // still hidden). tvOS keeps the focused poster on screen, so the
+        // scroll to top was undone. Move focus onto the hero once the
+        // top is in view so nothing off-screen pulls the scroll back.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            heroFocusRequest = true
         }
     }
 
@@ -1227,6 +1242,7 @@ struct MoviesView: View {
     }
     #else
     private var railFocusRequestBinding: Binding<String?> { .constant(nil) }
+    private var heroFocusRequestBinding: Binding<Bool> { .constant(false) }
 
     private func railCatcherAndGrid(_ items: [VODDisplayItem]) -> some View {
         posterGrid(items).padding(.leading, railWidth)
@@ -1605,6 +1621,8 @@ struct MoviesHeroPage: Identifiable {
 struct MoviesHeroCarousel: View {
     let pages: [MoviesHeroPage]
     var headers: [String: String] = [:]
+    /// Owner sets true to put focus on the aligned page's Resume; reset here.
+    var focusRequest: Binding<Bool> = .constant(false)
     let onPrimary: (MoviesHeroPage) -> Void
     let onPlayFromStart: (MoviesHeroPage) -> Void
     let onDetails: (MoviesHeroPage) -> Void
@@ -1639,6 +1657,11 @@ struct MoviesHeroCarousel: View {
             carousel
                 #if os(tvOS)
                 .focused($heroHasFocus)
+                .onChange(of: focusRequest.wrappedValue) { _, wanted in
+                    guard wanted else { return }
+                    heroFocus = currentID ?? pages.first?.id
+                    focusRequest.wrappedValue = false
+                }
                 #endif
         }
     }
