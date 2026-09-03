@@ -127,6 +127,14 @@ struct MoviesView: View {
     /// Genre pill selection; nil = All. Not persisted: a filter that
     /// silently survives a relaunch reads as "my movies vanished".
     @State private var selectedGenre: String? = nil
+    /// Library grid's top edge in scroll-view coordinates. The alphabet
+    /// rail rides with it, then sticks once it reaches the top inset.
+    @State private var gridTopY: CGFloat = 0
+    #if os(tvOS)
+    /// tvOS: the tab bar hides once the library scrolls past the top so
+    /// the grid gets the whole screen; it returns near the top.
+    @State private var tvTabBarHidden = false
+    #endif
 
     /// User-tunable UI scale (0.85–1.25). Only consumed on iPad / Mac Catalyst
     /// where the default 120 px minimum can feel cramped on wide displays;
@@ -209,8 +217,10 @@ struct MoviesView: View {
             .toolbarBackground(Color.appBackground, for: .navigationBar)
             #if os(tvOS)
             // Assert the tab bar visible at the grid root so popping a pushed
-            // VODDetailView (which hides it) restores it on tvOS 27.
-            .toolbar(.visible, for: .tabBar)
+            // VODDetailView (which hides it) restores it on tvOS 27. Hidden
+            // while the library is scrolled down (Logan 2026-09-03: the grid
+            // gets the whole screen); scrolling back near the top restores it.
+            .toolbar(tvTabBarHidden ? .hidden : .visible, for: .tabBar)
             #endif
             #if os(iOS)
             .toolbar {
@@ -758,9 +768,15 @@ struct MoviesView: View {
                             }
 
                             libraryHeader
+                                .padding(.leading, railWidth)
                             posterGrid(libraryMovies)
+                                .padding(.leading, railWidth)
+                                .onGeometryChange(for: CGFloat.self) { proxy in
+                                    proxy.frame(in: .named("moviesScroll")).minY
+                                } action: { y in
+                                    gridTopY = y
+                                }
                         }
-                        .padding(.leading, railWidth)
                     }
 
                     #if os(iOS)
@@ -769,7 +785,8 @@ struct MoviesView: View {
                 }
                 // Alphabet rail: pinned to the leading edge, jumps the
                 // library grid to the first title for a letter.
-                .overlay(alignment: .leading) {
+                .coordinateSpace(name: "moviesScroll")
+                .overlay(alignment: .topLeading) {
                     if searchText.isEmpty {
                         AlphabetRail(available: railLetters) { letter in
                             if let id = firstGridID(for: letter) {
@@ -779,8 +796,19 @@ struct MoviesView: View {
                             }
                         }
                         .frame(width: railWidth)
+                        .padding(.top, max(railStickyTop, gridTopY + railGridOffset))
                     }
                 }
+                #if os(tvOS)
+                .onScrollGeometryChange(for: CGFloat.self) { geo in
+                    geo.contentOffset.y
+                } action: { _, y in
+                    let hide = y > 260
+                    if hide != tvTabBarHidden {
+                        withAnimation(.easeInOut(duration: 0.2)) { tvTabBarHidden = hide }
+                    }
+                }
+                #endif
                 }
                 #if os(iOS)
                 .onScrollGeometryChange(for: CGFloat.self) { scrollGeo in
@@ -800,6 +828,25 @@ struct MoviesView: View {
                 #endif
             }
         }
+    }
+
+    /// Where the rail parks once the grid has scrolled under it.
+    private var railStickyTop: CGFloat {
+        #if os(tvOS)
+        return 40
+        #else
+        return 8
+        #endif
+    }
+
+    /// Grid padding (16) plus the card style's own inset so the first
+    /// letter lines up with the first poster's top edge.
+    private var railGridOffset: CGFloat {
+        #if os(tvOS)
+        return 24
+        #else
+        return 16
+        #endif
     }
 
     private var railWidth: CGFloat {
@@ -1511,7 +1558,6 @@ struct AlphabetRail: View {
                 #endif
             }
         }
-        .frame(maxHeight: .infinity)
         .padding(.leading, leadingInset)
         #if os(tvOS)
         .focusSection()
@@ -1528,15 +1574,17 @@ struct AlphabetRail: View {
         return enabled ? .textSecondary : .textTertiary.opacity(0.35)
     }
 
+    // Condensed (Logan 2026-09-03): 27 cells at these sizes run ~700pt on
+    // TV and ~400pt on phone, so the whole column fits with room to spare.
     #if os(tvOS)
     private let spacing: CGFloat = 0
-    private let fontSize: CGFloat = 20
-    private let cell: CGFloat = 34
+    private let fontSize: CGFloat = 17
+    private let cell: CGFloat = 26
     private let leadingInset: CGFloat = 20
     #else
     private let spacing: CGFloat = 0
-    private let fontSize: CGFloat = 11
-    private let cell: CGFloat = 18
+    private let fontSize: CGFloat = 10
+    private let cell: CGFloat = 15
     private let leadingInset: CGFloat = 6
     #endif
 }
