@@ -573,14 +573,19 @@ struct MoviesView: View {
         }.prefix(20))
     }
 
-    /// What the hero shows: the resume title when there is one, else the
-    /// newest addition, else the first library title.
-    private var heroItem: VODDisplayItem? {
-        if let p = heroProgress {
-            if let match = vodStore.movies.first(where: { $0.id == p.vodID }) { return match }
-            return MoviesView.syntheticItem(from: p)
+    /// Hero pages: every Continue Watching title (newest first, up to 12),
+    /// or, with nothing in progress, the newest addition or first title.
+    private var heroPages: [MoviesHeroPage] {
+        let resumes: [MoviesHeroPage] = movieProgress.prefix(12).compactMap { p in
+            let item = vodStore.movies.first(where: { $0.id == p.vodID })
+                ?? MoviesView.syntheticItem(from: p)
+            return item.map { MoviesHeroPage(item: $0, progress: p) }
         }
-        return recentlyAdded.first ?? visibleMovies.first
+        if !resumes.isEmpty { return resumes }
+        if let single = recentlyAdded.first ?? visibleMovies.first {
+            return [MoviesHeroPage(item: single, progress: nil)]
+        }
+        return []
     }
 
     /// Genre pills: the visible categories, in store order, "All" first.
@@ -638,8 +643,9 @@ struct MoviesView: View {
     // MARK: - Hero playback
 
     /// Hero primary action: resume when there is progress, else play.
-    private func heroPrimary(_ item: VODDisplayItem) {
-        if let p = heroProgress, p.vodID == item.id {
+    private func heroPrimary(_ page: MoviesHeroPage) {
+        let item = page.item
+        if let p = page.progress {
             resumeFromContinueWatching(p)
         } else {
             playMovie(item, resumePositionMs: WatchProgressManager.getResumePosition(
@@ -762,28 +768,26 @@ struct MoviesView: View {
                             #if os(iOS)
                             iOSTitleRow
                             #endif
-                            if let hero = heroItem {
-                                MoviesHero(
-                                    item: hero,
-                                    progress: heroProgress.flatMap { $0.vodID == hero.id ? $0 : nil },
+                            // Continue Watching IS the hero: one page per title
+                            // in progress (Logan 2026-09-03), so the separate
+                            // poster row is gone from this tab.
+                            let pages = heroPages
+                            if !pages.isEmpty {
+                                MoviesHeroCarousel(
+                                    pages: pages,
                                     headers: dispatcharrHeaders,
-                                    onPrimary: { heroPrimary(hero) },
-                                    onPlayFromStart: { playMovie(hero, resumePositionMs: 0) },
-                                    onDetails: { navPath.append(hero) }
+                                    onPrimary: { heroPrimary($0) },
+                                    onPlayFromStart: { playMovie($0.item, resumePositionMs: 0) },
+                                    onDetails: { navPath.append($0.item) },
+                                    onRemove: { page in
+                                        guard let p = page.progress else { return }
+                                        WatchProgressManager.delete(vodID: p.vodID, serverID: p.serverID)
+                                    }
                                 )
                                 #if os(tvOS)
                                 .focusSection()
                                 #endif
                             }
-
-                            ContinueWatchingSection(
-                                vodType: "movie",
-                                activeServerID: activeServerIDString,
-                                headers: dispatcharrHeaders,
-                                onPlay: { progress in resumeFromContinueWatching(progress) },
-                                movies: vodStore.movies,
-                                onOpenMovie: { item in navPath.append(item) }
-                            )
 
                             if !recentlyAdded.isEmpty {
                                 posterShelf(title: "Recently Added", items: recentlyAdded)
@@ -1335,6 +1339,78 @@ enum MoviesSortOrder: String, CaseIterable {
 /// Featured title at the top of the Movies tab: backdrop (poster when the
 /// source has no backdrop), title, metadata line, plot, and the action
 /// row. Leads with the newest resume point when there is one.
+/// One hero page: a title plus its resume row when it is in progress.
+struct MoviesHeroPage: Identifiable {
+    let item: VODDisplayItem
+    let progress: WatchProgress?
+    var id: String { item.id }
+}
+
+/// Paged hero: one full-width MoviesHero per Continue Watching title. On
+/// tvOS, focus moving right off a page's last button lands on the next
+/// page's first button and the banner slides over; on iOS it swipes.
+struct MoviesHeroCarousel: View {
+    let pages: [MoviesHeroPage]
+    var headers: [String: String] = [:]
+    let onPrimary: (MoviesHeroPage) -> Void
+    let onPlayFromStart: (MoviesHeroPage) -> Void
+    let onDetails: (MoviesHeroPage) -> Void
+    let onRemove: (MoviesHeroPage) -> Void
+
+    @State private var currentID: String?
+
+    var body: some View {
+        GeometryReader { geo in
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 0) {
+                    ForEach(pages) { page in
+                        MoviesHero(
+                            item: page.item,
+                            progress: page.progress,
+                            headers: headers,
+                            onPrimary: { onPrimary(page) },
+                            onPlayFromStart: { onPlayFromStart(page) },
+                            onDetails: { onDetails(page) },
+                            onRemove: page.progress != nil ? { onRemove(page) } : nil
+                        )
+                        .frame(width: geo.size.width)
+                        .id(page.id)
+                    }
+                }
+                .scrollTargetLayout()
+            }
+            .scrollTargetBehavior(.paging)
+            .scrollPosition(id: $currentID)
+            .scrollClipDisabled()
+            .overlay(alignment: .bottomTrailing) {
+                if pages.count > 1 {
+                    HStack(spacing: 6) {
+                        ForEach(pages) { page in
+                            Circle()
+                                .fill(page.id == (currentID ?? pages.first?.id)
+                                      ? Color.accentPrimary : Color.textTertiary.opacity(0.5))
+                                .frame(width: dot, height: dot)
+                        }
+                    }
+                    .padding(.trailing, dotInset)
+                    .padding(.bottom, dotInset)
+                }
+            }
+        }
+        .frame(height: heroHeight)
+    }
+
+    #if os(tvOS)
+    private let heroHeight: CGFloat = 420
+    private let dot: CGFloat = 10
+    private let dotInset: CGFloat = 40
+    #else
+    private let heroHeight: CGFloat = 220
+    private let dot: CGFloat = 6
+    private let dotInset: CGFloat = 28
+    #endif
+}
+
 struct MoviesHero: View {
     let item: VODDisplayItem
     let progress: WatchProgress?
@@ -1342,6 +1418,9 @@ struct MoviesHero: View {
     let onPrimary: () -> Void
     let onPlayFromStart: () -> Void
     let onDetails: () -> Void
+    /// Long press on Resume: Remove from Continue Watching. nil when the
+    /// page is not a resume row.
+    var onRemove: (() -> Void)? = nil
 
     private var movie: VODMovie? { item.movie }
 
@@ -1507,6 +1586,13 @@ struct MoviesHero: View {
             MoviesHeroButton(
                 title: progress != nil ? "Resume" : "Play",
                 systemImage: "play.fill", isPrimary: true, action: onPrimary)
+                .contextMenu {
+                    if let onRemove {
+                        Button(role: .destructive, action: onRemove) {
+                            Label("Remove from Continue Watching", systemImage: "trash")
+                        }
+                    }
+                }
             #if os(tvOS)
             if progress != nil {
                 MoviesHeroButton(title: "Play from Beginning", systemImage: "gobackward",
