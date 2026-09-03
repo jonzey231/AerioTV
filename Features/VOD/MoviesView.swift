@@ -1227,10 +1227,14 @@ struct MoviesView: View {
                 Text("\(count)")
                     .font(.labelMedium)
                     .foregroundColor(.textTertiary)
-                Spacer()
                 #if os(tvOS)
+                // Directly beside the title (Logan 2026-09-03), not
+                // pushed to the far right.
                 tvHeaderControls
+                    .padding(.leading, 12)
+                Spacer()
                 #else
+                Spacer()
                 Text(sortOrder.label)
                     .font(.labelSmall)
                     .foregroundColor(.textTertiary)
