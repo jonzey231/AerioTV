@@ -128,7 +128,6 @@ struct MoviesView: View {
     /// column and forwards focus to the rail; Right from the rail lands on
     /// it and goes back to the last focused poster.
     @FocusState private var gridFocus: String?
-    @FocusState private var railCatcherFocused: Bool
     @State private var lastGridFocus: String?
     @State private var railHadFocus = false
     @State private var railFocusRequest: String?
@@ -954,17 +953,17 @@ struct MoviesView: View {
                             #endif
                         }
                         .frame(width: railWidth)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                         // Rides with the first poster row, then parks
                         // vertically centered on screen (Emby behavior,
-                        // Logan 2026-09-03). Offset, not padding: padding
-                        // made the rail taller than the overlay frame and
-                        // SwiftUI centered the overflow, pulling it up.
-                        // Full height (the ScrollView ignores the top inset,
-                        // the GeometryReader does not), so centered means
-                        // centered on screen, not in the area below the bar.
-                        .offset(y: max(railCenteredTop(in: outer.size.height + outer.safeAreaInsets.top),
-                                       gridTopY + railGridOffset))
+                        // Logan 2026-09-03). `position` is a real layout
+                        // placement (so the tvOS focus engine sees the rail
+                        // where it is drawn) that never recenters overflow
+                        // the way padding did. Full height: the ScrollView
+                        // ignores the top inset, the GeometryReader does not.
+                        .position(
+                            x: railWidth / 2,
+                            y: max(railCenteredTop(in: outer.size.height + outer.safeAreaInsets.top),
+                                   gridTopY + railGridOffset) + AlphabetRail.totalHeight / 2)
                     }
                 }
                 #if os(tvOS)
@@ -1000,17 +999,7 @@ struct MoviesView: View {
                 .onChange(of: gridFocus) { _, id in
                     if let id { lastGridFocus = id }
                 }
-                .onChange(of: railCatcherFocused) { _, focused in
-                    guard focused else { return }
-                    if railHadFocus {
-                        railHadFocus = false
-                        gridFocus = lastGridFocus ?? libraryMovies.first?.id
-                    } else {
-                        // Land on # (Logan 2026-09-03); the grid does not
-                        // move until a letter is clicked.
-                        railFocusRequest = "#"
-                    }
-                }
+
                 .onDisappear { TVTabBarScrollState.shared.isHidden = false }
                 #endif
                 }
@@ -1160,18 +1149,8 @@ struct MoviesView: View {
         }
     }
 
-    /// Thin focusable strip on the grid's left edge (under the rail's
-    /// column, right beside the first poster) plus the grid.
     private func railCatcherAndGrid(_ items: [VODDisplayItem]) -> some View {
-        HStack(alignment: .top, spacing: 0) {
-            Color.clear.frame(width: railWidth - 2)
-            Color.clear
-                .frame(width: 2)
-                .frame(maxHeight: .infinity)
-                .focusable(true)
-                .focused($railCatcherFocused)
-            posterGrid(items)
-        }
+        posterGrid(items).padding(.leading, railWidth)
     }
     #else
     private var railFocusRequestBinding: Binding<String?> { .constant(nil) }
@@ -2047,10 +2026,14 @@ struct AlphabetRail: View {
         .padding(.leading, leadingInset)
         #if os(tvOS)
         .focusSection()
-        .onChange(of: focused) { _, letter in
+        .onChange(of: focused) { old, letter in
             onFocusChange?(letter != nil)
-            // Focus alone never moves the grid (Logan 2026-09-03); only a
-            // click does.
+            // Entering from outside lands on # (Logan 2026-09-03); moving
+            // within the rail is left alone. Focus alone never moves the
+            // grid; only a click does.
+            if old == nil, let letter, letter != "#" {
+                focused = "#"
+            }
         }
         .onChange(of: focusRequest.wrappedValue) { _, letter in
             guard let letter else { return }
