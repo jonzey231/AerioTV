@@ -1345,8 +1345,13 @@ struct MoviesHero: View {
         // Full bleed on TV: the art fades into the page background on the
         // left and bottom, so there is no card edge to see (Logan
         // 2026-09-03: a clipped card showed a faint boundary).
+        // Only the ART is clipped to the rounded shape; the fades and copy
+        // are drawn unclipped over it. Clipping the whole stack rasterized
+        // it as its own layer and left a faint seam along the corner even
+        // where the fade matched the page background (Logan 2026-09-03).
         ZStack(alignment: .leading) {
             artwork
+                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
             gradient
             LinearGradient(
                 stops: [
@@ -1358,9 +1363,6 @@ struct MoviesHero: View {
         }
         .frame(height: heroHeight)
         .frame(maxWidth: .infinity)
-        // Rounded to the pill radius (Logan 2026-09-03), art fading into
-        // the background on the left and bottom.
-        .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
         .padding(.horizontal, 16)
         #else
         ZStack(alignment: .leading) {
