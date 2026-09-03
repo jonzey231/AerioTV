@@ -340,7 +340,7 @@ struct ContinueWatchingSection: View {
                 #endif
             }()) {
                 Text("Continue Watching")
-                    .font(.headline)
+                    .font(.headlineSmall)
                     .foregroundColor(.textPrimary)
                     .padding(.horizontal, 16)
                     .zIndex(0)
@@ -466,9 +466,12 @@ struct ContinueWatchingSection: View {
     /// show's poster + name with an "S1:E4 - Episode Title" subtitle,
     /// instead of the episode's own still + title. Movies render as-is.
     private func resolveDisplay(_ p: WatchProgress) -> (poster: String?, title: String, subtitle: String?) {
+        // Landscape cards (2026-09): prefer the title's backdrop from the
+        // loaded catalog; the progress row only stores the poster.
         if p.vodType == "episode" {
             let show = series.first { $0.id == p.seriesID }
-            let poster = show?.posterURL?.absoluteString ?? p.posterURL
+            let poster = show?.series?.backdropURL?.absoluteString
+                ?? show?.posterURL?.absoluteString ?? p.posterURL
             let label = episodeLabel(season: p.seasonNumber, episode: p.episodeNumber)
             if let show {
                 let parts = [label, p.title].filter { !$0.isEmpty }
@@ -477,7 +480,8 @@ struct ContinueWatchingSection: View {
             // Series not loaded yet: keep the episode title up top, SxEy below.
             return (poster, p.title, label.isEmpty ? nil : label)
         }
-        return (p.posterURL, p.title, nil)
+        let backdrop = movies.first { $0.id == p.vodID }?.movie?.backdropURL?.absoluteString
+        return (backdrop ?? p.posterURL, p.title, nil)
     }
 
     /// "S1:E4", or "E4" when the season is unknown, or "" when neither is set.
@@ -497,13 +501,15 @@ private struct ContinueWatchingCard: View {
     let fraction: Double
     var headers: [String: String] = [:]
 
+    // Landscape 16:9 cards (Logan 2026-09-03): backdrop art with the
+    // progress bar along the bottom edge, title and subtitle beneath.
     #if os(tvOS)
     @Environment(\.isFocused) private var isFocused
-    private let cardWidth: CGFloat = 200
-    private let cardHeight: CGFloat = 300
+    private let cardWidth: CGFloat = 340
+    private let cardHeight: CGFloat = 191
     #else
-    private let cardWidth: CGFloat = 120
-    private let cardHeight: CGFloat = 180
+    private let cardWidth: CGFloat = 200
+    private let cardHeight: CGFloat = 112
     #endif
 
     var body: some View {
@@ -512,11 +518,11 @@ private struct ContinueWatchingCard: View {
                 // Poster (series poster for episodes, movie poster for movies)
                 if let urlStr = posterURLString, let url = URL(string: urlStr) {
                     AuthPosterImage(url: url, headers: headers)
-                        .aspectRatio(2/3, contentMode: .fill)
+                        .aspectRatio(contentMode: .fill)
                         .frame(width: cardWidth, height: cardHeight)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 } else {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .fill(Color.cardBackground)
                         .frame(width: cardWidth, height: cardHeight)
                         .overlay {
@@ -533,40 +539,52 @@ private struct ContinueWatchingCard: View {
                         ZStack(alignment: .leading) {
                             RoundedRectangle(cornerRadius: 2)
                                 .fill(Color.white.opacity(0.3))
-                                .frame(height: 3)
+                                .frame(height: barHeight)
                             RoundedRectangle(cornerRadius: 2)
                                 .fill(Color.accentPrimary)
-                                .frame(width: geo.size.width * CGFloat(min(fraction, 1.0)), height: 3)
+                                .frame(width: geo.size.width * CGFloat(min(fraction, 1.0)), height: barHeight)
                         }
                     }
                 }
                 .frame(width: cardWidth, height: cardHeight)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             }
             #if os(tvOS)
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(isFocused ? Color.accentPrimary : .clear, lineWidth: 2.5)
             )
             #endif
 
             // Title line: series name for episodes, movie title for movies.
             Text(title)
-                .font(.caption)
-                .foregroundColor(.textSecondary)
+                .font(titleFont)
+                .foregroundColor(titleColor)
                 .lineLimit(1)
                 .frame(width: cardWidth, alignment: .leading)
 
             // Subtitle line: "S1:E4 - Episode Title" for episodes.
             if let subtitle, !subtitle.isEmpty {
                 Text(subtitle)
-                    .font(.caption2)
-                    .foregroundColor(.textTertiary)
+                    .font(subtitleFont)
+                    .foregroundColor(.textSecondary)
                     .lineLimit(1)
                     .frame(width: cardWidth, alignment: .leading)
             }
         }
     }
+
+    #if os(tvOS)
+    private var titleFont: Font { .labelSmall }
+    private var subtitleFont: Font { .system(size: 16, weight: .medium) }
+    private var titleColor: Color { isFocused ? .white : .textPrimary }
+    private let barHeight: CGFloat = 5
+    #else
+    private var titleFont: Font { .system(size: 13, weight: .semibold) }
+    private var subtitleFont: Font { .system(size: 11) }
+    private var titleColor: Color { .textPrimary }
+    private let barHeight: CGFloat = 3
+    #endif
 }
 
 // MARK: - VOD Item Type
