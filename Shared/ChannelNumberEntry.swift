@@ -10,9 +10,10 @@ import GameController
 // digit key presses: an attached keyboard on iPadOS, or on Apple TV a
 // Bluetooth keyboard / a CEC or universal remote with a number pad (the
 // Siri Remote has no digits). Digits typed while the live player or the
-// EPG guide is on screen collect in a small top-right overlay; a 2s idle
-// timer (or Return/Select) resolves them against the channel numbers and
-// either tunes (player) or jumps the guide's focus/scroll to that row.
+// EPG guide is on screen collect in a small overlay under the nav bar;
+// Return resolves them against the channel numbers and either tunes
+// (player) or jumps the guide's focus/scroll to that row. An entry left
+// alone for 6s clears itself.
 //
 // One shared state holder feeds every screen. Each screen registers a
 // `Scope` with the channel list it shows and what "resolve" means for
@@ -38,7 +39,9 @@ final class ChannelNumberEntry: ObservableObject {
     }
 
     static let maxDigits = 4
-    static let commitDelay: TimeInterval = 2.0
+    /// Digits wait for Return; an entry left alone this long clears itself
+    /// (Logan 2026-09-02: no auto-commit, matches Android).
+    static let idleClear: TimeInterval = 6.0
     static let messageDuration: TimeInterval = 1.5
 
     /// Digits typed so far (empty when idle).
@@ -111,9 +114,9 @@ final class ChannelNumberEntry: ObservableObject {
     private func scheduleCommit() {
         commitTask?.cancel()
         commitTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(Self.commitDelay * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(Self.idleClear * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            self?.commit()
+            _ = self?.cancel()
         }
     }
 
