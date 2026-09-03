@@ -964,14 +964,16 @@ struct MoviesView: View {
                 // is nothing to scroll, the press is forwarded to the
                 // tab-level routing by notification.
                 .onExitCommand {
+                    debugLog("[MOVIES-EXIT] hidden=\(tvTabBarHidden)")
                     if tvTabBarHidden {
-                        withAnimation(.easeInOut(duration: 0.25)) {
-                            proxy.scrollTo("movies-top", anchor: .top)
-                            tvTabBarHidden = false
-                        }
+                        scrollMoviesToTop(proxy)
                     } else {
                         NotificationCenter.default.post(name: .aerioTabMenuPassthrough, object: nil)
                     }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .aerioTabScrollToTop)) { _ in
+                    guard tvTabBarHidden else { return }
+                    scrollMoviesToTop(proxy)
                 }
                 .onScrollGeometryChange(for: CGFloat.self) { geo in
                     geo.contentOffset.y
@@ -1137,6 +1139,13 @@ struct MoviesView: View {
     #if os(tvOS)
     private var railFocusRequestBinding: Binding<String?> {
         Binding(get: { railFocusRequest }, set: { railFocusRequest = $0 })
+    }
+
+    private func scrollMoviesToTop(_ proxy: ScrollViewProxy) {
+        withAnimation(.easeInOut(duration: 0.25)) {
+            proxy.scrollTo("movies-top", anchor: .top)
+            tvTabBarHidden = false
+        }
     }
 
     /// Search field (when open) and the Search, Sort, Manage Groups circles.
@@ -2185,4 +2194,7 @@ extension Notification.Name {
     /// A tab handled Menu itself and found nothing to do; MainTabView runs
     /// its normal Menu routing (switch to Live TV, etc.).
     static let aerioTabMenuPassthrough = Notification.Name("aerioTabMenuPassthrough")
+    /// MainTabView got Menu while the current tab had scrolled its bar
+    /// away: the tab scrolls back to the top and shows the bar.
+    static let aerioTabScrollToTop = Notification.Name("aerioTabScrollToTop")
 }

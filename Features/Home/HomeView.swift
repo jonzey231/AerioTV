@@ -6353,6 +6353,15 @@ struct MainTabView: View {
             // to hold a binding through the tab view hierarchy.
             debugLog("🎮 Menu pressed: Live TV tab → scroll guide to top")
             NotificationCenter.default.post(name: .guideScrollToTop, object: nil)
+        } else if tabBarScrollState.isHidden {
+            // Movies & TV redesign: the tab scrolled its bar away. Menu
+            // means "back to the top" there, same as the guide's
+            // scroll-to-top above; the tab handles the notification.
+            // Device log 2026-09-03: the tab's own .onExitCommand only
+            // received the press the first time, so the decision lives
+            // here, where every press arrives.
+            debugLog("🎮 Menu pressed: " + selectedTab.rawValue + " tab scrolled → scroll to top")
+            NotificationCenter.default.post(name: .aerioTabScrollToTop, object: nil)
         } else {
             let tabName = selectedTab.rawValue
             debugLog("🎮 Menu pressed: " + tabName + " tab → switch to Live TV")
