@@ -12,13 +12,13 @@ enum EventTimeParser {
     private static let time = "(\\d{1,2})(?::(\\d{2}))?\\s*([AaPp]\\.?[Mm]\\.?)?"
 
     private static let monthFirst = try! NSRegularExpression(
-        pattern: "\\b(\(months))[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?,?(?:\\s+(\\d{4}))?\\s*[,@-]?\\s*(?:at\\s+)?\(time)\(tz)\\b",
+        pattern: "\\b(\(months))[a-z]*\\.?\\s+(\\d{1,2})(?!\\d)(?:st|nd|rd|th)?,?(?:\\s+(\\d{4}))?\\s*[,@-]?\\s*(?:at\\s+)?\(time)\(tz)\\b",
         options: [.caseInsensitive])
     private static let dayFirst = try! NSRegularExpression(
         pattern: "\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(\(months))[a-z]*\\.?,?(?:\\s+(\\d{4}))?\\s*[,@-]?\\s*(?:at\\s+)?\(time)\(tz)\\b",
         options: [.caseInsensitive])
     private static let numeric = try! NSRegularExpression(
-        pattern: "\\b(\\d{1,2})/(\\d{1,2})(?:/(\\d{2,4}))?\\s*[,@-]?\\s*(?:at\\s+)?\(time)\(tz)\\b",
+        pattern: "\\b(\\d{1,2})/(\\d{1,2})(?!\\d)(?:/(\\d{2,4}))?\\s*[,@-]?\\s*(?:at\\s+)?\(time)\(tz)\\b",
         options: [.caseInsensitive])
 
     private static let zones: [String: String] = [
@@ -38,14 +38,16 @@ enum EventTimeParser {
             let r = m.range(at: i)
             return r.location == NSNotFound ? nil : ns.substring(with: r)
         }
-        if let m = monthFirst.firstMatch(in: name, range: range) {
-            return build(month: month(g(m, 1)), day: Int(g(m, 2) ?? "") ?? 0, year: g(m, 3), hour: g(m, 4), minute: g(m, 5), ampm: g(m, 6), tzToken: g(m, 7), now: now, zone: zone)
+        // Each pattern may match but fail validation (month-first can grab
+        // "Sep 0" out of "Sep 01:30"); fall through to the next one.
+        for m in monthFirst.matches(in: name, range: range) {
+            if let d = build(month: month(g(m, 1)), day: Int(g(m, 2) ?? "") ?? 0, year: g(m, 3), hour: g(m, 4), minute: g(m, 5), ampm: g(m, 6), tzToken: g(m, 7), now: now, zone: zone) { return d }
         }
-        if let m = dayFirst.firstMatch(in: name, range: range) {
-            return build(month: month(g(m, 2)), day: Int(g(m, 1) ?? "") ?? 0, year: g(m, 3), hour: g(m, 4), minute: g(m, 5), ampm: g(m, 6), tzToken: g(m, 7), now: now, zone: zone)
+        for m in dayFirst.matches(in: name, range: range) {
+            if let d = build(month: month(g(m, 2)), day: Int(g(m, 1) ?? "") ?? 0, year: g(m, 3), hour: g(m, 4), minute: g(m, 5), ampm: g(m, 6), tzToken: g(m, 7), now: now, zone: zone) { return d }
         }
-        if let m = numeric.firstMatch(in: name, range: range) {
-            return build(month: (Int(g(m, 1) ?? "") ?? 0) - 1, day: Int(g(m, 2) ?? "") ?? 0, year: g(m, 3), hour: g(m, 4), minute: g(m, 5), ampm: g(m, 6), tzToken: g(m, 7), now: now, zone: zone)
+        for m in numeric.matches(in: name, range: range) {
+            if let d = build(month: (Int(g(m, 1) ?? "") ?? 0) - 1, day: Int(g(m, 2) ?? "") ?? 0, year: g(m, 3), hour: g(m, 4), minute: g(m, 5), ampm: g(m, 6), tzToken: g(m, 7), now: now, zone: zone) { return d }
         }
         return nil
     }
