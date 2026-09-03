@@ -24,6 +24,9 @@ struct AuthPosterImage: View {
     /// instead of hard-cropping landscape EPG art into a 2:3 portrait
     /// frame. nil callers (grids with uniform poster cells) are unchanged.
     var onImageLoaded: ((CGSize) -> Void)? = nil
+    /// Painted until the image arrives. The Movies hero passes .clear so
+    /// nothing shows through its fade while the backdrop loads.
+    var placeholder: Color = .cardBackground
 
     @State private var uiImage: UIImage? = nil
 
@@ -32,7 +35,7 @@ struct AuthPosterImage: View {
             if let img = uiImage {
                 Image(uiImage: img).resizable()
             } else {
-                Color.cardBackground
+                placeholder
             }
         }
         // Keyed on url + the active effective host so a LAN/WAN probe flip
@@ -1383,12 +1386,12 @@ struct MoviesHero: View {
     private var artwork: some View {
         GeometryReader { geo in
             if let url = artworkURL {
-                AuthPosterImage(url: url, headers: headers)
+                AuthPosterImage(url: url, headers: headers, placeholder: .clear)
                     .aspectRatio(contentMode: .fill)
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
             } else {
-                Rectangle().fill(Color.appBackground)
+                Color.clear
             }
         }
     }
