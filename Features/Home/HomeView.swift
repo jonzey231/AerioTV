@@ -3568,6 +3568,13 @@ struct MainTabView: View {
     @State private var tabShowRecordings = false
     @State private var tabShowVOD = false
     @ObservedObject private var tabBarScrollState = TVTabBarScrollState.shared
+    private var isTVOS: Bool {
+        #if os(tvOS)
+        return true
+        #else
+        return false
+        #endif
+    }
     #endif
     @ObservedObject private var nowPlaying = NowPlayingManager.shared
     @ObservedObject private var favoritesStore = FavoritesStore.shared
@@ -4245,7 +4252,10 @@ struct MainTabView: View {
             // sits "Syncing…" for minutes. Opens a platform-native
             // detail view (popover on iOS, fullScreenCover on tvOS)
             // listing the active tasks + elapsed time.
-            if isAnyBackgroundWork, !nowPlaying.isActive || nowPlaying.isMinimized {
+            // tvOS (Logan 2026-09-03): no badge; the nav bar's Refresh
+            // circle already spins while background work runs.
+            if isAnyBackgroundWork, !nowPlaying.isActive || nowPlaying.isMinimized,
+               !isTVOS {
                 VStack {
                     Button {
                         showBackgroundWorkDetails = true
@@ -4367,12 +4377,16 @@ struct MainTabView: View {
                                                                 modelContext: ctx)
                             }
                         }
-                        TVNavActionCircle(
-                            systemImage: "magnifyingglass",
-                            label: "Search",
-                            isSelected: showSearch
-                        ) {
-                            withAnimation(.easeOut(duration: 0.2)) { showSearch.toggle() }
+                        // Live TV only (Logan 2026-09-03): the other tabs
+                        // carry their own search.
+                        if selectedTab == .liveTV {
+                            TVNavActionCircle(
+                                systemImage: "magnifyingglass",
+                                label: "Search",
+                                isSelected: showSearch
+                            ) {
+                                withAnimation(.easeOut(duration: 0.2)) { showSearch.toggle() }
+                            }
                         }
                         // Channel retention status (Logan 2026-08-27): a
                         // count circle appears while flipped-away channels
