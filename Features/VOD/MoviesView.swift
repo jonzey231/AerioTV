@@ -104,6 +104,7 @@ struct MoviesView: View {
     @State private var showSearchField = false
     @State private var showSortMenu = false
     @State private var showFilterMenu = false
+    @State private var searchFieldFocused = false
     #endif
     @State private var resumePlayingURL: IdentifiableURL?
     @State private var resumePlayingTitle = ""
@@ -924,22 +925,23 @@ struct MoviesView: View {
             Spacer()
 
             if showSearchField {
-                TextField("Search movies", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 24))
-                    .foregroundColor(.textPrimary)
-                    .frame(width: 400)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
-                    .background(
-                        Capsule()
-                            .fill(Color.elevatedBackground)
-                            .overlay(Capsule().stroke(Color.accentPrimary.opacity(0.3), lineWidth: 1))
-                    )
-                    // tvOS draws its own platter behind a focused field;
-                    // dark scheme keeps it dark instead of white.
-                    .environment(\.colorScheme, .dark)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                // Same UIKit-backed field Settings uses: transparent, never
+                // paints the system white focus platter. The capsule below
+                // is the resting box and the accent ring is the focus state.
+                DarkFocusTextFieldRepresentable(
+                    text: $searchText,
+                    placeholder: "Search movies",
+                    isSecure: false,
+                    onFocusChange: { searchFieldFocused = $0 }
+                )
+                .frame(width: 400, height: 56)
+                .padding(.horizontal, 8)
+                .background(Capsule().fill(Color.elevatedBackground))
+                .overlay(
+                    Capsule().stroke(Color.accentPrimary, lineWidth: searchFieldFocused ? 3 : 0)
+                        .animation(.easeInOut(duration: 0.15), value: searchFieldFocused)
+                )
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
             TVNavActionCircle(systemImage: "magnifyingglass", label: "Search",
