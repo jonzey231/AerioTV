@@ -5119,6 +5119,10 @@ struct MainTabView: View {
 
     private func healCollapsedTabBarIfNeeded() {
         guard !isSettingsSubviewPushed else { return }
+        // A tab that hid the bar on scroll (Movies) parks it off-screen on
+        // purpose; remounting the TabView here tore down every tab, the
+        // 5k-title grid included (device log 2026-09-03, "froze up").
+        guard !tabBarScrollState.isHidden else { return }
         guard let window = UIApplication.shared.connectedScenes
             .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
             .first else { return }
