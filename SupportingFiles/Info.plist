@@ -47,13 +47,12 @@
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
+		<!-- Only the blanket key. Adding NSAllowsArbitraryLoadsForMedia,
+		     InWebContent or LocalNetworking makes iOS/tvOS 10+ IGNORE
+		     NSAllowsArbitraryLoads, which blocked the AVPlayer remux ingest
+		     when an Xtream panel redirected a stream to a plain-http edge
+		     (Apple TV, 2026-09-03). mpv never noticed: it does its own I/O. -->
 		<key>NSAllowsArbitraryLoads</key>
-		<true/>
-		<key>NSAllowsArbitraryLoadsForMedia</key>
-		<true/>
-		<key>NSAllowsArbitraryLoadsInWebContent</key>
-		<true/>
-		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
 	<key>NSBonjourServices</key>
