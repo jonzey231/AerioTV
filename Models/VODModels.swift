@@ -165,6 +165,28 @@ enum WatchProgressManager {
         return progress.positionMs
     }
 
+    /// GH #75: saved position + duration + finished flag for a row, or
+    /// nil when nothing was ever saved. Unlike `getResumePosition` this
+    /// also reports finished rows so a list can render "Watched".
+    struct Snapshot {
+        let positionMs: Int32
+        let durationMs: Int32
+        let isFinished: Bool
+        /// 0...1 fraction watched; nil when the duration is unknown.
+        var fraction: Double? {
+            guard durationMs > 0 else { return nil }
+            return min(1, max(0, Double(positionMs) / Double(durationMs)))
+        }
+    }
+
+    static func snapshot(vodID: String, serverID: String? = nil) -> Snapshot? {
+        guard let context = modelContext else { return nil }
+        let matches = matchingProgress(context: context, vodID: vodID)
+        guard let progress = pickMatch(matches, serverID: serverID, claimLegacy: false) else { return nil }
+        return Snapshot(positionMs: progress.positionMs, durationMs: progress.durationMs,
+                        isFinished: progress.isFinished)
+    }
+
     /// Delete a specific watch progress entry.
     ///
     /// v1.6.8 (Codex A1): pass `serverID` to delete only that

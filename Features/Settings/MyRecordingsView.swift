@@ -45,6 +45,12 @@ struct MyRecordingsView: View {
         /// player treats it as a growing DVR window (live-edge seek
         /// clamp + LIVE timeline affordance) rather than a fixed file.
         var isDVR: Bool = false
+        /// GH #75: WatchProgress identity + resume seed for the legacy
+        /// (mpv) cover, so it saves and resumes exactly like the
+        /// AVPlayer container path does.
+        var vodID: String? = nil
+        var serverID: String? = nil
+        var resumePositionMs: Int32? = nil
     }
 
     /// v1.6.10: Recordings are scoped to the currently-active playlist
@@ -257,7 +263,11 @@ struct MyRecordingsView: View {
                 title: item.title,
                 headers: item.headers,
                 isLive: false,
-                isDVR: item.isDVR
+                isDVR: item.isDVR,
+                vodID: item.vodID,
+                vodServerID: item.serverID,
+                vodType: "recording",
+                resumePositionMs: item.resumePositionMs
             )
         }
         // Pull Dispatcharr server state whenever the view shows, then
@@ -581,9 +591,9 @@ struct MyRecordingsView: View {
         PlayerSession.shared.exit()
         // Hard-off regime: local files ride the container's TS-ingest
         // path (the legacy cover below is mpv by construction).
+        let vodID = rec.watchProgressID ?? "local-\(rec.id.uuidString)"
+        let resume = WatchProgressManager.getResumePosition(vodID: vodID, serverID: rec.serverID)
         if !PlaybackFeatureFlags.mpvEngineEnabled {
-            let vodID = "local-\(rec.id.uuidString)"
-            let resume = WatchProgressManager.getResumePosition(vodID: vodID, serverID: rec.serverID)
             if PlayerSession.shared.beginVOD(
                 title: rec.programTitle, streamURL: url, headers: [:],
                 posterURL: nil, vodID: vodID, serverID: rec.serverID,
@@ -593,7 +603,8 @@ struct MyRecordingsView: View {
             }
         }
         playingRecording = PlayingRecording(
-            id: rec.id, url: url, title: rec.programTitle, headers: [:]
+            id: rec.id, url: url, title: rec.programTitle, headers: [:],
+            vodID: vodID, serverID: rec.serverID, resumePositionMs: resume
         )
     }
 
@@ -683,7 +694,7 @@ struct MyRecordingsView: View {
         // DVR: 0 = explicit from-the-beginning seek, nil = live edge,
         // >2s = saved resume. beginVOD declining (engine toggle off with
         // mpv enabled) still falls through to the legacy cover unchanged.
-        let dvrVodID = "dvr-\(remoteID)"
+        let dvrVodID = rec.watchProgressID ?? "dvr-\(remoteID)"
         let resume: Int32?
         if fromStart {
             resume = isDVR ? 0 : nil
@@ -715,7 +726,9 @@ struct MyRecordingsView: View {
             return
         }
         playingRecording = PlayingRecording(
-            id: rec.id, url: url, title: rec.programTitle, headers: headers, isDVR: isDVR
+            id: rec.id, url: url, title: rec.programTitle, headers: headers, isDVR: isDVR,
+            vodID: dvrVodID, serverID: rec.serverID,
+            resumePositionMs: (resume ?? 0) > 0 ? resume : nil
         )
     }
 
@@ -806,6 +819,28 @@ private struct RecordingRow: View {
     /// (e.g. an old completed recording whose programme rolled out of
     /// the current grid window); the synopsis above still renders.
     @State private var epgCategory: String = ""
+
+    /// GH #75: saved playback position for this recording, refreshed
+    /// on every local save and on every iCloud merge so a position
+    /// synced in from another device shows up without leaving the tab.
+    @State private var progress: WatchProgressManager.Snapshot? = nil
+
+    private func refreshProgress() {
+        guard let key = recording.watchProgressID else { progress = nil; return }
+        progress = WatchProgressManager.snapshot(vodID: key, serverID: recording.serverID)
+    }
+
+    /// Short "Resume at 12:34" / "Watched" caption under the bar.
+    private var progressCaption: String? {
+        guard let p = progress else { return nil }
+        if p.isFinished { return "Watched" }
+        guard p.positionMs > 2_000 else { return nil }
+        let total = Int(p.positionMs / 1000)
+        let h = total / 3600, m = (total % 3600) / 60, sec = total % 60
+        let stamp = h > 0 ? String(format: "%d:%02d:%02d", h, m, sec)
+                          : String(format: "%d:%02d", m, sec)
+        return "Resume at \(stamp)"
+    }
 
     /// True when this row should advertise live in-progress playback.
     /// v1.6.23 (Codex UX P2): the row is already tappable to play
@@ -945,9 +980,40 @@ private struct RecordingRow: View {
                     .foregroundColor(.red)
                     .lineLimit(2)
             }
+
+            // GH #75: resume state. A thin bar plus a caption, the same
+            // shape Continue Watching uses for movies; hidden until the
+            // first 10s save lands (locally or via iCloud).
+            if let caption = progressCaption {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let fraction = progress?.fraction, !(progress?.isFinished ?? false) {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.secondary.opacity(0.25))
+                                Capsule().fill(Color.accentPrimary)
+                                    .frame(width: max(2, geo.size.width * fraction))
+                            }
+                        }
+                        .frame(height: 3)
+                    }
+                    Text(caption)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.top, 2)
+            }
         }
         .padding(.vertical, 4)
-        .task(id: recording.id) { resolveEPGCategory() }
+        .task(id: recording.id) {
+            resolveEPGCategory()
+            refreshProgress()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .watchProgressDidChange)) { _ in
+            refreshProgress()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidUpdateWatchProgress)) { _ in
+            refreshProgress()
+        }
     }
 
     private var statusBadge: some View {
