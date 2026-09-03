@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.8.27 - 2026-09-03
+
+Seventh AVPlayer-engine beta, and the first one going to every TestFlight
+tester. Xtream Codes accounts now work on the native engine.
+
+### Added
+
+- Channels without guide data show the channel name as the programme, with
+  the start time parsed out of the name when it carries one (Xtream event
+  feeds name their dynamic channels after the event).
+- Live playback backs the live edge off a little further after each stall,
+  up to 18 seconds, so a bursty stream stops re-buffering; a steady stream
+  never pays the extra latency.
+
+### Fixed
+
+- Xtream Codes channels failed on the AVPlayer engine: the app applied a
+  Dispatcharr-only HLS upgrade to them, and App Transport Security refused
+  the plain-http edge servers Xtream panels redirect to. Both fixed; Xtream
+  live and VOD play on the native engine.
+- Apple TV crashed on very large playlists (tens of thousands of channels):
+  the guide cache was read and written as a single block of managed
+  objects, a sparse-coverage rule forced a full XMLTV refetch on every
+  launch, and the empty-row label was rebuilt on every render. Cache reads
+  are paged, saves are batched and skipped when unchanged, huge playlists
+  keep six hours of aired programming in memory, and labels are cached.
+  Memory now holds around 300 MB where it reached 1.7 GB before.
+- Scrolling the guide's group sidebar on a huge playlist no longer hangs:
+  a group is previewed only after a short pause.
+
 ## v1.8.26 - 2026-09-03 (TestFlight beta)
 
 Sixth AVPlayer-engine beta, shipped alongside AerioTV for Android 0.4.24.
