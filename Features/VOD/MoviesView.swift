@@ -139,6 +139,19 @@ struct MoviesView: View {
     /// parked the value stops changing, so scrolling the grid costs no
     /// body re-evaluation. nil until the grid is first measured.
     @State private var railTop: CGFloat?
+    /// Scroll geometry for the rail jump, kept OUT of view state so the
+    /// per-frame writes never re-evaluate the body. Row pitch and the
+    /// grid's content-space top let a click scroll to an absolute offset:
+    /// ScrollViewReader.scrollTo(id) silently no-ops for lazy grid rows
+    /// that have not been built yet (device log 2026-09-03).
+    private final class ScrollGeometryBox {
+        var contentOffsetY: CGFloat = 0
+        var gridTopVisible: CGFloat = 0
+        var rowPitch: CGFloat = 0
+        var gridWidth: CGFloat = 0
+    }
+    @State private var geometryBox = ScrollGeometryBox()
+    @State private var scrollPosition = ScrollPosition()
     #if os(tvOS)
     @FocusState private var railCatcherFocused: Bool
     #endif
@@ -932,8 +945,10 @@ struct MoviesView: View {
                 // Alphabet rail: pinned to the leading edge, jumps the
                 // library grid to the first title for a letter.
                 .coordinateSpace(name: "moviesScroll")
+                .scrollPosition($scrollPosition)
                 .onPreferenceChange(GridTopKey.self) { gridTopY in
                     guard let gridTopY else { return }
+                    geometryBox.gridTopVisible = gridTopY
                     let top = max(railCenteredTop(in: outer.size.height + outer.safeAreaInsets.top),
                                   gridTopY + railGridOffset)
                     if railTop != top { railTop = top }
@@ -952,6 +967,7 @@ struct MoviesView: View {
                 .onScrollGeometryChange(for: CGFloat.self) { geo in
                     geo.contentOffset.y
                 } action: { _, y in
+                    geometryBox.contentOffsetY = y
                     // Hide as soon as the content moves so the bar, its
                     // reserved inset, and the nav circles leave together
                     // (Logan 2026-09-03: the circles lagged behind the bar).
@@ -1009,14 +1025,27 @@ struct MoviesView: View {
                             let found = firstGridID(for: letter)
                             debugLog("[RAIL] click \(letter) -> \(found ?? "nil") (letters=\(railLetters.count), library=\(libraryMovies.count))")
                             guard let id = found else { return }
-                            withAnimation(.easeInOut(duration: 0.25)) {
-                                proxy.scrollTo(id, anchor: .top)
+                            let itemID = String(id.dropFirst("grid-".count))
+                            if let index = libraryMovies.firstIndex(where: { $0.id == itemID }),
+                               geometryBox.rowPitch > 0, geometryBox.gridWidth > 0 {
+                                // Adaptive columns: floor((W + spacing) / (min + spacing)).
+                                let cols = max(1, Int((geometryBox.gridWidth + 32) / (200 + 32)))
+                                let row = index / cols
+                                let gridTopContent = geometryBox.gridTopVisible + geometryBox.contentOffsetY
+                                let y = gridTopContent + 16 + CGFloat(row) * geometryBox.rowPitch - 24
+                                debugLog("[RAIL] jump row=\(row) cols=\(cols) y=\(y) pitch=\(geometryBox.rowPitch)")
+                                withAnimation(.easeInOut(duration: 0.25)) {
+                                    scrollPosition.scrollTo(y: max(0, y))
+                                }
+                            } else {
+                                withAnimation(.easeInOut(duration: 0.25)) {
+                                    proxy.scrollTo(id, anchor: .top)
+                                }
                             }
                             #if os(tvOS)
                             // Once the row is on screen, put focus on that
                             // title so the click lands the user in the grid.
-                            let itemID = String(id.dropFirst("grid-".count))
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
                                 railHadFocus = false
                                 gridFocus = itemID
                             }
@@ -1370,9 +1399,20 @@ struct MoviesView: View {
                 .buttonStyle(.plain)
                 #endif
                 .id("grid-\(item.id)")
+                .background(GeometryReader { g in
+                    Color.clear.onAppear {
+                        if item.id == items.first?.id {
+                            geometryBox.rowPitch = g.size.height + gridRowSpacing
+                        }
+                    }
+                })
             }
         }
         .padding(16)
+        .background(GeometryReader { g in
+            Color.clear.onAppear { geometryBox.gridWidth = g.size.width - 32 }
+                .onChange(of: g.size.width) { _, w in geometryBox.gridWidth = w - 32 }
+        })
         #if os(tvOS)
         .focusSection()
         #endif
@@ -2070,14 +2110,10 @@ struct AlphabetRail: View {
             focused = letter
             focusRequest.wrappedValue = nil
         }
+        // Only Right is handled; the focus engine steps letters on its own
+        // (handling Up/Down here too moved two letters per swipe).
         .onMoveCommand { direction in
-            guard let current = focused, let idx = Self.letters.firstIndex(of: current) else { return }
-            switch direction {
-            case .up:    if idx > 0 { focused = Self.letters[idx - 1] }
-            case .down:  if idx + 1 < Self.letters.count { focused = Self.letters[idx + 1] }
-            case .right: onExitRight?()
-            default: break
-            }
+            if direction == .right { onExitRight?() }
         }
         #endif
     }
