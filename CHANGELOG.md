@@ -1,10 +1,8 @@
 # Changelog
 
-## v1.8.26 - 2026-09-03
+## v1.8.26 - 2026-09-03 (TestFlight beta)
 
-First general release of the native AVPlayer engine, after five TestFlight
-betas (1.8.21 to 1.8.25, listed below). Everything in those betas is
-included, plus the items here, shipped alongside AerioTV for Android 0.4.24.
+Sixth AVPlayer-engine beta, shipped alongside AerioTV for Android 0.4.24.
 
 ### Added
 

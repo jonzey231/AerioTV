@@ -454,6 +454,7 @@ final class GuideStore: ObservableObject {
         let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
         // Catch-up: load retained history too, not just the last hour.
         let retentionSecs = GuideStore.activeRetentionSeconds()
+        let channelCount = channels.count
         let refreshMins = UserDefaults.standard.integer(forKey: "bgRefreshIntervalMins")
         let effectiveMins = refreshMins > 0 ? refreshMins : 1440 // 0 means unset → default 24h
         let stalenessThreshold = TimeInterval(effectiveMins * 60)
@@ -507,7 +508,16 @@ final class GuideStore: ObservableObject {
                 }
 
                 let now = Date()
-                let windowStart = now.addingTimeInterval(-retentionSecs)
+                // Huge playlists (Xtream panels with tens of thousands of
+                // channels): the full history window put 322k programmes in
+                // memory and pushed the Apple TV to its jetsam line (1.68 GB
+                // RSS, repeated crashes, 2026-09-03). Cap the IN-MEMORY
+                // history for those; the SwiftData cache keeps the full
+                // retention and catch-up still resolves from the server.
+                let historySecs = channelCount > GuideStore.largePlaylistChannels
+                    ? min(retentionSecs, GuideStore.largePlaylistHistorySecs)
+                    : retentionSecs
+                let windowStart = now.addingTimeInterval(-historySecs)
                 let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
                 let descriptor = FetchDescriptor<EPGProgram>(
                     predicate: #Predicate<EPGProgram> {
@@ -862,6 +872,11 @@ final class GuideStore: ObservableObject {
     static func activeRetentionSeconds() -> TimeInterval {
         TimeInterval(activeRetentionDays()) * 86_400
     }
+
+    /// Above this many channels the in-memory guide keeps only
+    /// [largePlaylistHistorySecs] of aired programming (see loadFromCache).
+    nonisolated static let largePlaylistChannels = 5_000
+    nonisolated static let largePlaylistHistorySecs: TimeInterval = 6 * 3_600
 
     func trimExpiredPrograms() {
         let cutoff = Date().addingTimeInterval(-GuideStore.activeRetentionSeconds())

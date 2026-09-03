@@ -421,7 +421,14 @@ final class PlayerSession: ObservableObject {
         let format = classifyStreamURL(url)
         var routeURL = url
         var effectiveFormat = format
-        if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS {
+        // The ?output_format=hls upgrade is a Dispatcharr contract. Xtream
+        // panels ignore the parameter and routinely 302 live requests to an
+        // edge, which the probe read as "HLS capable": AVPlayer was then
+        // handed raw TS as direct HLS and failed with -11850 (os8.net, Apple TV,
+        // 2026-09-03). Only Dispatcharr sources take the upgrade; everything
+        // else keeps its TS on the remux path.
+        let isDispatcharr = server?.type == .dispatcharrAPI
+        if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS, isDispatcharr {
             // Resolve capability BEFORE the engine locks so the first play
             // of an HLS-capable server already upgrades to ?output_format=hls
             // and routes direct-HLS (which decodes HEVC and outputs HDR)
