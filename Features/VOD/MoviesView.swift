@@ -998,9 +998,17 @@ struct MoviesView: View {
                                 #if os(tvOS)
                                 if hasFocus { railHadFocus = true }
                                 #endif
+                            },
+                            onExitRight: {
+                                #if os(tvOS)
+                                railHadFocus = false
+                                gridFocus = lastGridFocus ?? libraryMovies.first?.id
+                                #endif
                             }
                         ) { letter in
-                            guard let id = firstGridID(for: letter) else { return }
+                            let found = firstGridID(for: letter)
+                            debugLog("[RAIL] click \(letter) -> \(found ?? "nil") (letters=\(railLetters.count), library=\(libraryMovies.count))")
+                            guard let id = found else { return }
                             withAnimation(.easeInOut(duration: 0.25)) {
                                 proxy.scrollTo(id, anchor: .top)
                             }
@@ -1956,6 +1964,10 @@ struct AlphabetRail: View {
     /// Set by the owner to move focus onto a letter (tvOS); cleared here.
     var focusRequest: Binding<String?> = .constant(nil)
     var onFocusChange: ((Bool) -> Void)? = nil
+    /// tvOS: Right on a letter leaves the rail (the owner puts focus back
+    /// on the grid). Moves are handled here because the focus engine did
+    /// not cross between the rail and the scroll content on its own.
+    var onExitRight: (() -> Void)? = nil
     let onSelect: (String) -> Void
 
     nonisolated static let letters: [String] = ["#"] + (65...90).map { String(UnicodeScalar($0)!) }
@@ -1963,7 +1975,7 @@ struct AlphabetRail: View {
     /// Full column height (27 cells), for centering the parked rail.
     static var totalHeight: CGFloat {
         #if os(tvOS)
-        return 27 * 26
+        return 27 * 32
         #else
         return 27 * 15
         #endif
@@ -2058,6 +2070,15 @@ struct AlphabetRail: View {
             focused = letter
             focusRequest.wrappedValue = nil
         }
+        .onMoveCommand { direction in
+            guard let current = focused, let idx = Self.letters.firstIndex(of: current) else { return }
+            switch direction {
+            case .up:    if idx > 0 { focused = Self.letters[idx - 1] }
+            case .down:  if idx + 1 < Self.letters.count { focused = Self.letters[idx + 1] }
+            case .right: onExitRight?()
+            default: break
+            }
+        }
         #endif
     }
 
@@ -2081,8 +2102,8 @@ struct AlphabetRail: View {
     // TV and ~400pt on phone, so the whole column fits with room to spare.
     #if os(tvOS)
     private let spacing: CGFloat = 0
-    private let fontSize: CGFloat = 17
-    private let cell: CGFloat = 26
+    private let fontSize: CGFloat = 21
+    private let cell: CGFloat = 32
     private let leadingInset: CGFloat = 20
     #else
     private let spacing: CGFloat = 0
