@@ -698,84 +698,82 @@ final class GuideStore: ObservableObject {
     /// Save current programs to SwiftData for persistent caching.
     /// Runs on a background ModelContext (Task.detached) to avoid blocking the main thread.
     /// For 4000+ programs, a main-thread save can cause a 700ms+ hang.
+    /// Signature of the last guide persisted per server, so a fetch that
+    /// changed nothing (the common Xtream case: the bulk XMLTV yields nothing
+    /// and the per-channel fallback is refused) does not rewrite 322k rows.
+    private var lastSavedSignature: [String: Int] = [:]
+
+    private func programsSignature(_ snapshot: [String: [GuideProgram]]) -> Int {
+        var h = Hasher()
+        var count = 0
+        for (channelID, progs) in snapshot {
+            h.combine(channelID)
+            for gp in progs {
+                h.combine(Int(gp.start.timeIntervalSince1970))
+                h.combine(Int(gp.end.timeIntervalSince1970))
+                h.combine(gp.title.count)
+                count += 1
+            }
+        }
+        h.combine(count)
+        return h.finalize()
+    }
+
     func saveToCache(modelContext: ModelContext, serverID: String) {
         let container = modelContext.container
-        // Snapshot the programs dictionary on the main actor before detaching
         let snapshot = programs
-        // NEVER let an empty guide reach the cache. The save below deletes
-        // every future row for this server before re-inserting, so writing an
-        // empty snapshot destroys a good on-disk guide and leaves the next
-        // launch with nothing to paint. In-memory guards keep `programs` from
-        // being emptied by a failed fetch in the first place; this is the last
-        // line before the data is gone for good.
         guard snapshot.contains(where: { !$0.value.isEmpty }) else {
             debugLog("📺 GuideStore: skipped saveToCache — nothing to save (refusing to blank the cache)")
             return
         }
-        // Catch-up: retained-history horizon (read on the main actor; the
-        // detached save below must not touch ChannelStore). The retention
-        // horizon superseded the old epgWindowHours trim in this save.
+        let signature = programsSignature(snapshot)
+        if lastSavedSignature[serverID] == signature {
+            debugLog("📺 GuideStore.saveToCache: skipped — guide unchanged since the last save (server \(serverID))")
+            return
+        }
+        lastSavedSignature[serverID] = signature
         let retentionSecs = GuideStore.activeRetentionSeconds()
 
-        // Invalidate the loadFromCache idempotency cache — a fresh
-        // network fetch is landing, so the next loadFromCache caller
-        // should re-read SwiftData and observe the updated fetchedAt
-        // (which will flip `fresh=true`). Runs synchronously on the
-        // MainActor before the detached save so there's no race
-        // between a subsequent caller and the stale cached verdict.
         lastLoadFromCacheResult = nil
 
+        // Memory discipline (Apple TV, 36k-channel Xtream panel, 2026-09-03):
+        // the old save fetched every existing row to delete it and inserted
+        // the whole guide into ONE context: three copies of 322k managed
+        // objects, +900 MB, jetsam. Deletes go by predicate without
+        // materialising rows, past-key dedup only fetches the aired window,
+        // and inserts run in chunks with a fresh context per chunk.
         Task.detached(priority: .utility) {
-            let bgContext = ModelContext(container)
-            bgContext.autosaveEnabled = false
-
             let now = Date()
-            // Catch-up: aired programmes are the archive the Watch action
-            // hangs off, so the old ended-1h-ago purge becomes a retention
-            // prune (Edit Server > Guide History, default 7 days).
             let retentionCutoff = now.addingTimeInterval(-retentionSecs)
-            let staleDescriptor = FetchDescriptor<EPGProgram>(
-                predicate: #Predicate<EPGProgram> { $0.endTime < retentionCutoff }
-            )
-            if let stale = try? bgContext.fetch(staleDescriptor) {
-                for s in stale { bgContext.delete(s) }
+            do {
+                let ctx = ModelContext(container)
+                ctx.autosaveEnabled = false
+                try ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> { $0.endTime < retentionCutoff })
+                try ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> { $0.serverID == serverID && $0.endTime > now })
+                try ctx.save()
+            } catch {
+                debugLog("📺 GuideStore.saveToCache: batch delete failed: \(error)")
             }
 
-            // The fresh snapshot owns the PRESENT AND FUTURE outright:
-            // delete that region and re-insert. Already-aired rows are
-            // left in place so history accumulates across refreshes
-            // (feeds trim their own history between refreshes; deleting
-            // the snapshot window used to erase recently-ended shows the
-            // feed no longer carried -- the AerioTV-Android data-loss
-            // bug, fixed there in DB v20 and mirrored here).
-            let existingDescriptor = FetchDescriptor<EPGProgram>(
-                predicate: #Predicate<EPGProgram> {
-                    $0.serverID == serverID && $0.endTime > now
-                }
-            )
-            if let existing = try? bgContext.fetch(existingDescriptor) {
-                for e in existing { bgContext.delete(e) }
-            }
-
-            // Dedup guard for the PAST region: the in-memory snapshot also
-            // carries history (merged from this same cache), so inserting
-            // it blindly would duplicate retained rows. SwiftData has no
-            // unique index, so skip past inserts whose (channel, start)
-            // already exists.
             var pastKeys = Set<String>()
-            let pastDescriptor = FetchDescriptor<EPGProgram>(
-                predicate: #Predicate<EPGProgram> {
-                    $0.serverID == serverID && $0.endTime <= now && $0.endTime > retentionCutoff
-                }
-            )
-            if let pastRows = try? bgContext.fetch(pastDescriptor) {
-                for r in pastRows {
-                    pastKeys.insert("\(r.channelID)|\(Int(r.startTime.timeIntervalSince1970))")
+            autoreleasepool {
+                let ctx = ModelContext(container)
+                let pastDescriptor = FetchDescriptor<EPGProgram>(
+                    predicate: #Predicate<EPGProgram> {
+                        $0.serverID == serverID && $0.endTime <= now && $0.endTime > retentionCutoff
+                    }
+                )
+                if let pastRows = try? ctx.fetch(pastDescriptor) {
+                    for r in pastRows {
+                        pastKeys.insert("\(r.channelID)|\(Int(r.startTime.timeIntervalSince1970))")
+                    }
                 }
             }
 
-            // Insert current programs (future always; past only when new)
             var count = 0
+            var chunk = 0
+            var ctx = ModelContext(container)
+            ctx.autosaveEnabled = false
             for (channelID, progs) in snapshot {
                 for gp in progs {
                     if gp.end <= now {
@@ -784,8 +782,6 @@ final class GuideStore: ObservableObject {
                         if gp.end <= retentionCutoff { continue }
                         pastKeys.insert(key)
                     }
-                    // v1.7.x: persist `programID` so cold-launch
-                    // Program Info lazy-load survives the cache hit.
                     let ep = EPGProgram(channelID: channelID, title: gp.title,
                                         description: gp.description,
                                         startTime: gp.start, endTime: gp.end,
@@ -796,16 +792,22 @@ final class GuideStore: ObservableObject {
                                         isLiveBroadcast: gp.isLiveBroadcast,
                                         isPremiere: gp.isPremiere, isFinale: gp.isFinale,
                                         isRepeat: gp.isRepeat)
-                    bgContext.insert(ep)
+                    ctx.insert(ep)
                     count += 1
+                    chunk += 1
+                    if chunk >= 5_000 {
+                        try? ctx.save()
+                        ctx = ModelContext(container)
+                        ctx.autosaveEnabled = false
+                        chunk = 0
+                    }
                 }
             }
-            try? bgContext.save()
-            debugLog("📺 GuideStore.saveToCache: saved \(count) programs for server \(serverID) (background)")
+            try? ctx.save()
+            debugLog("📺 GuideStore.saveToCache: saved \(count) programs for server \(serverID) (background, chunked) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         }
     }
 
-    /// Phase 1 — instant: build guide rows from data that's already in memory.
     func seedFromChannels(_ channels: [ChannelDisplayItem]) {
         var result: [String: [GuideProgram]] = programs // preserve cached data
         var mutated = false
@@ -928,7 +930,7 @@ final class GuideStore: ObservableObject {
             debugLog("📺 GuideStore.fetchUpcoming: no server found")
             return false  // `defer` above resets isLoading
         }
-        debugLog("📺 GuideStore.fetchUpcoming: server=\(server.name), type=\(server.type), channels=\(channels.count)")
+        debugLog("📺 GuideStore.fetchUpcoming: server=\(server.name), type=\(server.type), channels=\(channels.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         beginDisplaying(serverID: server.id.uuidString)
 
         let didRefresh: Bool

@@ -5594,7 +5594,7 @@ struct MainTabView: View {
         // await resolves immediately.
         let cacheIsFresh = await cacheLoadHandle.value
 
-        debugLog("🟢 [Orchestrator] phase 1 done (channels), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, channels=\(channelStore.channels.count)")
+        debugLog("🟢 [Orchestrator] phase 1 done (channels), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, channels=\(channelStore.channels.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         if !channelStore.channels.isEmpty {
             // Try to short-circuit the expensive `loadAllEPG`
             // path by checking the SwiftData EPG cache first. On
@@ -5791,7 +5791,7 @@ struct MainTabView: View {
             // no way out.
             channelStore.isEPGLoading = false
         }
-        debugLog("🟢 [Orchestrator] phase 2 done (EPG), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+        debugLog("🟢 [Orchestrator] phase 2 done (EPG), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
 
         // v1.6.21: VOD phases run sequentially after channels + EPG.
         // Movies first, then series, both awaitable so we observe
@@ -5832,10 +5832,10 @@ struct MainTabView: View {
         try? await Task.sleep(for: .seconds(3))
         debugLog("🟢 [Orchestrator] phase 3 BEGIN: VOD movies, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
         await vodStore.refreshMoviesAndWait(servers: allServers)
-        debugLog("🟢 [Orchestrator] phase 3 done (movies), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count)")
+        debugLog("🟢 [Orchestrator] phase 3 done (movies), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         debugLog("🟢 [Orchestrator] phase 4 BEGIN: VOD series, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
         await vodStore.refreshSeriesAndWait(servers: allServers)
-        debugLog("🟢 [Orchestrator] phase 4 done (series), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, series=\(vodStore.series.count)")
+        debugLog("🟢 [Orchestrator] phase 4 done (series), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, series=\(vodStore.series.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         debugLog("🟢 [Orchestrator] END, total elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
     }
 
