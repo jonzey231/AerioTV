@@ -129,7 +129,9 @@ struct MoviesView: View {
     @State private var selectedGenre: String? = nil
     /// Library grid's top edge in scroll-view coordinates. The alphabet
     /// rail rides with it, then sticks once it reaches the top inset.
-    @State private var gridTopY: CGFloat = 0
+    /// nil until the first measurement: the rail stays hidden until then so
+    /// it cannot flash at the top of the tab for a frame on tab switch.
+    @State private var gridTopY: CGFloat? = nil
     #if os(tvOS)
     /// tvOS: the tab bar hides once the library scrolls past the top so
     /// the grid gets the whole screen; it returns near the top.
@@ -801,7 +803,7 @@ struct MoviesView: View {
                 // library grid to the first title for a letter.
                 .coordinateSpace(name: "moviesScroll")
                 .overlay(alignment: .topLeading) {
-                    if searchText.isEmpty {
+                    if searchText.isEmpty, let gridTopY {
                         AlphabetRail(available: railLetters) { letter in
                             if let id = firstGridID(for: letter) {
                                 withAnimation(.easeInOut(duration: 0.25)) {
