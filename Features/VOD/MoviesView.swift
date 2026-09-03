@@ -1358,6 +1358,7 @@ struct MoviesHeroCarousel: View {
     let onRemove: (MoviesHeroPage) -> Void
 
     @State private var currentID: String?
+    @Namespace private var focusNS
 
     var body: some View {
         GeometryReader { geo in
@@ -1379,6 +1380,10 @@ struct MoviesHeroCarousel: View {
                         )
                         .frame(width: pageWidth)
                         .id(page.id)
+                        // Focus entering the carousel (Down from the header
+                        // row) lands on the leading page, not the page
+                        // peeking in on the right (Logan 2026-09-03).
+                        .prefersDefaultFocus(page.id == (currentID ?? pages.first?.id), in: focusNS)
                     }
                 }
                 .scrollTargetLayout()
@@ -1386,6 +1391,7 @@ struct MoviesHeroCarousel: View {
             .scrollTargetBehavior(.viewAligned)
             .scrollPosition(id: $currentID)
             .scrollClipDisabled()
+            .focusScope(focusNS)
             .overlay(alignment: .bottomTrailing) {
                 if pages.count > 1 {
                     HStack(spacing: 6) {
