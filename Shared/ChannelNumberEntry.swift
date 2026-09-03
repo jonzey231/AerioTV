@@ -278,7 +278,6 @@ struct ChannelNumberEntryOverlay: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: 14))
             .padding(.top, 24)
-            .padding(.trailing, 32)
             .transition(.opacity)
             .allowsHitTesting(false)
             .accessibilityLabel(entry.message ?? "Channel number \(entry.digits)")
@@ -330,7 +329,7 @@ struct ChannelNumberEntryModifier: ViewModifier {
             .onKeyPress(.escape, phases: .down) { _ in
                 entry.cancel() ? .handled : .ignored
             }
-            .overlay(alignment: .topTrailing) {
+            .overlay(alignment: .top) {
                 ChannelNumberEntryOverlay(scope: scope)
                     .animation(.easeInOut(duration: 0.15), value: entry.isVisible)
             }

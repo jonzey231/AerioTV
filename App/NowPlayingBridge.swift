@@ -23,6 +23,13 @@ final class NowPlayingBridge {
     private var onPlay: (() -> Void)?
     private var onPause: (() -> Void)?
     private var onSeek: ((TimeInterval) -> Void)?
+    /// Companion remote (2026-09-02): +/- skip in seconds, forwarded to the
+    /// TV. When set, the lock screen shows skip 30 buttons instead of the
+    /// disabled defaults.
+    private var onSkip: ((Double) -> Void)?
+    /// Companion remote: next/previous track flips the TV's channel instead of
+    /// the local player's. nil keeps the CarPlay local-flip behaviour.
+    private var onFlipChannel: ((Int) -> Void)?
     private var artworkTask: Task<Void, Never>?
 
     /// Our shadow copy of nowPlayingInfo — always written in full, never read
@@ -88,11 +95,15 @@ final class NowPlayingBridge {
         programEnd: Date? = nil,
         onPlay: @escaping () -> Void,
         onPause: @escaping () -> Void,
-        onSeek: ((TimeInterval) -> Void)?
+        onSeek: ((TimeInterval) -> Void)?,
+        onSkip: ((Double) -> Void)? = nil,
+        onFlipChannel: ((Int) -> Void)? = nil
     ) {
         self.onPlay = onPlay
         self.onPause = onPause
         self.onSeek = onSeek
+        self.onSkip = onSkip
+        self.onFlipChannel = onFlipChannel
         self.currentIsLive = isLive
         self.overrideProgramStart = programStart
         self.overrideProgramEnd = programEnd
@@ -266,6 +277,12 @@ final class NowPlayingBridge {
         onPlay = nil
         onPause = nil
         onSeek = nil
+        onSkip = nil
+        onFlipChannel = nil
+        cc.skipForwardCommand.removeTarget(nil)
+        cc.skipBackwardCommand.removeTarget(nil)
+        cc.skipForwardCommand.isEnabled = false
+        cc.skipBackwardCommand.isEnabled = false
         #if canImport(UIKit)
         // Balance the beginReceivingRemoteControlEvents() call in configure()
         // so backgrounded apps don't continue holding the remote-control route.
@@ -329,8 +346,27 @@ final class NowPlayingBridge {
             cc.changePlaybackPositionCommand.isEnabled = false
         }
 
-        cc.skipForwardCommand.isEnabled = false
-        cc.skipBackwardCommand.isEnabled = false
+        cc.skipForwardCommand.removeTarget(nil)
+        cc.skipBackwardCommand.removeTarget(nil)
+        if let onSkip {
+            cc.skipForwardCommand.isEnabled = true
+            cc.skipBackwardCommand.isEnabled = true
+            cc.skipForwardCommand.preferredIntervals = [30]
+            cc.skipBackwardCommand.preferredIntervals = [30]
+            cc.skipForwardCommand.addTarget { event in
+                let secs = (event as? MPSkipIntervalCommandEvent)?.interval ?? 30
+                DispatchQueue.main.async { onSkip(secs) }
+                return .success
+            }
+            cc.skipBackwardCommand.addTarget { event in
+                let secs = (event as? MPSkipIntervalCommandEvent)?.interval ?? 30
+                DispatchQueue.main.async { onSkip(-secs) }
+                return .success
+            }
+        } else {
+            cc.skipForwardCommand.isEnabled = false
+            cc.skipBackwardCommand.isEnabled = false
+        }
 
         // v1.7.x CarPlay: on live channels, the car's (and lock screen's)
         // next/previous buttons flip channels. `changeChannel` has its own
@@ -341,15 +377,16 @@ final class NowPlayingBridge {
         if isLive {
             cc.nextTrackCommand.isEnabled = true
             cc.previousTrackCommand.isEnabled = true
+            let flip = onFlipChannel
             cc.nextTrackCommand.addTarget { _ in
                 DispatchQueue.main.async {
-                    NowPlayingManager.shared.changeChannel(direction: 1)
+                    if let flip { flip(1) } else { NowPlayingManager.shared.changeChannel(direction: 1) }
                 }
                 return .success
             }
             cc.previousTrackCommand.addTarget { _ in
                 DispatchQueue.main.async {
-                    NowPlayingManager.shared.changeChannel(direction: -1)
+                    if let flip { flip(-1) } else { NowPlayingManager.shared.changeChannel(direction: -1) }
                 }
                 return .success
             }
