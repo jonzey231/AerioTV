@@ -4376,6 +4376,20 @@ final class AVPlayerProgressDriver {
         let dStalls = max(0, stalls - lastStallCount)
         let dDropped = max(0, dropped - lastDroppedFrames)
         lastStallCount = stalls
+        // Adaptive hold-back (Xtream soak, 2026-09-03): the remux serves 2 s
+        // segments and AVPlayer's default hold-back parks playback ~5 s from
+        // the edge, which a bursty source runs dry about every 90 s. Each
+        // NEW stall on a live stream moves the target 3 s further back
+        // (6 -> 9 -> ... -> 18); a steady stream never pays the latency.
+        if isLive, dStalls > 0, let item = player.currentItem {
+            let current = item.configuredTimeOffsetFromLive.seconds
+            let base = current.isFinite && current > 0 ? current : 6
+            let next = min(18.0, base + 3)
+            if next > base + 0.5 {
+                item.configuredTimeOffsetFromLive = CMTime(seconds: next, preferredTimescale: 600)
+                debugLog(String(format: "[AVP-HOLDBACK] stall #%d: live edge offset %.0fs -> %.0fs", stalls, base, next))
+            }
+        }
         lastDroppedFrames = dropped
         // rss rides this tick deliberately. Apple #74 was an ingest buffer
         // growing at exactly the stream bitrate for the whole session, and
