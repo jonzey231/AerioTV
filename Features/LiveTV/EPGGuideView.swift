@@ -527,31 +527,45 @@ final class GuideStore: ObservableObject {
                     },
                     sortBy: [SortDescriptor(\.startTime)]
                 )
-                guard let cachedRows = try? bgContext.fetch(descriptor), !cachedRows.isEmpty else {
-                    return (nil, false)
-                }
+                // Paged read (Apple TV, 2026-09-03): fetching 208k rows in
+                // one call materialised every managed object at once and took
+                // the process from 380 MB to 1.8 GB. Pages of 20k rows, each in
+                // its own context so the objects are released as we go.
                 var dict: [String: [GuideProgram]] = [:]
-                for ep in cachedRows {
-                    // v1.7.x: thread `programID` so a fresh-cache cold
-                    // launch on Dispatcharr can still drive the
-                    // ProgramInfoView lazy-load. Pre-v1.7.x rows have
-                    // `programID = nil` (lightweight migration); those
-                    // get repopulated on the next bulk grid refresh.
-                    let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
-                                          description: ep.programDescription,
-                                          start: ep.startTime, end: ep.endTime,
-                                          category: ep.category,
-                                          programID: ep.programID,
-                                          subTitle: ep.subTitle, season: ep.season,
-                                          episode: ep.episode, isNew: ep.isNew,
-                                          isLiveBroadcast: ep.isLiveBroadcast,
-                                          isPremiere: ep.isPremiere, isFinale: ep.isFinale,
-                                          isRepeat: ep.isRepeat)
-                    dict[ep.channelID, default: []].append(gp)
+                var total = 0
+                var newestFetch = Date.distantPast
+                var offset = 0
+                let pageSize = 20_000
+                while true {
+                    var page = descriptor
+                    page.fetchOffset = offset
+                    page.fetchLimit = pageSize
+                    let rows: [EPGProgram] = autoreleasepool {
+                        let pageContext = ModelContext(container)
+                        return (try? pageContext.fetch(page)) ?? []
+                    }
+                    if rows.isEmpty { break }
+                    for ep in rows {
+                        let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
+                                              description: ep.programDescription,
+                                              start: ep.startTime, end: ep.endTime,
+                                              category: ep.category,
+                                              programID: ep.programID,
+                                              subTitle: ep.subTitle, season: ep.season,
+                                              episode: ep.episode, isNew: ep.isNew,
+                                              isLiveBroadcast: ep.isLiveBroadcast,
+                                              isPremiere: ep.isPremiere, isFinale: ep.isFinale,
+                                              isRepeat: ep.isRepeat)
+                        dict[ep.channelID, default: []].append(gp)
+                        if ep.fetchedAt > newestFetch { newestFetch = ep.fetchedAt }
+                    }
+                    total += rows.count
+                    offset += rows.count
+                    if rows.count < pageSize { break }
                 }
-                let newestFetch = cachedRows.map(\.fetchedAt).max() ?? .distantPast
+                guard total > 0 else { return (nil, false) }
                 let isFresh = now.timeIntervalSince(newestFetch) < stalenessThreshold
-                return ((dict, cachedRows.count, isFresh, Int(now.timeIntervalSince(newestFetch))), false)
+                return ((dict, total, isFresh, Int(now.timeIntervalSince(newestFetch))), false)
             }.value
 
             if fetchResult.purgedForEpoch {
@@ -735,8 +749,11 @@ final class GuideStore: ObservableObject {
         }
         lastSavedSignature[serverID] = signature
         let retentionSecs = GuideStore.activeRetentionSeconds()
-
-        lastLoadFromCacheResult = nil
+        let snapshotTotal = snapshot.values.reduce(0) { $0 + $1.count }
+        debugLog("📺 GuideStore.saveToCache: persisting \(snapshotTotal) programs across \(snapshot.count) channels (server \(serverID))")
+        // The in-memory guide IS what was just persisted: do not force the next
+        // guide appearance to re-read the whole cache from disk (that reload
+        // was the 380 MB -> 1.8 GB jump on a 36k-channel panel, 2026-09-03).
 
         // Memory discipline (Apple TV, 36k-channel Xtream panel, 2026-09-03):
         // the old save fetched every existing row to delete it and inserted
