@@ -1,5 +1,6 @@
 import Foundation
 #if os(iOS)
+import AVFoundation
 import Combine
 import MediaPlayer
 
@@ -22,6 +23,12 @@ final class CompanionNowPlaying {
     private var bag = Set<AnyCancellable>()
     private var tick: Timer?
     private var configuredKey: String?
+    /// iOS lists an app in Control Center / the lock screen only once its
+    /// audio session has actually rendered audio; metadata plus playbackState
+    /// alone never surface (device log 2026-09-02: configure published, no
+    /// widget). A looping silent clip keeps the session live for the length
+    /// of the companion session, the same trick remote-speaker apps use.
+    private var silence: AVAudioPlayer?
 
     func start() {
         guard bag.isEmpty else { return }
@@ -44,6 +51,7 @@ final class CompanionNowPlaying {
             if configuredKey != nil {
                 configuredKey = nil
                 tick?.invalidate(); tick = nil
+                stopSilence()
                 NowPlayingBridge.shared.teardown()
             }
             return
@@ -75,6 +83,7 @@ final class CompanionNowPlaying {
             onSkip: { secs in CompanionClient.shared.seekBy(Int64(secs * 1000)) },
             onFlipChannel: { delta in CompanionClient.shared.flipChannel(delta) }
         )
+        startSilence()
         publishRate(client.remoteIsPlaying)
         tick?.invalidate()
         // 30 s tick: advances the programme timeline, and picks up a
@@ -85,6 +94,37 @@ final class CompanionNowPlaying {
                 self?.publishRate(CompanionClient.shared.remoteIsPlaying)
             }
         }
+    }
+
+    private func startSilence() {
+        if silence?.isPlaying == true { return }
+        if silence == nil {
+            silence = try? AVAudioPlayer(data: Self.silentWav(seconds: 2), fileTypeHint: AVFileType.wav.rawValue)
+            silence?.numberOfLoops = -1
+            silence?.volume = 0
+        }
+        silence?.prepareToPlay()
+        silence?.play()
+    }
+
+    private func stopSilence() {
+        silence?.stop()
+    }
+
+    /// 8 kHz mono 16-bit PCM WAV of digital silence, built in memory so no
+    /// asset ships with the app.
+    private static func silentWav(seconds: Int) -> Data {
+        let sampleRate: UInt32 = 8000
+        let frames = UInt32(seconds) * sampleRate
+        let dataSize = frames * 2
+        var d = Data()
+        func u32(_ v: UInt32) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 4)) }
+        func u16(_ v: UInt16) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 2)) }
+        d.append("RIFF".data(using: .ascii)!); u32(36 + dataSize); d.append("WAVE".data(using: .ascii)!)
+        d.append("fmt ".data(using: .ascii)!); u32(16); u16(1); u16(1); u32(sampleRate); u32(sampleRate * 2); u16(2); u16(16)
+        d.append("data".data(using: .ascii)!); u32(dataSize)
+        d.append(Data(count: Int(dataSize)))
+        return d
     }
 
     private func publishRate(_ playing: Bool) {
