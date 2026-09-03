@@ -1683,10 +1683,8 @@ struct MoviesHero: View {
 
     private var copy: some View {
         VStack(alignment: .leading, spacing: copySpacing) {
-            Text(eyebrow.uppercased())
-                .font(.system(size: eyebrowSize, weight: .bold))
-                .tracking(1.2)
-                .foregroundColor(.accentPrimary)
+            // No eyebrow (Logan 2026-09-03): the carousel is Continue
+            // Watching, the label was redundant.
             Text(item.name)
                 .font(titleFont)
                 .foregroundColor(.textPrimary)
