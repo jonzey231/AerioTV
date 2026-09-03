@@ -102,6 +102,7 @@ struct MoviesView: View {
     @State private var navPath = NavigationPath()
     #if os(tvOS)
     @State private var showSearchField = false
+    @State private var showSortMenu = false
     #endif
     @State private var resumePlayingURL: IdentifiableURL?
     @State private var resumePlayingTitle = ""
@@ -919,13 +920,7 @@ struct MoviesView: View {
     /// on the right. Same round platters as the nav bar's Refresh/Search.
     private var tvHeaderRow: some View {
         HStack(spacing: 14) {
-            TVNavActionCircle(systemImage: "magnifyingglass", label: "Search",
-                              isSelected: showSearchField) {
-                withAnimation(.spring(response: 0.25)) {
-                    showSearchField.toggle()
-                    if !showSearchField { searchText = "" }
-                }
-            }
+            Spacer()
 
             if showSearchField {
                 TextField("Search movies", text: $searchText)
@@ -940,16 +935,18 @@ struct MoviesView: View {
                             .fill(Color.elevatedBackground)
                             .overlay(Capsule().stroke(Color.accentPrimary.opacity(0.3), lineWidth: 1))
                     )
-                    .transition(.move(edge: .leading).combined(with: .opacity))
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
             }
 
-            Spacer()
-
-            Text(sortOrder.label)
-                .font(.labelMedium)
-                .foregroundColor(.textTertiary)
+            TVNavActionCircle(systemImage: "magnifyingglass", label: "Search",
+                              isSelected: showSearchField) {
+                withAnimation(.spring(response: 0.25)) {
+                    showSearchField.toggle()
+                    if !showSearchField { searchText = "" }
+                }
+            }
             TVNavActionCircle(systemImage: "arrow.up.arrow.down", label: "Sort") {
-                cycleSort()
+                showSortMenu = true
             }
             TVNavActionCircle(systemImage: "line.3.horizontal.decrease",
                               label: "Manage Groups",
@@ -960,6 +957,15 @@ struct MoviesView: View {
         .padding(.horizontal, 24)
         .padding(.vertical, 8)
         .focusSection()
+        // Native tvOS action list, same surface as the multiview tile menus.
+        .confirmationDialog("Sort Movies", isPresented: $showSortMenu, titleVisibility: .visible) {
+            ForEach(MoviesSortOrder.allCases, id: \.self) { order in
+                Button(order == sortOrder ? "\(order.label)  \u{2713}" : order.label) {
+                    sortOrderRaw = order.rawValue
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
     #endif
 
