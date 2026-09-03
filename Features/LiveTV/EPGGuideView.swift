@@ -4322,6 +4322,18 @@ struct EPGGuideView: View {
     }
 
     // MARK: - Program Row
+    /// Label for a row with no guide cells: the current programme when the
+    /// channel list knows one, else the channel NAME (Logan 2026-09-03:
+    /// Xtream event feeds are named after the event) plus the start time
+    /// parsed out of that name when it carries one.
+    private func emptyRowLabel(for channel: ChannelDisplayItem) -> String {
+        if let p = channel.currentProgram, !p.isEmpty { return p }
+        if let when = EventTimeParser.startLabel(for: channel.name) {
+            return "\(channel.name)  \u{00B7}  \(when)"
+        }
+        return channel.name
+    }
+
     private func programRow(for channel: ChannelDisplayItem) -> some View {
         ZStack(alignment: .leading) {
             Color.appBackground.opacity(0.5)
@@ -4360,12 +4372,12 @@ struct EPGGuideView: View {
                 // the button's frame center hours off-screen and the focus
                 // engine's candidate scoring always preferred the next row.
                 GuideEmptyRowButton(
-                    label: channel.currentProgram ?? "No guide data",
+                    label: emptyRowLabel(for: channel),
                     width: max(1, visibleProgramWidth), rowHeight: rowHeight
                 ) { onSelectChannel(channel) }
                 .offset(x: -horizontalOffset)
                 #else
-                Text(channel.currentProgram ?? "No guide data")
+                Text(emptyRowLabel(for: channel))
                     .font(.labelSmall)
                     .foregroundColor(.textTertiary)
                     .frame(width: max(1, visibleProgramWidth), height: rowHeight, alignment: .center)
