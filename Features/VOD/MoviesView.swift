@@ -1361,8 +1361,12 @@ struct MoviesHeroCarousel: View {
 
     var body: some View {
         GeometryReader { geo in
+            // Pages are narrower than the row so the next title peeks in
+            // (Logan 2026-09-03); view-aligned snapping keeps one page
+            // leading. Single page keeps the full width.
+            let pageWidth = pages.count > 1 ? geo.size.width * pageFraction : geo.size.width
             ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 0) {
+                LazyHStack(spacing: pageSpacing) {
                     ForEach(pages) { page in
                         MoviesHero(
                             item: page.item,
@@ -1373,13 +1377,13 @@ struct MoviesHeroCarousel: View {
                             onDetails: { onDetails(page) },
                             onRemove: page.progress != nil ? { onRemove(page) } : nil
                         )
-                        .frame(width: geo.size.width)
+                        .frame(width: pageWidth)
                         .id(page.id)
                     }
                 }
                 .scrollTargetLayout()
             }
-            .scrollTargetBehavior(.paging)
+            .scrollTargetBehavior(.viewAligned)
             .scrollPosition(id: $currentID)
             .scrollClipDisabled()
             .overlay(alignment: .bottomTrailing) {
@@ -1404,10 +1408,14 @@ struct MoviesHeroCarousel: View {
     private let heroHeight: CGFloat = 420
     private let dot: CGFloat = 10
     private let dotInset: CGFloat = 40
+    private let pageFraction: CGFloat = 0.72
+    private let pageSpacing: CGFloat = 8
     #else
     private let heroHeight: CGFloat = 220
     private let dot: CGFloat = 6
     private let dotInset: CGFloat = 28
+    private let pageFraction: CGFloat = 0.86
+    private let pageSpacing: CGFloat = 4
     #endif
 }
 
@@ -1567,14 +1575,14 @@ struct MoviesHero: View {
                     .font(.bodySmall)
                     .foregroundColor(.textPrimary.opacity(0.85))
                     .lineLimit(3)
-                    .frame(maxWidth: 680, alignment: .leading)
+                    .frame(maxWidth: 620, alignment: .leading)
             }
             #endif
             actions
         }
         .padding(copyInset)
         #if os(tvOS)
-        .frame(maxWidth: 1000, alignment: .leading)
+        .frame(maxWidth: 820, alignment: .leading)
         #else
         .frame(maxWidth: .infinity, alignment: .leading)
         #endif
