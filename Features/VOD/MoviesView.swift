@@ -932,13 +932,17 @@ struct MoviesView: View {
                     text: $searchText,
                     placeholder: "Search movies",
                     isSecure: false,
+                    fontSize: 24,
                     onFocusChange: { searchFieldFocused = $0 }
                 )
-                .frame(width: 400, height: 56)
-                .padding(.horizontal, 8)
-                .background(Capsule().fill(Color.elevatedBackground))
+                .frame(width: 380, height: 60)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.elevatedBackground)
+                )
                 .overlay(
-                    Capsule().stroke(Color.accentPrimary, lineWidth: searchFieldFocused ? 3 : 0)
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.accentPrimary, lineWidth: searchFieldFocused ? 3 : 0)
                         .animation(.easeInOut(duration: 0.15), value: searchFieldFocused)
                 )
                 .transition(.move(edge: .trailing).combined(with: .opacity))
