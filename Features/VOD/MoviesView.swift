@@ -1393,7 +1393,10 @@ struct MoviesHero: View {
         #if os(tvOS)
         LinearGradient(
             stops: [
+                // Fully opaque through the leading band so the rounded
+                // corners on that side never show an edge against the page.
                 .init(color: Color.appBackground, location: 0),
+                .init(color: Color.appBackground, location: 0.12),
                 .init(color: Color.appBackground.opacity(0.92), location: 0.38),
                 .init(color: Color.appBackground.opacity(0.35), location: 0.7),
                 .init(color: Color.appBackground.opacity(0.05), location: 1)
