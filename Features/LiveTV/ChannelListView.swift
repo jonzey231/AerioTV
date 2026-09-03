@@ -781,8 +781,16 @@ struct ChannelListView: View {
                             },
                             onPreview: { token in
                                 guideSidebarPreviewTask?.cancel()
+                                // Huge playlists (Xtream panels, tens of thousands
+                                // of channels): every preview re-filters the whole
+                                // list and rebuilds the guide's rows on the main
+                                // thread, so a 90 ms preview while walking the
+                                // rail hung the Apple TV (2026-09-03). Preview
+                                // only once the user has paused on a group.
+                                let previewNs: UInt64 = channelStore.channels.count > GuideStore.largePlaylistChannels
+                                    ? 450_000_000 : 90_000_000
                                 guideSidebarPreviewTask = Task { @MainActor in
-                                    try? await Task.sleep(nanoseconds: 90_000_000)
+                                    try? await Task.sleep(nanoseconds: previewNs)
                                     guard !Task.isCancelled else { return }
                                     selectedGroup = token
                                 }
