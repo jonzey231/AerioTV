@@ -1149,8 +1149,14 @@ struct MoviesView: View {
     }
 
     private func scrollMoviesToTop(_ proxy: ScrollViewProxy) {
-        withAnimation(.easeInOut(duration: 0.25)) {
+        // No animation on the jump itself (Logan 2026-09-03: it scrolled
+        // up through every row); only the bar's return animates.
+        var noAnimation = Transaction()
+        noAnimation.disablesAnimations = true
+        withTransaction(noAnimation) {
             proxy.scrollTo("movies-top", anchor: .top)
+        }
+        withAnimation(.easeInOut(duration: 0.2)) {
             tvTabBarHidden = false
         }
         // Device log 2026-09-03 18:28:48: a press was routed here and the
