@@ -830,6 +830,29 @@ private struct PlayerRootView: View {
     }
 
     var body: some View {
+        // GH #71: digit-key channel entry on the legacy live player,
+        // tuning through the same `tuneDirect` path the overlays use.
+        playerBody
+            .channelNumberEntry(
+                scope: .player,
+                isActive: numberEntryActive,
+                channels: { ChannelStore.shared.channels },
+                onResolve: { item in NowPlayingManager.shared.tuneDirect(item) }
+            )
+    }
+
+    /// Live and full-screen. The observed `nowPlayingManager` is tvOS
+    /// only; the legacy iOS player has no mini-player state to gate on.
+    private var numberEntryActive: Bool {
+        #if os(tvOS)
+        return isLive && !nowPlayingManager.isMinimized
+        #else
+        return isLive
+        #endif
+    }
+
+    @ViewBuilder
+    private var playerBody: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
@@ -1359,6 +1382,8 @@ private struct PlayerRootView: View {
     ///   Chrome visible      → minimize (or dismiss).
     ///   Chrome hidden       → reveal chrome.
     private func handleBackPress(source: String) {
+        // GH #71: Menu while digits are buffered only clears the entry.
+        if ChannelNumberEntry.shared.cancel() { return }
         debugLog("🎮 [PV-BACK] handleBackPress source=\(source) | showTVOptions=\(showTVOptions) showControls=\(showControls) isMinimized=\(nowPlayingManager.isMinimized) tvFocus=\(String(describing: tvFocus))")
         if showTVOptions {
             debugLog("🎮 [PV-BACK]   → branch: panel-open → close panel")

@@ -241,6 +241,23 @@ struct MultiviewContainerView: View {
     #endif
 
     var body: some View {
+        // GH #71: digit keys tune the sole live tile through the same
+        // path the Channels overlay pick uses (`tuneDirect`). Only the
+        // full-screen single live tile listens; multiview grids, VOD
+        // and the minimized mini-player leave digits alone.
+        containerBody
+            .channelNumberEntry(
+                scope: .player,
+                isActive: store.tiles.count == 1
+                    && !nowPlaying.isMinimized
+                    && (store.tiles.first?.kind ?? .live) == .live,
+                channels: { ChannelStore.shared.channels },
+                onResolve: { item in nowPlaying.tuneDirect(item) }
+            )
+    }
+
+    @ViewBuilder
+    private var containerBody: some View {
         // N=1 treatment — "this is effectively PlayerView" — is
         // gated on the unified-playback feature flag. Without the
         // flag, legacy users can still hit N=1 (e.g. by removing a
@@ -1647,6 +1664,8 @@ struct MultiviewContainerView: View {
     }
 
     private func handleMenuPress(source: String) {
+        // GH #71: Menu while digits are buffered only clears the entry.
+        if ChannelNumberEntry.shared.cancel() { return }
         DebugLogger.shared.log(
             "[MV-Cmd] tvOS Menu source=\(source) | showTVOptions=\(showTVOptions) showStreamInfo=\(showStreamInfo) isMinimized=\(nowPlaying.isMinimized) chromeVisible=\(chromeState.isVisible) tiles=\(store.tiles.count) fullscreenTile=\(store.fullscreenTileID ?? "nil") relocating=\(store.relocatingTileID ?? "nil")",
             category: "Playback", level: .info

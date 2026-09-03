@@ -3137,6 +3137,13 @@ struct EPGGuideView: View {
 
     var body: some View {
         bodyContent
+            // GH #71: digit keys (attached keyboard, CEC / universal
+            // remote number pad) jump the guide to that channel row
+            // without tuning. Resolves against the list the guide is
+            // showing, so the index fallback matches what is on screen.
+            .channelNumberEntry(scope: .guide,
+                                channels: { channels },
+                                onResolve: { jumpToChannelByNumber($0) })
             .animation(.easeInOut(duration: 0.2), value: stagingToast)
             .animation(.easeInOut(duration: 0.2), value: multiviewStore.isStagingFromGuide)
         #if os(tvOS)
@@ -4708,6 +4715,18 @@ struct EPGGuideView: View {
     /// retry via `.task(id: channels.count)`. The horizontal position
     /// uses the same `xOffset(for:)` date→pixel map the now-line uses,
     /// biased a little right of the channel column.
+    /// GH #71: number-entry target. Rides the same stash + notification
+    /// path the EPG-search jump uses (`consumePendingGuideJump` owns the
+    /// scroll, and on tvOS the focus hand-off to the row's airing
+    /// programme), aimed at "now" so the row lands on the live column.
+    @MainActor
+    private func jumpToChannelByNumber(_ item: ChannelDisplayItem) {
+        let defaults = UserDefaults.standard
+        defaults.set(item.id, forKey: "guideJumpChannelID")
+        defaults.set(Date().timeIntervalSince1970, forKey: "guideJumpStart")
+        NotificationCenter.default.post(name: .aerioJumpToGuideProgram, object: nil)
+    }
+
     @MainActor
     private func consumePendingGuideJump(proxy: ScrollViewProxy) {
         let defaults = UserDefaults.standard
