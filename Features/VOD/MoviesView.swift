@@ -105,6 +105,8 @@ struct MoviesView: View {
     @State private var showSortMenu = false
     @State private var showFilterMenu = false
     @State private var searchFieldFocused = false
+    /// Up from the hero carousel lands here (see MoviesHeroCarousel.onExitUp).
+    @FocusState private var headerSearchFocused: Bool
     #endif
     @State private var resumePlayingURL: IdentifiableURL?
     @State private var resumePlayingTitle = ""
@@ -782,6 +784,11 @@ struct MoviesView: View {
                                     onRemove: { page in
                                         guard let p = page.progress else { return }
                                         WatchProgressManager.delete(vodID: p.vodID, serverID: p.serverID)
+                                    },
+                                    onExitUp: {
+                                        #if os(tvOS)
+                                        headerSearchFocused = true
+                                        #endif
                                     }
                                 )
                                 #if os(tvOS)
@@ -959,6 +966,7 @@ struct MoviesView: View {
                     if !showSearchField { searchText = "" }
                 }
             }
+            .focused($headerSearchFocused)
             TVNavActionCircle(systemImage: "arrow.up.arrow.down", label: "Sort") {
                 showSortMenu = true
             }
@@ -1357,10 +1365,41 @@ struct MoviesHeroCarousel: View {
     let onDetails: (MoviesHeroPage) -> Void
     let onRemove: (MoviesHeroPage) -> Void
 
+    /// tvOS: focus arriving from above is forwarded to the aligned page's
+    /// Resume (geometry alone landed on the page peeking in on the right);
+    /// focus leaving upward goes back to the header's Search circle.
+    var onExitUp: (() -> Void)? = nil
+
     @State private var currentID: String?
-    @Namespace private var focusNS
+    #if os(tvOS)
+    @FocusState private var heroFocus: String?
+    @FocusState private var catcherFocused: Bool
+    @State private var heroHadFocus = false
+    #endif
 
     var body: some View {
+        VStack(spacing: 0) {
+            #if os(tvOS)
+            Color.clear
+                .frame(height: 1)
+                .frame(maxWidth: .infinity)
+                .focusable(true)
+                .focused($catcherFocused)
+                .onChange(of: catcherFocused) { _, focused in
+                    guard focused else { return }
+                    if heroHadFocus {
+                        heroHadFocus = false
+                        onExitUp?()
+                    } else {
+                        heroFocus = currentID ?? pages.first?.id
+                    }
+                }
+            #endif
+            carousel
+        }
+    }
+
+    private var carousel: some View {
         GeometryReader { geo in
             // Pages are narrower than the row so the next title peeks in
             // (Logan 2026-09-03); view-aligned snapping keeps one page
@@ -1376,14 +1415,11 @@ struct MoviesHeroCarousel: View {
                             onPrimary: { onPrimary(page) },
                             onPlayFromStart: { onPlayFromStart(page) },
                             onDetails: { onDetails(page) },
-                            onRemove: page.progress != nil ? { onRemove(page) } : nil
+                            onRemove: page.progress != nil ? { onRemove(page) } : nil,
+                            primaryFocusID: page.id
                         )
                         .frame(width: pageWidth)
                         .id(page.id)
-                        // Focus entering the carousel (Down from the header
-                        // row) lands on the leading page, not the page
-                        // peeking in on the right (Logan 2026-09-03).
-                        .prefersDefaultFocus(page.id == (currentID ?? pages.first?.id), in: focusNS)
                     }
                 }
                 .scrollTargetLayout()
@@ -1391,7 +1427,12 @@ struct MoviesHeroCarousel: View {
             .scrollTargetBehavior(.viewAligned)
             .scrollPosition(id: $currentID)
             .scrollClipDisabled()
-            .focusScope(focusNS)
+            #if os(tvOS)
+            .focusedHeroPage($heroFocus)
+            .onChange(of: heroFocus) { _, id in
+                if id != nil { heroHadFocus = true }
+            }
+            #endif
             .overlay(alignment: .bottomTrailing) {
                 if pages.count > 1 {
                     HStack(spacing: 6) {
@@ -1435,6 +1476,11 @@ struct MoviesHero: View {
     /// Long press on Resume: Remove from Continue Watching. nil when the
     /// page is not a resume row.
     var onRemove: (() -> Void)? = nil
+    /// tvOS: id the carousel uses to focus this page's Resume.
+    var primaryFocusID: String? = nil
+    #if os(tvOS)
+    @Environment(\.heroFocusBinding) private var heroFocusBinding
+    #endif
 
     private var movie: VODMovie? { item.movie }
 
@@ -1597,9 +1643,7 @@ struct MoviesHero: View {
 
     private var actions: some View {
         HStack(spacing: 12) {
-            MoviesHeroButton(
-                title: progress != nil ? "Resume" : "Play",
-                systemImage: "play.fill", isPrimary: true, action: onPrimary)
+            primaryButton
                 .contextMenu {
                     if let onRemove {
                         Button(role: .destructive, action: onRemove) {
@@ -1629,6 +1673,22 @@ struct MoviesHero: View {
             #endif
         }
         .padding(.top, 4)
+    }
+
+    @ViewBuilder
+    private var primaryButton: some View {
+        let button = MoviesHeroButton(
+            title: progress != nil ? "Resume" : "Play",
+            systemImage: "play.fill", isPrimary: true, action: onPrimary)
+        #if os(tvOS)
+        if let binding = heroFocusBinding, let primaryFocusID {
+            button.focused(binding, equals: primaryFocusID)
+        } else {
+            button
+        }
+        #else
+        button
+        #endif
     }
 
     #if os(tvOS)
@@ -1794,3 +1854,26 @@ struct AlphabetRail: View {
     private let leadingInset: CGFloat = 6
     #endif
 }
+
+#if os(tvOS)
+// MARK: - Hero focus plumbing (tvOS)
+
+/// Hands the carousel's FocusState binding down to each page so its Resume
+/// button can be focused programmatically.
+private struct HeroFocusBindingKey: EnvironmentKey {
+    nonisolated(unsafe) static let defaultValue: FocusState<String?>.Binding? = nil
+}
+
+extension EnvironmentValues {
+    var heroFocusBinding: FocusState<String?>.Binding? {
+        get { self[HeroFocusBindingKey.self] }
+        set { self[HeroFocusBindingKey.self] = newValue }
+    }
+}
+
+extension View {
+    func focusedHeroPage(_ binding: FocusState<String?>.Binding) -> some View {
+        environment(\.heroFocusBinding, binding)
+    }
+}
+#endif
