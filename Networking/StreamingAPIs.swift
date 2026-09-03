@@ -4076,6 +4076,12 @@ enum DispatcharrDateValue: Decodable {
             if ts > 2_000_000_000_000 { return Date(timeIntervalSince1970: ts / 1000.0) }
             return Date(timeIntervalSince1970: ts)
         case .iso(let s):
+            // Fast path (Time Profiler on the Apple TV, 2026-09-03: 47% of
+            // main-thread samples during a Movies scroll were here). The
+            // default ISO8601DateFormatter rejects Dispatcharr's
+            // microsecond timestamps, so EVERY parse fell through to the
+            // ICU DateFormatter path. Pure arithmetic, no ICU.
+            if let d = FastISO8601.parse(s) { return d }
             // Try RFC3339 / ISO8601
             if let d = Self.iso8601Formatter.date(from: s) { return d }
             // Fall back to common Django formats
@@ -5538,5 +5544,90 @@ enum CatchupSupport {
         default:
             throw CatchupError.unsupportedServer
         }
+    }
+}
+
+
+// MARK: - Fast ISO 8601 (no ICU)
+
+/// Parses `YYYY-MM-DD[T ]HH:MM[:SS[.fraction]][Z|+HH:MM|-HH:MM|+HHMM]`
+/// with integer arithmetic (days-from-civil). Anything else returns nil
+/// so callers can fall back to Foundation's formatters.
+enum FastISO8601 {
+    static func parse(_ s: String) -> Date? {
+        let u = Array(s.utf8)
+        var i = 0
+        func digits(_ n: Int) -> Int? {
+            guard i + n <= u.count else { return nil }
+            var v = 0
+            for k in 0..<n {
+                let c = u[i + k]
+                guard c >= 48 && c <= 57 else { return nil }
+                v = v * 10 + Int(c - 48)
+            }
+            i += n
+            return v
+        }
+        func expect(_ c: UInt8) -> Bool {
+            guard i < u.count, u[i] == c else { return false }
+            i += 1
+            return true
+        }
+        guard let year = digits(4), expect(45), let month = digits(2), expect(45), let day = digits(2) else { return nil }
+        guard i < u.count, u[i] == 84 || u[i] == 116 || u[i] == 32 else { return nil }  // T t space
+        i += 1
+        guard let hour = digits(2), expect(58), let minute = digits(2) else { return nil }
+        var second = 0
+        var fraction = 0.0
+        if expect(58) {
+            guard let sec = digits(2) else { return nil }
+            second = sec
+            if i < u.count, u[i] == 46 || u[i] == 44 {  // . or ,
+                i += 1
+                var scale = 0.1
+                var any = false
+                while i < u.count, u[i] >= 48, u[i] <= 57 {
+                    fraction += Double(u[i] - 48) * scale
+                    scale /= 10
+                    i += 1
+                    any = true
+                }
+                guard any else { return nil }
+            }
+        }
+        var offset = 0
+        if i < u.count {
+            switch u[i] {
+            case 90, 122:  // Z z
+                i += 1
+            case 43, 45:   // + -
+                let sign = u[i] == 45 ? -1 : 1
+                i += 1
+                guard let oh = digits(2) else { return nil }
+                var om = 0
+                if expect(58) {
+                    guard let m = digits(2) else { return nil }
+                    om = m
+                } else if let m = digits(2) {
+                    om = m
+                }
+                offset = sign * (oh * 3600 + om * 60)
+            default:
+                return nil
+            }
+        }
+        guard i == u.count else { return nil }
+        guard (1...12).contains(month), (1...31).contains(day),
+              hour < 24, minute < 60, second < 61 else { return nil }
+        // Howard Hinnant's days_from_civil.
+        let y = month <= 2 ? year - 1 : year
+        let era = (y >= 0 ? y : y - 399) / 400
+        let yoe = y - era * 400
+        let mp = (month + 9) % 12
+        let doy = (153 * mp + 2) / 5 + day - 1
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+        let days = era * 146097 + doe - 719468
+        let secs = Double(days) * 86400 + Double(hour * 3600 + minute * 60 + second) + fraction - Double(offset)
+        return Date(timeIntervalSince1970: secs)
     }
 }
