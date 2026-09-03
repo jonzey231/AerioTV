@@ -250,6 +250,16 @@ struct MoviesView: View {
                         placement: .navigationBarDrawer(displayMode: .always),
                         prompt: "Search movies")
             #endif
+            .task(id: libraryKey) {
+                let movies = vodStore.movies
+                let hidden = hiddenGroups
+                let genre = selectedGenre
+                let sort = sortOrder
+                let result = await Task.detached(priority: .userInitiated) {
+                    MoviesView.computeDerived(movies: movies, hidden: hidden, genre: genre, sort: sort)
+                }.value
+                if !Task.isCancelled { derived = result }
+            }
             .onAppear {
                 hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                 // v1.6.22: same guard as TVShowsView.onAppear. The
@@ -555,25 +565,100 @@ struct MoviesView: View {
 
     /// Library minus hidden groups, before genre and sort.
     private var visibleMovies: [VODDisplayItem] {
-        guard !hiddenGroups.isEmpty else { return vodStore.movies }
-        return vodStore.movies.filter { item in
+        MoviesView.visible(vodStore.movies, hidden: hiddenGroups)
+    }
+
+    nonisolated private static func visible(_ movies: [VODDisplayItem], hidden: Set<String>) -> [VODDisplayItem] {
+        guard !hidden.isEmpty else { return movies }
+        return movies.filter { item in
             guard let cat = item.movie?.categoryName else { return true }
-            return !hiddenGroups.contains(cat)
+            return !hidden.contains(cat)
         }
     }
 
-    /// Up to 20 newest titles by source add time. Empty (shelf hidden)
-    /// when the source carries no add dates at all.
-    private var recentlyAdded: [VODDisplayItem] {
-        let dated = visibleMovies.filter { $0.movie?.addedAt != nil }
-        guard !dated.isEmpty else { return [] }
-        return Array(dated.sorted {
+    // Perf (Logan 2026-09-03: 4 fps scrolling the grid): these used to be
+    // computed properties, so every body evaluation (every focus move and
+    // every scroll frame that updates gridTopY) re-sorted all ~5k titles
+    // with a localized compare, several times over. They are now computed
+    // once per input change, off the main thread, into `derived`.
+    struct LibraryDerived: Equatable {
+        var library: [VODDisplayItem] = []
+        var recentlyAdded: [VODDisplayItem] = []
+        var railLetters: Set<String> = []
+        /// First grid row id per rail letter.
+        var firstGridID: [String: String] = [:]
+    }
+    @State private var derived = LibraryDerived()
+
+    private struct LibraryKey: Hashable {
+        let count: Int
+        let firstID: String?
+        let lastID: String?
+        let hidden: Set<String>
+        let genre: String?
+        let sort: String
+    }
+    private var libraryKey: LibraryKey {
+        LibraryKey(count: vodStore.movies.count,
+                   firstID: vodStore.movies.first?.id,
+                   lastID: vodStore.movies.last?.id,
+                   hidden: hiddenGroups, genre: selectedGenre, sort: sortOrderRaw)
+    }
+
+    nonisolated private static func computeDerived(movies: [VODDisplayItem], hidden: Set<String>,
+                                       genre: String?, sort: MoviesSortOrder) -> LibraryDerived {
+        let visible = Self.visible(movies, hidden: hidden)
+
+        let dated = visible.filter { $0.movie?.addedAt != nil }
+        let recent: [VODDisplayItem] = dated.isEmpty ? [] : Array(dated.sorted {
             let a = $0.movie?.addedAt ?? .distantPast
             let b = $1.movie?.addedAt ?? .distantPast
             if a != b { return a > b }
             return $0.id < $1.id
         }.prefix(20))
+
+        var library = visible
+        if let g = genre { library = library.filter { $0.movie?.categoryName == g } }
+        // Precomputed folded keys: one localized fold per title instead of
+        // one localized compare per comparison.
+        let keys = Dictionary(uniqueKeysWithValues: library.map {
+            ($0.id, $0.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))
+        })
+        func byTitle(_ a: VODDisplayItem, _ b: VODDisplayItem) -> Bool {
+            let ka = keys[a.id] ?? "", kb = keys[b.id] ?? ""
+            if ka != kb { return ka < kb }
+            return a.id < b.id
+        }
+        switch sort {
+        case .titleAZ:    library.sort(by: byTitle)
+        case .titleZA:    library.sort { byTitle($1, $0) }
+        case .yearNewest:
+            library.sort {
+                if $0.releaseYear != $1.releaseYear { return $0.releaseYear > $1.releaseYear }
+                return byTitle($0, $1)
+            }
+        case .recentlyAdded:
+            library.sort {
+                let a = $0.movie?.addedAt ?? .distantPast
+                let b = $1.movie?.addedAt ?? .distantPast
+                if a != b { return a > b }
+                return byTitle($0, $1)
+            }
+        }
+
+        var letters: Set<String> = []
+        var firstID: [String: String] = [:]
+        for item in library {
+            let bucket = AlphabetRail.bucket(for: item.name)
+            if firstID[bucket] == nil { firstID[bucket] = "grid-\(item.id)" }
+            letters.insert(bucket)
+        }
+        return LibraryDerived(library: library, recentlyAdded: recent,
+                              railLetters: letters, firstGridID: firstID)
     }
+
+    /// Up to 20 newest titles by source add time (cached).
+    private var recentlyAdded: [VODDisplayItem] { derived.recentlyAdded }
 
     /// Hero pages: every Continue Watching title (newest first, up to 12),
     /// or, with nothing in progress, the newest addition or first title.
@@ -595,32 +680,8 @@ struct MoviesView: View {
         vodStore.movieCategories.map(\.name).filter { !hiddenGroups.contains($0) }
     }
 
-    /// The library grid: visible movies, genre-filtered, sorted.
-    private var libraryMovies: [VODDisplayItem] {
-        var result = visibleMovies
-        if let g = selectedGenre {
-            result = result.filter { $0.movie?.categoryName == g }
-        }
-        switch sortOrder {
-        case .titleAZ:
-            result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        case .titleZA:
-            result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedDescending }
-        case .yearNewest:
-            result.sort {
-                if $0.releaseYear != $1.releaseYear { return $0.releaseYear > $1.releaseYear }
-                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-            }
-        case .recentlyAdded:
-            result.sort {
-                let a = $0.movie?.addedAt ?? .distantPast
-                let b = $1.movie?.addedAt ?? .distantPast
-                if a != b { return a > b }
-                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-            }
-        }
-        return result
-    }
+    /// The library grid: visible movies, genre-filtered, sorted (cached).
+    private var libraryMovies: [VODDisplayItem] { derived.library }
 
     private func cycleSort() {
         let all = MoviesSortOrder.allCases
@@ -807,7 +868,8 @@ struct MoviesView: View {
                                 .onGeometryChange(for: CGFloat.self) { proxy in
                                     proxy.frame(in: .named("moviesScroll")).minY
                                 } action: { y in
-                                    gridTopY = y
+                                    let rounded = y.rounded()
+                                    if gridTopY != rounded { gridTopY = rounded }
                                 }
                         }
                     }
@@ -909,15 +971,12 @@ struct MoviesView: View {
         #endif
     }
 
-    /// Letters that have at least one title in the library grid.
-    private var railLetters: Set<String> {
-        Set(libraryMovies.map { AlphabetRail.bucket(for: $0.name) })
-    }
+    /// Letters that have at least one title in the library grid (cached).
+    private var railLetters: Set<String> { derived.railLetters }
 
-    /// Grid row id of the first title in this letter's bucket.
+    /// Grid row id of the first title in this letter's bucket (cached).
     private func firstGridID(for letter: String) -> String? {
-        libraryMovies.first { AlphabetRail.bucket(for: $0.name) == letter }
-            .map { "grid-\($0.id)" }
+        derived.firstGridID[letter]
     }
 
     private var sectionSpacing: CGFloat {
