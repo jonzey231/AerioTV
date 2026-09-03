@@ -917,7 +917,10 @@ struct MoviesView: View {
                             }
                         }
                         .frame(width: railWidth)
-                        .padding(.top, max(railStickyTop, gridTopY + railGridOffset))
+                        // Rides with the first poster row, then parks
+                        // vertically centered on screen (Emby behavior,
+                        // Logan 2026-09-03) rather than at the top.
+                        .padding(.top, max(railCenteredTop(in: outer.size.height), gridTopY + railGridOffset))
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
                 }
@@ -971,13 +974,10 @@ struct MoviesView: View {
         }
     }
 
-    /// Where the rail parks once the grid has scrolled under it.
-    private var railStickyTop: CGFloat {
-        #if os(tvOS)
-        return 40
-        #else
-        return 8
-        #endif
+    /// Where the rail parks once the grid has scrolled under it: centered
+    /// vertically in the scroll area.
+    private func railCenteredTop(in height: CGFloat) -> CGFloat {
+        max(8, (height - AlphabetRail.totalHeight) / 2)
     }
 
     /// Grid padding (16) plus the card style's own inset so the first
@@ -1869,6 +1869,15 @@ struct AlphabetRail: View {
     let onSelect: (String) -> Void
 
     static let letters: [String] = ["#"] + (65...90).map { String(UnicodeScalar($0)!) }
+
+    /// Full column height (27 cells), for centering the parked rail.
+    static var totalHeight: CGFloat {
+        #if os(tvOS)
+        return 27 * 26
+        #else
+        return 27 * 15
+        #endif
+    }
 
     /// Rail bucket for a title: its first letter, folded to A to Z, or #
     /// for anything else (digits, symbols, leading articles kept as-is).
