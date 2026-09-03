@@ -645,8 +645,11 @@ struct MoviesView: View {
         if let g = genre { library = library.filter { $0.movie?.categoryName == g } }
         // Precomputed folded keys: one localized fold per title instead of
         // one localized compare per comparison.
+        // Same stripped title the rail buckets on, so a rail jump lands on
+        // the sorted run for that letter ("4K: Thor" sorts under T).
         let keys = Dictionary(uniqueKeysWithValues: library.map {
-            ($0.id, $0.name.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))
+            ($0.id, String(AlphabetRail.stripQualityPrefix($0.name))
+                .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current))
         })
         func byTitle(_ a: VODDisplayItem, _ b: VODDisplayItem) -> Bool {
             let ka = keys[a.id] ?? "", kb = keys[b.id] ?? ""
