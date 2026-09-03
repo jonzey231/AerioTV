@@ -780,14 +780,14 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
         return currentUsageBytes() + max(0, free - floor)
     }
 
-    /// Total bytes of buffered .ts across all session dirs (rewind
+    /// Total bytes of buffered media (.ts and fMP4 .m4s) across all session dirs (rewind
     /// segments AND AVPlayer spill files), for the free-space budget.
     private func currentUsageBytes() -> Int64 {
         let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: nil)) ?? []
         var total: Int64 = 0
         for dir in dirs where dir.hasDirectoryPath {
             let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey])) ?? []
-            for f in files where f.pathExtension == "ts" {
+            for f in files where ["ts", "m4s"].contains(f.pathExtension) {
                 total += Int64((try? f.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
             }
         }
@@ -824,6 +824,58 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
 
     func noteTimeshifting(_ on: Bool) {
         Task { @MainActor in self.timeshifting = on }
+    }
+
+    // MARK: - External window (AVPlayer container Live Rewind)
+    //
+    // The AVPlayer engine's rewind is TSHLSRemuxer's disk spill + a
+    // playlist advertising the whole spilled window - native AVPlayer
+    // seeking IS the rewind, no relay, no LiveRewindBuffer. The chrome,
+    // however, is gated entirely on this engine's published state
+    // (buffering / timeshifting / tailWallMs / headWallMs). External-
+    // window mode lets that path light the same chrome: the AVPlayer
+    // progress driver pumps the window it reads from seekableTimeRanges
+    // into these fields, and nothing else in the engine runs.
+    private(set) var externalWindowActive = false
+    /// Which tile owns the external window. Session hand-offs (Jump to
+    /// Channel) run the INCOMING tile's begin before the OUTGOING tile's
+    /// end - without ownership, the begin was refused (buffering still
+    /// true) and the stale end then killed the fresh session's chrome.
+    private var externalWindowOwner: String?
+
+    @MainActor
+    func beginExternalWindow(owner: String) {
+        // A live mpv relay owns `buffering` outright; never fight it.
+        guard !buffering || externalWindowActive else { return }
+        externalWindowOwner = owner
+        externalWindowActive = true
+        timeshifting = false
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        tailWallMs = now
+        headWallMs = now
+        buffering = true
+        DebugLogger.shared.log("[LiveRewind] external window began (AVPlayer, owner \(owner))",
+                               category: "Playback", level: .info)
+    }
+
+    @MainActor
+    func updateExternalWindow(tailWallMs tail: Int64, headWallMs head: Int64) {
+        guard externalWindowActive else { return }
+        // Same delta-gate as the relay window timer: second resolution
+        // is all the transport needs, and every write re-renders chrome.
+        if abs(tail - tailWallMs) >= 1_000 { tailWallMs = tail }
+        if abs(head - headWallMs) >= 1_000 { headWallMs = head }
+    }
+
+    @MainActor
+    func endExternalWindow(owner: String) {
+        guard externalWindowActive, externalWindowOwner == owner else { return }
+        externalWindowOwner = nil
+        externalWindowActive = false
+        buffering = false
+        timeshifting = false
+        DebugLogger.shared.log("[LiveRewind] external window ended (owner \(owner))",
+                               category: "Playback", level: .info)
     }
 
     func noteReaderStart(_ wallMs: Int64) {
@@ -1060,14 +1112,14 @@ final class LiveRewindEngine: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func enforceBudget() {
-        // Enumerate EVERY .ts under the root by modification date, not
+        // Enumerate every .ts/.m4s under the root by modification date, not
         // just parseable seg_<wallMs> names: the AVPlayer spill files
         // (seg<seq>.ts in avp_sess_ dirs) were invisible to the budget.
         let dirs = (try? FileManager.default.contentsOfDirectory(at: rootDir, includingPropertiesForKeys: nil)) ?? []
         var segs: [(url: URL, mtime: Date, size: Int64)] = []
         for dir in dirs where dir.hasDirectoryPath {
             let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])) ?? []
-            for f in files where f.pathExtension == "ts" {
+            for f in files where ["ts", "m4s"].contains(f.pathExtension) {
                 let vals = try? f.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
                 segs.append((f, vals?.contentModificationDate ?? .distantPast, Int64(vals?.fileSize ?? 0)))
             }

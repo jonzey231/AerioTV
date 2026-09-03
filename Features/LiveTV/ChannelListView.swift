@@ -223,6 +223,8 @@ struct ChannelListView: View {
     // default off). Declared UNCONDITIONALLY (the guide branch is shared with
     // the iPad guide); the tvOS-only behavior is gated inside the members below.
     @State private var guideSidebarOpen = false
+    /// Single-flight guard: see EPGGuideView.focusRestoreTask.
+    @State private var focusRestoreTask: Task<Void, Never>?
     @State private var guideSidebarReturnProgramID: String?
     /// #196 sidebar preview: the group active when the sidebar OPENED, so
     /// Back can revert a live preview. Nil while the sidebar is closed.
@@ -463,7 +465,7 @@ struct ChannelListView: View {
                        !selectedGroup.hasPrefix("collection:"),
                        !channelStore.orderedGroups.isEmpty,
                        !channelStore.orderedGroups.contains(selectedGroup) {
-                        selectedGroup = "All"
+                        selectedGroup = fallbackGroup
                     }
                     filterChannels()
                     favoritesStore.register(items: items)
@@ -473,10 +475,13 @@ struct ChannelListView: View {
                     tryHandlePendingChannelDeepLink(from: items)
                     #endif
                 }
-                #if os(tvOS)
                 // Warm-launch deep link: the app was already running, channels
-                // are already loaded, and a Top Shelf click posted an
-                // aerioOpenChannel notification. Start playback immediately.
+                // are already loaded, and an aerioOpenChannel notification
+                // arrived (tvOS: Top Shelf click; both platforms: the DVR
+                // "Continue on Live TV" hand-off). Start playback immediately.
+                // Cross-platform since 2026-08-27 - only tvOS ever POSTS the
+                // Top Shelf flavor, so iOS behavior changes only for the new
+                // hand-off path.
                 .onReceive(NotificationCenter.default.publisher(for: .aerioOpenChannel)) { notif in
                     guard let channelID = notif.userInfo?["channelID"] as? String else { return }
                     if let channel = channelStore.channels.first(where: { $0.id == channelID }),
@@ -490,13 +495,12 @@ struct ChannelListView: View {
                         debugLog("🔗 ChannelListView: warm deep link received but channel not loaded yet")
                     }
                 }
-                #endif
                 // EPG-search jump: force guide mode and clear any group
                 // filter so the target channel is visible. EPGGuideView
                 // consumes the pending target (UserDefaults) and scrolls.
                 .onReceive(NotificationCenter.default.publisher(for: .aerioJumpToGuideProgram)) { _ in
-                    if selectedGroup != "All" {
-                        selectedGroup = "All"
+                    if selectedGroup != fallbackGroup {
+                        selectedGroup = fallbackGroup
                         filterChannels()
                     }
                     showGuideView = true
@@ -538,7 +542,7 @@ struct ChannelListView: View {
                     // can scroll to it once it mounts.
                     if UserDefaults.standard.object(forKey: "guideJumpChannelID") != nil {
                         showGuideView = true
-                        if selectedGroup != "All" { selectedGroup = "All" }
+                        if selectedGroup != fallbackGroup { selectedGroup = fallbackGroup }
                     }
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
@@ -567,8 +571,8 @@ struct ChannelListView: View {
                         onDismiss: { updated in
                             hiddenGroups = updated
                             // Reset selection if the current group was hidden
-                            if selectedGroup != "All" && hiddenGroups.contains(selectedGroup) {
-                                selectedGroup = "All"
+                            if !selectedGroup.hasPrefix("collection:") && !groupTokens.contains(selectedGroup) {
+                                selectedGroup = fallbackGroup
                             }
                             filterChannels()
                         },
@@ -642,8 +646,8 @@ struct ChannelListView: View {
                     hiddenGroups = HiddenGroupsStore.load(forKey: hiddenGroupsKey)
                     groupOrder = GroupOrderStore.load(forKey: channelGroupOrderKey)
                     groupSortMode = GroupOrderStore.loadMode(forKey: channelGroupSortModeKey)
-                    if selectedGroup != "All" && hiddenGroups.contains(selectedGroup) {
-                        selectedGroup = "All"
+                    if !selectedGroup.hasPrefix("collection:") && !groupTokens.contains(selectedGroup) {
+                        selectedGroup = fallbackGroup
                     }
                     filterChannels()
                 }
@@ -701,7 +705,7 @@ struct ChannelListView: View {
                 : "No channels in this group match that search.",
             action: {
                 searchText = ""
-                selectedGroup = "All"
+                selectedGroup = fallbackGroup
             },
             actionTitle: "Show All Channels"
         )
@@ -758,7 +762,7 @@ struct ChannelListView: View {
                         // debounce); OK or Right COMMITS and closes; Back
                         // reverts to the group the sidebar opened with.
                         GuideGroupSidebarPane(
-                            groups: ["All"] + visibleGroups,
+                            groups: groupTokens,
                             selectedToken: selectedGroup,
                             onSelect: { token in
                                 guideSidebarPreviewTask?.cancel()
@@ -777,8 +781,16 @@ struct ChannelListView: View {
                             },
                             onPreview: { token in
                                 guideSidebarPreviewTask?.cancel()
+                                // Huge playlists (Xtream panels, tens of thousands
+                                // of channels): every preview re-filters the whole
+                                // list and rebuilds the guide's rows on the main
+                                // thread, so a 90 ms preview while walking the
+                                // rail hung the Apple TV (2026-09-03). Preview
+                                // only once the user has paused on a group.
+                                let previewNs: UInt64 = channelStore.channels.count > GuideStore.largePlaylistChannels
+                                    ? 450_000_000 : 90_000_000
                                 guideSidebarPreviewTask = Task { @MainActor in
-                                    try? await Task.sleep(nanoseconds: 90_000_000)
+                                    try? await Task.sleep(nanoseconds: previewNs)
                                     guard !Task.isCancelled else { return }
                                     selectedGroup = token
                                 }
@@ -1111,7 +1123,9 @@ struct ChannelListView: View {
                     // realized row, not the watched channel, so after that we
                     // instant-scroll the target to center and re-assert
                     // focusedGuideRowID until the engine accepts it.
-                    Task { @MainActor in
+                    if focusRestoreTask != nil { debugLog("🧭 [GuideFocus] superseding prior restore task") }
+                    focusRestoreTask?.cancel()
+                    focusRestoreTask = Task { @MainActor in
                         // TEST (branch test/avplayer-hls-engine): never
                         // steal focus from the presented native AVPlayer
                         // cover (PlayerSession.mode stays .idle there, so
@@ -1121,6 +1135,7 @@ struct ChannelListView: View {
                             return
                         }
                         try? await Task.sleep(nanoseconds: 400_000_000)  // minimize spring
+                        if Task.isCancelled { return }
                         let resolved = nowPlaying.playingItem?.id ?? nowPlaying.lastPlayedChannelID
                         let valid = resolved.flatMap { id in
                             filteredChannels.contains(where: { $0.id == id }) ? id : nil
@@ -1128,8 +1143,15 @@ struct ChannelListView: View {
                         guideFocusTargetID = valid
                         debugLog("🧭 [GuideFocus] forceGuideFocus(list) → playing=\(nowPlaying.playingItem?.id ?? "nil") last=\(nowPlaying.lastPlayedChannelID ?? "nil") valid=\(valid ?? "nil") count=\(filteredChannels.count)")
                         guard let valid else { resetFocus(in: guideFocusNS); return }
+                        // Same reorder as the EPG handler: realize the target
+                        // row first so the reset lands on it directly instead
+                        // of hopping via the top row.
+                        proxy.scrollTo(valid, anchor: .center)
+                        try? await Task.sleep(nanoseconds: 120_000_000)
+                        if Task.isCancelled { return }
                         resetFocus(in: guideFocusNS)
                         for attempt in 0..<8 {
+                            if Task.isCancelled { return }
                             proxy.scrollTo(valid, anchor: .center)
                             focusedGuideRowID = valid
                             try? await Task.sleep(nanoseconds: 70_000_000)
@@ -1436,7 +1458,7 @@ struct ChannelListView: View {
                     collectionPill(c, canFocus: !leftHoldPinningAll)
                 }
 
-                ForEach(["All"] + visibleGroups, id: \.self) { group in
+                ForEach(groupTokens, id: \.self) { group in
                     #if os(tvOS)
                     TVGroupPill(
                         group: group,
@@ -1570,7 +1592,7 @@ struct ChannelListView: View {
         Button(role: .destructive) {
             // Mirror the hidden-group reset: if we're filtered to this
             // collection, drop back to All before its pill vanishes.
-            if selectedGroup == "collection:\(c.id)" { selectedGroup = "All" }
+            if selectedGroup == "collection:\(c.id)" { selectedGroup = fallbackGroup }
             ChannelCollectionsStore.shared.delete(id: c.id)
         } label: { Label("Delete Collection", systemImage: "trash") }
     }
@@ -1608,11 +1630,23 @@ struct ChannelListView: View {
             .filter { !hiddenGroups.contains($0) }
     }
 
+    /// GH #80: the pill tokens actually shown. "All" can be hidden like any
+    /// group (its sentinel lives in `hiddenGroups`); it is kept when nothing
+    /// else would be left so the list never goes unfilterable.
+    private var groupTokens: [String] {
+        let visible = visibleGroups
+        if hiddenGroups.contains("All") && !visible.isEmpty { return visible }
+        return ["All"] + visible
+    }
+
+    /// Where a reset lands: All when shown, else the first visible group.
+    private var fallbackGroup: String { groupTokens.first ?? "All" }
+
     /// Apple GH #55: step the selected group pill from a horizontal list
     /// swipe. The cycle matches the pill row (All first, then the visible
     /// groups in display order) and clamps at both ends.
     private func cycleGroup(forward: Bool) {
-        let cycle = ["All"] + visibleGroups
+        let cycle = groupTokens
         guard cycle.count > 1 else { return }
         let current = cycle.firstIndex(of: selectedGroup) ?? 0
         let target = min(max(forward ? current + 1 : current - 1, 0), cycle.count - 1)
@@ -1628,7 +1662,7 @@ struct ChannelListView: View {
     /// True when a swipe in that direction has a group to land on (the
     /// interactive drag rubber-bands instead of following at the ends).
     private func canCycleGroup(forward: Bool) -> Bool {
-        let cycle = ["All"] + visibleGroups
+        let cycle = groupTokens
         guard cycle.count > 1 else { return false }
         let current = cycle.firstIndex(of: selectedGroup) ?? 0
         let target = forward ? current + 1 : current - 1
@@ -2208,6 +2242,9 @@ struct ChannelRow: View {
     /// hidden. Cross-platform; defaults on.
     @AppStorage("ui.showChannelNumbers") private var showChannelNumbers = true
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    /// Settings > Appearance > Channel List > Show Program Subtitles: some EPG
+    /// feeds repeat the description in the sub-title, so the row reads twice.
+    @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
     @State private var upcomingPrograms: [EPGEntry] = []
     @State private var isLoadingUpcoming = false
     @State private var reminderTarget: EPGEntry?
@@ -2546,7 +2583,8 @@ struct ChannelRow: View {
                             // GH #34: XMLTV <sub-title> (match/episode name),
                             // guarded so a Dispatcharr promote-into-description
                             // program doesn't print it twice.
-                            if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+                            if showProgramSubtitles, let sub = prog.subTitle,
+                               !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                                 Text(sub)
                                     .font(.system(size: 18))
                                     .italic()
@@ -2683,7 +2721,8 @@ struct ChannelRow: View {
                     }
                     // GH #34: XMLTV <sub-title> (match/episode name), guarded
                     // against the Dispatcharr promote-into-description case.
-                    if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+                    if showProgramSubtitles, let sub = prog.subTitle,
+                       !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                         Text(sub)
                             .font(.system(size: (isWide ? 12 : 10) * s))
                             .italic()
@@ -2978,8 +3017,15 @@ struct ChannelRow: View {
                 // switch - no separate cover, no second player UI.
                 PlayerSession.shared.beginCatchup(pb)
                 #else
-                PlayerSession.shared.exit()
-                playingCatchup = pb
+                // No-mpv regime: iOS rides the same unified container
+                // (AVPlayer catch-up); the legacy mpv cover remains the
+                // mpv-enabled path.
+                if !PlaybackFeatureFlags.mpvEngineEnabled {
+                    PlayerSession.shared.beginCatchup(pb)
+                } else {
+                    PlayerSession.shared.exit()
+                    playingCatchup = pb
+                }
                 #endif
             } catch {
                 catchupErrorMessage = error.localizedDescription
@@ -3786,6 +3832,18 @@ struct FavoritesView: View {
                         message: "Tap the star on a channel in the guide, or a channel's actions button in the list, to add it here."
                     )
                 } else {
+                    #if os(tvOS)
+                    // Apple TV: Favorites is the GUIDE filtered to the starred
+                    // channels in favorites order (Logan 2026-09-02), matching
+                    // the Android TV tab. No group pills or sidebar here.
+                    EPGGuideView(
+                        channels: favoritesStore.favoriteItems,
+                        servers: Array(servers),
+                        onSelectChannel: { item in
+                            startPlayback(item)
+                        }
+                    )
+                    #else
                     List {
                         // Keyed by the unique stream URL (see rowKey) so two
                         // favorited channels sharing a tvg-id stay distinct rows.
@@ -3832,6 +3890,7 @@ struct FavoritesView: View {
                     .background(Color.appBackground)
                     #if os(iOS)
                     .scrollContentBackground(.hidden)
+                    #endif
                     #endif
                 }
             }

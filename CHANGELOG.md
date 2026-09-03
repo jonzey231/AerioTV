@@ -1,5 +1,189 @@
 # Changelog
 
+## v1.8.27 - 2026-09-03
+
+Seventh AVPlayer-engine beta, and the first one going to every TestFlight
+tester. Xtream Codes accounts now work on the native engine.
+
+### Added
+
+- Channels without guide data show the channel name as the programme, with
+  the start time parsed out of the name when it carries one (Xtream event
+  feeds name their dynamic channels after the event).
+- Live playback backs the live edge off a little further after each stall,
+  up to 18 seconds, so a bursty stream stops re-buffering; a steady stream
+  never pays the extra latency.
+
+### Fixed
+
+- Xtream Codes channels failed on the AVPlayer engine: the app applied a
+  Dispatcharr-only HLS upgrade to them, and App Transport Security refused
+  the plain-http edge servers Xtream panels redirect to. Both fixed; Xtream
+  live and VOD play on the native engine.
+- Apple TV crashed on very large playlists (tens of thousands of channels):
+  the guide cache was read and written as a single block of managed
+  objects, a sparse-coverage rule forced a full XMLTV refetch on every
+  launch, and the empty-row label was rebuilt on every render. Cache reads
+  are paged, saves are batched and skipped when unchanged, huge playlists
+  keep six hours of aired programming in memory, and labels are cached.
+  Memory now holds around 300 MB where it reached 1.7 GB before.
+- Scrolling the guide's group sidebar on a huge playlist no longer hangs:
+  a group is previewed only after a short pause.
+
+## v1.8.26 - 2026-09-03 (TestFlight beta)
+
+Sixth AVPlayer-engine beta, shipped alongside AerioTV for Android 0.4.24.
+
+### Added
+
+- Manage Groups has a pinned All Channels row: uncheck it and the guide,
+  the channel list and the in-player channel list start on your first
+  visible group, which keeps very large playlists quick to open.
+- Channel number entry from a keyboard or a remote with digit keys
+  (Apple TV with a Bluetooth keyboard, iPad with a hardware keyboard):
+  type the number and press Return to jump the guide to that channel or
+  change channel while watching. An entry left alone for six seconds
+  clears.
+- Recordings resume where you left off, on every device: playback position
+  for DVR recordings is saved and synced over iCloud, and the recordings
+  list shows the progress.
+- iPhone: lock screen and Control Center controls while controlling an
+  AerioTV TV with the companion remote (program, channel and TV name,
+  channel logo, play/pause, skip 30, next/previous channel).
+
+### Fixed
+
+- Program subtitles that only repeat the start of the description in
+  square brackets (some Schedules Direct lineups) are hidden.
+- Long-running series load every season again; episodes are paged from
+  Dispatcharr instead of loaded in one request that timed out.
+
+## v1.8.25 - 2026-09-02 (TestFlight beta)
+
+Fifth AVPlayer-engine beta: two new Appearance settings and a player
+channel-list focus fix, shipped alongside the same changes on Android.
+
+### Added
+
+- Settings > Appearance > Time Format: System, 12-hour or 24-hour for every
+  clock in the app (guide header and cell times, program info, search,
+  recordings). Synced across your devices.
+- Settings > Appearance > Channel List > Show Program Subtitles: turn off to
+  hide the episode or match name under each program title, for EPG feeds
+  that repeat the description there.
+
+### Fixed
+
+- Apple TV: the player's channel list (Left while watching) now opens with
+  focus on the channel you are watching instead of the top of the list.
+
+
+## v1.8.24 - 2026-09-02 (TestFlight beta)
+
+Fourth AVPlayer-engine beta: Apple TV multiview and guide polish from the
+third round of tester feedback, plus a stream-start fix for busy servers.
+
+### Fixed
+
+- Apple TV multiview: the tile hold menu now lists Remove, Move Tile,
+  Playback, Switch Stream, Change Channel, Add Channel, Full-Screen,
+  Spotlight and the Layout choices in that order, and every option fits
+  on screen.
+- Apple TV multiview: the tile hold menu no longer flickers or rebuilds
+  every few seconds while it is open.
+- Apple TV guide: a short press of Right steps one slot on release while
+  hold-Right (close the mini player) is armed, instead of being swallowed.
+- A channel that answers HTTP 502/503 at stream start (a server slot still
+  tearing down) is retried with an increasing back-off before an error is
+  shown, instead of failing after three one-second attempts.
+- VOD prepare on HTTP 503 now says the server refused the request rather
+  than reporting a stalled connection.
+
+
+## v1.8.23 - 2026-09-01 (TestFlight beta)
+
+Third AVPlayer-engine beta: OTA channel handling and touch-scrubbing
+polish from the second round of tester feedback.
+
+### Added
+
+- Over-the-air (MPEG-2) channels now show a clear "Channel Not
+  Supported" message explaining the format and pointing at the OTA /
+  HDHomeRun section of the GitHub README, which documents a validated
+  Dispatcharr Stream Profile that transcodes these channels for native
+  playback.
+
+### Fixed
+
+- Dragging the VOD/DVR timeline no longer rubber-bands back to the old
+  position before jumping forward: the scrubber holds at the released
+  spot until the seek actually lands.
+- Error cards no longer show the "mpv engine disabled (Developer
+  setting)" internal note.
+
+
+## v1.8.22 - 2026-08-31 (TestFlight beta)
+
+Second AVPlayer-engine beta. Fixes for everything raised in the first
+round of tester feedback (VOD/DVR scanning, DVR Watch from Beginning,
+the scrubbing crash, and mid-file VOD failures).
+
+### Added
+
+- Completed recordings now offer "Watch from Beginning" in the
+  long-press menu (previously only in-progress recordings had it).
+
+### Fixed
+
+- Scanning through a VOD or DVR recording no longer jumps back to the
+  previous position: consecutive scrubs now chain from the seek target
+  while the engine is still reopening the stream at the new spot.
+- "Watch from Beginning" on an in-progress recording actually starts at
+  the beginning instead of the live edge (the start seek is re-issued
+  once the player is ready, when it sticks).
+- Fixed a crash when rapidly scanning through high-bitrate VOD files:
+  the engine now drops its stale read-ahead caches on every seek, and
+  the periodic guide refresh no longer runs during active playback.
+- A VOD file that fails mid-play with a decoder error now retries once
+  just past the failing spot instead of stopping with an error card,
+  and logs precise diagnostics for the failing copy.
+
+
+## v1.8.21 - 2026-08-31 (TestFlight beta)
+
+AVPlayer-engine beta: every playback path (live TV, VOD, DVR, catch-up,
+Live Rewind, multiview) now runs on the native AVPlayer engine with the
+mpv engine fully disabled. This build is for the AVPlayer-only test
+group.
+
+### Added
+
+- **Stream Buffer for live TV** now applies to the native engine: the
+  App Behaviors setting adds its seconds behind the live edge, smoothing
+  channels whose feeds arrive in bursts (event streams).
+- **Channel list freshness.** The guide now refreshes itself during long
+  foreground sessions (every 5 minutes past the 30-minute staleness
+  window), so event channels appear and disappear without relaunching.
+- Multiview tile menu: native long-press menu with Playback submenu
+  (RW 60s / Pause / FF 60s / Return to Live), Add Channel, Change
+  Channel, and per-tile Switch Stream on Dispatcharr.
+
+### Fixed
+
+- Returning from the background no longer shows a playback error; the
+  player rebuilds its pipeline silently (live returns at the edge, VOD
+  at position, catch-up in place).
+- Picture in Picture works on the native engine (auto-starts on swipe
+  home; solo playback only).
+- 4K UHD MKV remuxes with oversized codec headers no longer fail with a
+  bare error at start.
+- Playback survives the server switching provider copies mid-stream
+  (silent retry budget instead of an immediate error card).
+- Live channels removed on the server (finished event streams) now show
+  a clear "Channel Unavailable" message and refresh the guide instead of
+  a generic error.
+
+
 ## v1.8.5 - 2026-08-08
 
 ### Added

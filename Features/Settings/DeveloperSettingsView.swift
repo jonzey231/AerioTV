@@ -44,7 +44,12 @@ struct DeveloperSettingsView: View {
     /// TS-to-HLS remuxer into AVPlayer (H.264 + AC-3/AAC only; auto
     /// fallback to mpv otherwise). Still opt-in: background-audio +
     /// transition-restart caveats keep it below the default-on bar.
-    @AppStorage("playback.avplayerRemuxTS") private var avPlayerRemuxTS = false
+    @AppStorage("playback.avplayerRemuxTS") private var avPlayerRemuxTS = true
+    /// TEST BRANCH: mpv engine kill-switch, default OFF (mpv disabled)
+    /// so AVPlayer gaps fail visibly instead of being silently rescued.
+    /// See PlaybackFeatureFlags.mpvEngineEnabled - must default back ON
+    /// before this branch ships beyond Logan's devices.
+    @AppStorage("dev.mpvEngineEnabled") private var mpvEngineEnabled = false
 
     /// **Experimental** — iPhone-only. When on, the Live TV chrome is
     /// compacted: Manage Groups moves into the nav bar toolbar, and the
@@ -290,6 +295,38 @@ struct DeveloperSettingsView: View {
                         Spacer()
 
                         Toggle("", isOn: $avPlayerRemuxTS)
+                            .labelsHidden()
+                            .tint(.accentPrimary)
+                    }
+                    .padding(.vertical, 4)
+                    .listRowBackground(Color.cardBackground)
+
+                    HStack(spacing: 14) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(mpvEngineEnabled
+                                      ? Color.accentPrimary.opacity(0.18)
+                                      : Color.elevatedBackground)
+                                .frame(width: 36, height: 36)
+                            Image(systemName: mpvEngineEnabled ? "shield.lefthalf.filled" : "shield.slash")
+                                .font(.system(size: 16, weight: .medium))
+                                .foregroundColor(mpvEngineEnabled ? .accentPrimary : .textSecondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("mpv Engine")
+                                .font(.bodyMedium)
+                                .foregroundColor(.textPrimary)
+                            Text(mpvEngineEnabled
+                                 ? "On: mpv is the fallback when AVPlayer can't play something"
+                                 : "Off: AVPlayer only; unplayable content shows an error (test default)")
+                                .font(.labelSmall)
+                                .foregroundColor(mpvEngineEnabled ? .accentPrimary : .textTertiary)
+                        }
+
+                        Spacer()
+
+                        Toggle("", isOn: $mpvEngineEnabled)
                             .labelsHidden()
                             .tint(.accentPrimary)
                     }
@@ -677,6 +714,16 @@ struct DeveloperSettingsView: View {
                             ? "On: raw MPEG-TS remuxed to HLS for AVPlayer (HEVC/MPEG-2 fall back to mpv)"
                             : "Off: raw TS channels use the mpv engine (the default)",
                         isOn: $avPlayerRemuxTS
+                    ) { _ in }
+
+                    TVSettingsToggleRow(
+                        icon: mpvEngineEnabled ? "shield.lefthalf.filled" : "shield.slash",
+                        iconColor: mpvEngineEnabled ? .accentPrimary : .textSecondary,
+                        title: "mpv Engine",
+                        subtitle: mpvEngineEnabled
+                            ? "On: mpv is the fallback when AVPlayer can't play something"
+                            : "Off: AVPlayer only; unplayable content shows an error (test default)",
+                        isOn: $mpvEngineEnabled
                     ) { _ in }
 
                     TVSettingsToggleRow(

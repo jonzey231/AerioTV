@@ -1113,32 +1113,12 @@ struct VODDetailView: View {
     private var versionLabels: [Int: String] {
         // Account + container, then whatever the server MEASURED for that
         // copy (resolution, codec, audio, bitrate). Nothing here is derived
-        // from the provider's advertised title.
-        func base(_ rel: DispatcharrVODProviderRelation) -> String {
-            // Server measurements, with gaps filled from what this device
-            // measured while playing that copy (many upstream panels publish
-            // a bitrate and nothing else).
-            let learned = learnedVersionStreams[rel.id]
-            let measured = versionMedia[rel.id]?.descriptors(mergedWith: learned)
-                ?? DispatcharrVODProviderMedia.descriptorsForLearnedOnly(learned)
-            guard !measured.isEmpty else { return rel.displayLabel }
-            return ([rel.displayLabel] + measured).joined(separator: " · ")
-        }
-        var counts: [String: Int] = [:]
-        for rel in versionProviders { counts[base(rel), default: 0] += 1 }
-        var used: [String: Int] = [:]
-        var out: [Int: String] = [:]
-        for rel in versionProviders {
-            let base = base(rel)
-            if counts[base, default: 0] > 1 {
-                let n = used[base, default: 0] + 1
-                used[base] = n
-                out[rel.id] = "\(base) (\(n))"
-            } else {
-                out[rel.id] = base
-            }
-        }
-        return out
+        // from the provider's advertised title. Shared with the in-player
+        // Switch Version rows (see VODVersionLabeler) so the two pickers
+        // can never drift apart.
+        VODVersionLabeler.labels(providers: versionProviders,
+                                 media: versionMedia,
+                                 learned: learnedVersionStreams)
     }
 
     private func label(for rel: DispatcharrVODProviderRelation) -> String {
@@ -1290,9 +1270,12 @@ struct VODDetailView: View {
                 guard seen.insert(rel.account.id).inserted,
                       let url = api.proxyEpisodeURL(uuid: episode.dispatcharrUUID,
                                                     m3uAccountID: rel.account.id) else { return nil }
-                return VODVersionOption(id: rel.account.id,
-                                        label: rel.account.name ?? "Source \(rel.account.id)",
-                                        url: url)
+                var label = rel.account.name ?? "Source \(rel.account.id)"
+                if let note = AVPlayerSupportNote.note(
+                    containerExtension: rel.containerExtension, videoCodec: nil) {
+                    label += " · ⚠️ \(note)"
+                }
+                return VODVersionOption(id: rel.account.id, label: label, url: url)
             }
         }
         return []
@@ -1459,6 +1442,24 @@ struct VODDetailView: View {
         // single-stream mode: the multiview-specific branches inside
         // `exit()` are guarded by `if let audioID = store.audioTileID`.
         PlayerSession.shared.exit()
+        // TEST (AVPlayer VOD): the unified container path first; false =
+        // engine off or non-VOD shape, mount the legacy cover unchanged.
+        if PlayerSession.shared.beginVOD(
+            title: title,
+            streamURL: resolvedURL,
+            headers: playingHeaders,
+            posterURL: (playingPosterURL ?? item.posterURL?.absoluteString).flatMap { URL(string: $0) },
+            vodID: playingVodID,
+            serverID: item.serverID.uuidString,
+            vodType: playingVodType,
+            resumePositionMs: WatchProgressManager.getResumePosition(vodID: playingVodID,
+                                                              serverID: item.serverID.uuidString),
+            versionOptions: playingVersionOptions,
+            selectedVersionID: playingVersionOptionID,
+            versionSelectionKey: versionSelectionKey) {
+            isPlaying = true
+            return
+        }
         playingURL = IdentifiableURL(url: resolvedURL)
         isPlaying = true
     }

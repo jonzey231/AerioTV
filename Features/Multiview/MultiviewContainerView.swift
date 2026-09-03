@@ -32,6 +32,12 @@ struct MultiviewContainerView: View {
     /// When `true`, the add-channel sheet is presented. Wired to the
     /// transport bar's "Add Tile" button.
     @State private var showAddSheet: Bool = false
+    // Per-tile menu panel + native Switch Stream dialog (2026-08-28).
+    @State private var switchDialogVisible = false
+    @State private var switchDialogOptions: [SwitchStreamFlow.Option] = []
+    @State private var switchDialogChannelName = ""
+    @State private var switchDialogUUID = ""
+    @State private var switchDialogError = false
 
     /// Presentation for the Swap Stream picker. There is no separate
     /// Bool: the store's `pendingSwapTileID` IS the state, so the tile
@@ -235,6 +241,23 @@ struct MultiviewContainerView: View {
     #endif
 
     var body: some View {
+        // GH #71: digit keys tune the sole live tile through the same
+        // path the Channels overlay pick uses (`tuneDirect`). Only the
+        // full-screen single live tile listens; multiview grids, VOD
+        // and the minimized mini-player leave digits alone.
+        containerBody
+            .channelNumberEntry(
+                scope: .player,
+                isActive: store.tiles.count == 1
+                    && !nowPlaying.isMinimized
+                    && (store.tiles.first?.kind ?? .live) == .live,
+                channels: { ChannelStore.shared.channels },
+                onResolve: { item in nowPlaying.tuneDirect(item) }
+            )
+    }
+
+    @ViewBuilder
+    private var containerBody: some View {
         // N=1 treatment — "this is effectively PlayerView" — is
         // gated on the unified-playback feature flag. Without the
         // flag, legacy users can still hit N=1 (e.g. by removing a
@@ -292,7 +315,7 @@ struct MultiviewContainerView: View {
                     // hard focus trap on every direction (no other
                     // focusable view exists outside the panel).
                     #if os(tvOS)
-                    .disabled(showTVOptions)
+                    .disabled(showTVOptions || store.pendingStreamSwitchTileID != nil)
                     // tvOS N=1 chrome floats as a BOTTOM OVERLAY over the
                     // full-bleed video instead of an inline sibling that
                     // shrank the tile (Android-style, far less obtrusive).
@@ -380,7 +403,7 @@ struct MultiviewContainerView: View {
                     // views unless those views are .disabled. With
                     // this guard the panel becomes a true focus trap.
                     #if os(tvOS)
-                    .disabled(showTVOptions)
+                    .disabled(showTVOptions || store.pendingStreamSwitchTileID != nil)
                     // Issue #31: the transport bar is its own focus
                     // section so D-pad-down from ANY tile (including a
                     // left-column one) lands on the right-aligned Add /
@@ -394,6 +417,22 @@ struct MultiviewContainerView: View {
                     #endif
                 }
             }
+
+            #if os(iOS)
+            // Tap-to-dismiss (Logan 2026-08-26, phone parity with the
+            // tvOS Back-hides-chrome rule): while chrome is up on a solo
+            // session, a tap on the video / empty space hides it. This
+            // clear catcher sits BETWEEN the tiles and the chrome, so
+            // chrome buttons above it keep their taps; when chrome is
+            // hidden it unmounts and the container's show-gesture (which
+            // now only fires with chrome hidden) takes over.
+            if chromeState.isVisible, !chromeState.isPinned, store.tiles.count == 1 {
+                Color.clear
+                    .contentShape(Rectangle())
+                    .ignoresSafeArea()
+                    .onTapGesture { chromeState.hideNow() }
+            }
+            #endif
 
             // N=1 chrome overlay — top bar (iOS) / bottom pill (tvOS).
             // Only mounted for unified-path users at N=1; legacy
@@ -446,11 +485,10 @@ struct MultiviewContainerView: View {
             // Keep the diagnostic log so a future hardware test can
             // confirm or rule out the hypothesis.
             #if os(tvOS)
-            let _ = {
-                if showTVOptions, store.audioProgressStore == nil {
-                    debugLog("[MV-Cmd] OPTIONS PANEL gate failed: showTVOptions=true but audioProgressStore=nil (audioTileID=\(store.audioTileID ?? "nil") tiles=\(store.tiles.count) firstTileID=\(store.tiles.first?.id ?? "nil"))")
-                }
-            }()
+            // Extracted to a func: this interpolation inside the builder
+            // closure blew the type-checker budget once the options panel
+            // gained its version-switching arguments.
+            let _ = logOptionsGateFailureIfNeeded()
             #endif
             if isSoleTile,
                showTVOptions,
@@ -486,46 +524,7 @@ struct MultiviewContainerView: View {
                     )
                     .id(audioTile.id)
                 } else {
-                    TVPlayerOptionsPanel(
-                        audioTracks: audioStore.audioTracks,
-                        currentAudioTrackID: audioStore.currentAudioTrackID,
-                        subtitleTracks: audioStore.subtitleTracks,
-                        currentSubtitleTrackID: audioStore.currentSubtitleTrackID,
-                        speed: audioStore.speed,
-                        isLive: true,  // multiview is always live-only in v1
-                        sleepTimerEnd: $sleepTimerEnd,
-                        showStreamInfo: $showStreamInfo,
-                        setAudioTrack: { audioStore.setAudioTrackAction?($0) },
-                        setSubtitleTrack: { audioStore.setSubtitleTrackAction?($0) },
-                        setSpeed: { audioStore.setSpeedAction?($0) },
-                        onDismiss: {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                showTVOptions = false
-                            }
-                        },
-                        // Deliberately nil — `+` pill is a peer action
-                        // in `PlaybackChromeOverlay`. Listing "Add Stream"
-                        // inside this panel would be a second path to
-                        // the same action, which is the workflow the
-                        // user explicitly asked us to remove.
-                        onEnterMultiview: nil,
-                        // Switch Stream — only for an admin Dispatcharr
-                        // channel with a pk + uuid. Flips to the picker
-                        // PAGE in this same panel (no separate overlay).
-                        onSwitchStream: canSwitchStreamForAudioTile ? {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                streamPickerVisible = true
-                            }
-                        } : nil,
-                        // Issue #48: live layout picker for the current tile
-                        // count. Selecting a mode persists it and the grid
-                        // reflows underneath while the panel stays open.
-                        layoutOptions: MultiviewLayoutMode.available(forTileCount: store.tiles.count),
-                        currentLayout: layoutMode,
-                        onSelectLayout: { mode in
-                            withAnimation(.easeInOut(duration: 0.2)) { layoutMode = mode }
-                        }
-                    )
+                    containerOptionsPanel(audioStore: audioStore)
                     // v1.6.12 (GH #11 follow-up): trap D-pad navigation
                     // inside the panel. Without `.focusSection()` tvOS
                     // lets focus escape down past the last row (Stream
@@ -551,6 +550,7 @@ struct MultiviewContainerView: View {
                     }
                 }
             }
+
             #endif
 
             // v1.6.15.x: Stream Info overlay. Mounted when the user
@@ -772,16 +772,40 @@ struct MultiviewContainerView: View {
                 // lives INSIDE this panel presentation on tvOS, so closing
                 // the panel closes it too — no separate chrome wiring.)
                 streamPickerVisible = false
+                // Panel dismissed with chrome still up: land focus back on
+                // the Options pill. Without this the focus engine re-picks
+                // the VIDEO TILE when the panel's focus section vanishes,
+                // and visible chrome is then unreachable until it fades
+                // and gets re-summoned (Logan, 2026-08-26: "select an
+                // option, then wait for chrome to fade, press OK, reopen
+                // Options"). Same three-step dance as the chrome-summon
+                // fix above: release the tile's active hold, then claim
+                // the pill on the NEXT runloop so the write lands after
+                // the focus sections settle. The legacy PlayerView has
+                // done the equivalent (tvFocus = .gearIcon) all along.
+                dpadScrub.cancel()
+                focusedTileID = nil
+                Task { @MainActor in
+                    await Task.yield()
+                    if chromeState.isVisible && !showTVOptions {
+                        focusedChrome = .options
+                    }
+                }
             }
         }
         #endif
         #if os(iOS)
-        // iPad: any tap anywhere in multiview reveals chrome +
+        // iPad/iPhone: any tap anywhere in multiview reveals chrome +
         // resets the 5s fade timer. `.simultaneousGesture` so it
         // fires alongside the tile's own `.onTapGesture` (which
-        // takes audio) rather than stealing it.
+        // takes audio) rather than stealing it. Gated to chrome-HIDDEN:
+        // with chrome up, the solo tap-catcher above owns the tap
+        // (dismiss), and an unguarded report here would instantly
+        // re-show what the catcher just hid.
         .simultaneousGesture(
-            TapGesture().onEnded { chromeState.reportInteraction() }
+            TapGesture().onEnded {
+                if !chromeState.isVisible { chromeState.reportInteraction() }
+            }
         )
         // v1.6.18: vertical swipe = channel flip (single-stream
         // live only). Gated on chrome being VISIBLE — the user
@@ -834,103 +858,7 @@ struct MultiviewContainerView: View {
         // still call `reportInteraction()` — they're the
         // "I intend to use the chrome" signal. Plain D-pad moves
         // are just "I'm looking around".
-        .onMoveCommand { direction in
-            // Relocate mode takes priority: when the user picked
-            // "Move Tile" from the context menu we need D-pad presses
-            // to swap the relocating tile with its neighbour
-            // regardless of where tvOS thinks focus is. Handling this
-            // at the CONTAINER level (instead of the individual
-            // tile's `.onMoveCommand`) dodges the "focus drifted to
-            // the audio tile after context-menu dismiss" race:
-            // `.onMoveCommand` on a `.focusSection()` fires for any
-            // D-pad event while focus is anywhere inside the scope,
-            // so the swap runs even if focus is technically on a
-            // different tile. The tile's own `.onMoveCommand` stays
-            // for historical compatibility (harmless no-op in the
-            // common case).
-            if let relocatingID = store.relocatingTileID,
-               let idx = store.tiles.firstIndex(where: { $0.id == relocatingID }) {
-                let neighborDir: MultiviewGridMath.NeighborDirection
-                switch direction {
-                case .left:  neighborDir = .left
-                case .right: neighborDir = .right
-                case .up:    neighborDir = .up
-                case .down:  neighborDir = .down
-                @unknown default: return
-                }
-                if let neighborIdx = MultiviewGridMath.physicalNeighbor(
-                    of: idx,
-                    count: store.tiles.count,
-                    direction: neighborDir
-                ) {
-                    let neighborID = store.tiles[neighborIdx].id
-                    DebugLogger.shared.log(
-                        "[MV-Cmd] tvOS relocate swap (container-level) dir=\(neighborDir) tile=\(relocatingID) neighbor=\(neighborID)",
-                        category: "Playback", level: .info
-                    )
-                    store.swap(relocatingID, neighborID)
-                    // Keep focus pinned on the relocating tile after
-                    // the swap — its array index changed but its id
-                    // didn't, so the `.focused($focusedTileID)`
-                    // binding keeps working. Reasserting here covers
-                    // the case where tvOS's post-swap focus pass
-                    // tried to move focus elsewhere.
-                    focusedTileID = relocatingID
-                }
-                return
-            }
-            // Remote Control #195: on the BARE fullscreen live player
-            // (sole tile, no replay, chrome hidden, no scrub, no
-            // overlay/sheet) the short-press D-pad slots resolve
-            // through the user's remote map instead of the old
-            // hardcoded scheme. Default map: Up/Down = channel surf,
-            // Left = Channels overlay (Apple GH #54), Right =
-            // last-channel zap. The pre-initiative behaviour lives on
-            // as `RemoteControlMap.legacyScheme` slot values a user
-            // can restore per-slot in Settings > Remote Control.
-            #if os(tvOS)
-            if barePlayerState {
-                let slot: RemoteSlot? = {
-                    switch direction {
-                    case .up: return .upShort
-                    case .down: return .downShort
-                    case .left: return .leftShort
-                    case .right: return .rightShort
-                    @unknown default: return nil
-                    }
-                }()
-                if let slot {
-                    let action = RemoteControlStore.shared.playerAction(slot)
-                    // Honor the pre-map App Behaviors flip toggle: users
-                    // who turned the Apple TV channel flip OFF keep
-                    // up/down inert even under the default map (the
-                    // toggle predates the map and still syncs).
-                    let flipSuppressed = (action == .channelUp || action == .channelDown)
-                        && !appleTVChannelFlip
-                    if !flipSuppressed, executePlayerAction(action) {
-                        return
-                    }
-                }
-            }
-            #endif
-            // D-pad left/right = direct timeline step while a REPLAY is
-            // on (catch-up always scrubs, matching Android) or a scrub
-            // is already engaged (HUD up). Plain-live scrub entry moved
-            // to hold-Left/Right (ScrubHoldDetector below) when the
-            // map assigns short-Left/Right elsewhere; remapping
-            // leftShort/rightShort back to seek restores the old
-            // single-press behaviour.
-            if store.tiles.count == 1,
-               !nowPlaying.isMinimized,
-               !chromeState.isVisible,
-               !dpadScrub.holdActive,   // hold loop already stepping
-               direction == .left || direction == .right,
-               dpadScrub.step(direction == .left ? -1 : +1, store: store) {
-                return
-            }
-            // Normal navigation: just wake the focus indicator.
-            chromeState.reportFocusActivity()
-        }
+        .onMoveCommand { direction in handleTVMoveCommand(direction) }
         // Hold-to-scrub: move commands never autorepeat on a held
         // d-pad edge, so a window-level UIKit recognizer detects the
         // hold (0.4s) and a repeat task steps the shared scrub until
@@ -1032,29 +960,7 @@ struct MultiviewContainerView: View {
             // Resumes on dismissal.
             store.isPickerPresented = presenting
         }
-        .task {
-            // Subscribe to thermal-state changes for the lifetime of
-            // the container. The observer posts on the main thread
-            // per Apple docs, so direct @MainActor writes are fine.
-            // Initial state primes the flag for the "already hot when
-            // user opens multiview" case.
-            store.thermalState = ProcessInfo.processInfo.thermalState
-            DebugLogger.shared.log(
-                "[MV-Thermal] initial arrival=\(thermalStateName(store.thermalState))",
-                category: "Playback", level: .info
-            )
-            for await _ in NotificationCenter.default.notifications(
-                named: ProcessInfo.thermalStateDidChangeNotification
-            ) {
-                let new = ProcessInfo.processInfo.thermalState
-                let old = store.thermalState
-                store.thermalState = new
-                DebugLogger.shared.log(
-                    "[MV-Thermal] state \(thermalStateName(old))→\(thermalStateName(new)) tiles=\(store.tiles.count)",
-                    category: "Playback", level: .warning
-                )
-            }
-        }
+        .task(watchThermalState)
         .onReceive(
             NotificationCenter.default.publisher(for: .multiviewRequestOpenAddSheet)
         ) { _ in
@@ -1076,9 +982,7 @@ struct MultiviewContainerView: View {
         // but in practice works because the `.focusSection()` at the
         // grid scope gives us ownership of d-pad + Menu within that
         // region.
-        .onExitCommand {
-            handleMenuPress(source: "onExitCommand")
-        }
+        .onExitCommand { handleTVExitCommand() }
         // GH #11 fix: also listen for the .playerBackPress relay so
         // MainTabView's outer `.onExitCommand` (which fires after the
         // user expands from mini back to fullscreen via Play/Pause —
@@ -1090,51 +994,7 @@ struct MultiviewContainerView: View {
         .onReceive(NotificationCenter.default.publisher(for: .playerBackPress)) { _ in
             handleMenuPress(source: "playerBackPress")
         }
-        .onPlayPauseCommand {
-            // Siri Remote Play/Pause routing:
-            //   - Mini state (container is collapsed to corner) →
-            //     EXPAND back to full-screen. The container-level
-            //     handler fires even when the outer wrapper is
-            //     `.disabled`/hit-testing-off, so we need to
-            //     explicitly short-circuit here to reach
-            //     `nowPlaying.expand()`. Without this the handler
-            //     would toggle pause on the tile while it's still
-            //     in the corner — confusing.
-            //   - Full-screen state → toggle pause on the audio
-            //     tile's mpv handle. Ported from the legacy
-            //     PlayerView path (PlayerView.swift ~line 625).
-            //     `audioProgressStore` resolves to whichever tile
-            //     currently owns audio (tile 0 at N=1, the
-            //     user-picked tile at N≥2).
-            //
-            // In the full-screen case we also call
-            // `reportInteraction()` so the scrubber/overlay reflects
-            // the new pause state immediately — matches the legacy
-            // `showControls = true` after a Play/Pause.
-            if NowPlayingManager.shared.isMinimized {
-                DebugLogger.shared.log(
-                    "[MV-Cmd] tvOS Play/Pause → expand (was mini)",
-                    category: "Playback", level: .info
-                )
-                withAnimation(.spring(response: 0.35)) {
-                    NowPlayingManager.shared.expand()
-                }
-            } else if barePlayerState,
-                      RemoteControlStore.shared.playerAction(.playPause) != .playPause,
-                      executePlayerAction(RemoteControlStore.shared.playerAction(.playPause)) {
-                // Remote Control #195: a REMAPPED Play/Pause slot runs its
-                // mapped action on the bare player; the default (and any
-                // non-bare state: chrome up, N>1, replay) keeps the
-                // toggle below.
-            } else if let toggle = store.audioProgressStore?.togglePauseAction {
-                DebugLogger.shared.log(
-                    "[MV-Cmd] tvOS Play/Pause → toggle pause on audio tile",
-                    category: "Playback", level: .info
-                )
-                toggle()
-                chromeState.reportInteraction()
-            }
-        }
+        .onPlayPauseCommand { handleTVPlayPauseCommand() }
         // Remote Control #195: host the player's Left-press overlays.
         // ZStack overlay (not a cover) so the live picture stays
         // underneath; each overlay owns its focus + Back, and
@@ -1235,6 +1095,84 @@ struct MultiviewContainerView: View {
         .sheet(isPresented: $showSwitchStream) {
             switchStreamSheetContent
         }
+        // Per-tile Switch Stream (tile long-press menu, 2026-08-28).
+        .sheet(isPresented: Binding(
+            get: { store.pendingStreamSwitchTileID != nil },
+            set: { if !$0 { store.pendingStreamSwitchTileID = nil } }
+        )) {
+            if let switchID = store.pendingStreamSwitchTileID,
+               let switchTile = store.tiles.first(where: { $0.id == switchID }),
+               let switchChannelID = switchTile.item.dispatcharrChannelID,
+               let switchUUID = switchTile.item.uuid, !switchUUID.isEmpty {
+                SwitchStreamView(
+                    channelID: switchChannelID,
+                    channelUUID: switchUUID,
+                    channelName: switchTile.item.name,
+                    onClose: { store.pendingStreamSwitchTileID = nil }
+                )
+            } else {
+                EmptyView()
+            }
+        }
+        #endif
+        // Tile context menu's Add Channel: the menu can't reach
+        // showAddSheet directly (it lives deep in the tile view), so it
+        // raises a store flag. Small delay lets the system menu finish
+        // dismissing before the sheet presents.
+        .modifier(AddSheetRequestBridge(store: store, showAddSheet: $showAddSheet))
+        #if os(tvOS)
+        // Per-tile Switch Stream as a NATIVE dialog (Logan 2026-08-28:
+        // the custom picker was a visual break in the tile flow). The
+        // battle-tested switch machinery lives in SwitchStreamFlow
+        // (change_stream + confirm-by-status-url + reprime).
+        .onChange(of: store.pendingStreamSwitchTileID) { _, newID in
+            guard let id = newID,
+                  let tile = store.tiles.first(where: { $0.id == id }),
+                  let chID = tile.item.dispatcharrChannelID,
+                  let uuid = tile.item.uuid, !uuid.isEmpty else { return }
+            switchDialogChannelName = tile.item.name
+            switchDialogUUID = uuid
+            Task { @MainActor in
+                switchDialogOptions = await SwitchStreamFlow.loadOptions(
+                    server: ChannelStore.shared.activeServer,
+                    channelID: chID, channelUUID: uuid) ?? []
+                switchDialogVisible = true
+            }
+        }
+        .confirmationDialog(
+            switchDialogChannelName,
+            isPresented: $switchDialogVisible,
+            titleVisibility: .visible
+        ) {
+            ForEach(switchDialogOptions) { option in
+                Button(option.isCurrent ? "\(option.title)  (Current)" : option.title) {
+                    let uuid = switchDialogUUID
+                    store.pendingStreamSwitchTileID = nil
+                    Task { @MainActor in
+                        let ok = await SwitchStreamFlow.performSwitch(
+                            server: ChannelStore.shared.activeServer,
+                            channelUUID: uuid, streamID: option.id)
+                        if !ok {
+                            switchDialogError = true
+                        }
+                    }
+                }
+            }
+        } message: {
+            Text(switchDialogOptions.isEmpty
+                 ? "No alternate streams are available for this channel."
+                 : "Pick the provider stream for this channel. Playback continues without interruption.")
+        }
+        .onChange(of: switchDialogVisible) { _, visible in
+            // Dialog dismissed without a pick: clear the pending target
+            // so the same tile can raise it again.
+            if !visible { store.pendingStreamSwitchTileID = nil }
+        }
+        .alert("Stream Not Switched", isPresented: $switchDialogError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("The switch didn't take effect. The server may be busy; the current stream is unchanged.")
+        }
         #endif
         // Exit-confirmation dialog. Presented when the user presses
         // Menu/Back with chrome already visible (see the `onExitCommand`
@@ -1250,15 +1188,9 @@ struct MultiviewContainerView: View {
             isPresented: $showExitConfirmation,
             titleVisibility: .visible
         ) {
-            // Android parity P2: at N>=2 offer a guide-return that KEEPS
-            // the staged set; the guide's staging banner lets the user
-            // resume the same grid via Play. N=1 unified playback keeps
-            // the plain Exit dialog (nothing staged worth keeping).
-            if !(PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1) {
-                Button("Back to TV Guide") {
-                    session.exitMultiviewKeepingStagedTiles()
-                }
-            }
+            // "Back to TV Guide" removed (Logan 2026-08-31, both
+            // platforms): with Add Channel in the tile menu the
+            // keep-staged-tiles exit just duplicated the Back flow.
             Button(exitConfirmationPrimary, role: .destructive) {
                 performConfirmedExit()
             }
@@ -1388,6 +1320,82 @@ struct MultiviewContainerView: View {
     /// channel (int pk + proxy uuid) on a Direct Connect admin server.
     /// Gates the tvOS Options panel's "Switch Stream" row. The iOS path
     /// has its own copy in `PlaybackChromeOverlay`.
+    /// Switch Version context for a solo VOD tile (container parity
+    /// with the legacy cover's panel; Logan's ask 2026-08-25). Empty
+    /// everywhere else so the panel hides the section.
+    private var vodPanelVersionOptions: [VODVersionOption] {
+        store.vodSoloTile != nil ? store.vodVersionOptions : []
+    }
+
+    private func logOptionsGateFailureIfNeeded() {
+        if showTVOptions, store.audioProgressStore == nil {
+            let tileID = store.audioTileID ?? "nil"
+            let firstID = store.tiles.first?.id ?? "nil"
+            debugLog("[MV-Cmd] OPTIONS PANEL gate failed: showTVOptions=true but audioProgressStore=nil (audioTileID=\(tileID) tiles=\(store.tiles.count) firstTileID=\(firstID))")
+        }
+    }
+
+    /// The options panel construction, extracted whole: inline in the
+    /// container body its argument list blew the type-checker budget
+    /// once version switching joined it.
+    private func containerOptionsPanel(audioStore: PlayerProgressStore) -> some View {
+        TVPlayerOptionsPanel(
+                        audioTracks: audioStore.audioTracks,
+                        currentAudioTrackID: audioStore.currentAudioTrackID,
+                        subtitleTracks: audioStore.subtitleTracks,
+                        currentSubtitleTrackID: audioStore.currentSubtitleTrackID,
+                        speed: audioStore.speed,
+                        // A solo VOD tile (beginVOD) is the one non-live
+                        // container session; everything else stays live.
+                        isLive: store.vodSoloTile == nil,
+                        sleepTimerEnd: $sleepTimerEnd,
+                        showStreamInfo: $showStreamInfo,
+                        setAudioTrack: { audioStore.setAudioTrackAction?($0) },
+                        setSubtitleTrack: { audioStore.setSubtitleTrackAction?($0) },
+                        setSpeed: { audioStore.setSpeedAction?($0) },
+                        onDismiss: {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                showTVOptions = false
+                            }
+                        },
+                        // Deliberately nil — `+` pill is a peer action
+                        // in `PlaybackChromeOverlay`. Listing "Add Stream"
+                        // inside this panel would be a second path to
+                        // the same action, which is the workflow the
+                        // user explicitly asked us to remove.
+                        onEnterMultiview: nil,
+                        // Switch Stream — only for an admin Dispatcharr
+                        // channel with a pk + uuid. Flips to the picker
+                        // PAGE in this same panel (no separate overlay).
+                        onSwitchStream: canSwitchStreamForAudioTile ? {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                streamPickerVisible = true
+                            }
+                        } : nil,
+                        // Issue #48: live layout picker for the current tile
+                        // count. Selecting a mode persists it and the grid
+                        // reflows underneath while the panel stays open.
+                        // Switch Version for a solo VOD tile (container
+                        // parity with the legacy cover's panel).
+                        versionOptions: vodPanelVersionOptions,
+                        currentVersionOptionID: store.vodCurrentVersionID,
+                        onSelectVersion: vodSelectVersionHandler,
+                        layoutOptions: MultiviewLayoutMode.available(forTileCount: store.tiles.count),
+                        currentLayout: layoutMode,
+                        onSelectLayout: { mode in
+                            withAnimation(.easeInOut(duration: 0.2)) { layoutMode = mode }
+                        }
+                    )
+    }
+
+    private var vodSelectVersionHandler: ((VODVersionOption) -> Void)? {
+        guard !vodPanelVersionOptions.isEmpty else { return nil }
+        return { option in
+            withAnimation(.easeInOut(duration: 0.15)) { showTVOptions = false }
+            store.switchVODVersion(option)
+        }
+    }
+
     private var canSwitchStreamForAudioTile: Bool {
         guard let audioID = store.audioTileID,
               let audio = store.tiles.first(where: { $0.id == audioID }),
@@ -1405,7 +1413,7 @@ struct MultiviewContainerView: View {
         if PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1 {
             return "Stops playback and returns to the channel guide."
         }
-        return "Exit Multiview collapses the grid back to the stream you were listening to. Back to TV Guide keeps your staged tiles so you can resume from the guide."
+        return "Exit Multiview collapses the grid back to the stream you were listening to."
     }
 
     /// Run the actual exit action that the confirmation dialog was
@@ -1464,20 +1472,30 @@ struct MultiviewContainerView: View {
     /// falls through to the legacy handling / focus wake).
     @discardableResult
     private func executePlayerAction(_ action: PlayerRemoteAction) -> Bool {
+        // A VOD session has no channels: the channel-flavored actions
+        // (flip, last, Channels/Recents overlays - D-pad Left's default)
+        // fall through to the plain focus/chrome wake instead of
+        // surfacing live-TV surfaces over a movie (Logan 2026-08-26).
+        let isVODSession = store.vodSoloTile != nil
         switch action {
         case .channelUp:
+            guard !isVODSession else { return false }
             nowPlaying.changeChannel(direction: +1)
             return true
         case .channelDown:
+            guard !isVODSession else { return false }
             nowPlaying.changeChannel(direction: -1)
             return true
         case .lastChannel:
+            guard !isVODSession else { return false }
             nowPlaying.zapToPreviousChannel()
             return true
         case .channelList:
+            guard !isVODSession else { return false }
             withAnimation(.easeInOut(duration: 0.2)) { showChannelsOverlay = true }
             return true
         case .recentChannels:
+            guard !isVODSession else { return false }
             withAnimation(.easeInOut(duration: 0.2)) { showRecentsOverlay = true }
             return true
         case .toggleControls:
@@ -1491,6 +1509,13 @@ struct MultiviewContainerView: View {
             showTVOptions = true
             return true
         case .minimizeToGuide:
+            if isVODSession {
+                // No corner-mini for VOD: the mapped gesture exits with
+                // the position saved, same as Back.
+                store.saveVODProgressNow()
+                PlayerSession.shared.exit()
+                return true
+            }
             withAnimation(.spring(response: 0.35)) { nowPlaying.minimize() }
             return true
         case .playPause:
@@ -1639,6 +1664,8 @@ struct MultiviewContainerView: View {
     }
 
     private func handleMenuPress(source: String) {
+        // GH #71: Menu while digits are buffered only clears the entry.
+        if ChannelNumberEntry.shared.cancel() { return }
         DebugLogger.shared.log(
             "[MV-Cmd] tvOS Menu source=\(source) | showTVOptions=\(showTVOptions) showStreamInfo=\(showStreamInfo) isMinimized=\(nowPlaying.isMinimized) chromeVisible=\(chromeState.isVisible) tiles=\(store.tiles.count) fullscreenTile=\(store.fullscreenTileID ?? "nil") relocating=\(store.relocatingTileID ?? "nil")",
             category: "Playback", level: .info
@@ -1721,6 +1748,21 @@ struct MultiviewContainerView: View {
                 category: "Playback", level: .info
             )
             store.relocatingTileID = nil
+        } else if chromeState.isVisible, !chromeState.isPinned,
+                  store.tiles.count == 1 {
+            // Back with chrome up on ANY solo session (Live, VOD, DVR,
+            // catch-up - Logan 2026-08-26: "everywhere") just dismisses
+            // the chrome; the NEXT Back, with chrome hidden, runs the
+            // session action below (VOD/catch-up exit, live minimize).
+            // Pinned chrome (Options panel, connection issue) falls
+            // through - those states own their own Back handling.
+            // N>=2 multiview keeps chrome-visible Back = exit confirm,
+            // or its exit would become unreachable.
+            DebugLogger.shared.log(
+                "[MV-Cmd]   → branch: solo chrome visible → hide chrome",
+                category: "Playback", level: .info
+            )
+            chromeState.hideNow()
         } else if !chromeState.isVisible
             && !(PlaybackFeatureFlags.useUnifiedPlayback && store.tiles.count == 1) {
             // #42 Part 4: only the N>=2 multiview grid uses Menu to SUMMON chrome.
@@ -1745,6 +1787,18 @@ struct MultiviewContainerView: View {
                         "[MV-Cmd]   → branch: catch-up N=1 → exit session",
                         category: "Playback", level: .info
                     )
+                    PlayerSession.shared.exit()
+                    return
+                }
+                if store.vodSoloTile != nil {
+                    // VOD has no corner-mini model either (Logan
+                    // 2026-08-26): Back saves the exact position and
+                    // returns to the previous screen, like catch-up.
+                    DebugLogger.shared.log(
+                        "[MV-Cmd]   → branch: VOD N=1 → save progress + exit session",
+                        category: "Playback", level: .info
+                    )
+                    store.saveVODProgressNow()
                     PlayerSession.shared.exit()
                     return
                 }
@@ -1864,6 +1918,199 @@ struct MultiviewContainerView: View {
     /// `String(describing:)` on the raw enum prints "nominal" which
     /// is already what we want, but using a small function keeps
     /// future-proofing simple if Apple adds a new case.
+#if os(tvOS)
+    /// Extracted from the inline .onPlayPauseCommand closure: the
+    /// container's modifier chain is at the Xcode 26 Release
+    /// type-checker budget (archive timeout). Behavior unchanged.
+    private func handleTVPlayPauseCommand() {
+            // Siri Remote Play/Pause routing:
+            //   - Mini state (container is collapsed to corner) →
+            //     EXPAND back to full-screen. The container-level
+            //     handler fires even when the outer wrapper is
+            //     `.disabled`/hit-testing-off, so we need to
+            //     explicitly short-circuit here to reach
+            //     `nowPlaying.expand()`. Without this the handler
+            //     would toggle pause on the tile while it's still
+            //     in the corner — confusing.
+            //   - Full-screen state → toggle pause on the audio
+            //     tile's mpv handle. Ported from the legacy
+            //     PlayerView path (PlayerView.swift ~line 625).
+            //     `audioProgressStore` resolves to whichever tile
+            //     currently owns audio (tile 0 at N=1, the
+            //     user-picked tile at N≥2).
+            //
+            // In the full-screen case we also call
+            // `reportInteraction()` so the scrubber/overlay reflects
+            // the new pause state immediately — matches the legacy
+            // `showControls = true` after a Play/Pause.
+            if NowPlayingManager.shared.isMinimized {
+                DebugLogger.shared.log(
+                    "[MV-Cmd] tvOS Play/Pause → expand (was mini)",
+                    category: "Playback", level: .info
+                )
+                withAnimation(.spring(response: 0.35)) {
+                    NowPlayingManager.shared.expand()
+                }
+            } else if barePlayerState,
+                      RemoteControlStore.shared.playerAction(.playPause) != .playPause,
+                      executePlayerAction(RemoteControlStore.shared.playerAction(.playPause)) {
+                // Remote Control #195: a REMAPPED Play/Pause slot runs its
+                // mapped action on the bare player; the default (and any
+                // non-bare state: chrome up, N>1, replay) keeps the
+                // toggle below.
+            } else if let toggle = store.audioProgressStore?.togglePauseAction {
+                DebugLogger.shared.log(
+                    "[MV-Cmd] tvOS Play/Pause → toggle pause on audio tile",
+                    category: "Playback", level: .info
+                )
+                toggle()
+                chromeState.reportInteraction()
+            }
+    }
+#endif
+
+#if os(tvOS)
+    /// Extracted from the inline .onMoveCommand closure (Xcode 26
+    /// Release type-checker budget on the container chain).
+    private func handleTVMoveCommand(_ direction: MoveCommandDirection) {
+        // Relocate mode takes priority: when the user picked
+        // "Move Tile" from the context menu we need D-pad presses
+        // to swap the relocating tile with its neighbour
+        // regardless of where tvOS thinks focus is. Handling this
+        // at the CONTAINER level (instead of the individual
+        // tile's `.onMoveCommand`) dodges the "focus drifted to
+        // the audio tile after context-menu dismiss" race:
+        // `.onMoveCommand` on a `.focusSection()` fires for any
+        // D-pad event while focus is anywhere inside the scope,
+        // so the swap runs even if focus is technically on a
+        // different tile. The tile's own `.onMoveCommand` stays
+        // for historical compatibility (harmless no-op in the
+        // common case).
+        if let relocatingID = store.relocatingTileID,
+           let idx = store.tiles.firstIndex(where: { $0.id == relocatingID }) {
+            let neighborDir: MultiviewGridMath.NeighborDirection
+            switch direction {
+            case .left:  neighborDir = .left
+            case .right: neighborDir = .right
+            case .up:    neighborDir = .up
+            case .down:  neighborDir = .down
+            @unknown default: return
+            }
+            if let neighborIdx = MultiviewGridMath.physicalNeighbor(
+                of: idx,
+                count: store.tiles.count,
+                direction: neighborDir
+            ) {
+                let neighborID = store.tiles[neighborIdx].id
+                DebugLogger.shared.log(
+                    "[MV-Cmd] tvOS relocate swap (container-level) dir=\(neighborDir) tile=\(relocatingID) neighbor=\(neighborID)",
+                    category: "Playback", level: .info
+                )
+                store.swap(relocatingID, neighborID)
+                // Keep focus pinned on the relocating tile after
+                // the swap — its array index changed but its id
+                // didn't, so the `.focused($focusedTileID)`
+                // binding keeps working. Reasserting here covers
+                // the case where tvOS's post-swap focus pass
+                // tried to move focus elsewhere.
+                focusedTileID = relocatingID
+            }
+            return
+        }
+        // Remote Control #195: on the BARE fullscreen live player
+        // (sole tile, no replay, chrome hidden, no scrub, no
+        // overlay/sheet) the short-press D-pad slots resolve
+        // through the user's remote map instead of the old
+        // hardcoded scheme. Default map: Up/Down = channel surf,
+        // Left = Channels overlay (Apple GH #54), Right =
+        // last-channel zap. The pre-initiative behaviour lives on
+        // as `RemoteControlMap.legacyScheme` slot values a user
+        // can restore per-slot in Settings > Remote Control.
+        #if os(tvOS)
+        // VOD/DVR sessions (Logan 2026-08-26): a D-pad press while
+        // chrome is HIDDEN only SUMMONS chrome - left/right used to
+        // scrub the timeline immediately (and up/down fell into the
+        // remote map). Scrubbing now lives on the visible chrome's
+        // timeline band and hold-to-scrub; catch-up keeps its
+        // always-scrubs Android-parity behavior.
+        if store.vodSoloTile != nil, !chromeState.isVisible,
+           !dpadScrub.active, !dpadScrub.holdActive {
+            chromeState.reportInteraction()
+            return
+        }
+        if barePlayerState {
+            let slot: RemoteSlot? = {
+                switch direction {
+                case .up: return .upShort
+                case .down: return .downShort
+                case .left: return .leftShort
+                case .right: return .rightShort
+                @unknown default: return nil
+                }
+            }()
+            if let slot {
+                let action = RemoteControlStore.shared.playerAction(slot)
+                // Honor the pre-map App Behaviors flip toggle: users
+                // who turned the Apple TV channel flip OFF keep
+                // up/down inert even under the default map (the
+                // toggle predates the map and still syncs).
+                let flipSuppressed = (action == .channelUp || action == .channelDown)
+                    && !appleTVChannelFlip
+                if !flipSuppressed, executePlayerAction(action) {
+                    return
+                }
+            }
+        }
+        #endif
+        // D-pad left/right = direct timeline step while a REPLAY is
+        // on (catch-up always scrubs, matching Android) or a scrub
+        // is already engaged (HUD up). Plain-live scrub entry moved
+        // to hold-Left/Right (ScrubHoldDetector below) when the
+        // map assigns short-Left/Right elsewhere; remapping
+        // leftShort/rightShort back to seek restores the old
+        // single-press behaviour.
+        if store.tiles.count == 1,
+           !nowPlaying.isMinimized,
+           !chromeState.isVisible,
+           !dpadScrub.holdActive,   // hold loop already stepping
+           direction == .left || direction == .right,
+           dpadScrub.step(direction == .left ? -1 : +1, store: store) {
+            return
+        }
+        // Normal navigation: just wake the focus indicator.
+        chromeState.reportFocusActivity()
+    }
+
+    /// Extracted from the inline .onExitCommand closure (same
+    /// type-checker budget note as handleTVMoveCommand).
+    private func handleTVExitCommand() {
+        handleMenuPress(source: "onExitCommand")
+    }
+#endif
+
+    /// Thermal watch for the container's lifetime (named function, not
+    /// an inline .task closure: the modifier chain is at the Xcode 26
+    /// Release type-checker budget and inlining this timed out the
+    /// archive). The observer posts on the main thread per Apple docs,
+    /// so direct @MainActor writes are fine; the initial state primes
+    /// the flag for the "already hot when user opens multiview" case.
+    @Sendable private func watchThermalState() async {
+        store.thermalState = ProcessInfo.processInfo.thermalState
+        DebugLogger.shared.log(
+            "[MV-Thermal] initial arrival=\(thermalStateName(store.thermalState))",
+            category: "Playback", level: .info
+        )
+        for await _ in NotificationCenter.default.notifications(
+            named: ProcessInfo.thermalStateDidChangeNotification
+        ) {
+            let new = ProcessInfo.processInfo.thermalState
+            let old = store.thermalState
+            store.thermalState = new
+            let line = "[MV-Thermal] state \(thermalStateName(old))→\(thermalStateName(new)) tiles=\(store.tiles.count)"
+            DebugLogger.shared.log(line, category: "Playback", level: .warning)
+        }
+    }
+
     private func thermalStateName(_ state: ProcessInfo.ThermalState) -> String {
         switch state {
         case .nominal: return "nominal"
@@ -2155,12 +2402,39 @@ final class MultiviewChromeState: ObservableObject {
     /// Delay before auto-hide fires after the last interaction.
     private static let fadeDelayNs: UInt64 = 5_000_000_000
 
+    /// Immediately dismiss the chrome without waiting out the 5s fade
+    /// (Back with chrome visible, solo sessions - Logan 2026-08-26).
+    /// A pinned chrome (Options panel open, connection issue) refuses:
+    /// the pin owners' visibility guarantee outranks the gesture, and
+    /// the Back ladder handles those states earlier anyway.
+    /// Explicit-dismiss timestamp: `reportInteraction()` within 300ms of
+    /// a `hideNow()` is ignored, because the SAME tap that hit the
+    /// dismiss catcher also fires the container's simultaneous
+    /// show-gesture, and their order is undefined - without the window
+    /// the dismiss could instantly re-show.
+    private var lastHideNowAt: ContinuousClock.Instant?
+
+    func hideNow() {
+        guard !isPinned else { return }
+        hideTask?.cancel()
+        hideTask = nil
+        lastRescheduleAt = nil
+        lastHideNowAt = ContinuousClock.now
+        if isVisible {
+            withAnimation(.easeInOut(duration: 0.2)) { isVisible = false }
+        }
+    }
+
     /// Reveal chrome + reset the 5s timer. Safe to call as often as
     /// wanted — the cancel+reschedule loop is the whole point, but
     /// the 500ms coalesce guard stops D-pad/focus bursts from
     /// churning `Task` allocations.
     func reportInteraction() {
         let now = ContinuousClock.now
+        // See lastHideNowAt: the dismissing tap must not re-show.
+        if let hid = lastHideNowAt, hid.duration(to: now) < .milliseconds(300) {
+            return
+        }
         // Fast path: chrome is already visible AND we just
         // rescheduled within the last 500ms. Dropping this call
         // still leaves > 4s of visible chrome, so it's indistinct
@@ -2186,6 +2460,24 @@ final class MultiviewChromeState: ObservableObject {
         scheduleHide()
     }
 
+    /// Extended-grace variant for surfaces whose CLOSE event is not
+    /// trustworthy - the iOS overflow `Menu` skips `onDisappear` on some
+    /// dismissals (caught live 2026-08-26: `setPinned(true)` at menu
+    /// open, no release, every scheduleHide "SKIPPED (pinned)" for two
+    /// minutes = "chrome never fades"). Instead of a pin that can leak
+    /// forever, the menu grants a LONG fade delay: a fired close event
+    /// restores the normal 5s, and a swallowed one self-heals when the
+    /// grace expires (chrome fading under a still-open menu is harmless,
+    /// the menu is its own presentation layer). Bypasses the coalesce
+    /// guard so it always re-arms with the requested delay.
+    func reportInteractionWithGrace(_ seconds: Double) {
+        if !isVisible {
+            withAnimation(.easeInOut(duration: 0.25)) { isVisible = true }
+        }
+        reportFocusActivity()
+        scheduleHide(delaySeconds: seconds)
+    }
+
     /// Records the reschedule timestamp and (re)arms the auto-hide task.
     /// Suppressed while pinned. Factored out so both `reportInteraction()`
     /// AND `setPinned(false)` arm the fade through the same path. The latter
@@ -2196,7 +2488,7 @@ final class MultiviewChromeState: ObservableObject {
     /// chrome with no hide task at all (it was cancelled when the pin went
     /// on), stranding it visible forever — the "exit Switch Stream picker via
     /// Menu, chrome never fades" bug.
-    private func scheduleHide() {
+    private func scheduleHide(delaySeconds: Double = 5) {
         lastRescheduleAt = ContinuousClock.now
         hideTask?.cancel()
         // While pinned (e.g. TVOptions panel open) don't schedule the hide
@@ -2206,9 +2498,9 @@ final class MultiviewChromeState: ObservableObject {
             debugLog("[MV-Chrome] scheduleHide SKIPPED (pinned) isVisible=\(isVisible)")
             return
         }
-        debugLog("[MV-Chrome] scheduleHide armed (5s) isVisible=\(isVisible)")
+        debugLog("[MV-Chrome] scheduleHide armed (\(Int(delaySeconds))s) isVisible=\(isVisible)")
         hideTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: Self.fadeDelayNs)
+            try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
             guard !Task.isCancelled, let self else { return }
             // Re-check the pin at fire time too: it may have been set during
             // the 5s sleep (the panel could open after chrome was summoned),
@@ -2301,16 +2593,13 @@ private struct MultiviewSafeAreaModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         #if os(iOS)
-        if UIDevice.current.userInterfaceIdiom == .phone {
-            // Phone — respect the safe area on every edge so the
-            // notch / Dynamic Island / home indicator / landscape
-            // speaker carve-out never overlaps a tile's video frame.
-            content
-        } else {
-            // iPad — preserve the legacy "tiles bleed to the
-            // hardware edge" multiview look.
-            content.ignoresSafeArea()
-        }
+        // Phone AND iPad both bleed to the hardware edges now. The
+        // phone's respect-every-edge carve-out shrank the whole video
+        // frame ("zoomed out", 2026-08-26 field find): with aspect-fit
+        // content the letterboxing keeps the picture clear of the
+        // Dynamic Island by itself, exactly like every system video
+        // app, and the chrome overlay manages its own insets.
+        content.ignoresSafeArea()
         #else
         // tvOS — no notch, edge-to-edge is right for fullscreen; the corner
         // mini player must stay inside its proposed frame (see `minimized`).
@@ -2323,3 +2612,20 @@ private struct MultiviewSafeAreaModifier: ViewModifier {
     }
 }
 
+/// Tile context menu's Add Channel hand-off. A ViewModifier (not one
+/// more inline .onChange on the container's chain) because that chain
+/// is already at the tvOS type-checker budget - the extra closure blew
+/// it. The delay lets the system menu finish dismissing first.
+private struct AddSheetRequestBridge: ViewModifier {
+    @ObservedObject var store: MultiviewStore
+    @Binding var showAddSheet: Bool
+    func body(content: Content) -> some View {
+        content.onChange(of: store.addSheetRequested) { _, requested in
+            guard requested else { return }
+            store.addSheetRequested = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                showAddSheet = true
+            }
+        }
+    }
+}

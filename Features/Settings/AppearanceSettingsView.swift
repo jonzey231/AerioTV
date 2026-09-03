@@ -48,6 +48,14 @@ struct AppearanceSettingsView: View {
     // GH #19 (Android parity): hide channel numbers in the List and Guide.
     @AppStorage("ui.showChannelNumbers")  private var showChannelNumbers = true
     @AppStorage("ui.showChannelNames")    private var showChannelNames = true
+    @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
+    @AppStorage(ClockFormat.defaultsKey) private var timeFormat = "system"
+
+    private static let timeFormatOptions: [(value: String, label: String, subtitle: String)] = [
+        ("system", "System", "Follow the device's clock setting."),
+        ("12", "12-hour", "7:30 PM"),
+        ("24", "24-hour", "19:30"),
+    ]
 
     // MARK: - App Behaviors (moved)
     //
@@ -202,6 +210,24 @@ struct AppearanceSettingsView: View {
                     scaleSliderRow_tvOS(title: "Guide", binding: $guideScale)
                 }
 
+                // Time Format: every clock in the app (guide header, cell
+                // ranges, program info, search, recordings).
+                tvAppearanceSection("Time Format") {
+                    ForEach(Self.timeFormatOptions, id: \.value) { option in
+                        TVSettingsSelectionRow(
+                            icon: "clock",
+                            iconColor: .accentPrimary,
+                            label: option.label,
+                            subtitle: option.subtitle,
+                            isSelected: timeFormat == option.value,
+                            action: {
+                                timeFormat = option.value
+                                SyncManager.shared.pushPreferencesImmediate()
+                            }
+                        )
+                    }
+                }
+
                 // Channel List (issue #28 logos + GH #19 numbers)
                 tvAppearanceSection("Channel List") {
                     TVSettingsToggleRow(
@@ -227,6 +253,16 @@ struct AppearanceSettingsView: View {
                         title: "Show Channel Names",
                         subtitle: "Turn off to hide channel names in the Guide's channel column.",
                         isOn: $showChannelNames,
+                        onChange: { _ in }
+                    )
+                    // Tester report (2026-09-02): some EPG feeds repeat the
+                    // description in the sub-title line.
+                    TVSettingsToggleRow(
+                        icon: "text.alignleft",
+                        iconColor: .accentPrimary,
+                        title: "Show Program Subtitles",
+                        subtitle: "Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there.",
+                        isOn: $showProgramSubtitles,
                         onChange: { _ in }
                     )
                 }
@@ -503,6 +539,38 @@ struct AppearanceSettingsView: View {
                 }
                 .listSectionSeparator(.hidden)
 
+                // MARK: Time Format
+                Section {
+                    ForEach(Self.timeFormatOptions, id: \.value) { option in
+                        Button {
+                            timeFormat = option.value
+                            SyncManager.shared.pushPreferencesImmediate()
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(option.label)
+                                        .font(.bodyMedium).foregroundColor(.textPrimary)
+                                    Text(option.subtitle)
+                                        .font(.labelSmall).foregroundColor(.textTertiary)
+                                }
+                                Spacer()
+                                if timeFormat == option.value {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .foregroundColor(theme.accent)
+                                }
+                            }
+                        }
+                        .listRowBackground(Color.cardBackground)
+                    }
+                } header: {
+                    Text("Time Format").sectionHeaderStyle()
+                } footer: {
+                    Text("System follows your device's clock setting. Applies to the Guide, program info, search, and recordings.")
+                        .font(.labelSmall).foregroundColor(.textTertiary)
+                }
+                .listSectionSeparator(.hidden)
+
                 // MARK: Channel List (issue #28)
                 Section {
                     Toggle(isOn: $showChannelLogos) {
@@ -544,6 +612,19 @@ struct AppearanceSettingsView: View {
                     .tint(theme.accent)
                     .listRowBackground(Color.cardBackground)
                     .onChange(of: showChannelNames) { _, _ in
+                        SyncManager.shared.pushPreferencesImmediate()
+                    }
+                    Toggle(isOn: $showProgramSubtitles) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Show Program Subtitles")
+                                .font(.bodyMedium).foregroundColor(.textPrimary)
+                            Text("Turn off to hide the episode or match name under each program title in the Guide and Live TV list, for EPGs that repeat the description there.")
+                                .font(.labelSmall).foregroundColor(.textTertiary)
+                        }
+                    }
+                    .tint(theme.accent)
+                    .listRowBackground(Color.cardBackground)
+                    .onChange(of: showProgramSubtitles) { _, _ in
                         SyncManager.shared.pushPreferencesImmediate()
                     }
                 } header: {

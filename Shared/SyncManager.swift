@@ -78,6 +78,8 @@ final class SyncManager: ObservableObject {
         // List), so a single synced value let an iPhone's "list" clobber the
         // Apple TV's Guide default across devices. Kept per-device (@AppStorage).
         "defaultTab", "streamBufferSize",
+        // Time Format (Settings > Appearance): "system" | "12" | "24".
+        ClockFormat.defaultsKey,
         "bgRefreshType",
         // Guide Display palette overrides — one hex string per
         // category bucket. Missing keys fall through to the defaults
@@ -1543,6 +1545,9 @@ extension Notification.Name {
     /// (gates onMoveCommand(.right)) so the still-held Right does not scroll the
     /// EPG forward after the mini closes.
     static let guideRightHoldBegan = Notification.Name("guideRightHoldBegan")
+    /// A short Right press was released while the hold-Right detector was armed
+    /// (mini minimized): the guide performs its deferred Right step now.
+    static let guideRightPressEnded = Notification.Name("guideRightPressEnded")
     static let guideRightHoldEnded = Notification.Name("guideRightHoldEnded")
     /// Remote Control #196: mapped guide actions dispatched from the hold
     /// handlers in ChannelListView into the guide grid. `guideTimelineJump`

@@ -1107,6 +1107,7 @@ final class CompanionClient: NSObject, ObservableObject {
     func setSpeed(_ speed: Double) { sendJSON(["cmd": "setSpeed", "speed": speed]); Self.clog("-> TV setSpeed \(speed)") }
     func setAspect(_ key: String) { sendJSON(["cmd": "setAspect", "aspect": key]); Self.clog("-> TV setAspect \(key)") }
     func pause() { sendJSON(["cmd": "pause"]); Self.clog("-> TV pause") }
+    func play() { sendJSON(["cmd": "play"]); Self.clog("-> TV play") }
     func setAudioOnly(_ on: Bool) { sendJSON(["cmd": "setAudioOnly", "audioOnly": on]); Self.clog("-> TV setAudioOnly \(on)") }
     func seekBy(_ deltaMs: Int64) { sendJSON(["cmd": "seekBy", "deltaMs": deltaMs]) }
     func seekToWall(_ ms: Int64) { sendJSON(["cmd": "seekWall", "targetWallMs": ms]) }

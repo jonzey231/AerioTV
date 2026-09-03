@@ -383,9 +383,8 @@ final class PlayerSession: ObservableObject {
     static func resolveEngine(item: ChannelDisplayItem,
                               server: ServerConnection?,
                               isLive: Bool) -> ResolvedEngine {
-        guard isLive, let url = item.streamURL ?? item.streamURLs.first else {
-            let fallback = item.streamURL ?? item.streamURLs.first ?? URL(string: "about:blank")!
-            return ResolvedEngine(engine: .mpv, routeURL: fallback, headers: [:])
+        guard let url = item.streamURL ?? item.streamURLs.first else {
+            return ResolvedEngine(engine: .mpv, routeURL: URL(string: "about:blank")!, headers: [:])
         }
         var headers: [String: String] = [:]
         if let ua = server?.effectiveUserAgent, !ua.isEmpty {
@@ -398,10 +397,38 @@ final class PlayerSession: ObservableObject {
                 headers["Authorization"] = "ApiKey \(key)"
             }
         }
+        if !isLive {
+            // VOD (never DVR/catchup: those come through their own URLs
+            // and stay mpv). The AVPlayer VOD path plays MP4 natively and
+            // MKV through the on-device cue-indexed remux
+            // (MKVFMP4Remuxer); anything it cannot open falls back to mpv
+            // per-tile. Gated by the same remux toggle as live.
+            let ext = url.pathExtension.lowercased()
+            let vodShape = url.path.contains("/proxy/vod/")
+                || ["mkv", "mp4", "m4v", "mov"].contains(ext)
+            if PlaybackFeatureFlags.avPlayerRemuxTS, vodShape {
+                return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
+            }
+            // mpv disabled (test flag): EVERYTHING non-live rides the
+            // AVPlayer container chain (direct / MKV remux / visible
+            // failure) - including DVR and catchup URLs that used to be
+            // mpv's by fiat. Sink or swim is the point.
+            if !PlaybackFeatureFlags.mpvEngineEnabled {
+                return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
+            }
+            return ResolvedEngine(engine: .mpv, routeURL: url, headers: headers)
+        }
         let format = classifyStreamURL(url)
         var routeURL = url
         var effectiveFormat = format
-        if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS {
+        // The ?output_format=hls upgrade is a Dispatcharr contract. Xtream
+        // panels ignore the parameter and routinely 302 live requests to an
+        // edge, which the probe read as "HLS capable": AVPlayer was then
+        // handed raw TS as direct HLS and failed with -11850 (os8.net, Apple TV,
+        // 2026-09-03). Only Dispatcharr sources take the upgrade; everything
+        // else keeps its TS on the remux path.
+        let isDispatcharr = server?.type == .dispatcharrAPI
+        if format == .mpegTS, PlaybackFeatureFlags.avPlayerForHLS, isDispatcharr {
             // Resolve capability BEFORE the engine locks so the first play
             // of an HLS-capable server already upgrades to ?output_format=hls
             // and routes direct-HLS (which decodes HEVC and outputs HDR)
@@ -417,7 +444,97 @@ final class PlayerSession: ObservableObject {
         if PlaybackFeatureFlags.avPlayerRemuxTS, format == .mpegTS {
             return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
         }
+        // mpv disabled (test flag): unknown live formats go through the
+        // TS remux arm and fail visibly if they are not TS.
+        if !PlaybackFeatureFlags.mpvEngineEnabled {
+            return ResolvedEngine(engine: .avPlayerRemuxTS, routeURL: url, headers: headers)
+        }
         return ResolvedEngine(engine: .mpv, routeURL: url, headers: headers)
+    }
+
+    /// TEST (AVPlayer VOD): route a VOD launch through the unified
+    /// container instead of the legacy PlayerView cover, so the tile's
+    /// AVPlayer VOD chain (MP4 direct / MKV cue-indexed remux, resume,
+    /// display criteria, mpv fallback) runs. Returns false when the
+    /// engine toggle is off or the URL is not VOD-shaped - the caller
+    /// then mounts the legacy cover exactly as before, so the mpv path
+    /// is byte-for-byte untouched.
+    ///
+    /// Known v1 gaps vs the legacy cover, accepted for the field test:
+    /// the in-player Switch Version menu and sleep timer are the
+    /// container chrome's versions, and lockscreen/Now Playing mirrors
+    /// the tile item generically.
+    @discardableResult
+    func beginVOD(title: String,
+                  streamURL: URL,
+                  headers: [String: String],
+                  posterURL: URL?,
+                  vodID: String?,
+                  serverID: String?,
+                  vodType: String,
+                  resumePositionMs: Int32?,
+                  versionOptions: [VODVersionOption] = [],
+                  selectedVersionID: Int? = nil,
+                  versionSelectionKey: String? = nil,
+                  kind: TilePlaybackKind = .vod,
+                  dvrScheduledEnd: Date? = nil,
+                  dvrChannelID: String? = nil) -> Bool {
+        guard PlaybackFeatureFlags.avPlayerRemuxTS else { return false }
+        let ext = streamURL.pathExtension.lowercased()
+        // m3u8 = HLS-shaped (in-progress DVR windows, HLS-fronted VOD);
+        // AVPlayer plays those natively, so they belong in the container.
+        let vodShape = streamURL.path.contains("/proxy/vod/")
+            || ["mkv", "mp4", "m4v", "mov", "m3u8"].contains(ext)
+        // mpv disabled: no legacy-cover escape hatch; every VOD launch
+        // goes through the container and fails visibly if it must.
+        guard vodShape || !PlaybackFeatureFlags.mpvEngineEnabled else { return false }
+        // PERSISTED URLs (Continue Watching rows saved before the
+        // session-minting change) arrive WITHOUT a session segment, and
+        // sessionless requests go through Dispatcharr's idle-session
+        // adoption - the pin is discarded and the play can land on a
+        // stale provider connection (13:33 field failure: dead upstream
+        // on a resumed sessionless URL). Normalize: mint a session into
+        // any bare /proxy/vod/ URL at launch time.
+        let streamURL = Self.ensureVODSession(streamURL)
+        let store = MultiviewStore.shared
+        if !store.tiles.isEmpty { exit() }
+        store.lockEngine(ResolvedEngine(engine: .avPlayerRemuxTS,
+                                        routeURL: streamURL,
+                                        headers: headers))
+        let result = store.addVOD(title: title, streamURL: streamURL,
+                                  headers: headers, posterURL: posterURL,
+                                  kind: kind, vodID: vodID, serverID: serverID,
+                                  vodType: vodType,
+                                  resumePositionMs: resumePositionMs,
+                                  bypassWarning: true,
+                                  dvrScheduledEnd: dvrScheduledEnd,
+                                  dvrChannelID: dvrChannelID)
+        guard result == .added else {
+            DebugLogger.shared.log("[Engine] beginVOD: addVOD -> \(result); falling back to legacy cover",
+                                   category: "Playback", level: .warning)
+            exit()
+            return false
+        }
+        DebugLogger.shared.log("[Engine] beginVOD: \(title) via AVPlayer container (\(ext.isEmpty ? "proxy" : ext))",
+                               category: "Playback", level: .info)
+        store.setVODVersionContext(options: versionOptions,
+                                   selectedID: selectedVersionID,
+                                   selectionKey: versionSelectionKey)
+        mode = .multiview
+        return true
+    }
+
+    /// Mint a VOD session id into a bare Dispatcharr /proxy/vod/ URL
+    /// (see DispatcharrAPI.mintVODSession for why sessionless requests
+    /// are unsafe). URLs that already carry a session, and non-proxy
+    /// URLs, pass through untouched.
+    static func ensureVODSession(_ url: URL) -> URL {
+        let comps = url.pathComponents // ["/", "proxy", "vod", type, uuid, session?]
+        guard comps.count == 5, comps[1] == "proxy", comps[2] == "vod" else { return url }
+        guard var c = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        let session = "vod_\(Int(Date().timeIntervalSince1970 * 1000))_\(Int.random(in: 1000...9999))"
+        c.path = url.path + "/" + session
+        return c.url ?? url
     }
 
     @discardableResult
@@ -651,6 +768,10 @@ enum PlaybackFeatureFlags {
     /// (object(forKey:) probe) so existing installs pick the default up
     /// without regressing an explicit user opt-out.
     static var avPlayerForHLS: Bool {
+        // HARD-OFF RULE: an .m3u8 live channel must route direct HLS -
+        // with this flag off and mpv off it would hit the TS remux and
+        // fail on playlist bytes.
+        if !mpvEngineEnabled { return true }
         let defaults = UserDefaults.standard
         if defaults.object(forKey: "playback.avplayerHLS") == nil {
             return true
@@ -661,12 +782,24 @@ enum PlaybackFeatureFlags {
     /// Engine auto-detection, remux arm: raw MPEG-TS live streams
     /// (Dispatcharr /proxy/ts/) through the on-device TS-to-HLS remuxer into
     /// AVPlayer. H.264 + AC-3/AAC only; the codec gate auto-falls back to mpv
-    /// (HEVC, MPEG-2, MP2). **Deliberately still opt-in**: the loopback remux
-    /// server suspends when the app backgrounds (no background audio) and
-    /// native<->container transitions restart the stream -- the "playback
-    /// works well" bar for defaulting is not met yet (June 2026 eval).
+    /// (HEVC, MPEG-2, MP2). **Default ON since the 2026-08-21 field test**
+    /// (branch test/avplayer-remux-default): Logan is running the remux as
+    /// the default engine for a weekend to qualify it for the MPV removal
+    /// plan. The June 2026 opt-in reasons still hold and are the test's
+    /// watch list: the loopback remux server suspends when the app
+    /// backgrounds (no background audio) and native<->container transitions
+    /// restart the stream. Absent-key-means-on convention (see
+    /// useUnifiedPlayback) so flipping the Developer toggle OFF still works
+    /// and is remembered.
     static var avPlayerRemuxTS: Bool {
-        UserDefaults.standard.bool(forKey: "playback.avplayerRemuxTS")
+        // HARD-OFF RULE: no mpv means the AVPlayer engines must be on -
+        // a disabled remux flag would leave nothing to play with.
+        if !mpvEngineEnabled { return true }
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "playback.avplayerRemuxTS") == nil {
+            return true
+        }
+        return defaults.bool(forKey: "playback.avplayerRemuxTS")
     }
 
     /// `true` (default) while routing through the unified
@@ -680,6 +813,11 @@ enum PlaybackFeatureFlags {
     /// false and silently regress every existing user to the legacy
     /// path on this build.
     static var useUnifiedPlayback: Bool {
+        // HARD-OFF RULE (Logan 2026-08-28): with the mpv engine
+        // disabled, the unified container is the ONLY player - the
+        // legacy single-stream PlayerView is mpv by construction, so no
+        // toggle combination may reach it.
+        if !mpvEngineEnabled { return true }
         let defaults = UserDefaults.standard
         if defaults.object(forKey: "playback.unified") == nil {
             return true
@@ -699,5 +837,24 @@ enum PlaybackFeatureFlags {
             return true
         }
         return defaults.bool(forKey: "playback.modernChrome")
+    }
+
+    /// POLICY (Logan, 2026-08-28): mpv defaults OFF and stays OFF - this
+    /// branch feeds an AVPlayer-only beta group, then the wider
+    /// TestFlight audience. OFF is a HARD guarantee, not a test flag:
+    /// the resolver never picks mpv, tile fallbacks show an on-tile
+    /// error instead of swapping engines, downgradeToMPV is a logged
+    /// no-op, useUnifiedPlayback/avPlayerRemuxTS are forced on so the
+    /// legacy mpv-only surfaces are unreachable, and local-file
+    /// recordings ride the TS-ingest container path. The Developer
+    /// toggle exists for A/B comparison only. (Superseded 2026-08-26
+    /// note said to revert the default before shipping - it now ships
+    /// anyone but Logan.
+    static var mpvEngineEnabled: Bool {
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "dev.mpvEngineEnabled") == nil {
+            return false
+        }
+        return defaults.bool(forKey: "dev.mpvEngineEnabled")
     }
 }

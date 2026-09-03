@@ -289,6 +289,21 @@ struct TVShowsView: View {
                 resumeVersionSelectionKey = ""
             }
             loadResumeVersionOptions(progress: progress, resumeURL: url, server: resumeServer)
+            // TEST (AVPlayer VOD): unified container first; false = engine
+            // off or non-VOD shape, legacy cover mounts unchanged.
+            if PlayerSession.shared.beginVOD(
+                title: progress.title,
+                streamURL: url,
+                headers: resumePlayingHeaders,
+                posterURL: progress.posterURL.flatMap { URL(string: $0) },
+                vodID: progress.vodID,
+                serverID: progress.serverID,
+                vodType: "episode",
+                resumePositionMs: progress.positionMs,
+                versionSelectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey) {
+                isPlaying = true
+                return
+            }
             resumePlayingURL = IdentifiableURL(url: url)
             isPlaying = true
             return
@@ -348,9 +363,12 @@ struct TVShowsView: View {
                 guard seen.insert(rel.account.id).inserted,
                       let url = api.proxyEpisodeURL(uuid: uuid,
                                                     m3uAccountID: rel.account.id) else { return nil }
-                return VODVersionOption(id: rel.account.id,
-                                        label: rel.account.name ?? "Source \(rel.account.id)",
-                                        url: url)
+                var label = rel.account.name ?? "Source \(rel.account.id)"
+                if let note = AVPlayerSupportNote.note(
+                    containerExtension: rel.containerExtension, videoCodec: nil) {
+                    label += " · ⚠️ \(note)"
+                }
+                return VODVersionOption(id: rel.account.id, label: label, url: url)
             }
             guard options.count > 1 else {
                 debugLog("[VOD-VERSION] episode resume \(progress.vodID): \(options.count) distinct account(s), no picker")
@@ -358,6 +376,12 @@ struct TVShowsView: View {
             }
             resumeVersionOptions = options
             debugLog("[VOD-VERSION] episode resume \(progress.vodID): \(options.count) provider accounts")
+            // Container path (beginVOD): see MoviesView's matching push.
+            MultiviewStore.shared.updateVODVersionContext(
+                vodID: progress.vodID,
+                options: options,
+                selectedID: VODVersionSelectionStore.selection(forKey: resumeVersionSelectionKey),
+                selectionKey: resumeVersionSelectionKey.isEmpty ? nil : resumeVersionSelectionKey)
         }
     }
 

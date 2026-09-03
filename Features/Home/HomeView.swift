@@ -3502,6 +3502,16 @@ struct MainTabView: View {
 
     @State private var selectedTab: AppTab = .liveTV
     @State private var showSearch = false
+    /// Channel-retention status circle (tvOS): observed so the count
+    /// circle appears/disappears live as channels are kept or dropped.
+    @ObservedObject private var retention = LiveChannelRetention.shared
+    @State private var retentionListPresented = false
+    @State private var retentionActionKey: String?
+    /// The per-channel dialog was reached from the channel LIST dialog,
+    /// so a Back/Menu dismissal returns to the list instead of closing
+    /// the whole flow (Logan 2026-08-27). Explicit choices still close.
+    @State private var retentionActionFromList = false
+    @State private var retentionActionResolved = false
     @State private var isPlaying = false  // for Movies / TV Shows player state
     /// Tracks whether a VOD detail view is pushed (Movies or Series).
     /// When true, Menu button should pop the navigation, not switch tabs.
@@ -4029,8 +4039,31 @@ struct MainTabView: View {
     /// kick the same channels + guide refresh that pull-to-refresh uses
     /// (`forceRefresh`, which deliberately does NOT re-pull VOD). Gated on
     /// staleness so ordinary app-switching doesn't refetch every time.
+    /// See the `.task` at the wiring site. A named function, not an
+    /// inline closure: the modifier chain there is at the Release-mode
+    /// type-checker's budget in Xcode 26 (archive-blocking timeout).
+    @Sendable private func runPeriodicGuideStalenessSweep() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
+            // Never refresh under active playback: the tester's 2026-08-31
+            // jetsam died seconds after this sweep fired an 8MB grid fetch +
+            // 7.8k-programme XMLTV parse WHILE a 20Mbps MKV remux was
+            // scrubbing. The guide can be 5 minutes staler; a dead player
+            // cannot. Same policy as Android's PlaylistRefreshWorker gate.
+            if scenePhase == .active, PlayerSession.shared.mode == .idle {
+                refreshGuideIfStale(reason: "periodic sweep")
+            }
+        }
+    }
+
     private func refreshGuideIfStaleOnForeground(from oldPhase: ScenePhase, to newPhase: ScenePhase) {
         guard oldPhase != .active, newPhase == .active else { return }
+        refreshGuideIfStale(reason: "foreground")
+    }
+
+    /// Shared staleness gate for the foreground edge AND the 5-minute
+    /// always-active sweep (see the `.task` at the wiring site).
+    private func refreshGuideIfStale(reason: String) {
         guard !allServers.isEmpty else { return }
         // Don't pile on top of an in-flight cold-launch / server-change sync.
         guard !channelStore.isLoading, !channelStore.isEPGLoading else { return }
@@ -4038,7 +4071,7 @@ struct MainTabView: View {
         // short enough that "opened it after a few hours" always lands fresh.
         let staleAfter: TimeInterval = 30 * 60
         guard GuideStore.shared.isEPGStale(olderThan: staleAfter) else { return }
-        debugLog("🔄 Foreground guide refresh: EPG stale (>\(Int(staleAfter / 60))m old) — forcing channels + guide refresh")
+        debugLog("🔄 Guide refresh (\(reason)): EPG stale (>\(Int(staleAfter / 60))m old) — forcing channels + guide refresh")
         let servers = allServers
         let ctx = modelContext
         Task { await channelStore.forceRefresh(servers: servers, modelContext: ctx) }
@@ -4319,12 +4352,104 @@ struct MainTabView: View {
                         ) {
                             withAnimation(.easeOut(duration: 0.2)) { showSearch.toggle() }
                         }
+                        // Channel retention status (Logan 2026-08-27): a
+                        // count circle appears while flipped-away channels
+                        // are still ingesting upstream, so background
+                        // provider connections are always one glance -
+                        // and one click - from being cancelled.
+                        if !retention.entries.isEmpty {
+                            TVNavActionCircle(
+                                systemImage: "\(min(retention.entries.count, 5)).circle",
+                                label: "Channels kept live in background"
+                            ) {
+                                if retention.entries.count == 1 {
+                                    retentionActionFromList = false
+                                    retentionActionKey = retention.entries[0].key
+                                } else {
+                                    retentionListPresented = true
+                                }
+                            }
+                        }
+                    }
+                    .confirmationDialog(
+                        "Channels Live in Background",
+                        isPresented: $retentionListPresented,
+                        titleVisibility: .visible
+                    ) {
+                        ForEach(retention.entries, id: \.key) { entry in
+                            Button(entry.channelName) {
+                                // Beat between dialogs: presenting the
+                                // per-channel dialog in the same runloop
+                                // turn as this one's dismissal drops it.
+                                let key = entry.key
+                                retentionActionFromList = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                    retentionActionKey = key
+                                }
+                            }
+                        }
+                        Button("Stop All", role: .destructive) {
+                            LiveChannelRetention.shared.stopAll(reason: "user (status circle)")
+                        }
+                        Button("Close", role: .cancel) {}
+                    } message: {
+                        Text("These channels keep buffering for Live Rewind and each holds a stream connection.")
+                    }
+                    .confirmationDialog(
+                        retention.entries.first(where: { $0.key == retentionActionKey })?.channelName ?? "Channel",
+                        isPresented: Binding(
+                            get: { retentionActionKey != nil },
+                            set: { presented in
+                                guard !presented else { return }
+                                let dismissedWithoutChoice = retentionActionKey != nil && !retentionActionResolved
+                                retentionActionKey = nil
+                                retentionActionResolved = false
+                                if dismissedWithoutChoice, retentionActionFromList,
+                                   !retention.entries.isEmpty {
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                                        retentionListPresented = true
+                                    }
+                                }
+                            }
+                        ),
+                        titleVisibility: .visible
+                    ) {
+                        Button {
+                            guard let key = retentionActionKey,
+                                  let entry = retention.entries.first(where: { $0.key == key }) else { return }
+                            retentionActionResolved = true
+                            retentionActionKey = nil
+                            DebugLogger.shared.log(
+                                "[AVP-RETAIN] status circle: jump to '\(entry.channelName)'",
+                                category: "Playback", level: .info)
+                            NotificationCenter.default.post(
+                                name: .aerioOpenChannel, object: nil,
+                                userInfo: ["channelID": entry.channelID])
+                        } label: {
+                            Label("Jump to Channel", systemImage: "play.tv")
+                        }
+                        Button(role: .destructive) {
+                            guard let key = retentionActionKey else { return }
+                            retentionActionResolved = true
+                            retentionActionKey = nil
+                            DebugLogger.shared.log(
+                                "[AVP-RETAIN] status circle: cancel retained channel",
+                                category: "Playback", level: .info)
+                            LiveChannelRetention.shared.drop(key: key)
+                        } label: {
+                            Label("Stop Playback", systemImage: "xmark.circle")
+                        }
+
                     }
                     // Own focus region beside the tab bar: LEFT from the
                     // first tab pill (or up-and-left from content) reaches
                     // them; grid navigation never lands here by accident.
                     .focusSection()
-                    .padding(.leading, max(16, barLeading - 152))
+                    // 152 fits the two standing circles; the retention
+                    // circle adds its 60pt + 16pt spacing so the row grows
+                    // LEFT instead of overlapping the tab bar (screenshot,
+                    // 2026-08-27).
+                    .padding(.leading, max(16, barLeading - 152 - (retention.entries.isEmpty ? 0 : 76)))
                     // Mirror-measured against the system tab bar: at .top 2 the
                     // circle centers sat ~12pt below the capsule's center line
                     // (Logan: "not centered vertically with the nav bar").
@@ -4675,7 +4800,12 @@ struct MainTabView: View {
             } else if !companionClient.devices.isEmpty,
                !companionClient.isControlling,
                !castController.isCasting,
-               nowPlaying.playingItem == nil || nowPlaying.isMinimized {
+               nowPlaying.playingItem == nil || nowPlaying.isMinimized,
+               // Container sessions (VOD/DVR/live via PlayerSession) never
+               // set nowPlaying.playingItem, so the FAB floated over the
+               // fullscreen player (field find 2026-08-26, "rogue cast
+               // button"). Gate on the session mode too.
+               playerSession.mode == .idle || nowPlaying.isMinimized {
                 CompanionControlFAB { showCompanionPickerGlobal = true }
                     .padding(.trailing, 20)
                     .padding(.bottom, 52)
@@ -5131,6 +5261,17 @@ struct MainTabView: View {
                 }
             }
         ))
+        // Field 2026-08-30 (MLS group): a session that STAYS foregrounded
+        // never refetches - the staleness refresh above only fires on the
+        // background->active edge, so an evening of continuous use rendered
+        // a channel lineup from before teamarr's event-channel rewrite (the
+        // server had removed 12 finished events and regrouped the new MLS
+        // games; the app kept showing its 17:27 snapshot for 80+ minutes).
+        // Sweep the SAME gated check on a 5-minute tick while active: the
+        // 30-minute staleness window still decides whether anything is
+        // actually refetched, so steady state adds one cheap age check per
+        // tick and at most the pull-to-refresh workload per half hour.
+        .task(runPeriodicGuideStalenessSweep)
         // Background-work heartbeat logger. When `isAnyBackgroundWork`
         // transitions false → true we start a 15s-tick Task that
         // prints the currently-active task labels. The user-visible
@@ -5325,6 +5466,9 @@ struct MainTabView: View {
                 nowPlaying.stop()
                 NowPlayingBridge.shared.teardown()
             }
+            // Channel retention never ingests while backgrounded (same
+            // policy as playback itself - the loopback engines suspend).
+            LiveChannelRetention.shared.stopAll(reason: "app backgrounded")
         }
         // Top Shelf deep link for a channel → switch to Live TV tab.
         // ChannelListView itself handles starting playback once channels are loaded.
@@ -5450,7 +5594,7 @@ struct MainTabView: View {
         // await resolves immediately.
         let cacheIsFresh = await cacheLoadHandle.value
 
-        debugLog("🟢 [Orchestrator] phase 1 done (channels), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, channels=\(channelStore.channels.count)")
+        debugLog("🟢 [Orchestrator] phase 1 done (channels), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, channels=\(channelStore.channels.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         if !channelStore.channels.isEmpty {
             // Try to short-circuit the expensive `loadAllEPG`
             // path by checking the SwiftData EPG cache first. On
@@ -5533,7 +5677,13 @@ struct MainTabView: View {
             // inflate coverage.
             let matchedChannelKeys = liveChannelIDs.intersection(guideStore.programs.keys).count
             let coverageRatio = Double(matchedChannelKeys) / Double(totalChannels)
-            let cacheCoverageOK = coverageRatio >= 0.25
+            // Huge playlists (Xtream panels with tens of thousands of channels,
+            // most of which never carry EPG): coverage against ALL channels is
+            // always "sparse", and the forced refetch parsed the provider's
+            // 315k-programme XMLTV on top of the cache every launch, taking the
+            // Apple TV past its memory line (2026-09-03). Treat a fresh cache
+            // as good enough there; the scheduled refresh still runs.
+            let cacheCoverageOK = coverageRatio >= 0.25 || totalChannels > GuideStore.largePlaylistChannels
             if cacheIsFresh && hasFuturePrograms && cacheCoverageOK {
                 debugLog("🟢 [Orchestrator] phase 2 EPG: cache fresh, seeding only (no network), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
                 // Seed EPGCache from GuideStore.programs so the
@@ -5641,7 +5791,7 @@ struct MainTabView: View {
             // no way out.
             channelStore.isEPGLoading = false
         }
-        debugLog("🟢 [Orchestrator] phase 2 done (EPG), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
+        debugLog("🟢 [Orchestrator] phase 2 done (EPG), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
 
         // v1.6.21: VOD phases run sequentially after channels + EPG.
         // Movies first, then series, both awaitable so we observe
@@ -5682,10 +5832,10 @@ struct MainTabView: View {
         try? await Task.sleep(for: .seconds(3))
         debugLog("🟢 [Orchestrator] phase 3 BEGIN: VOD movies, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
         await vodStore.refreshMoviesAndWait(servers: allServers)
-        debugLog("🟢 [Orchestrator] phase 3 done (movies), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count)")
+        debugLog("🟢 [Orchestrator] phase 3 done (movies), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, movies=\(vodStore.movies.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         debugLog("🟢 [Orchestrator] phase 4 BEGIN: VOD series, elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
         await vodStore.refreshSeriesAndWait(servers: allServers)
-        debugLog("🟢 [Orchestrator] phase 4 done (series), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, series=\(vodStore.series.count)")
+        debugLog("🟢 [Orchestrator] phase 4 done (series), elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s, series=\(vodStore.series.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         debugLog("🟢 [Orchestrator] END, total elapsed=\(Int(Date().timeIntervalSince(orchestratorStart)))s")
     }
 
@@ -6094,6 +6244,18 @@ struct MainTabView: View {
             // Edit Server). SettingsView resets the flag.
             debugLog("🎮 Menu pressed: Settings subview pushed → popping")
             settingsPopRequested = true
+        } else if nowPlaying.isActive && nowPlaying.isMinimized
+                    && selectedTab != .liveTV {
+            // Logan 2026-08-26: Back on another tab's ROOT (e.g. Settings)
+            // with a mini playing must first return to the Live TV tab -
+            // expanding immediately put the fullscreen player ON TOP of
+            // Settings. The NEXT Back, now on Live TV, runs the expand
+            // branch below. Same focus re-seat as the no-mini tab hop.
+            debugLog("🎮 [HMP]   → branch: mini on \(selectedTab.rawValue) tab → switch to Live TV first")
+            selectedTab = .liveTV
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                NotificationCenter.default.post(name: .forceGuideFocus, object: nil)
+            }
         } else if nowPlaying.isActive && nowPlaying.isMinimized {
             // #42 Part 3: with a mini-player active, a SINGLE Back restores it to
             // fullscreen; a DOUBLE Back jumps to the top channel (the long-press
@@ -6570,9 +6732,7 @@ private struct ChannelInfoBanner: View {
     /// against inverted EPG payloads).
     private func airingTimeAndDuration(start: Date, end: Date) -> String? {
         guard end > start else { return nil }
-        let f = DateFormatter()
-        f.dateStyle = .none
-        f.timeStyle = .short
+        let f = ClockFormat.short()
         let window = "\(f.string(from: start)) – \(f.string(from: end))"
 
         let totalMinutes = Int(end.timeIntervalSince(start) / 60)

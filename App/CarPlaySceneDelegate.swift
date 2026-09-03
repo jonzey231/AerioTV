@@ -44,6 +44,40 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
     // MARK: - Scene Lifecycle
 
+    /// The car window handed to us by the window-variant connect callback
+    /// (video-entitled sessions). Held for the video phase (self-rendered
+    /// playback draws into this window); templates ignore it.
+    private var carWindow: CPWindow?
+
+    /// WINDOW-VARIANT connect (field find 2026-08-31, rPlayTV parity):
+    /// with com.apple.developer.carplay-video in the binary, CarPlay
+    /// connects the scene through THIS callback - the same window-bearing
+    /// variant navigation apps get - and never calls the windowless one.
+    /// Implementing only the windowless variant made a video-entitled
+    /// build sit frozen on a blank pane: no callback fired, no templates
+    /// were ever set (A/B verified: removing just the entitlement key
+    /// restored the windowless callback and instant launch). Forward to
+    /// the shared connect path; keep the window for the video phase.
+    func templateApplicationScene(
+        _ scene: CPTemplateApplicationScene,
+        didConnect interfaceController: CPInterfaceController,
+        to window: CPWindow
+    ) {
+        debugLog("[CarPlay] didConnect (window variant): window=\(window.bounds.size)")
+        carWindow = window
+        self.templateApplicationScene(scene, didConnect: interfaceController)
+    }
+
+    func templateApplicationScene(
+        _ scene: CPTemplateApplicationScene,
+        didDisconnect interfaceController: CPInterfaceController,
+        from window: CPWindow
+    ) {
+        carWindow = nil
+        self.templateApplicationScene(scene,
+                                      didDisconnectInterfaceController: interfaceController)
+    }
+
     func templateApplicationScene(
         _ templateApplicationScene: CPTemplateApplicationScene,
         didConnect interfaceController: CPInterfaceController
@@ -452,4 +486,50 @@ private extension UIImage {
     }
 }
 
+// MARK: - CarPlay video window scene
+
+/// Delegate for the `UIWindowSceneSessionRoleCarPlay` window scene.
+///
+/// REQUIRED FOR LAUNCH with the carplay-video entitlement (field find
+/// 2026-08-31): a video-entitled app must declare this window-scene role
+/// in its scene manifest or iOS aborts the ENTIRE CarPlay launch - the
+/// template scene never connects and the car shows a frozen blank pane.
+/// Undocumented in the June 2026 CarPlay guide; discovered by reading
+/// rPlayTV's on-device manifest (it declares the same role), and Apple's
+/// own CarPlay system apps (Settings, Wallpaper) use it too.
+///
+/// The scene is the surface iOS gives video apps on the car display.
+/// v1 keeps it EMPTY (a black window): browsing and playback run through
+/// the template scene + CPPlaybackConfiguration, and video presentation
+/// stays on the sanctioned system path - nothing is self-rendered here.
+@MainActor
+final class CarPlayVideoWindowSceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
+               options connectionOptions: UIScene.ConnectionOptions) {
+        guard let windowScene = scene as? UIWindowScene else { return }
+        debugLog("[CarPlay] video window scene connected: \(windowScene.coordinateSpace.bounds.size)")
+        let w = UIWindow(windowScene: windowScene)
+        let vc = UIViewController()
+        vc.view.backgroundColor = .black
+        w.rootViewController = vc
+        window = w
+        // Diagnostic: does a CPTemplateApplicationScene exist alongside
+        // this window scene, and did anything claim its delegate? Tells
+        // us whether iOS 27 still offers templates to video apps or
+        // routes the whole car UI through this window.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            for sc in UIApplication.shared.connectedScenes {
+                let delegate = (sc as? UIWindowScene)?.delegate ?? sc.delegate
+                debugLog("[CarPlay] scene census: \(type(of: sc)) role=\(sc.session.role.rawValue) state=\(sc.activationState.rawValue) delegate=\(delegate.map { String(describing: type(of: $0)) } ?? "nil")")
+            }
+        }
+    }
+
+    func sceneDidDisconnect(_ scene: UIScene) {
+        debugLog("[CarPlay] video window scene disconnected")
+        window = nil
+    }
+}
 #endif

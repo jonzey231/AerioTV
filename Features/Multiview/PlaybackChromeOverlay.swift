@@ -316,16 +316,22 @@ struct PlaybackChromeOverlay: View {
                             chromeState.reportInteraction()
                             showSwitchStream = true
                         } : nil,
+                        versionOptions: store.vodSoloTile != nil ? store.vodVersionOptions : [],
+                        currentVersionOptionID: store.vodCurrentVersionID,
+                        onSelectVersion: store.vodSoloTile == nil ? nil : { store.switchVODVersion($0) },
+                        isVODSession: store.vodSoloTile != nil,
                         // Pin the chrome up while the overflow menu (and
                         // its sub-menus) is open; release + restart the
                         // fade clock on dismiss. Without this the 5s
                         // timer could hide the chrome (and the menu's
                         // anchor) out from under the open menu.
-                        onMenuOpen: { chromeState.setPinned(true) },
-                        onMenuClose: {
-                            chromeState.setPinned(false)
-                            chromeState.reportInteraction()
-                        }
+                        // NO pin here: SwiftUI Menu's onDisappear is
+                        // unreliable (a swallowed close leaked the pin
+                        // for two minutes, field-caught 2026-08-26).
+                        // A 30s fade grace self-heals instead; a close
+                        // that DOES fire restores the normal 5s.
+                        onMenuOpen: { chromeState.reportInteractionWithGrace(30) },
+                        onMenuClose: { chromeState.reportInteraction() }
                     )
                 }
                 addButton_iOS
@@ -367,7 +373,11 @@ struct PlaybackChromeOverlay: View {
             }
             .padding(.horizontal, 20)
             .padding(.bottom, 8)
-            if liveRewindIOS.buffering {
+            if store.vodSoloTile != nil {
+                VODTransportBar_iOS(store: store)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+            } else if liveRewindIOS.buffering {
                 RewindTransportBar_iOS(store: store)
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
@@ -631,6 +641,117 @@ struct PlaybackChromeOverlay: View {
 /// centered skip/pause controls with the Go Live pill on the right
 /// while rewound. Actions dispatch through the sole tile's
 /// PlayerProgressStore closures into the coordinator's re-tune branch.
+/// VOD transport for the iOS unified chrome: the rewind bar's layout
+/// over the title's full duration (drag-to-seek timeline, elapsed /
+/// total clock, 30s skips, play-pause). Solo-VOD sessions only.
+struct VODTransportBar_iOS: View {
+    @ObservedObject var store: MultiviewStore
+    @State private var dragFraction: CGFloat? = nil
+    @State private var settleTask: Task<Void, Never>? = nil
+
+    var body: some View {
+        let duration = Int64(max(Int32(1), store.audioProgressStore?.durationMs ?? 1))
+        let posMs = Int64(store.audioProgressStore?.currentMs ?? 0)
+        let current = min(posMs, duration)
+        let fraction = dragFraction ?? CGFloat(Double(current) / Double(duration))
+        let isPaused = store.audioProgressStore?.isPaused ?? false
+
+        VStack(spacing: 6) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.2))
+                    Capsule().fill(Color.accentColor)
+                        .frame(width: geo.size.width * max(0, min(1, fraction)))
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 14, height: 14)
+                        .offset(x: geo.size.width * max(0, min(1, fraction)) - 7)
+                }
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { v in
+                            settleTask?.cancel()
+                            dragFraction = max(0, min(1, v.location.x / geo.size.width))
+                        }
+                        .onEnded { v in
+                            let f = max(0, min(1, v.location.x / geo.size.width))
+                            let target = Int32(Double(duration) * Double(f))
+                            store.audioProgressStore?.seekAction?(target)
+                            // Hold the bar at the released spot until playback
+                            // actually lands near it. Dropping dragFraction
+                            // immediately rubber-banded the thumb back to the
+                            // stale pre-seek position for the seconds the MKV
+                            // remuxer spends reopening at the new offset, then
+                            // jumped it forward (tester 2026-08-31, iPad).
+                            settleTask?.cancel()
+                            settleTask = Task { @MainActor in
+                                for _ in 0..<188 {  // ~15s backstop at 80ms
+                                    if Task.isCancelled { return }
+                                    let cur = store.audioProgressStore?.currentMs ?? 0
+                                    if abs(Int64(cur) - Int64(target)) < 4_000 { break }
+                                    try? await Task.sleep(nanoseconds: 80_000_000)
+                                }
+                                guard !Task.isCancelled else { return }
+                                dragFraction = nil
+                            }
+                        }
+                )
+                .padding(.vertical, -12)
+            }
+            .frame(height: 14)
+
+            HStack {
+                Text(Self.clock(Int32(clamping: dragFraction.map { Int64(Double(duration) * Double($0)) } ?? current)))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .monospacedDigit()
+                Spacer()
+                Text(Self.clock(Int32(clamping: duration)))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .monospacedDigit()
+            }
+
+            HStack(spacing: 26) {
+                vodButton("gobackward.30") {
+                    if let ps = store.audioProgressStore {
+                        ps.seekAction?(max(0, ps.currentMs - 30_000))
+                    }
+                }
+                vodButton(isPaused ? "play.fill" : "pause.fill") {
+                    store.audioProgressStore?.togglePauseAction?()
+                }
+                vodButton("goforward.30") {
+                    if let ps = store.audioProgressStore {
+                        ps.seekAction?(min(Int32(clamping: duration), ps.currentMs + 30_000))
+                    }
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    private func vodButton(_ icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 44, height: 44)
+                .background(Color.black.opacity(0.55), in: Circle())
+        }
+    }
+
+    private static func clock(_ ms: Int32) -> String {
+        let total = Int(ms) / 1000
+        if total >= 3600 {
+            return String(format: "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+        }
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
 struct RewindTransportBar_iOS: View {
     @ObservedObject var store: MultiviewStore
     @ObservedObject private var liveRewind = LiveRewindEngine.shared
@@ -808,6 +929,14 @@ private struct iPadOverflowAdapter: View {
     /// only when the audio tile's channel is eligible; flips
     /// `showSwitchStream` so the container presents `SwitchStreamView`.
     var onSwitchStream: (() -> Void)? = nil
+    /// Switch Version for a solo VOD tile (container parity with the
+    /// legacy cover; same store-driven context the tvOS panel reads).
+    var versionOptions: [VODVersionOption] = []
+    var currentVersionOptionID: Int? = nil
+    var onSelectVersion: ((VODVersionOption) -> Void)? = nil
+    /// True while the session is a solo VOD play; drives the menu's
+    /// live-only gating truthfully.
+    var isVODSession: Bool = false
     /// Pin / unpin the auto-hiding chrome while the menu popover is open
     /// (fired from `PlayerOverflowMenu`'s `.onAppear`/`.onDisappear`
     /// under `#if os(iOS)`). See the type doc comment.
@@ -816,12 +945,15 @@ private struct iPadOverflowAdapter: View {
 
     var body: some View {
         PlayerOverflowMenu(
+            versionOptions: versionOptions,
+            currentVersionOptionID: currentVersionOptionID,
+            switchVersionAction: onSelectVersion,
             audioTracks: progressStore.audioTracks,
             currentAudioTrackID: progressStore.currentAudioTrackID,
             subtitleTracks: progressStore.subtitleTracks,
             currentSubtitleTrackID: progressStore.currentSubtitleTrackID,
             speed: progressStore.speed,
-            isLive: true,  // multiview is always live-only in v1
+            isLive: !isVODSession,
             sleepTimerEnd: sleepTimerEnd,
             showStreamInfo: showStreamInfo,
             isAudioOnly: progressStore.isAudioOnly,
@@ -1026,6 +1158,11 @@ struct PlaybackBottomChrome_tvOS: View {
                 CatchupTimelineBand(progress: ps, playback: cu,
                                     previewMs: preview,
                                     focused: focusedChrome == .timeline)
+            } else if let vod = store.vodSoloTile,
+                      let ps = store.audioProgressStore {
+                VODTimelineBand(progress: ps, title: vod.item.name,
+                                previewMs: preview,
+                                focused: focusedChrome == .timeline)
             } else {
                 LiveRewindTimelineBand(store: store,
                                        previewMs: preview,
@@ -1060,7 +1197,7 @@ struct PlaybackBottomChrome_tvOS: View {
             // bar + time remaining. Non-focusable; informational.
             // With a Live Rewind session rolling, the band becomes the
             // rewind timeline over [buffer tail .. live edge] instead.
-            if store.catchupTile != nil || liveRewind.buffering {
+            if store.catchupTile != nil || store.vodSoloTile != nil || liveRewind.buffering {
                 // Scrubbable timeline (catch-up over the pinned
                 // programme duration / live rewind over the buffer
                 // window). A focus target: D-pad UP from the cells
@@ -1136,7 +1273,7 @@ struct PlaybackBottomChrome_tvOS: View {
                 // catch-up: currentMs ticks in both modes and seekAction
                 // routes to the right seek model per mode (buffer re-tune
                 // vs archive window re-tune).
-                if store.catchupTile != nil || liveRewind.buffering {
+                if store.catchupTile != nil || store.vodSoloTile != nil || liveRewind.buffering {
                     nativeToolButton(
                         .rewind30,
                         icon: "gobackward.30",
@@ -1634,6 +1771,63 @@ struct CatchupTimelineBand: View {
     }
 }
 
+/// Timeline band for a solo VOD tile: the catch-up band's shape with
+/// the duration read from the progress store (the AVPlayer driver
+/// publishes it at readyToPlay) instead of a pinned programme length.
+struct VODTimelineBand: View {
+    @ObservedObject var progress: PlayerProgressStore
+    let title: String
+    var previewMs: Int32? = nil
+    var focused: Bool = false
+
+    var body: some View {
+        let duration = max(Int32(1), progress.durationMs)
+        let current = min(max(0, previewMs ?? progress.currentMs), duration)
+        let fraction = Double(current) / Double(duration)
+
+        VStack(spacing: 8) {
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.white.opacity(focused ? 0.35 : 0.2))
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(Color.accentColor)
+                        .frame(width: geo.size.width * CGFloat(max(0, min(1, fraction))))
+                    if focused {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 16, height: 16)
+                            .shadow(color: .black.opacity(0.5), radius: 3)
+                            .offset(x: geo.size.width * CGFloat(max(0, min(1, fraction))) - 8)
+                    }
+                }
+            }
+            .frame(height: 6)
+
+            HStack(spacing: 14) {
+                Text(title)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1)
+                Spacer()
+                Text("\(Self.clock(current)) / \(Self.clock(duration))")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .monospacedDigit()
+            }
+        }
+        // NO .focusable(false) here - see LiveRewindTimelineBand.
+    }
+
+    private static func clock(_ ms: Int32) -> String {
+        let total = Int(ms) / 1000
+        if total >= 3600 {
+            return String(format: "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+        }
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
 /// ONE D-pad left/right scrub implementation for live rewind AND
 /// catch-up (task #147 milestone 2). Presses with the chrome hidden
 /// step a PREVIEW position - no seek per press, because a seek is a
@@ -1663,15 +1857,32 @@ final class DpadScrubController: ObservableObject {
     private var scrubbing = false
     private var commitTask: Task<Void, Never>? = nil
     private var hideTask: Task<Void, Never>? = nil
+    /// Last committed seek target, kept until the playhead actually
+    /// arrives near it. A VOD seek through the MKV remuxer reopens the
+    /// source stream, and for several seconds the player still reports
+    /// the OLD position -- so a scrub sequence started in that window
+    /// used to re-seed from the stale playhead and its commit silently
+    /// cancelled the seek the user just made (tester 2026-08-31:
+    /// "keeps going back to where it was previously playing").
+    private var pendingCommitMs: Int32? = nil
+    private var pendingCommitAt: Date? = nil
 
     /// Returns false when neither mode has a scrubbable timeline (live
     /// with rewind off) so the caller can let the press fall through.
     @discardableResult
     func step(_ dir: Int, store: MultiviewStore) -> Bool {
         let endMs: Int32
+        let isVOD = store.vodSoloTile != nil
         let isCatchup = store.catchupTile != nil
         if let cu = store.catchupTile?.catchup {
             endMs = max(1, cu.programDurationMs)
+        } else if isVOD {
+            // VOD scrubs over the title's full duration; the driver
+            // publishes it once the item is ready. 0 = not ready yet,
+            // refuse the scrub rather than divide into a zero window.
+            let d = store.audioProgressStore?.durationMs ?? 0
+            guard d > 0 else { return false }
+            endMs = d
         } else {
             let rewind = LiveRewindEngine.shared
             guard rewind.buffering else { return false }
@@ -1684,8 +1895,22 @@ final class DpadScrubController: ObservableObject {
             accelCount = 0
             // Seed from the playhead. At the live edge (rewind mode,
             // not timeshifting) the playhead IS the window end.
-            if isCatchup || LiveRewindEngine.shared.timeshifting {
-                targetMs = min(max(0, store.audioProgressStore?.currentMs ?? 0), endMs)
+            if isCatchup || isVOD || LiveRewindEngine.shared.timeshifting {
+                let playheadMs = max(0, store.audioProgressStore?.currentMs ?? 0)
+                // If the previous commit's seek is still in flight (the
+                // playhead has not moved to within 3s of it and the
+                // commit is recent), seed from the committed target so
+                // consecutive scrubs chain instead of reverting.
+                if let pending = pendingCommitMs,
+                   let at = pendingCommitAt,
+                   Date().timeIntervalSince(at) < 20,
+                   abs(Int64(playheadMs) - Int64(pending)) > 3_000 {
+                    targetMs = min(max(0, pending), endMs)
+                } else {
+                    pendingCommitMs = nil
+                    pendingCommitAt = nil
+                    targetMs = min(playheadMs, endMs)
+                }
             } else {
                 targetMs = endMs
             }
@@ -1696,13 +1921,15 @@ final class DpadScrubController: ObservableObject {
         let stepped = Int64(targetMs) + Int64(dir) * 10_000 * mult
         targetMs = Int32(max(0, min(Int64(endMs), stepped)))
         active = true
-        debugLog("[DPAD-SCRUB] step dir=\(dir) x\(mult) -> \(targetMs)/\(endMs)ms \(isCatchup ? "catchup" : "rewind")")
+        debugLog("[DPAD-SCRUB] step dir=\(dir) x\(mult) -> \(targetMs)/\(endMs)ms \(isCatchup ? "catchup" : (isVOD ? "vod" : "rewind"))")
         let seek = store.audioProgressStore?.seekAction
         commitTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 650_000_000)
             guard !Task.isCancelled, let self else { return }
             self.scrubbing = false
             debugLog("[DPAD-SCRUB] commit \(self.targetMs)ms")
+            self.pendingCommitMs = self.targetMs
+            self.pendingCommitAt = Date()
             seek?(self.targetMs)
             self.hideTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -1735,6 +1962,9 @@ struct DpadScrubHUD: View {
             if let cu = store.catchupTile?.catchup,
                let ps = store.audioProgressStore {
                 CatchupTimelineBand(progress: ps, playback: cu, previewMs: scrub.targetMs)
+            } else if let vod = store.vodSoloTile,
+                      let ps = store.audioProgressStore {
+                VODTimelineBand(progress: ps, title: vod.item.name, previewMs: scrub.targetMs)
             } else {
                 LiveRewindTimelineBand(store: store, previewMs: scrub.targetMs)
             }

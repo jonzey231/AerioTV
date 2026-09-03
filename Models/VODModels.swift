@@ -165,6 +165,28 @@ enum WatchProgressManager {
         return progress.positionMs
     }
 
+    /// GH #75: saved position + duration + finished flag for a row, or
+    /// nil when nothing was ever saved. Unlike `getResumePosition` this
+    /// also reports finished rows so a list can render "Watched".
+    struct Snapshot {
+        let positionMs: Int32
+        let durationMs: Int32
+        let isFinished: Bool
+        /// 0...1 fraction watched; nil when the duration is unknown.
+        var fraction: Double? {
+            guard durationMs > 0 else { return nil }
+            return min(1, max(0, Double(positionMs) / Double(durationMs)))
+        }
+    }
+
+    static func snapshot(vodID: String, serverID: String? = nil) -> Snapshot? {
+        guard let context = modelContext else { return nil }
+        let matches = matchingProgress(context: context, vodID: vodID)
+        guard let progress = pickMatch(matches, serverID: serverID, claimLegacy: false) else { return nil }
+        return Snapshot(positionMs: progress.positionMs, durationMs: progress.durationMs,
+                        isFinished: progress.isFinished)
+    }
+
     /// Delete a specific watch progress entry.
     ///
     /// v1.6.8 (Codex A1): pass `serverID` to delete only that
@@ -282,12 +304,18 @@ struct ContinueWatchingSection: View {
     /// only carries the episode's own still + title, so the show poster
     /// and name come from here (looked up by `seriesID`).
     var series: [VODDisplayItem] = []
-    /// Optional "Open Series" action for episode cards. When provided,
-    /// long-pressing an episode card offers Open Series, which navigates
+    /// Optional "View Series" action for episode cards. When provided,
+    /// long-pressing an episode card offers View Series, which navigates
     /// to that show's detail page (all seasons and episodes), the same
     /// destination as selecting the series from the main grid. Movies and
     /// not-yet-loaded series do not surface the option.
     var onOpenSeries: ((VODDisplayItem) -> Void)?
+    /// Loaded movies for the active server; drives the movie cards'
+    /// long-press "View Movie" action (Logan 2026-08-26: jumping to the
+    /// full detail page used to require finding the grid listing by
+    /// search/scroll). Same lookup-by-id pattern as `series`.
+    var movies: [VODDisplayItem] = []
+    var onOpenMovie: ((VODDisplayItem) -> Void)?
 
     @Query(
         filter: #Predicate<WatchProgress> { !$0.isFinished },
@@ -353,14 +381,34 @@ struct ContinueWatchingSection: View {
                             .buttonStyle(.plain)
                             #endif
                             .contextMenu {
-                                // Episodes with a loaded parent series get an
-                                // Open Series action that jumps to the full
+                                // Episodes with a loaded parent series get a
+                                // View Series action that jumps to the full
                                 // show page, same as picking it from the grid.
                                 if let parentSeries, let onOpenSeries {
                                     Button {
                                         onOpenSeries(parentSeries)
                                     } label: {
-                                        Label("Open Series", systemImage: "rectangle.stack")
+                                        Label("View Series", systemImage: "rectangle.stack")
+                                    }
+                                }
+                                // Movies get the mirror: View Movie jumps to
+                                // the detail page without hunting the grid.
+                                // Catalog row preferred (full metadata);
+                                // otherwise a minimal item synthesized from
+                                // the progress row - the detail page loads
+                                // providers/versions by numeric id anyway,
+                                // so the option never depends on catalog
+                                // load timing.
+                                if progress.vodType == "movie", let onOpenMovie {
+                                    let target = movies.first(where: { $0.id == progress.vodID })
+                                        ?? Self.syntheticMovieItem(from: progress)
+                                    let _ = debugLog("[CW-MENU] vodID=\(progress.vodID) moviesLoaded=\(movies.count) catalogMatch=\(movies.contains(where: { $0.id == progress.vodID })) synthesized=\(target != nil && !movies.contains(where: { $0.id == progress.vodID }))")
+                                    if let target {
+                                        Button {
+                                            onOpenMovie(target)
+                                        } label: {
+                                            Label("View Movie", systemImage: "info.circle")
+                                        }
                                     }
                                 }
                                 Button(role: .destructive) {
@@ -395,6 +443,22 @@ struct ContinueWatchingSection: View {
             .focusSection()
             #endif
         }
+    }
+
+    /// Minimal display item for a movie whose catalog row hasn't loaded
+    /// (or whose id space drifted): enough for VODDetailView to render
+    /// and to fetch providers/versions by the numeric id. Requires a
+    /// serverID on the row - without one the detail page could not auth.
+    private static func syntheticMovieItem(from p: WatchProgress) -> VODDisplayItem? {
+        guard let sid = p.serverID, let serverUUID = UUID(uuidString: sid) else { return nil }
+        let movie = VODMovie(
+            id: p.vodID, name: p.title,
+            posterURL: p.posterURL.flatMap { URL(string: $0) }, backdropURL: nil,
+            rating: "", plot: "", genre: "", releaseDate: "", duration: "",
+            cast: "", director: "", imdbID: "", categoryID: "", categoryName: "",
+            streamURL: p.streamURL.flatMap { URL(string: $0) },
+            containerExtension: "", serverID: serverUUID)
+        return VODDisplayItem(movie: movie)
     }
 
     /// Resolve the card's artwork, title, and subtitle. For an episode we
@@ -708,6 +772,96 @@ struct VODVersionOption: Identifiable, Equatable, Hashable {
     let id: Int          // provider relation pk (movies) or m3u account id (episodes)
     let label: String    // "Provider · 1080p"
     let url: URL
+}
+
+/// AVPlayer-engine playability notes for the Version picker. Only
+/// DEFINITIVE facts get a note - container extension the server recorded,
+/// or a MEASURED video codec - never anything inferred from the
+/// provider's advertised title (the "4K:" copy that measured 1080p is why
+/// that rule exists). Returns nil when the AVPlayer engine is off: on the
+/// mpv engine everything here plays and the note would be noise.
+enum AVPlayerSupportNote {
+    /// Human-facing note like "AVI isn't supported by AVPlayer", or nil
+    /// when nothing definitive disqualifies the copy.
+    static func note(containerExtension: String?, videoCodec: String?) -> String? {
+        guard PlaybackFeatureFlags.avPlayerRemuxTS else { return nil }
+        if let ext = containerExtension?.lowercased(), !ext.isEmpty {
+            switch ext {
+            case "avi", "divx": return "AVI isn't supported by AVPlayer"
+            case "wmv", "asf": return "WMV isn't supported by AVPlayer"
+            case "flv": return "FLV isn't supported by AVPlayer"
+            case "mpg", "mpeg": return "MPEG-PS isn't supported by AVPlayer"
+            default: break
+            }
+        }
+        // Measured codec strings vary by source: server ffprobe gives
+        // "mpeg4"; the mpv learn-cache gives full descriptions. Match by
+        // substring, and check the more specific names first (a plain
+        // "mpeg4" test would also catch "mpeg4/ISO AVC" style strings).
+        if let codec = videoCodec?.lowercased(), !codec.isEmpty {
+            if codec.contains("avc") || codec.contains("h264") || codec.contains("264")
+                || codec.contains("hevc") || codec.contains("h265") || codec.contains("265") {
+                return nil
+            }
+            if codec.contains("mpeg2") || codec.contains("mpeg-2") {
+                return "MPEG-2 video isn't supported by AVPlayer"
+            }
+            if codec.contains("mpeg4") || codec.contains("xvid") || codec.contains("divx")
+                || codec.contains("msmpeg4") {
+                return "MPEG-4 ASP video isn't supported by AVPlayer"
+            }
+            if codec.contains("vc1") || codec.contains("vc-1") {
+                return "VC-1 video isn't supported by AVPlayer"
+            }
+            if codec.contains("av1") || codec.contains("av01") {
+                // Hardware-dependent (A17 Pro/M-class decode it); the MKV
+                // engine passes AV1 through so the device gets to vote.
+                return "AV1 may not play on this device"
+            }
+        }
+        return nil
+    }
+}
+
+/// One label pipeline for EVERY version picker (detail page and the
+/// in-player Switch Version rows): account + container, then whatever was
+/// MEASURED for that copy (server ffprobe merged with this device's
+/// learn-cache), then the AVPlayer support note. Collisions get a
+/// positional "(n)". Extracted 2026-08-26: the resume-cover path built
+/// its own bare "Account · 4K" labels, so the player rows lacked the
+/// quality info the detail picker shows.
+enum VODVersionLabeler {
+    static func labels(providers: [DispatcharrVODProviderRelation],
+                       media: [Int: DispatcharrVODProviderMedia],
+                       learned: [Int: VODLearnedStream]) -> [Int: String] {
+        func base(_ rel: DispatcharrVODProviderRelation) -> String {
+            let l = learned[rel.id]
+            let measured = media[rel.id]?.descriptors(mergedWith: l)
+                ?? DispatcharrVODProviderMedia.descriptorsForLearnedOnly(l)
+            var parts = measured.isEmpty ? [rel.displayLabel] : [rel.displayLabel] + measured
+            if let note = AVPlayerSupportNote.note(
+                containerExtension: rel.containerExtension,
+                videoCodec: media[rel.id]?.videoCodec) {
+                parts.append("⚠️ \(note)")
+            }
+            return parts.joined(separator: " · ")
+        }
+        var counts: [String: Int] = [:]
+        for rel in providers { counts[base(rel), default: 0] += 1 }
+        var used: [String: Int] = [:]
+        var out: [Int: String] = [:]
+        for rel in providers {
+            let b = base(rel)
+            if counts[b, default: 0] > 1 {
+                let n = used[b, default: 0] + 1
+                used[b] = n
+                out[rel.id] = "\(b) (\(n))"
+            } else {
+                out[rel.id] = b
+            }
+        }
+        return out
+    }
 }
 
 // MARK: - VOD Movie (display model — not persisted, fetched on demand)

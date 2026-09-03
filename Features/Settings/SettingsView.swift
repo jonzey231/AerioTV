@@ -53,6 +53,8 @@ struct SettingsView: View {
     @State private var clearICloudConfirmationVisible = false
     // Tracks whether the one-time swipe-hint peek has been shown.
     @State private var copiedAbout = false
+    /// iPad About pane's Open Source Licenses sheet.
+    @State private var showOSSLicensesPad = false
     @AppStorage("iCloudSyncEnabled") private var iCloudSyncEnabled = false
     @AppStorage("syncLastDate") private var syncLastDate: Double = 0
     #if os(tvOS)
@@ -508,6 +510,21 @@ struct SettingsView: View {
                         #if os(iOS)
                         .buttonStyle(PressableButtonStyle())
                         #endif
+                        .listRowBackground(Color.cardBackground)
+
+                        NavigationLink {
+                            OpenSourceLicensesView()
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "doc.text")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundColor(.textSecondary)
+                                Text("Open Source Licenses")
+                                    .font(.bodyMedium)
+                                    .foregroundColor(.textSecondary)
+                                Spacer()
+                            }
+                        }
                         .listRowBackground(Color.cardBackground)
 
                         Link(destination: URL(string: "https://github.com/jonzey231/AerioTV")!) {
@@ -1181,6 +1198,28 @@ struct SettingsView: View {
                 .buttonStyle(PressableButtonStyle())
                 .listRowBackground(Color.cardBackground)
 
+                Button {
+                    showOSSLicensesPad = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.textSecondary)
+                        Text("Open Source Licenses")
+                            .font(.bodyMedium)
+                            .foregroundColor(.textSecondary)
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 12))
+                            .foregroundColor(.textTertiary)
+                    }
+                }
+                .buttonStyle(PressableButtonStyle())
+                .listRowBackground(Color.cardBackground)
+                .sheet(isPresented: $showOSSLicensesPad) {
+                    OpenSourceLicensesView(standalone: true)
+                }
+
                 Link(destination: URL(string: "https://github.com/jonzey231/AerioTV")!) {
                     HStack(spacing: 8) {
                         Image(systemName: "link")
@@ -1490,6 +1529,22 @@ struct SettingsView: View {
                     tvAboutLinkRow("Developer Website", urlString: "https://github.com/jonzey231/AerioTV")
                     Divider().background(Color.borderSubtle).padding(.horizontal, 16)
                     tvAboutLinkRow("Report an Issue",   urlString: "https://github.com/jonzey231/AerioTV/issues/new")
+                    Divider().background(Color.borderSubtle).padding(.horizontal, 16)
+                    Button {
+                        showOSSLicenses = true
+                    } label: {
+                        HStack {
+                            Text("Open Source Licenses")
+                                .font(.system(size: 26, weight: .medium))
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 20))
+                                .opacity(0.5)
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 18)
+                    }
+                    .buttonStyle(.plain)
                 }
                 .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Color.cardBackground))
@@ -1508,7 +1563,14 @@ struct SettingsView: View {
         .sheet(item: $tvQRLink) { link in
             TVQRLinkSheet(link: link)
         }
+        .fullScreenCover(isPresented: $showOSSLicenses) {
+            OpenSourceLicensesView(standalone: true)
+        }
     }
+
+    /// Presents the Open Source Licenses takeover (GPL/LGPL notice
+    /// obligations; mirrors Android's Settings > About entry).
+    @State private var showOSSLicenses = false
 
 
     /// Non-nil presents the About-row QR sheet.

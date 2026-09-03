@@ -875,4 +875,22 @@ final class Recording {
     var isInProgress: Bool { status == .recording }
     var isCompleted: Bool { status == .completed }
     var isUpcoming: Bool { status == .scheduled }
+
+    /// GH #75: the WatchProgress key for this recording. Server
+    /// recordings key on the Dispatcharr recording id ("dvr-<id>") so
+    /// the same recording resolves to the same row on every Apple
+    /// device the user syncs (iPad -> Apple TV); the "dvr-" prefix
+    /// keeps it out of the movie / episode id space. Local (on-disk)
+    /// recordings key on the local row UUID: the file never leaves
+    /// this device, so neither does its progress. nil when a server
+    /// recording has no remote id yet (nothing to resume).
+    var watchProgressID: String? {
+        switch destination {
+        case .dispatcharrServer:
+            guard let remoteID = remoteRecordingID else { return nil }
+            return "dvr-\(remoteID)"
+        case .local:
+            return "local-\(id.uuidString)"
+        }
+    }
 }

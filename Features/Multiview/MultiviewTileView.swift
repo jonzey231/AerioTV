@@ -93,6 +93,12 @@ struct MultiviewTileView: View {
     /// button calls `store.remove(id:)`, which takes the tile out of
     /// the grid entirely.
     @State private var decodeErrorMessage: String? = nil
+    /// "Recording Ending" prompt (.dvr tiles only): raised when the
+    /// scheduled end is imminent AND the viewer is at the live edge (a
+    /// viewer 20 minutes behind keeps watching undisturbed - the
+    /// finalize migration serves them silently). One-shot per tile.
+    @State private var dvrEndPromptVisible = false
+    @State private var dvrEndPromptDismissed = false
     /// Auto-reconnect state for the playback-error overlay. Each fatal
     /// error schedules a retry through the coordinator's
     /// `progressStore.retryAction` on an escalating delay (5s doubling
@@ -195,7 +201,16 @@ struct MultiviewTileView: View {
     /// half-mpv. VOD/DVR carve-out stays (proxy redirects, MKV, resume).
     /// Toggle-off sessions lock to .mpv, so this is always false then.
     private var usesAVPlayerEngine: Bool {
-        guard tile.kind == .live else { return false }
+        // Live, VOD, and in-progress DVR ride the AVPlayer engine when
+        // the session locked to it (DVR-window driver mode, 2026-08-27);
+        // catchup stays mpv until its port lands. This guard MUST match
+        // the kinds beginVOD/enterMultiview can lock AVPlayer for - the
+        // first DVR field test mounted mpv here despite the lock, with
+        // no from-start hint at all (the sentinel header is stripped on
+        // the container path), so playback landed at the live edge.
+        // Catch-up included since 2026-08-28: seedCatchup locks the
+        // AVPlayer engine only in the no-mpv regime, so this reduces to
+        // "whatever the session locked".
         return store.sessionEngine.isAVPlayer
     }
 
@@ -204,7 +219,9 @@ struct MultiviewTileView: View {
     /// on-device TS->HLS remux vs mpv. Reads the session-locked engine, which
     /// a mid-session HEVC fallback downgrades to .mpv, so it reflects reality.
     private var engineBadgeLabel: String {
-        guard tile.kind == .live else { return "mpv" }
+        // Same guard as usesAVPlayerEngine - a VOD tile riding AVPlayer
+        // must not report "mpv" (field find: Speak No Evil badge).
+
         switch store.sessionEngine {
         case .avPlayerDirectHLS: return "AVPlayer · Direct HLS"
         case .avPlayerRemuxTS:   return "AVPlayer · Remux TS"
@@ -278,6 +295,7 @@ struct MultiviewTileView: View {
         progressStore.vodServerID = tile.vodServerID
         progressStore.vodType = tile.vodType
         progressStore.explicitResumeMs = tile.resumePositionMs
+        progressStore.isDVRWindow = (tile.kind == .dvr)
     }
 
     /// Phase 2: when a VOD tile reaches the end of its file it stops
@@ -427,9 +445,12 @@ struct MultiviewTileView: View {
         // the tile to the guide via D-pad spatial search. The tile
         // stays focusable (Button default), and the focus indicator
         // continues to work normally.
-        // Context-menu at N=1 drops its actions (meaningless with a
-        // single tile) but keeps the `.contextMenu` attachment so
-        // the focus engine behaviour is unchanged.
+        // The SYSTEM context menu, by explicit ruling (Logan 2026-08-28:
+        // the native look wins over stay-open transport and over the
+        // rare Menu-press dismissal race - a press landing mid-dismiss
+        // can reach the system unhandled and suspend the app; keep an
+        // eye on field reports). Context-menu at N=1 drops its actions
+        // but keeps the attachment so focus behaviour is unchanged.
         .contextMenu {
             if !isSoleTile { tileContextMenu }
         }
@@ -495,6 +516,45 @@ struct MultiviewTileView: View {
                 finishedOverlay
             }
         }
+
+        // .dvr: proactive "Recording Ending" choice as a SYSTEM dialog.
+        // The custom sibling-overlay card rendered fine but its buttons
+        // could never take Siri-remote focus - the solo player's focus
+        // model owns the remote (screen recording, 2026-08-27), the same
+        // trap that stripped the error card's tvOS buttons. The system
+        // confirmationDialog brings its own focus handling, like every
+        // recordings menu already does.
+        .confirmationDialog(
+            "Recording Ending",
+            isPresented: $dvrEndPromptVisible,
+            titleVisibility: .visible
+        ) {
+            Button {
+                dvrEndPromptDismissed = true
+                dvrEndContinueOnLive()
+            } label: {
+                Label("Continue on Live TV", systemImage: "play.tv")
+            }
+            Button {
+                dvrEndPromptDismissed = true
+                DebugLogger.shared.log(
+                    "[MV-Cmd] DVR ending dialog: back to DVR tile=\(tile.id)",
+                    category: "Playback", level: .info)
+                store.saveVODProgressNow()
+                PlayerSession.shared.exit()
+            } label: {
+                Label("Back to DVR", systemImage: "arrow.backward.circle")
+            }
+            Button("Keep Watching", role: .cancel) {
+                dvrEndPromptDismissed = true
+            }
+        } message: {
+            Text("This recording is about to reach its scheduled end.")
+        }
+        // Clock source: the driver's 0.5s currentMs pump (a per-init
+        // Timer.publish never fires here - the 0.5s re-render replaces
+        // it before its first tick; field find 2026-08-27).
+        .onReceive(progressStore.$currentMs) { _ in checkDVREndApproaching() }
         // Playback-error overlay, also a SIBLING so its Retry / Remove
         // buttons are real focus targets on tvOS (same reasoning as the
         // Finished overlay above).
@@ -550,97 +610,16 @@ struct MultiviewTileView: View {
     /// appear next to each row in the native tvOS menu.
     @ViewBuilder
     private var tileContextMenu: some View {
-        if !isAudioActive {
-            Button {
-                store.setAudio(to: tile.id)
-            } label: {
-                Label("Make Audio", systemImage: "speaker.wave.2.fill")
-            }
-        }
-
-        // Swap Stream: re-point THIS tile at another channel using the
-        // same picker as Add Stream. Setting the store's target is all
-        // that is needed; the container owns the presentation.
-        Button {
-            store.pendingSwapTileID = tile.id
+        // Order per the AVPlayer testers (Discord, 2026-09-01): the actions
+        // used most often sit at the top, and everything fits on screen
+        // without scrolling because the audio/subtitle items live inside
+        // Playback and the layout modes inside Layout. Top to bottom:
+        // Remove, Move Tile, Playback, Switch Stream, Change Channel,
+        // Add Channel, Full-Screen, Spotlight, Layout.
+        Button(role: .destructive) {
+            store.remove(id: tile.id)
         } label: {
-            Label("Swap Stream", systemImage: "arrow.triangle.2.circlepath")
-        }
-
-        let isFullscreen = store.fullscreenTileID == tile.id
-        Button {
-            store.fullscreenTileID = isFullscreen ? nil : tile.id
-        } label: {
-            Label(
-                isFullscreen ? "Exit Full-Screen" : "Full-Screen in Grid",
-                systemImage: isFullscreen
-                    ? "arrow.down.right.and.arrow.up.left"
-                    : "arrow.up.left.and.arrow.down.right"
-            )
-        }
-
-        // Issue #27: spotlight this tile (big tile + others stacked small).
-        // Mutually exclusive with fullscreen.
-        let isSpotlit = store.spotlightTileID == tile.id
-        Button {
-            store.spotlightTileID = isSpotlit ? nil : tile.id
-            if !isSpotlit { store.fullscreenTileID = nil }
-        } label: {
-            Label(
-                isSpotlit ? "Remove Spotlight" : "Spotlight",
-                systemImage: isSpotlit ? "rectangle.split.3x1" : "rectangle.inset.filled"
-            )
-        }
-
-        // Issue #48: grid layout picker. The single-player Options panel that
-        // also hosts this never surfaces in multiview, so the layout choices
-        // live here in the per-tile long-press menu as direct items (this
-        // codebase uses sheets rather than nested submenus in its tvOS context
-        // menus, so flat items are the reliable shape). Grid-wide (selecting
-        // from any tile sets the shared layout); hidden when there's no real
-        // choice (<= 1 tile). The active mode shows a checkmark.
-        let layoutOptions = MultiviewLayoutMode.available(forTileCount: store.tiles.count)
-        ForEach(layoutOptions) { mode in
-            Button {
-                debugLog("[MV-LAYOUT] select mode=\(mode.rawValue) was=\(layoutMode.rawValue) tile=\(tile.id) tiles=\(store.tiles.count) spotID=\(store.spotlightTileID ?? "nil")")
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    layoutMode = mode
-                    // An explicit non-spotlight layout choice is authoritative:
-                    // clear any per-tile spotlight (#27), which would otherwise
-                    // keep `spotlightActive` true and make this switch a no-op
-                    // (the likely cause of the "switches stop working" report).
-                    if mode != .spotlight { store.spotlightTileID = nil }
-                }
-            } label: {
-                Label("Layout: \(mode.displayName)",
-                      systemImage: layoutMode == mode ? "checkmark" : mode.symbolName)
-            }
-        }
-
-        if progressStore.audioTracks.count > 1 {
-            Button {
-                Task { @MainActor in showAudioTrackMenu = true }
-            } label: {
-                Label("Audio Track", systemImage: "waveform")
-            }
-        }
-        // Task #184: mpv-engine tiles only (setAudioSyncAction nil on AVPlayer).
-        if progressStore.setAudioSyncAction != nil {
-            Button {
-                Task { @MainActor in showAudioSyncMenu = true }
-            } label: {
-                Label(progressStore.audioSyncMs == 0
-                        ? "Audio Sync"
-                        : "Audio Sync: \(String(format: "%+d", progressStore.audioSyncMs)) ms",
-                      systemImage: "metronome")
-            }
-        }
-        if !progressStore.subtitleTracks.isEmpty {
-            Button {
-                Task { @MainActor in showSubtitleTrackMenu = true }
-            } label: {
-                Label("Subtitle Track", systemImage: "captions.bubble")
-            }
+            Label("Remove", systemImage: "xmark.circle")
         }
 
         Button {
@@ -656,17 +635,138 @@ struct MultiviewTileView: View {
             )
         }
 
-        Button(role: .destructive) {
-            store.remove(id: tile.id)
+        Menu {
+            Button {
+                progressStore.relativeSeekAction?(-60_000)
+            } label: {
+                Label("RW 60s", systemImage: "gobackward.60")
+            }
+            Button {
+                progressStore.togglePauseAction?()
+            } label: {
+                Label(progressStore.isPaused ? "Play" : "Pause",
+                      systemImage: progressStore.isPaused ? "play.fill" : "pause.fill")
+            }
+            Button {
+                progressStore.relativeSeekAction?(60_000)
+            } label: {
+                Label("FF 60s", systemImage: "goforward.60")
+            }
+            // Live tiles always offer Return to Live. Gating it on
+            // `behindLiveEdge` made the row appear and vanish as each new
+            // segment moved the live-edge estimate, and SwiftUI rebuilt the
+            // open menu every few seconds (tester report 2026-09-02). At the
+            // edge the action is a harmless no-op.
+            let showReturnToLive: Bool = {
+                if tile.kind == .live { return true }
+                if tile.kind == .dvr {
+                    return progressStore.durationMs > 0
+                        && progressStore.durationMs - progressStore.currentMs > 15_000
+                }
+                return false
+            }()
+            if showReturnToLive {
+                Button {
+                    if tile.kind == .dvr {
+                        progressStore.seekAction?(progressStore.durationMs)
+                    } else {
+                        progressStore.seekToLiveAction?()
+                    }
+                } label: {
+                    Label("Return to Live", systemImage: "livephoto.play")
+                }
+            }
+            if progressStore.audioTracks.count > 1 {
+                Button {
+                    Task { @MainActor in showAudioTrackMenu = true }
+                } label: {
+                    Label("Audio Track", systemImage: "waveform")
+                }
+            }
+            if progressStore.setAudioSyncAction != nil {
+                Button {
+                    Task { @MainActor in showAudioSyncMenu = true }
+                } label: {
+                    Label(progressStore.audioSyncMs == 0
+                            ? "Audio Sync"
+                            : "Audio Sync: \(String(format: "%+d", progressStore.audioSyncMs)) ms",
+                          systemImage: "metronome")
+                }
+            }
+            if !progressStore.subtitleTracks.isEmpty {
+                Button {
+                    Task { @MainActor in showSubtitleTrackMenu = true }
+                } label: {
+                    Label("Subtitle Track", systemImage: "captions.bubble")
+                }
+            }
         } label: {
-            Label("Remove", systemImage: "xmark.circle")
+            Label("Playback", systemImage: "slider.horizontal.below.rectangle")
+        }
+
+        if tile.item.dispatcharrChannelID != nil,
+           let uuid = tile.item.uuid, !uuid.isEmpty {
+            Button {
+                store.pendingStreamSwitchTileID = tile.id
+            } label: {
+                Label("Switch Stream", systemImage: "antenna.radiowaves.left.and.right")
+            }
+        }
+
+        Button {
+            store.pendingSwapTileID = tile.id
+        } label: {
+            Label("Change Channel", systemImage: "arrow.triangle.2.circlepath")
+        }
+
+        Button {
+            store.addSheetRequested = true
+        } label: {
+            Label("Add Channel", systemImage: "plus")
+        }
+
+        let isFullscreen = store.fullscreenTileID == tile.id
+        Button {
+            store.fullscreenTileID = isFullscreen ? nil : tile.id
+        } label: {
+            Label(
+                isFullscreen ? "Exit Full-Screen" : "Full-Screen in Grid",
+                systemImage: isFullscreen
+                    ? "arrow.down.right.and.arrow.up.left"
+                    : "arrow.up.left.and.arrow.down.right"
+            )
+        }
+
+        let isSpotlit = store.spotlightTileID == tile.id
+        Button {
+            store.spotlightTileID = isSpotlit ? nil : tile.id
+            if !isSpotlit { store.fullscreenTileID = nil }
+        } label: {
+            Label(
+                isSpotlit ? "Remove Spotlight" : "Spotlight",
+                systemImage: isSpotlit ? "rectangle.split.3x1" : "rectangle.inset.filled"
+            )
+        }
+
+        let layoutOptions = MultiviewLayoutMode.available(forTileCount: store.tiles.count)
+        Menu {
+            ForEach(layoutOptions) { mode in
+                Button {
+                    debugLog("[MV-LAYOUT] select mode=\(mode.rawValue) was=\(layoutMode.rawValue) tile=\(tile.id) tiles=\(store.tiles.count) spotlight=\(store.spotlightTileID ?? "nil")")
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        layoutMode = mode
+                        if mode != .spotlight { store.spotlightTileID = nil }
+                    }
+                } label: {
+                    Label(mode.displayName,
+                          systemImage: layoutMode == mode ? "checkmark" : mode.symbolName)
+                }
+            }
+        } label: {
+            Label("Layout: \(layoutMode.displayName)", systemImage: "rectangle.3.group")
         }
     }
 
-    /// Pure visual content of the tile (no gestures, no focus
-    /// state) — used as the `Button` label on tvOS. The
-    /// surrounding `Button` + `MultiviewTileButtonStyle` handle
-    /// focus chrome + input; this view just draws video + overlays.
     @ViewBuilder
     private var tileVideoContent: some View {
         ZStack {
@@ -678,14 +778,30 @@ struct MultiviewTileView: View {
             // relocate, audio routing, chrome, focus) are tile-agnostic,
             // so this branch is the entirety of AVPlayer multiview.
             Group {
-                if usesAVPlayerEngine {
+                if !store.tiles.contains(where: { $0.id == tile.id }) {
+                    // ZOMBIE GUARD (field find 2026-08-27, "Continue on
+                    // Live TV" hand-off): exit() empties the tile list
+                    // and resets the engine lock to .mpv in one beat,
+                    // but this view can re-render 1s+ later while the
+                    // tab transition unwinds - and the .mpv default then
+                    // mounted a FRESH mpv instance playing the dead DVR
+                    // URL over the incoming live session. A tile no
+                    // longer in the store mounts NO engine, ever.
+                    Color.black
+                } else if usesAVPlayerEngine {
                     AVPlayerMultiviewTile(
                         tileID: tile.id,
                         streamURL: avPlayerTileURL,
                         headers: avPlayerTileHeaders,
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
+                        channelID: tile.item.id,
+                        isVOD: tile.kind == .vod,
+                        isDVR: tile.kind == .dvr,
+                        resumePositionMs: tile.resumePositionMs,
+                        catchup: tile.catchup,
                         progressStore: progressStore,
+                        pipEnabled: isSoleTile,
                         // A hard AVPlayer failure (codec gate, fatal item
                         // error) downgrades the WHOLE session to mpv,
                         // one-way, so the grid stays pure rather than
@@ -741,6 +857,16 @@ struct MultiviewTileView: View {
             .onChange(of: tile.streamURL) { _, _ in
                 store.registerEngine(engineBadgeLabel, for: tile.id)
             }
+            // 2026-08-25 field find (Sky Sports Main Event UHD screenshots):
+            // a mid-session downgradeToMPV re-rendered the tile as mpv but
+            // the chrome badge kept saying "AVPlayer · Remux TS" -- none of
+            // onAppear / task(id) / streamURL re-fire on an engine change,
+            // so tileEngines held the stale pre-fallback string. Re-register
+            // whenever the session engine actually changes so the badge can
+            // never disagree with the pipeline that is rendering.
+            .onChange(of: store.sessionEngine) { _, _ in
+                store.registerEngine(engineBadgeLabel, for: tile.id)
+            }
             .id(tile.id)
             .onAppear {
                 debugLog("[MV-Tile] onAppear id=\(tile.id) name=\(tile.item.name)")
@@ -770,7 +896,7 @@ struct MultiviewTileView: View {
             // whenever the id changes, regardless of whether
             // onAppear ran — guarantees the registration even
             // when the diff swallows onAppear.
-            .task(id: "\(tile.id)|\(store.progressStoreRegistrationEpoch)") {
+            .task(id: "\(tile.id)|\(tile.streamURL.absoluteString)|\(store.progressStoreRegistrationEpoch)") {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
                 store.registerEngine(engineBadgeLabel, for: tile.id)
@@ -854,6 +980,45 @@ struct MultiviewTileView: View {
                     finishedOverlay
                 }
             }
+
+            // .dvr: proactive "Recording Ending" choice as a SYSTEM dialog.
+            // The custom sibling-overlay card rendered fine but its buttons
+            // could never take Siri-remote focus - the solo player's focus
+            // model owns the remote (screen recording, 2026-08-27), the same
+            // trap that stripped the error card's tvOS buttons. The system
+            // confirmationDialog brings its own focus handling, like every
+            // recordings menu already does.
+            .confirmationDialog(
+                "Recording Ending",
+                isPresented: $dvrEndPromptVisible,
+                titleVisibility: .visible
+            ) {
+                Button {
+                    dvrEndPromptDismissed = true
+                    dvrEndContinueOnLive()
+                } label: {
+                    Label("Continue on Live TV", systemImage: "play.tv")
+                }
+                Button {
+                    dvrEndPromptDismissed = true
+                    DebugLogger.shared.log(
+                        "[MV-Cmd] DVR ending dialog: back to DVR tile=\(tile.id)",
+                        category: "Playback", level: .info)
+                    store.saveVODProgressNow()
+                    PlayerSession.shared.exit()
+                } label: {
+                    Label("Back to DVR", systemImage: "arrow.backward.circle")
+                }
+                Button("Keep Watching", role: .cancel) {
+                    dvrEndPromptDismissed = true
+                }
+            } message: {
+                Text("This recording is about to reach its scheduled end.")
+            }
+            // Clock source: the driver's 0.5s currentMs pump (a per-init
+            // Timer.publish never fires here - the 0.5s re-render replaces
+            // it before its first tick; field find 2026-08-27).
+            .onReceive(progressStore.$currentMs) { _ in checkDVREndApproaching() }
             // Playback-error overlay, also OUTSIDE `tappableRegion` so
             // its Retry / Remove buttons receive taps directly.
             .overlay {
@@ -954,14 +1119,30 @@ struct MultiviewTileView: View {
             // branch the tvOS body uses; the surrounding gestures /
             // chrome / focus are engine-agnostic.
             Group {
-                if usesAVPlayerEngine {
+                if !store.tiles.contains(where: { $0.id == tile.id }) {
+                    // ZOMBIE GUARD (field find 2026-08-27, "Continue on
+                    // Live TV" hand-off): exit() empties the tile list
+                    // and resets the engine lock to .mpv in one beat,
+                    // but this view can re-render 1s+ later while the
+                    // tab transition unwinds - and the .mpv default then
+                    // mounted a FRESH mpv instance playing the dead DVR
+                    // URL over the incoming live session. A tile no
+                    // longer in the store mounts NO engine, ever.
+                    Color.black
+                } else if usesAVPlayerEngine {
                     AVPlayerMultiviewTile(
                         tileID: tile.id,
                         streamURL: avPlayerTileURL,
                         headers: avPlayerTileHeaders,
                         shouldPause: shouldPause,
                         channelName: tile.item.name,
+                        channelID: tile.item.id,
+                        isVOD: tile.kind == .vod,
+                        isDVR: tile.kind == .dvr,
+                        resumePositionMs: tile.resumePositionMs,
+                        catchup: tile.catchup,
                         progressStore: progressStore,
+                        pipEnabled: isSoleTile,
                         onEngineFallback: { _ in store.downgradeToMPV() }
                     )
                 } else {
@@ -1033,11 +1214,16 @@ struct MultiviewTileView: View {
             // v1.6.15.x: same belt + suspenders as the tvOS body —
             // see the matching `.task(id: tile.id)` block in
             // `tvOSBody` for the freeze-after-channel-flip rationale.
-            .task(id: "\(tile.id)|\(store.progressStoreRegistrationEpoch)") {
+            .task(id: "\(tile.id)|\(tile.streamURL.absoluteString)|\(store.progressStoreRegistrationEpoch)") {
                 debugLog("[MV-Tile] task(id) fired id=\(tile.id) name=\(tile.item.name)")
                 store.registerProgressStore(progressStore, for: tile.id)
                 store.registerEngine(engineBadgeLabel, for: tile.id)
                 applyVODIdentityToProgressStore()
+            }
+            // Same stale-badge fix as the tvOS body: re-register on engine
+            // change so a downgradeToMPV updates the chrome badge.
+            .onChange(of: store.sessionEngine) { _, _ in
+                store.registerEngine(engineBadgeLabel, for: tile.id)
             }
 
             // Per-tile corner chrome suppressed at N=1 (container
@@ -1621,6 +1807,37 @@ struct MultiviewTileView: View {
     /// iPad directly. Gated strictly to `.vod`: a `.dvr` tile at its live
     /// edge isn't "finished" and a `.live` tile never finishes, so this
     /// view is only ever mounted for VOD.
+    /// Raise the prompt when BOTH hold: the scheduled end is within 20s
+    /// (or past), and the playhead is within 30s of the recorded edge.
+    private func checkDVREndApproaching() {
+        guard tile.kind == .dvr, !dvrEndPromptVisible, !dvrEndPromptDismissed,
+              let end = tile.dvrScheduledEnd else { return }
+        guard Date() >= end.addingTimeInterval(-20) else { return }
+        let durMs = progressStore.durationMs
+        guard durMs > 0, durMs - progressStore.currentMs < 30_000 else { return }
+        DebugLogger.shared.log(
+            "[MV-Tile] DVR scheduled end imminent (edge viewer); raising prompt tile=\(tile.id)",
+            category: "Playback", level: .info)
+        dvrEndPromptVisible = true
+    }
+
+    /// Hand off to the live channel the recording captures: save + exit
+    /// the session, then ride the Top Shelf deep-link path
+    /// (aerioOpenChannel -> Live TV tab switch + channel playback).
+    private func dvrEndContinueOnLive() {
+        DebugLogger.shared.log(
+            "[MV-Cmd] DVR ending overlay: continue on live channelID=\(tile.dvrChannelID ?? "-") tile=\(tile.id)",
+            category: "Playback", level: .info)
+        let channelID = tile.dvrChannelID
+        store.saveVODProgressNow()
+        PlayerSession.shared.exit()
+        if let channelID, !channelID.isEmpty {
+            NotificationCenter.default.post(
+                name: .aerioOpenChannel, object: nil,
+                userInfo: ["channelID": channelID])
+        }
+    }
+
     @ViewBuilder
     private var finishedOverlay: some View {
         ZStack {
@@ -1721,18 +1938,20 @@ struct MultiviewTileView: View {
     #if !os(tvOS)
     @ViewBuilder
     private var menuButtons: some View {
-        if !isAudioActive {
-            Button("Make Audio") {
-                store.setAudio(to: tile.id)
-            }
-        }
 
         // Swap Stream: re-point THIS tile at another channel through the same
         // picker as Add Stream. The tvOS menu carries the twin of this item;
         // they are separate lists, so an action added to one is NOT on the
         // other (that is exactly how iOS shipped without this at first).
-        Button("Swap Stream") {
+        Button("Change Channel") {
             store.pendingSwapTileID = tile.id
+        }
+
+        if tile.item.dispatcharrChannelID != nil,
+           let uuid = tile.item.uuid, !uuid.isEmpty {
+            Button("Switch Stream") {
+                store.pendingStreamSwitchTileID = tile.id
+            }
         }
 
         let isFullscreen = store.fullscreenTileID == tile.id

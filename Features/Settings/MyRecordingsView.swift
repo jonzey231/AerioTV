@@ -45,6 +45,12 @@ struct MyRecordingsView: View {
         /// player treats it as a growing DVR window (live-edge seek
         /// clamp + LIVE timeline affordance) rather than a fixed file.
         var isDVR: Bool = false
+        /// GH #75: WatchProgress identity + resume seed for the legacy
+        /// (mpv) cover, so it saves and resumes exactly like the
+        /// AVPlayer container path does.
+        var vodID: String? = nil
+        var serverID: String? = nil
+        var resumePositionMs: Int32? = nil
     }
 
     /// v1.6.10: Recordings are scoped to the currently-active playlist
@@ -257,7 +263,11 @@ struct MyRecordingsView: View {
                 title: item.title,
                 headers: item.headers,
                 isLive: false,
-                isDVR: item.isDVR
+                isDVR: item.isDVR,
+                vodID: item.vodID,
+                vodServerID: item.serverID,
+                vodType: "recording",
+                resumePositionMs: item.resumePositionMs
             )
         }
         // Pull Dispatcharr server state whenever the view shows, then
@@ -332,6 +342,15 @@ struct MyRecordingsView: View {
                 } label: {
                     Label("Play", systemImage: "play.fill")
                 }
+                // Tester 2026-08-31: Completed-tab recordings only offered
+                // resume (row tap). fromStart on a completed recording maps
+                // to resume=nil, which plays the fixed file from 0 and does
+                // not touch the saved progress until the 10s saver runs.
+                Button {
+                    playServerRecording(rec, fromStart: true)
+                } label: {
+                    Label("Watch from Beginning", systemImage: "backward.end.fill")
+                }
                 Button {
                     recordingToDelete = rec
                     showDownloadConfirmation = true
@@ -367,7 +386,7 @@ struct MyRecordingsView: View {
                 // jumping to the live edge instead (matches Android's
                 // "Start at Live").
                 Button {
-                    playServerRecording(rec)
+                    playServerRecording(rec, liveEdge: true)
                 } label: {
                     Label("Start at Live", systemImage: "play.fill")
                 }
@@ -523,7 +542,11 @@ struct MyRecordingsView: View {
             // THE BEGINNING (not the live edge). Completed rows already play
             // from the start of the file, so fromStart only matters here for
             // the in-progress HLS route (emits X-Aerio-Start-From-Beginning).
-            playServerRecording(rec, fromStart: rec.isInProgress)
+            // Tap = auto: resume saved progress, else from the beginning
+            // (playServerRecording's isDVR branch owns the decision now;
+            // the old fromStart force predates DVR progress sync and
+            // made every tap discard the saved position).
+            playServerRecording(rec)
         }
     }
 
@@ -566,8 +589,22 @@ struct MyRecordingsView: View {
         // through `PlayerSession.shared.exit()` so the tile store is
         // reset and mode flips to `.idle`.
         PlayerSession.shared.exit()
+        // Hard-off regime: local files ride the container's TS-ingest
+        // path (the legacy cover below is mpv by construction).
+        let vodID = rec.watchProgressID ?? "local-\(rec.id.uuidString)"
+        let resume = WatchProgressManager.getResumePosition(vodID: vodID, serverID: rec.serverID)
+        if !PlaybackFeatureFlags.mpvEngineEnabled {
+            if PlayerSession.shared.beginVOD(
+                title: rec.programTitle, streamURL: url, headers: [:],
+                posterURL: nil, vodID: vodID, serverID: rec.serverID,
+                vodType: "recording", resumePositionMs: resume) {
+                debugLog("Local recording via AVPlayer container: \(rec.id) resume=\(resume.map(String.init) ?? "none")ms")
+                return
+            }
+        }
         playingRecording = PlayingRecording(
-            id: rec.id, url: url, title: rec.programTitle, headers: [:]
+            id: rec.id, url: url, title: rec.programTitle, headers: [:],
+            vodID: vodID, serverID: rec.serverID, resumePositionMs: resume
         )
     }
 
@@ -598,7 +635,8 @@ struct MyRecordingsView: View {
     /// fetches inside the HLS playlist also re-route through
     /// `/api/channels/recordings/<id>/hls/<segment>` so the same
     /// headers carry through.
-    private func playServerRecording(_ rec: Recording, fromStart: Bool = false) {
+    private func playServerRecording(_ rec: Recording, fromStart: Bool = false,
+                                     liveEdge: Bool = false) {
         guard let server = servers.first(where: { $0.id.uuidString == rec.serverID }),
               server.type == .dispatcharrAPI,
               let api = apiForRecording(rec),
@@ -641,8 +679,56 @@ struct MyRecordingsView: View {
         // window: drive the live-edge-aware timeline. Completed recordings
         // and the legacy /file/ fallback are fixed files (plain VOD).
         let isDVR = rec.isInProgress && urlSource == "server-hls"
+        // COMPLETED recordings ride the AVPlayer VOD container (Logan
+        // 2026-08-26): that path carries the 10s WatchProgress saver,
+        // exact-position Back exit, resume, and iCloud sync - none of
+        // which the legacy cover ever had for recordings. The vodID is
+        // a dvr-scoped key so recording progress can never collide with
+        // a movie's numeric id. In-progress recordings (growing HLS
+        // window) keep the legacy DVR cover; beginVOD declining (engine
+        // toggle off with mpv enabled) also falls through unchanged.
+        // Both shapes now ride the AVPlayer container. In-progress
+        // recordings (growing HLS window) go in as `.dvr` tiles: direct
+        // AVPlayer HLS with the driver in DVR-window mode (growing
+        // scrubber, live-edge default). resumePositionMs semantics for
+        // DVR: 0 = explicit from-the-beginning seek, nil = live edge,
+        // >2s = saved resume. beginVOD declining (engine toggle off with
+        // mpv enabled) still falls through to the legacy cover unchanged.
+        let dvrVodID = rec.watchProgressID ?? "dvr-\(remoteID)"
+        let resume: Int32?
+        if fromStart {
+            resume = isDVR ? 0 : nil
+        } else if isDVR, liveEdge {
+            // Menu "Start at Live": no seek at all - AVPlayer's default
+            // for a live-shaped playlist IS the live edge.
+            resume = nil
+        } else if isDVR {
+            // Row tap: resume where the user left off; first watch (no
+            // saved progress) starts from the beginning (Android parity).
+            resume = WatchProgressManager.getResumePosition(vodID: dvrVodID, serverID: rec.serverID) ?? 0
+        } else {
+            resume = WatchProgressManager.getResumePosition(vodID: dvrVodID, serverID: rec.serverID)
+        }
+        // The from-beginning sentinel is an mpv-only in-process signal
+        // (setupMPV consumes and strips it); the AVPlayer path would
+        // send it to the server as a real header. The container gets
+        // resumePositionMs == 0 instead.
+        var containerHeaders = headers
+        containerHeaders.removeValue(forKey: "X-Aerio-Start-From-Beginning")
+        if PlayerSession.shared.beginVOD(
+            title: rec.programTitle, streamURL: url, headers: containerHeaders,
+            posterURL: nil, vodID: dvrVodID, serverID: rec.serverID,
+            vodType: "recording", resumePositionMs: resume,
+            kind: isDVR ? .dvr : .vod,
+            dvrScheduledEnd: isDVR ? rec.effectiveEnd : nil,
+            dvrChannelID: isDVR ? rec.channelID : nil) {
+            debugLog("▶️ \(isDVR ? "In-progress" : "Completed") recording via AVPlayer container: id=\(remoteID) resume=\(resume.map(String.init) ?? "none")ms")
+            return
+        }
         playingRecording = PlayingRecording(
-            id: rec.id, url: url, title: rec.programTitle, headers: headers, isDVR: isDVR
+            id: rec.id, url: url, title: rec.programTitle, headers: headers, isDVR: isDVR,
+            vodID: dvrVodID, serverID: rec.serverID,
+            resumePositionMs: (resume ?? 0) > 0 ? resume : nil
         )
     }
 
@@ -733,6 +819,28 @@ private struct RecordingRow: View {
     /// (e.g. an old completed recording whose programme rolled out of
     /// the current grid window); the synopsis above still renders.
     @State private var epgCategory: String = ""
+
+    /// GH #75: saved playback position for this recording, refreshed
+    /// on every local save and on every iCloud merge so a position
+    /// synced in from another device shows up without leaving the tab.
+    @State private var progress: WatchProgressManager.Snapshot? = nil
+
+    private func refreshProgress() {
+        guard let key = recording.watchProgressID else { progress = nil; return }
+        progress = WatchProgressManager.snapshot(vodID: key, serverID: recording.serverID)
+    }
+
+    /// Short "Resume at 12:34" / "Watched" caption under the bar.
+    private var progressCaption: String? {
+        guard let p = progress else { return nil }
+        if p.isFinished { return "Watched" }
+        guard p.positionMs > 2_000 else { return nil }
+        let total = Int(p.positionMs / 1000)
+        let h = total / 3600, m = (total % 3600) / 60, sec = total % 60
+        let stamp = h > 0 ? String(format: "%d:%02d:%02d", h, m, sec)
+                          : String(format: "%d:%02d", m, sec)
+        return "Resume at \(stamp)"
+    }
 
     /// True when this row should advertise live in-progress playback.
     /// v1.6.23 (Codex UX P2): the row is already tappable to play
@@ -872,9 +980,40 @@ private struct RecordingRow: View {
                     .foregroundColor(.red)
                     .lineLimit(2)
             }
+
+            // GH #75: resume state. A thin bar plus a caption, the same
+            // shape Continue Watching uses for movies; hidden until the
+            // first 10s save lands (locally or via iCloud).
+            if let caption = progressCaption {
+                VStack(alignment: .leading, spacing: 3) {
+                    if let fraction = progress?.fraction, !(progress?.isFinished ?? false) {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.secondary.opacity(0.25))
+                                Capsule().fill(Color.accentPrimary)
+                                    .frame(width: max(2, geo.size.width * fraction))
+                            }
+                        }
+                        .frame(height: 3)
+                    }
+                    Text(caption)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.top, 2)
+            }
         }
         .padding(.vertical, 4)
-        .task(id: recording.id) { resolveEPGCategory() }
+        .task(id: recording.id) {
+            resolveEPGCategory()
+            refreshProgress()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .watchProgressDidChange)) { _ in
+            refreshProgress()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .syncManagerDidUpdateWatchProgress)) { _ in
+            refreshProgress()
+        }
     }
 
     private var statusBadge: some View {
@@ -908,11 +1047,8 @@ private struct RecordingRow: View {
     }
 
     private func formatDateRange(_ start: Date, _ end: Date) -> String {
-        let df = DateFormatter()
-        df.dateStyle = .medium
-        df.timeStyle = .short
-        let tf = DateFormatter()
-        tf.timeStyle = .short
+        let df = ClockFormat.dateAndShortTime()
+        let tf = ClockFormat.short()
         return "\(df.string(from: start)) – \(tf.string(from: end))"
     }
 }

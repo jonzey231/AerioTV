@@ -212,6 +212,8 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
             // discovery churned the browse on every chrome show (Android
             // device test) -- app scope is the cheap, stable choice.
             CompanionClient.shared.startDiscovery()
+            // Lock-screen / Control Center controls while controlling a TV.
+            CompanionNowPlaying.shared.start()
         }
         return true
     }

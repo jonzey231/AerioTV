@@ -133,6 +133,19 @@ final class MultiviewStore: ObservableObject {
     /// the picker closes, whether or not a channel was chosen.
     @Published var pendingSwapTileID: String?
 
+    /// Per-tile Switch Stream (Logan 2026-08-28): the tile whose CHANNEL
+    /// should get the Dispatcharr provider-stream picker (the same
+    /// SwitchStreamView the single player's Options panel hosts). The
+    /// container owns the presentation; the per-tile menu only sets this.
+    /// Distinct from pendingSwapTileID, which re-points the tile at a
+    /// DIFFERENT channel ("Change Channel").
+    @Published var pendingStreamSwitchTileID: String?
+
+    /// Tile context menu's "Add Channel": the menu (deep in the tile
+    /// view) can't reach the container's showAddSheet state, so it
+    /// raises this and the container observes it.
+    @Published var addSheetRequested = false
+
     /// tvOS relocate mode: when non-nil, the container's D-pad
     /// remap kicks in so arrow keys swap `relocatingTileID` with
     /// its neighbor at the pressed direction. Click commits
@@ -201,6 +214,14 @@ final class MultiviewStore: ObservableObject {
     /// life, so no tile or re-begin can flip back. Idempotent.
     func downgradeToMPV() {
         guard sessionEngine.isAVPlayer else { return }
+        // Test flag: with mpv disabled the session NEVER downgrades -
+        // the failing tile shows its own error (failOrFallback) and the
+        // log records what would have been silently rescued.
+        guard PlaybackFeatureFlags.mpvEngineEnabled else {
+            DebugLogger.shared.log("[Engine] AVPlayer failure would downgrade to mpv, but mpv is disabled (dev flag)",
+                                   category: "Playback", level: .warning)
+            return
+        }
         sessionEngine = .mpv
         sessionRouteURL = nil
         DebugLogger.shared.log("[Engine] session downgraded to mpv (AVPlayer failure)",
@@ -364,6 +385,11 @@ final class MultiviewStore: ObservableObject {
         return progressStoresByTileID[id]
     }
 
+    /// Per-tile store lookup for the tile menu panel's transport row.
+    func progressStore(forTile id: String) -> PlayerProgressStore? {
+        progressStoresByTileID[id]
+    }
+
     /// Called by `MultiviewTileView.onAppear`. Replaces any existing
     /// entry for this tile id (e.g. view re-render mid-session).
     /// Only fires `objectWillChange` when the registered tile is the
@@ -415,6 +441,7 @@ final class MultiviewStore: ObservableObject {
     /// LAN services. The app's real streams are always one of these
     /// five, so the allowlist costs nothing in practice.
     private static let allowedSchemes: Set<String> = [
+        "file",   // local-file recordings via the TS-ingest container path
         "http", "https", "rtmp", "rtmps", "rtsp"
     ]
 
@@ -645,7 +672,17 @@ final class MultiviewStore: ObservableObject {
         reset()
         // Catch-up is mpv-only: the aeriocu relay + window re-tune seek
         // model live in the mpv coordinator. Never route to AVPlayer.
-        clearEngineLock()
+        // Catch-up rides the AVPlayer container in the no-mpv regime
+        // (archive TS through the live remux arm + window re-tune
+        // seeks); with mpv enabled the legacy aeriocu relay path keeps
+        // the tile via MultiviewTileView's engine guard.
+        if PlaybackFeatureFlags.avPlayerRemuxTS, !PlaybackFeatureFlags.mpvEngineEnabled {
+            lockEngine(ResolvedEngine(engine: .avPlayerRemuxTS,
+                                      routeURL: pb.url,
+                                      headers: pb.headers))
+        } else {
+            clearEngineLock()
+        }
         let syntheticItem = ChannelDisplayItem(
             id: "catchup-\(pb.id.uuidString)",
             name: pb.title,
@@ -680,6 +717,123 @@ final class MultiviewStore: ObservableObject {
         tiles.count == 1 ? tiles.first(where: { $0.kind == .catchup }) : nil
     }
 
+    /// The sole VOD tile when the session is a single-title VOD play
+    /// (the beginVOD path). The chrome gates its seekable transport
+    /// (timeline band, 30s skips, D-pad scrub) on this, same as
+    /// catch-up: both are fixed-duration seekable programmes.
+    var vodSoloTile: MultiviewTile? {
+        tiles.count == 1 ? tiles.first(where: { $0.kind == .vod || $0.kind == .dvr }) : nil
+    }
+
+    /// Persist the playing VOD's position RIGHT NOW (Back-to-exit path:
+    /// "stop the video at that exact time"). The AVPlayer driver also
+    /// saves every 10s during playback; this closes the last-10s gap so
+    /// Continue Watching resumes exactly where the user left.
+    func saveVODProgressNow() {
+        guard let ps = audioProgressStore, let vodID = ps.vodID, !vodID.isEmpty,
+              ps.durationMs > 0, ps.currentMs > 2_000 else { return }
+        let finished = !ps.isDVRWindow && ps.currentMs > Int32(Double(ps.durationMs) * 0.9)
+        WatchProgressManager.save(
+            vodID: vodID, title: ps.vodTitle ?? "", positionMs: ps.currentMs,
+            durationMs: ps.durationMs, posterURL: ps.vodPosterURL,
+            vodType: ps.vodType, isFinished: finished,
+            streamURL: ps.vodStreamURL, serverID: ps.vodServerID)
+        DebugLogger.shared.log(
+            "[VOD-PROGRESS] exit save at \(ps.currentMs)ms / \(ps.durationMs)ms",
+            category: "Playback", level: .info)
+    }
+
+    // MARK: VOD version switching (container parity with the legacy
+    // PlayerView cover's Switch Version; Logan's ask 2026-08-25).
+
+    /// Provider copies of the playing VOD title, for the Options panel.
+    /// Resume covers resolve these ASYNCHRONOUSLY after launch, so they
+    /// arrive via updateVODVersionContext as often as via beginVOD.
+    @Published private(set) var vodVersionOptions: [VODVersionOption] = []
+    @Published private(set) var vodCurrentVersionID: Int?
+    private var vodVersionSelectionKey: String?
+
+    func setVODVersionContext(options: [VODVersionOption],
+                              selectedID: Int?,
+                              selectionKey: String?) {
+        vodVersionOptions = options
+        vodVersionSelectionKey = selectionKey
+        vodCurrentVersionID = selectedID
+            ?? options.first { $0.url == vodSoloTile?.streamURL }?.id
+    }
+
+    /// Late arrival from an async provider-copies fetch. Ignored unless
+    /// the named title is still the playing solo-VOD tile.
+    func updateVODVersionContext(vodID: String,
+                                 options: [VODVersionOption],
+                                 selectedID: Int?,
+                                 selectionKey: String?) {
+        guard let tile = vodSoloTile, tile.vodID == vodID else { return }
+        setVODVersionContext(options: options, selectedID: selectedID,
+                             selectionKey: selectionKey)
+    }
+
+    /// In-place provider-copy swap, mirroring the mpv path's
+    /// switchVersionAction: stamp the position into explicitResumeMs so
+    /// the restarted tile seeks back, persist the pick, update the
+    /// Continue Watching URL, and replace the tile's streamURL (same
+    /// tile id, so the tile view's streamURL onChange restarts the
+    /// pipeline on the new copy).
+    /// An in-progress recording FINISHED while the user was watching it:
+    /// Dispatcharr stops appending, finalizes, and the /hls/ playlist
+    /// route starts falling through to the SPA's HTML (which AVPlayer
+    /// reports as -12646 "Playlist parse error"). Swap the tile in place
+    /// - same id, so SwiftUI identity and the tile's onChange(streamURL)
+    /// restart carry over, exactly like a version switch - onto the
+    /// completed-file endpoint (/file/) as a plain .vod tile, resuming
+    /// at the position the viewer was at. Returns false when the tile
+    /// isn't a DVR-window tile or the URL isn't the HLS DVR shape (the
+    /// caller then shows its normal error card).
+    func migrateDVRTileToCompletedFile(tileID: String, positionMs: Int32) -> Bool {
+        guard let idx = tiles.firstIndex(where: { $0.id == tileID }),
+              tiles[idx].kind == .dvr else { return false }
+        let tile = tiles[idx]
+        let urlString = tile.streamURL.absoluteString
+        let hlsSuffix = "hls/index.m3u8"
+        guard urlString.hasSuffix(hlsSuffix),
+              let fileURL = URL(string: String(urlString.dropLast(hlsSuffix.count)) + "file/")
+        else { return false }
+        DebugLogger.shared.log(
+            "[MV-Tile] DVR recording finished mid-watch; migrating to /file/ at \(positionMs)ms tileID=\(tileID)",
+            category: "Playback", level: .info)
+        tiles[idx] = MultiviewTile(
+            id: tile.id, item: tile.item, streamURL: fileURL,
+            headers: tile.headers, addedAt: tile.addedAt, kind: .vod,
+            vodID: tile.vodID, vodServerID: tile.vodServerID,
+            vodType: tile.vodType,
+            resumePositionMs: positionMs > 2_000 ? positionMs : nil)
+        return true
+    }
+
+    func switchVODVersion(_ option: VODVersionOption) {
+        guard let tile = vodSoloTile,
+              let idx = tiles.firstIndex(where: { $0.id == tile.id }),
+              option.url != tile.streamURL else { return }
+        let resumeMs = audioProgressStore?.currentMs ?? 0
+        audioProgressStore?.explicitResumeMs = resumeMs > 5_000 ? resumeMs : nil
+        audioProgressStore?.vodStreamURL = option.url.absoluteString
+        vodCurrentVersionID = option.id
+        if let key = vodVersionSelectionKey {
+            VODVersionSelectionStore.setSelection(option.id, forKey: key)
+        }
+        DebugLogger.shared.log(
+            "[VOD-VERSION] container switch to '\(option.label)' at \(resumeMs)ms",
+            category: "Playback", level: .info)
+        var swapped = tile
+        swapped = MultiviewTile(
+            id: tile.id, item: tile.item, streamURL: option.url,
+            headers: tile.headers, addedAt: tile.addedAt, kind: tile.kind,
+            vodID: tile.vodID, vodServerID: tile.vodServerID,
+            vodType: tile.vodType,
+            resumePositionMs: resumeMs > 5_000 ? resumeMs : nil)
+        tiles[idx] = swapped
+    }
+
     @discardableResult
     func addVOD(
         title: String,
@@ -691,7 +845,9 @@ final class MultiviewStore: ObservableObject {
         serverID: String?,
         vodType: String,
         resumePositionMs: Int32? = nil,
-        bypassWarning: Bool = false
+        bypassWarning: Bool = false,
+        dvrScheduledEnd: Date? = nil,
+        dvrChannelID: String? = nil
     ) -> AddResult {
         // Dedup on the VOD id when present. Server recordings have no
         // id, so they can be added more than once (matching channels).
@@ -731,7 +887,9 @@ final class MultiviewStore: ObservableObject {
             vodID: vodID,
             vodServerID: serverID,
             vodType: vodType,
-            resumePositionMs: resumePositionMs
+            resumePositionMs: resumePositionMs,
+            dvrScheduledEnd: dvrScheduledEnd,
+            dvrChannelID: dvrChannelID
         )
         tiles.append(tile)
         if tiles.count == 2 {
@@ -945,6 +1103,9 @@ final class MultiviewStore: ObservableObject {
         // store stays unregistered and the Options panel never mounts.
         progressStoreRegistrationEpoch &+= 1
         tileEngines = [:]
+        vodVersionOptions = []
+        vodCurrentVersionID = nil
+        vodVersionSelectionKey = nil
         // Engine lock is per-session: clear it so the next session
         // re-resolves (and honors a freshly-toggled Developer flag).
         clearEngineLock()

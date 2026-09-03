@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import SwiftData
 import Combine  // Xcode 26.5 requires explicit Combine import for the
@@ -352,6 +353,7 @@ final class GuideStore: ObservableObject {
     @discardableResult
     private func commitPrograms(_ dict: [String: [GuideProgram]],
                                 for serverID: String, source: String) -> Bool {
+        debugLog("[MEM] commitPrograms begin rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         guard displayedServerID == nil || displayedServerID == serverID else {
             debugLog("📺 GuideStore: DISCARDED stale \(source) write for \(serverID.prefix(8)) — guide now displays \(displayedServerID!.prefix(8))")
             return false
@@ -383,6 +385,7 @@ final class GuideStore: ObservableObject {
         _isBatching = false
         commitPrograms(_pendingPrograms, for: serverID, source: source)
         _pendingPrograms = [:]
+        debugLog("[MEM] endBatch done rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
     }
 
     private func cancelBatch() {
@@ -453,6 +456,7 @@ final class GuideStore: ObservableObject {
         let effectiveWindowHours = epgWindowHours > 0 ? epgWindowHours : 36
         // Catch-up: load retained history too, not just the last hour.
         let retentionSecs = GuideStore.activeRetentionSeconds()
+        let channelCount = channels.count
         let refreshMins = UserDefaults.standard.integer(forKey: "bgRefreshIntervalMins")
         let effectiveMins = refreshMins > 0 ? refreshMins : 1440 // 0 means unset → default 24h
         let stalenessThreshold = TimeInterval(effectiveMins * 60)
@@ -506,7 +510,16 @@ final class GuideStore: ObservableObject {
                 }
 
                 let now = Date()
-                let windowStart = now.addingTimeInterval(-retentionSecs)
+                // Huge playlists (Xtream panels with tens of thousands of
+                // channels): the full history window put 322k programmes in
+                // memory and pushed the Apple TV to its jetsam line (1.68 GB
+                // RSS, repeated crashes, 2026-09-03). Cap the IN-MEMORY
+                // history for those; the SwiftData cache keeps the full
+                // retention and catch-up still resolves from the server.
+                let historySecs = channelCount > GuideStore.largePlaylistChannels
+                    ? min(retentionSecs, GuideStore.largePlaylistHistorySecs)
+                    : retentionSecs
+                let windowStart = now.addingTimeInterval(-historySecs)
                 let windowEnd = now.addingTimeInterval(Double(effectiveWindowHours) * 3600)
                 let descriptor = FetchDescriptor<EPGProgram>(
                     predicate: #Predicate<EPGProgram> {
@@ -514,31 +527,45 @@ final class GuideStore: ObservableObject {
                     },
                     sortBy: [SortDescriptor(\.startTime)]
                 )
-                guard let cachedRows = try? bgContext.fetch(descriptor), !cachedRows.isEmpty else {
-                    return (nil, false)
-                }
+                // Paged read (Apple TV, 2026-09-03): fetching 208k rows in
+                // one call materialised every managed object at once and took
+                // the process from 380 MB to 1.8 GB. Pages of 20k rows, each in
+                // its own context so the objects are released as we go.
                 var dict: [String: [GuideProgram]] = [:]
-                for ep in cachedRows {
-                    // v1.7.x: thread `programID` so a fresh-cache cold
-                    // launch on Dispatcharr can still drive the
-                    // ProgramInfoView lazy-load. Pre-v1.7.x rows have
-                    // `programID = nil` (lightweight migration); those
-                    // get repopulated on the next bulk grid refresh.
-                    let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
-                                          description: ep.programDescription,
-                                          start: ep.startTime, end: ep.endTime,
-                                          category: ep.category,
-                                          programID: ep.programID,
-                                          subTitle: ep.subTitle, season: ep.season,
-                                          episode: ep.episode, isNew: ep.isNew,
-                                          isLiveBroadcast: ep.isLiveBroadcast,
-                                          isPremiere: ep.isPremiere, isFinale: ep.isFinale,
-                                          isRepeat: ep.isRepeat)
-                    dict[ep.channelID, default: []].append(gp)
+                var total = 0
+                var newestFetch = Date.distantPast
+                var offset = 0
+                let pageSize = 20_000
+                while true {
+                    var page = descriptor
+                    page.fetchOffset = offset
+                    page.fetchLimit = pageSize
+                    let rows: [EPGProgram] = autoreleasepool {
+                        let pageContext = ModelContext(container)
+                        return (try? pageContext.fetch(page)) ?? []
+                    }
+                    if rows.isEmpty { break }
+                    for ep in rows {
+                        let gp = GuideProgram(channelID: ep.channelID, title: ep.title,
+                                              description: ep.programDescription,
+                                              start: ep.startTime, end: ep.endTime,
+                                              category: ep.category,
+                                              programID: ep.programID,
+                                              subTitle: ep.subTitle, season: ep.season,
+                                              episode: ep.episode, isNew: ep.isNew,
+                                              isLiveBroadcast: ep.isLiveBroadcast,
+                                              isPremiere: ep.isPremiere, isFinale: ep.isFinale,
+                                              isRepeat: ep.isRepeat)
+                        dict[ep.channelID, default: []].append(gp)
+                        if ep.fetchedAt > newestFetch { newestFetch = ep.fetchedAt }
+                    }
+                    total += rows.count
+                    offset += rows.count
+                    if rows.count < pageSize { break }
                 }
-                let newestFetch = cachedRows.map(\.fetchedAt).max() ?? .distantPast
+                guard total > 0 else { return (nil, false) }
                 let isFresh = now.timeIntervalSince(newestFetch) < stalenessThreshold
-                return ((dict, cachedRows.count, isFresh, Int(now.timeIntervalSince(newestFetch))), false)
+                return ((dict, total, isFresh, Int(now.timeIntervalSince(newestFetch))), false)
             }.value
 
             if fetchResult.purgedForEpoch {
@@ -567,7 +594,7 @@ final class GuideStore: ObservableObject {
             // measures the real age of what the user is looking at, not
             // just this session's network activity.
             self.newestFetchedAt = Date().addingTimeInterval(-Double(loaded.newestFetchAgoSec))
-            debugLog("📺 GuideStore.loadFromCache: loaded \(loaded.programCount) programs across \(loaded.dict.count) channels (server \(serverID))")
+            debugLog("📺 GuideStore.loadFromCache: loaded \(loaded.programCount) programs across \(loaded.dict.count) channels (server \(serverID)) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
             debugLog("📺 GuideStore.loadFromCache: newest fetch \(loaded.newestFetchAgoSec)s ago, threshold \(Int(stalenessThreshold))s, fresh=\(loaded.isFresh)")
             self.lastLoadFromCacheResult = (serverID: serverID, isFresh: loaded.isFresh)
             return loaded.isFresh
@@ -687,84 +714,85 @@ final class GuideStore: ObservableObject {
     /// Save current programs to SwiftData for persistent caching.
     /// Runs on a background ModelContext (Task.detached) to avoid blocking the main thread.
     /// For 4000+ programs, a main-thread save can cause a 700ms+ hang.
+    /// Signature of the last guide persisted per server, so a fetch that
+    /// changed nothing (the common Xtream case: the bulk XMLTV yields nothing
+    /// and the per-channel fallback is refused) does not rewrite 322k rows.
+    private var lastSavedSignature: [String: Int] = [:]
+
+    private func programsSignature(_ snapshot: [String: [GuideProgram]]) -> Int {
+        var h = Hasher()
+        var count = 0
+        for (channelID, progs) in snapshot {
+            h.combine(channelID)
+            for gp in progs {
+                h.combine(Int(gp.start.timeIntervalSince1970))
+                h.combine(Int(gp.end.timeIntervalSince1970))
+                h.combine(gp.title.count)
+                count += 1
+            }
+        }
+        h.combine(count)
+        return h.finalize()
+    }
+
     func saveToCache(modelContext: ModelContext, serverID: String) {
         let container = modelContext.container
-        // Snapshot the programs dictionary on the main actor before detaching
         let snapshot = programs
-        // NEVER let an empty guide reach the cache. The save below deletes
-        // every future row for this server before re-inserting, so writing an
-        // empty snapshot destroys a good on-disk guide and leaves the next
-        // launch with nothing to paint. In-memory guards keep `programs` from
-        // being emptied by a failed fetch in the first place; this is the last
-        // line before the data is gone for good.
         guard snapshot.contains(where: { !$0.value.isEmpty }) else {
             debugLog("📺 GuideStore: skipped saveToCache — nothing to save (refusing to blank the cache)")
             return
         }
-        // Catch-up: retained-history horizon (read on the main actor; the
-        // detached save below must not touch ChannelStore). The retention
-        // horizon superseded the old epgWindowHours trim in this save.
+        let signature = programsSignature(snapshot)
+        if lastSavedSignature[serverID] == signature {
+            debugLog("📺 GuideStore.saveToCache: skipped — guide unchanged since the last save (server \(serverID))")
+            return
+        }
+        lastSavedSignature[serverID] = signature
         let retentionSecs = GuideStore.activeRetentionSeconds()
+        let snapshotTotal = snapshot.values.reduce(0) { $0 + $1.count }
+        debugLog("📺 GuideStore.saveToCache: persisting \(snapshotTotal) programs across \(snapshot.count) channels (server \(serverID))")
+        // The in-memory guide IS what was just persisted: do not force the next
+        // guide appearance to re-read the whole cache from disk (that reload
+        // was the 380 MB -> 1.8 GB jump on a 36k-channel panel, 2026-09-03).
 
-        // Invalidate the loadFromCache idempotency cache — a fresh
-        // network fetch is landing, so the next loadFromCache caller
-        // should re-read SwiftData and observe the updated fetchedAt
-        // (which will flip `fresh=true`). Runs synchronously on the
-        // MainActor before the detached save so there's no race
-        // between a subsequent caller and the stale cached verdict.
-        lastLoadFromCacheResult = nil
-
+        // Memory discipline (Apple TV, 36k-channel Xtream panel, 2026-09-03):
+        // the old save fetched every existing row to delete it and inserted
+        // the whole guide into ONE context: three copies of 322k managed
+        // objects, +900 MB, jetsam. Deletes go by predicate without
+        // materialising rows, past-key dedup only fetches the aired window,
+        // and inserts run in chunks with a fresh context per chunk.
         Task.detached(priority: .utility) {
-            let bgContext = ModelContext(container)
-            bgContext.autosaveEnabled = false
-
             let now = Date()
-            // Catch-up: aired programmes are the archive the Watch action
-            // hangs off, so the old ended-1h-ago purge becomes a retention
-            // prune (Edit Server > Guide History, default 7 days).
             let retentionCutoff = now.addingTimeInterval(-retentionSecs)
-            let staleDescriptor = FetchDescriptor<EPGProgram>(
-                predicate: #Predicate<EPGProgram> { $0.endTime < retentionCutoff }
-            )
-            if let stale = try? bgContext.fetch(staleDescriptor) {
-                for s in stale { bgContext.delete(s) }
+            do {
+                let ctx = ModelContext(container)
+                ctx.autosaveEnabled = false
+                try ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> { $0.endTime < retentionCutoff })
+                try ctx.delete(model: EPGProgram.self, where: #Predicate<EPGProgram> { $0.serverID == serverID && $0.endTime > now })
+                try ctx.save()
+            } catch {
+                debugLog("📺 GuideStore.saveToCache: batch delete failed: \(error)")
             }
 
-            // The fresh snapshot owns the PRESENT AND FUTURE outright:
-            // delete that region and re-insert. Already-aired rows are
-            // left in place so history accumulates across refreshes
-            // (feeds trim their own history between refreshes; deleting
-            // the snapshot window used to erase recently-ended shows the
-            // feed no longer carried -- the AerioTV-Android data-loss
-            // bug, fixed there in DB v20 and mirrored here).
-            let existingDescriptor = FetchDescriptor<EPGProgram>(
-                predicate: #Predicate<EPGProgram> {
-                    $0.serverID == serverID && $0.endTime > now
-                }
-            )
-            if let existing = try? bgContext.fetch(existingDescriptor) {
-                for e in existing { bgContext.delete(e) }
-            }
-
-            // Dedup guard for the PAST region: the in-memory snapshot also
-            // carries history (merged from this same cache), so inserting
-            // it blindly would duplicate retained rows. SwiftData has no
-            // unique index, so skip past inserts whose (channel, start)
-            // already exists.
             var pastKeys = Set<String>()
-            let pastDescriptor = FetchDescriptor<EPGProgram>(
-                predicate: #Predicate<EPGProgram> {
-                    $0.serverID == serverID && $0.endTime <= now && $0.endTime > retentionCutoff
-                }
-            )
-            if let pastRows = try? bgContext.fetch(pastDescriptor) {
-                for r in pastRows {
-                    pastKeys.insert("\(r.channelID)|\(Int(r.startTime.timeIntervalSince1970))")
+            autoreleasepool {
+                let ctx = ModelContext(container)
+                let pastDescriptor = FetchDescriptor<EPGProgram>(
+                    predicate: #Predicate<EPGProgram> {
+                        $0.serverID == serverID && $0.endTime <= now && $0.endTime > retentionCutoff
+                    }
+                )
+                if let pastRows = try? ctx.fetch(pastDescriptor) {
+                    for r in pastRows {
+                        pastKeys.insert("\(r.channelID)|\(Int(r.startTime.timeIntervalSince1970))")
+                    }
                 }
             }
 
-            // Insert current programs (future always; past only when new)
             var count = 0
+            var chunk = 0
+            var ctx = ModelContext(container)
+            ctx.autosaveEnabled = false
             for (channelID, progs) in snapshot {
                 for gp in progs {
                     if gp.end <= now {
@@ -773,8 +801,6 @@ final class GuideStore: ObservableObject {
                         if gp.end <= retentionCutoff { continue }
                         pastKeys.insert(key)
                     }
-                    // v1.7.x: persist `programID` so cold-launch
-                    // Program Info lazy-load survives the cache hit.
                     let ep = EPGProgram(channelID: channelID, title: gp.title,
                                         description: gp.description,
                                         startTime: gp.start, endTime: gp.end,
@@ -785,16 +811,22 @@ final class GuideStore: ObservableObject {
                                         isLiveBroadcast: gp.isLiveBroadcast,
                                         isPremiere: gp.isPremiere, isFinale: gp.isFinale,
                                         isRepeat: gp.isRepeat)
-                    bgContext.insert(ep)
+                    ctx.insert(ep)
                     count += 1
+                    chunk += 1
+                    if chunk >= 5_000 {
+                        try? ctx.save()
+                        ctx = ModelContext(container)
+                        ctx.autosaveEnabled = false
+                        chunk = 0
+                    }
                 }
             }
-            try? bgContext.save()
-            debugLog("📺 GuideStore.saveToCache: saved \(count) programs for server \(serverID) (background)")
+            try? ctx.save()
+            debugLog("📺 GuideStore.saveToCache: saved \(count) programs for server \(serverID) (background, chunked) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         }
     }
 
-    /// Phase 1 — instant: build guide rows from data that's already in memory.
     func seedFromChannels(_ channels: [ChannelDisplayItem]) {
         var result: [String: [GuideProgram]] = programs // preserve cached data
         var mutated = false
@@ -862,6 +894,11 @@ final class GuideStore: ObservableObject {
         TimeInterval(activeRetentionDays()) * 86_400
     }
 
+    /// Above this many channels the in-memory guide keeps only
+    /// [largePlaylistHistorySecs] of aired programming (see loadFromCache).
+    nonisolated static let largePlaylistChannels = 5_000
+    nonisolated static let largePlaylistHistorySecs: TimeInterval = 6 * 3_600
+
     func trimExpiredPrograms() {
         let cutoff = Date().addingTimeInterval(-GuideStore.activeRetentionSeconds())
         var trimmed: [String: [GuideProgram]] = [:]
@@ -912,7 +949,7 @@ final class GuideStore: ObservableObject {
             debugLog("📺 GuideStore.fetchUpcoming: no server found")
             return false  // `defer` above resets isLoading
         }
-        debugLog("📺 GuideStore.fetchUpcoming: server=\(server.name), type=\(server.type), channels=\(channels.count)")
+        debugLog("📺 GuideStore.fetchUpcoming: server=\(server.name), type=\(server.type), channels=\(channels.count), rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         beginDisplaying(serverID: server.id.uuidString)
 
         let didRefresh: Bool
@@ -1001,7 +1038,7 @@ final class GuideStore: ObservableObject {
         // Log final state
         let totalPrograms = programs.values.reduce(0) { $0 + $1.count }
         let channelsWithMultiple = programs.values.filter { $0.count > 1 }.count
-        debugLog("📺 GuideStore done: \(totalPrograms) programs across \(programs.count) channels, \(channelsWithMultiple) channels have >1 program")
+        debugLog("📺 GuideStore done: \(totalPrograms) programs across \(programs.count) channels, \(channelsWithMultiple) channels have >1 program, rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         // A real network refresh landed, so the loaded data is current as of
         // `now`. Resets the warm-foreground staleness clock (issue #24).
         // Guarded on display ownership: a fetch whose merge was discarded
@@ -1580,6 +1617,7 @@ final class GuideStore: ObservableObject {
     private func fetchXtream(server: ServerConnection, channels: [ChannelDisplayItem],
                               windowStart: Date, windowEnd: Date,
                               replaceExisting: Bool = false) async -> Bool {
+        debugLog("[MEM] fetchXtream begin rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         let api = XtreamCodesAPI(baseURL: server.effectiveBaseURL,
                                   username: server.username,
                                   password: server.effectivePassword)
@@ -1921,6 +1959,7 @@ final class GuideStore: ObservableObject {
                                     extraTVGIDs: [String: [String]] = [:],
                                     categoryServerID: String,
                                     replaceExisting: Bool = false) async -> Bool {
+        debugLog("[MEM] fetchXMLTVFromURL begin rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         let inFlightKey = InFlightXMLTVKey(
             url: url,
             categoryServerID: categoryServerID,
@@ -2070,7 +2109,7 @@ final class GuideStore: ObservableObject {
                 headers: headers,
                 knownChannelIDs: knownChannelKeys.isEmpty ? nil : knownChannelKeys
             )
-            debugLog("📺 XMLTV fetched OK from \(url.host ?? "?") (headers=\(headers.count), \(parsed.count) programs parsed)")
+            debugLog("📺 XMLTV fetched OK from \(url.host ?? "?") (headers=\(headers.count), \(parsed.count) programs parsed) rss=\(ProcessMetrics.residentSetSizeBytes() / 1_048_576) MB")
         } catch let APIError.serverError(code) {
             // v1.6.22: spell out the most common WAN-deployment
             // root cause when we hit 403. Dispatcharr 0.23.0+
@@ -2169,8 +2208,12 @@ final class GuideStore: ObservableObject {
             // grew beyond what was in the snapshot).
             var touchedChannelIDs = Set<String>()
 
+            // Same in-memory history cap as loadFromCache for huge playlists.
+            let mergeStart = channels.count > GuideStore.largePlaylistChannels
+                ? max(windowStart, Date().addingTimeInterval(-GuideStore.largePlaylistHistorySecs))
+                : windowStart
             for prog in parsed {
-                guard prog.endTime > windowStart && prog.startTime < windowEnd else { continue }
+                guard prog.endTime > mergeStart && prog.startTime < windowEnd else { continue }
                 let key = prog.channelID.lowercased()
                 // v1.7.3 (Issue #20): tvg-id may match multiple
                 // channels (shared-EPG case). `numberToChannelID`
@@ -2934,6 +2977,11 @@ struct EPGGuideView: View {
     /// closes. nil when nothing is focused (GH #72: an empty group has no
     /// cells, and the hold must still open the sidebar).
     var onRequestGroupSidebar: ((String?) -> Void)? = nil
+    /// Single-flight guard for the return-from-player focus restore: the
+    /// notification arrives more than once per minimize (log 2026-08-28:
+    /// two handler runs ~50ms apart), and two overlapping scroll+assert
+    /// tasks ping-pong focus visibly. New trigger cancels the old task.
+    @State private var focusRestoreTask: Task<Void, Never>?
 
     // Observe the shared GuideStore so its loading state is visible to
     // MainTabView's initial-sync loading cover (see HomeView's
@@ -3042,6 +3090,10 @@ struct EPGGuideView: View {
     /// move BEFORE the 0.5s hold recognizes, so the guide scrolls one
     /// step it should not have; the holdBegan handler reverts to this.
     @State private var preRightStepOffset: CGFloat?
+    /// A short Right step deferred to the press RELEASE while the hold-Right
+    /// (close mini) detector is armed, so the hold never scrolls first
+    /// (Logan 2026-09-02). Dropped if the hold recognizes before release.
+    @State private var pendingRightStep = false
     /// When the offset above was last touched; lets repeats of one held press
     /// share a single capture while a fresh gesture re-captures.
     @State private var preRightStepAt = Date.distantPast
@@ -3120,22 +3172,20 @@ struct EPGGuideView: View {
 
     // Timer removed — time indicator uses TimelineView instead (avoids full view invalidation)
 
-    private let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "h:mma"
-        f.amSymbol = "am"
-        f.pmSymbol = "pm"
-        return f
-    }()
-
-    private let shortTimeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "h:mm"
-        return f
-    }()
+    // Time Format setting (Settings > Appearance): cached per mode inside
+    // ClockFormat, so these stay cheap to read per label.
+    private var timeFormatter: DateFormatter { ClockFormat.guideLabel() }
+    private var shortTimeFormatter: DateFormatter { ClockFormat.guideShort() }
 
     var body: some View {
         bodyContent
+            // GH #71: digit keys (attached keyboard, CEC / universal
+            // remote number pad) jump the guide to that channel row
+            // without tuning. Resolves against the list the guide is
+            // showing, so the index fallback matches what is on screen.
+            .channelNumberEntry(scope: .guide,
+                                channels: { channels },
+                                onResolve: { jumpToChannelByNumber($0) })
             .animation(.easeInOut(duration: 0.2), value: stagingToast)
             .animation(.easeInOut(duration: 0.2), value: multiviewStore.isStagingFromGuide)
         #if os(tvOS)
@@ -3399,7 +3449,7 @@ struct EPGGuideView: View {
             .aerioContentUnderTabBar()
             #endif
             .onAppear {
-                visibleProgramWidth = geo.size.width - channelColumnWidth
+                    visibleProgramWidth = geo.size.width - channelColumnWidth
                 // Audit #50: seed the guide-cell recording markers so the red
                 // "set to record" dot renders on first guide open, before any
                 // recording mutation or reconcile has refreshed the snapshot.
@@ -3527,6 +3577,8 @@ struct EPGGuideView: View {
             #endif
             .onReceive(NotificationCenter.default.publisher(for: .guideRightHoldBegan)) { _ in
                 #if os(tvOS)
+                // The hold owns this press: the deferred short step is dropped.
+                pendingRightStep = false
                 // Freeze the EPG timeline for the duration of the close-mini hold.
                 // A safety backstop clears the pin if the release event is missed.
                 rightHoldPinningTimeline = true
@@ -3549,11 +3601,20 @@ struct EPGGuideView: View {
                 }
                 #endif
             }
-            .onReceive(NotificationCenter.default.publisher(for: .guideRightHoldEnded)) { _ in
+            // One receiver for both Right release notifications (a second
+            // `.onReceive` in this chain pushes the type-checker past its
+            // budget): the hold's release unpins the timeline; a short press's
+            // release performs the step that was deferred on press-down.
+            .onReceive(rightReleasePublisher) { note in
                 #if os(tvOS)
-                rightHoldPinningTimeline = false
-                rightHoldSafetyTask?.cancel()
-                rightHoldSafetyTask = nil
+                if note.name == .guideRightHoldEnded {
+                    rightHoldPinningTimeline = false
+                    rightHoldSafetyTask?.cancel()
+                    rightHoldSafetyTask = nil
+                } else if pendingRightStep {
+                    pendingRightStep = false
+                    if !rightHoldPinningTimeline { performRightStep() }
+                }
                 #endif
             }
             // Hold Right to close the corner mini-player. The detector was
@@ -3663,7 +3724,9 @@ struct EPGGuideView: View {
                 // isolated singletons (MultiviewStore, NowPlayingManager)
                 // and @State mutations are accessed safely regardless
                 // of which thread NotificationCenter delivers on.
-                Task { @MainActor in
+                if focusRestoreTask != nil { debugLog("🧭 [GuideFocus] superseding prior restore task") }
+                focusRestoreTask?.cancel()
+                focusRestoreTask = Task { @MainActor in
                     // TEST (branch test/avplayer-hls-engine): the native
                     // AVPlayer cover keeps PlayerSession.mode at .idle,
                     // so without this guard the guide's focus restore
@@ -3687,6 +3750,7 @@ struct EPGGuideView: View {
                     // animation; triggering during it lets tvOS ignore the
                     // reset because the mini tile's frame is still in flux.
                     try? await Task.sleep(nanoseconds: 400_000_000)
+                    if Task.isCancelled { return }
                     // Re-validate against the current (possibly filtered)
                     // channel list AFTER the delay, in case it changed.
                     let valid = candidateID.flatMap { id in
@@ -3704,8 +3768,19 @@ struct EPGGuideView: View {
                     guard let target = resolveFocusProgramID(preferringChannel: valid) else {
                         resetFocus(in: guideFocusNS); return
                     }
+                    // Realize the target row BEFORE resetFocus: reset lands on
+                    // the topmost realized cell, so resetting first produced a
+                    // visible hop to the top and then a walk back down as the
+                    // assert loop corrected it (Logan 2026-08-27, return from
+                    // a retention Jump). With the row on screen,
+                    // prefersDefaultFocus (guideFocusTargetChannelID) lets the
+                    // reset land directly; the loop below is now a backstop.
+                    proxy.scrollTo(valid, anchor: .center)
+                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    if Task.isCancelled { return }
                     resetFocus(in: guideFocusNS)
                     for attempt in 0..<8 {
+                        if Task.isCancelled { return }
                         proxy.scrollTo(valid, anchor: .center)
                         focusedProgramID = target
                         try? await Task.sleep(nanoseconds: 70_000_000)
@@ -3900,6 +3975,13 @@ struct EPGGuideView: View {
     /// Task #188: memoized in GuideStore (cleared on EPG writes) -- the
     /// linear scan ran on every focus change and up to ~5x per horizontal
     /// press via the retarget/assert-retry loops.
+    // Both platforms: the receiver in the view body is unconditional.
+    private var rightReleasePublisher: AnyPublisher<Notification, Never> {
+        NotificationCenter.default.publisher(for: .guideRightHoldEnded)
+            .merge(with: NotificationCenter.default.publisher(for: .guideRightPressEnded))
+            .eraseToAnyPublisher()
+    }
+
     #if os(tvOS)
     /// iOS #66: move focus one viewport of channels up or down, driven by the
     /// CEC channel keys (delivered as pageUp/pageDown). Mirrors the Android
@@ -3942,6 +4024,24 @@ struct EPGGuideView: View {
             // the still-held Right does not scroll the EPG forward after the
             // mini closes. Short/normal Right scrolling is unaffected.
             if rightHoldPinningTimeline { break }
+            // While a corner mini is minimized this Right may be the start of
+            // a hold-to-close: step on the RELEASE (guideRightPressEnded), not
+            // on press-down, so a hold never scrolls the timeline first.
+            if !TVSearchOverlayState.shared.isUp
+                && NowPlayingManager.shared.isActive
+                && NowPlayingManager.shared.isMinimized {
+                pendingRightStep = true
+                break
+            }
+            performRightStep()
+        default:
+            break
+        }
+    }
+
+    /// One half-hour Right step of the timeline plus the focus retarget.
+    private func performRightStep() {
+        do {
             // Capture the pre-gesture offset ONCE per press train. A
             // held Right emits repeats before the hold recognizes;
             // overwriting per step made the hold's restore land one or
@@ -3957,8 +4057,6 @@ struct EPGGuideView: View {
                 horizontalOffset = max(maxHorizontalOffset, horizontalOffset - pixelsPerHour * 0.5)
             }
             retargetFocusToViewportColumn()
-        default:
-            break
         }
     }
 
@@ -4251,6 +4349,18 @@ struct EPGGuideView: View {
     }
 
     // MARK: - Program Row
+    /// Label for a row with no guide cells: the current programme when the
+    /// channel list knows one, else the channel NAME (Logan 2026-09-03:
+    /// Xtream event feeds are named after the event) plus the start time
+    /// parsed out of that name when it carries one.
+    private func emptyRowLabel(for channel: ChannelDisplayItem) -> String {
+        if let p = channel.currentProgram, !p.isEmpty { return p }
+        if let when = EventTimeParser.startLabel(for: channel.name) {
+            return "\(channel.name)  \u{00B7}  \(when)"
+        }
+        return channel.name
+    }
+
     private func programRow(for channel: ChannelDisplayItem) -> some View {
         ZStack(alignment: .leading) {
             Color.appBackground.opacity(0.5)
@@ -4289,12 +4399,12 @@ struct EPGGuideView: View {
                 // the button's frame center hours off-screen and the focus
                 // engine's candidate scoring always preferred the next row.
                 GuideEmptyRowButton(
-                    label: channel.currentProgram ?? "No guide data",
+                    label: emptyRowLabel(for: channel),
                     width: max(1, visibleProgramWidth), rowHeight: rowHeight
                 ) { onSelectChannel(channel) }
                 .offset(x: -horizontalOffset)
                 #else
-                Text(channel.currentProgram ?? "No guide data")
+                Text(emptyRowLabel(for: channel))
                     .font(.labelSmall)
                     .foregroundColor(.textTertiary)
                     .frame(width: max(1, visibleProgramWidth), height: rowHeight, alignment: .center)
@@ -4630,8 +4740,15 @@ struct EPGGuideView: View {
                 // switch - no separate cover, no second player UI.
                 PlayerSession.shared.beginCatchup(pb)
                 #else
-                PlayerSession.shared.exit()
-                playingCatchup = pb
+                // No-mpv regime: iOS rides the same unified container
+                // (AVPlayer catch-up); the legacy mpv cover remains the
+                // mpv-enabled path.
+                if !PlaybackFeatureFlags.mpvEngineEnabled {
+                    PlayerSession.shared.beginCatchup(pb)
+                } else {
+                    PlayerSession.shared.exit()
+                    playingCatchup = pb
+                }
                 #endif
             } catch {
                 catchupErrorMessage = error.localizedDescription
@@ -4652,6 +4769,18 @@ struct EPGGuideView: View {
     /// retry via `.task(id: channels.count)`. The horizontal position
     /// uses the same `xOffset(for:)` date→pixel map the now-line uses,
     /// biased a little right of the channel column.
+    /// GH #71: number-entry target. Rides the same stash + notification
+    /// path the EPG-search jump uses (`consumePendingGuideJump` owns the
+    /// scroll, and on tvOS the focus hand-off to the row's airing
+    /// programme), aimed at "now" so the row lands on the live column.
+    @MainActor
+    private func jumpToChannelByNumber(_ item: ChannelDisplayItem) {
+        let defaults = UserDefaults.standard
+        defaults.set(item.id, forKey: "guideJumpChannelID")
+        defaults.set(Date().timeIntervalSince1970, forKey: "guideJumpStart")
+        NotificationCenter.default.post(name: .aerioJumpToGuideProgram, object: nil)
+    }
+
     @MainActor
     private func consumePendingGuideJump(proxy: ScrollViewProxy) {
         let defaults = UserDefaults.standard
@@ -4715,9 +4844,11 @@ private struct GuideCornerClock: View {
     let fontSize: CGFloat
     @State private var now = Date()
     private let tick = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
+    /// Re-render when the Time Format setting changes.
+    @AppStorage(ClockFormat.defaultsKey) private var timeFormatMode = "system"
 
     var body: some View {
-        Text(now, format: .dateTime.hour().minute())
+        Text(ClockFormat.short().string(from: now))
             .font(.system(size: fontSize, weight: .semibold).monospacedDigit())
             .foregroundColor(.textPrimary)
             .lineLimit(1)
@@ -4921,6 +5052,14 @@ private struct GuideProgramButton: View {
     // Access ReminderManager directly — @ObservedObject on a singleton
     // would invalidate every program cell whenever any reminder changes.
     private var reminderManager: ReminderManager { .shared }
+    /// Observed (unlike reminderManager above) so a cancelled/deleted
+    /// recording drops its red dot without waiting for the guide's next
+    /// onAppear (field report 2026-08-27: dot survived a DVR-tab delete
+    /// because a tab switch never re-fires onAppear). Cheap in practice:
+    /// the marker snapshot is equatable-gated to publish only on REAL
+    /// changes, and the coordinator's other @Published fields
+    /// (activeSessions/isRecording) mutate only on local-session events.
+    @ObservedObject private var recordingCoordinator = RecordingCoordinator.shared
     /// v1.7.x: observed so the cell-level tap behavior swaps between
     /// "play this channel" and "toggle in multiview pile" when the
     /// `isStagingFromGuide` flag flips, and so the long-press menu
@@ -4957,6 +5096,8 @@ private struct GuideProgramButton: View {
     #endif
 
     @AppStorage(epgBadgesVisibleKey) private var showEpgBadges = true
+    /// Settings > Appearance > Channel List > Show Program Subtitles.
+    @AppStorage("ui.showProgramSubtitles") private var showProgramSubtitles = true
 
     private var hasReminder: Bool {
         isFutureProgram && reminderManager.hasReminder(forKey: reminderKey)
@@ -4966,8 +5107,9 @@ private struct GuideProgramButton: View {
     /// recording. Read directly off RecordingCoordinator's marker snapshot,
     /// same non-observing pattern as `reminderManager` above.
     private var hasScheduledRecording: Bool {
-        RecordingCoordinator.shared.hasGuideRecordingMarker(
+        recordingCoordinator.hasGuideRecordingMarker(
             channelID: channelItem.id, channelName: channelItem.name,
+            dispatcharrChannelID: channelItem.dispatcharrChannelID,
             title: prog.title, start: prog.start, end: prog.end)
     }
 
@@ -5061,7 +5203,8 @@ private struct GuideProgramButton: View {
             // distinguishes same-title back-to-back programmes. Guarded against
             // the Dispatcharr paths that promote subTitle into description when
             // <desc> is empty, so it never double-prints.
-            if let sub = prog.subTitle, !sub.isEmpty, sub != prog.title, sub != prog.description {
+            if showProgramSubtitles, let sub = prog.subTitle,
+               !EPGText.subtitleIsRedundant(sub, title: prog.title, description: prog.description) {
                 Text(sub)
                     .font(.system(size: 18))
                     .italic()

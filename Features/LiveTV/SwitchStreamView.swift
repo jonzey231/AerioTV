@@ -19,6 +19,93 @@ import SwiftData
 /// `.sheet` on iOS and a `.fullScreenCover` on tvOS — the same modality
 /// the Record sheet uses. Self-contained: resolves the active server and
 /// builds its own `DispatcharrAPI`, mirroring `RecordProgramSheet`.
+// MARK: - Headless switch flow (shared)
+//
+// The per-tile multiview menu presents streams as a NATIVE
+// confirmationDialog (Logan 2026-08-28: the custom picker was a visual
+// break there) but must reuse THIS file's battle-tested switch
+// machinery - change_stream + confirm-by-/status.url polling (stream_id
+// is unreliable on the event path), the owner-worker connection-pool
+// caveat, and the reprime notification. Keep flow changes here so both
+// presentations stay in lockstep.
+enum SwitchStreamFlow {
+    struct Option: Identifiable {
+        let id: Int
+        let title: String
+        let isCurrent: Bool
+    }
+
+    @MainActor
+    static func makeAPI(server: ServerConnection?) -> DispatcharrAPI? {
+        guard let server, server.type == .dispatcharrAPI else { return nil }
+        return DispatcharrAPI(baseURL: server.effectiveBaseURL,
+                              auth: .apiKey(server.effectiveApiKey),
+                              userAgent: server.effectiveUserAgent,
+                              authMode: server.dispatcharrHeaderMode)
+    }
+
+    @MainActor
+    static func loadOptions(server: ServerConnection?,
+                            channelID: Int,
+                            channelUUID: String) async -> [Option]? {
+        guard let api = makeAPI(server: server) else { return nil }
+        do {
+            async let streamsTask = api.getChannelStreams(channelID: channelID)
+            async let accountsTask = api.getM3UAccounts()
+            async let statusTask = api.getChannelStatus(channelUUID: channelUUID)
+            let fetched = try await streamsTask
+            let accounts = (try? await accountsTask) ?? []
+            let currentID = (try? await statusTask)?.streamID
+            var names: [Int: String] = [:]
+            for a in accounts { if let n = a.name, !n.isEmpty { names[a.id] = n } }
+            return fetched.map { st in
+                let source = st.m3uAccount.flatMap { names[$0] }
+                let base = st.name?.trimmingCharacters(in: .whitespaces) ?? "Stream \(st.id)"
+                let title = source.map { "\(base)  ·  \($0)" } ?? base
+                return Option(id: st.id, title: title, isCurrent: st.id == currentID)
+            }
+        } catch {
+            debugLog("[SwitchStream] flow load failed (id=\(channelID)): \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    /// change_stream + confirm; posts the reprime on success. Mirrors
+    /// SwitchStreamView.select()/confirmSwitch() - see those comments.
+    @MainActor
+    static func performSwitch(server: ServerConnection?,
+                              channelUUID: String,
+                              streamID: Int) async -> Bool {
+        guard let api = makeAPI(server: server) else { return false }
+        do {
+            let targetURL = try await api.changeStream(channelUUID: channelUUID, streamID: streamID)
+            if let targetURL, !targetURL.isEmpty {
+                let deadline = Date().addingTimeInterval(6)
+                var confirmed = false
+                while Date() < deadline {
+                    if let status = try? await api.getChannelStatus(channelUUID: channelUUID),
+                       let liveURL = status.url, liveURL == targetURL {
+                        confirmed = true
+                        break
+                    }
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                }
+                guard confirmed else {
+                    debugLog("[SwitchStream] flow: change_stream not confirmed (stream=\(streamID))")
+                    return false
+                }
+            }
+            NotificationCenter.default.post(name: .switchStreamReprime, object: nil,
+                                            userInfo: ["uuid": channelUUID])
+            debugLog("[SwitchStream] flow: confirmed switch to stream id=\(streamID)")
+            return true
+        } catch {
+            debugLog("[SwitchStream] flow: change_stream failed (stream=\(streamID)): \(error.localizedDescription)")
+            return false
+        }
+    }
+}
+
 struct SwitchStreamView: View {
     @Environment(\.dismiss) private var dismiss
     @Query private var servers: [ServerConnection]

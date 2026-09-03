@@ -337,6 +337,29 @@ final class PressCatcherView: UIView {
 /// `.overlay`/`.background` view is not) — and is removed when the guide leaves
 /// the hierarchy, so it lives only while the guide (which mounts this view) is
 /// shown. Modeled on PlayerView's `.leftArrow` long-press recognizer.
+
+/// Guards the window-level d-pad hold recognizers against PHANTOM presses
+/// synthesized around scene reactivation: backgrounding the app with the
+/// guide up and reopening it fired a leftArrow long-press nobody made,
+/// which opened the group sidebar (Logan, ATV, 2026-08-27). A real user
+/// hold within the first second of activation is vanishingly rare and
+/// costs one retry.
+@MainActor
+final class SceneActivationClock {
+    static let shared = SceneActivationClock()
+    private(set) var lastBecameActiveAt = Date.distantPast
+    private init() {
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification,
+            object: nil, queue: .main) { [weak self] _ in
+            self?.lastBecameActiveAt = Date()
+        }
+    }
+    var recentlyActivated: Bool {
+        Date().timeIntervalSince(lastBecameActiveAt) < 1.0
+    }
+}
+
 struct GuideLongPressLeftDetector: UIViewRepresentable {
     /// Hold threshold. 0.5s for the mapped guide action; sidebar mode passes
     /// ~0.32s so the docked group menu opens snappily (the Android twin moved
@@ -425,6 +448,10 @@ final class LeftHoldHostView: UIView, UIGestureRecognizerDelegate {
     @objc private func handleLeftHold(_ gr: UILongPressGestureRecognizer) {
         switch gr.state {
         case .began:
+            guard !SceneActivationClock.shared.recentlyActivated else {
+                debugLog("[TV-Press] suppressed phantom hold-Left (scene just activated)")
+                return
+            }
             onLeftHoldBegan?()
         case .ended, .cancelled, .failed:
             onLeftHoldEnded?()
@@ -494,6 +521,7 @@ final class RightHoldHostView: UIView, UIGestureRecognizerDelegate {
     var isEnabled: Bool = false
     private weak var attachedWindow: UIWindow?
     private var recognizer: UILongPressGestureRecognizer?
+    private var pressTracker: UILongPressGestureRecognizer?
     /// True from the recognized Right-hold (.began) until release. While true the
     /// recognizer is not detached even after `isEnabled` flips false (mini closed),
     /// so the `.ended` release still fires and unpins the guide timeline.
@@ -524,9 +552,30 @@ final class RightHoldHostView: UIView, UIGestureRecognizerDelegate {
             lp.delegate = self
             window.addGestureRecognizer(lp)
             recognizer = lp
+            // Zero-duration tracker: reports the RELEASE of any Right press
+            // while armed, so the guide can defer its short Right step to the
+            // release instead of stepping on press-down and reverting when the
+            // hold recognizes (Logan 2026-09-02, Android twin pans on release).
+            let tracker = UILongPressGestureRecognizer(target: self, action: #selector(handleRightPress(_:)))
+            tracker.allowedPressTypes = [NSNumber(value: UIPress.PressType.rightArrow.rawValue)]
+            tracker.minimumPressDuration = 0
+            tracker.cancelsTouchesInView = false
+            tracker.delaysTouchesBegan = false
+            tracker.delegate = self
+            window.addGestureRecognizer(tracker)
+            pressTracker = tracker
             attachedWindow = window
         } else if !isEnabled && !holdInProgress {
             detachRecognizer()
+        }
+    }
+
+    @objc private func handleRightPress(_ gr: UILongPressGestureRecognizer) {
+        switch gr.state {
+        case .ended, .cancelled, .failed:
+            NotificationCenter.default.post(name: .guideRightPressEnded, object: nil)
+        default:
+            break
         }
     }
 
@@ -534,13 +583,19 @@ final class RightHoldHostView: UIView, UIGestureRecognizerDelegate {
         holdSafety?.cancel(); holdSafety = nil
         holdInProgress = false
         if let r = recognizer { attachedWindow?.removeGestureRecognizer(r) }
+        if let t = pressTracker { attachedWindow?.removeGestureRecognizer(t) }
         recognizer = nil
+        pressTracker = nil
         attachedWindow = nil
     }
 
     @objc private func handleRightHold(_ gr: UILongPressGestureRecognizer) {
         switch gr.state {
         case .began:
+            guard !SceneActivationClock.shared.recentlyActivated else {
+                debugLog("[TV-Press] suppressed phantom hold-Right (scene just activated)")
+                return
+            }
             holdInProgress = true
             // Backstop in case the release event is missed, so the timeline pin
             // (and this recognizer) are never left stuck. Mirrors the hold-Left pin.

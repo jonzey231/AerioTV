@@ -114,6 +114,7 @@
 		81A5CE2643A02F7A26B2B5CF /* AddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F00 /* AddServerView.swift */; };
 		81A5CE2643A02F7A26B2B5D0 /* ServerSyncView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1061A736638618318B7F01 /* ServerSyncView.swift */; };
 		84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D60A8F073408CAFD075C499C /* MyRecordingsView.swift */; };
+		C3E892D1A5B2461D966BE39C /* OpenSourceLicensesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5B3F5A632594CCFBF0752AA /* OpenSourceLicensesView.swift */; };
 		84D478A2A84F9A8A2FEE8EA4 /* PlaylistModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA33B18A62A3411B6425B661 /* PlaylistModels.swift */; };
 		85F0D65172F55DFA1D3DA20B /* Pods-Aerio_iOS-frameworks.sh in Resources */ = {isa = PBXBuildFile; fileRef = CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */; };
 		867C07594A685FB5BDCA5BB3 /* SplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5044B9CD69C05A6836588548 /* SplashView.swift */; };
@@ -129,10 +130,21 @@
 		9F9A37C29E5E186E323737C0 /* ChannelListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94C2469FCAE37105952DCC28 /* ChannelListView.swift */; };
 		A133DDDD4444DDDD4444DDDD /* MPMediaItemArtworkShim.m in Sources */ = {isa = PBXBuildFile; fileRef = A111BBBB2222BBBB2222BBBB /* MPMediaItemArtworkShim.m */; };
 		A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
+		A1B2C3D4E5F67890C10C0001 /* ClockFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */; };
+		A1B2C3D4E5F67890E7A70001 /* EventTimeParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */; };
+		A1B2C3D4E5F67890C0A90001 /* CompanionNowPlaying.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C0A90003 /* CompanionNowPlaying.swift */; };
+		A1B2C3D4E5F67890C4A10001 /* ChannelNumberEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C4A10003 /* ChannelNumberEntry.swift */; };
+		A1B2C3D4E5F67890E9600010 /* EPGText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E9600030 /* EPGText.swift */; };
+		A1B2C3D4E5F67890E9600020 /* EPGText.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E9600030 /* EPGText.swift */; };
+		A1B2C3D4E5F67890C10C0002 /* ClockFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */; };
+		A1B2C3D4E5F67890E7A70002 /* EventTimeParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */; };
+		A1B2C3D4E5F67890C0A90002 /* CompanionNowPlaying.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C0A90003 /* CompanionNowPlaying.swift */; };
+		A1B2C3D4E5F67890C4A10002 /* ChannelNumberEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890C4A10003 /* ChannelNumberEntry.swift */; };
 		A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */; };
 		A2B3C4D5E6F7A80901CD3456 /* EPGGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1A2B3C4D5E6F70890AB1234 /* EPGGuideView.swift */; };
 		A41AA69146981E08D85F8439 /* DeviceInfo.swift in Sources */ = {isa = PBXBuildFile; fileRef = 62C0C151EAA6394D32003217 /* DeviceInfo.swift */; };
 		A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D60A8F073408CAFD075C499C /* MyRecordingsView.swift */; };
+		DEA6C277657F4CC08322169F /* OpenSourceLicensesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5B3F5A632594CCFBF0752AA /* OpenSourceLicensesView.swift */; };
 		A8E322C238A7CE0B55BA3D4D /* AerioApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08B4D4146C07D85405524861 /* AerioApp.swift */; };
 		ACAEB60B5118B283BF99CF16 /* PlaylistImportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5CEFA9081ED5FC944CB0895 /* PlaylistImportViews.swift */; };
 		AD422FFDD689840F76B8A238 /* MediaServerAPIs.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CCC4F9DC3019E15FB84C5DC /* MediaServerAPIs.swift */; };
@@ -239,6 +251,10 @@
 		MPV0000000000000000000003 /* MPVPlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MPV0000000000000000000001 /* MPVPlayerView.swift */; };
 		TSR0000000000000000000002 /* TSHLSRemuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = TSR0000000000000000000001 /* TSHLSRemuxer.swift */; };
 		TSR0000000000000000000003 /* TSHLSRemuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = TSR0000000000000000000001 /* TSHLSRemuxer.swift */; };
+		LIVEFMP4000000000000000A2 /* LiveFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = LIVEFMP4000000000000000A1 /* LiveFMP4Remuxer.swift */; };
+		LIVEFMP4000000000000000A3 /* LiveFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = LIVEFMP4000000000000000A1 /* LiveFMP4Remuxer.swift */; };
+		MKVFMP40000000000000000B2 /* MKVFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = MKVFMP40000000000000000B1 /* MKVFMP4Remuxer.swift */; };
+		MKVFMP40000000000000000B3 /* MKVFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = MKVFMP40000000000000000B1 /* MKVFMP4Remuxer.swift */; };
 		CASTHLSPROXY0000000000A1 /* CastFMP4Remuxer.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F1 /* CastFMP4Remuxer.swift */; };
 		CASTHLSPROXY0000000000A2 /* CastAudioTranscoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F2 /* CastAudioTranscoder.swift */; };
 		CASTHLSPROXY0000000000A3 /* CastHLSSegmentStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTHLSPROXY0000000000F3 /* CastHLSSegmentStore.swift */; };
@@ -368,6 +384,11 @@
 		A122CCCC3333CCCC3333CCCC /* Aerio-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Aerio-Bridging-Header.h"; sourceTree = "<group>"; };
 		A1AB8E6203108C63D4696924 /* Aerio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aerio.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TVPressGesture.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ClockFormat.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EventTimeParser.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F67890C0A90003 /* CompanionNowPlaying.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CompanionNowPlaying.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F67890C4A10003 /* ChannelNumberEntry.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ChannelNumberEntry.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F67890E9600030 /* EPGText.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = EPGText.swift; sourceTree = "<group>"; };
 		A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MultiviewSettingsView.swift; sourceTree = "<group>"; };
 		A1ECC0FF1ED1ABF1ED1ABF11 /* Aerio.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Aerio.xcconfig; path = Config/Aerio.xcconfig; sourceTree = "<group>"; };
 		A2FD31E5C3E95D9CF2F53F4E /* Aerio.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Aerio.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -414,6 +435,7 @@
 		CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
 		CF54ACE468E89E4259601D31 /* Pods-Aerio_iOS-frameworks.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "Pods-Aerio_iOS-frameworks.sh"; sourceTree = "<group>"; };
 		D60A8F073408CAFD075C499C /* MyRecordingsView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MyRecordingsView.swift; sourceTree = "<group>"; };
+		C5B3F5A632594CCFBF0752AA /* OpenSourceLicensesView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = OpenSourceLicensesView.swift; sourceTree = "<group>"; };
 		D6A98EC87AA5F1A5CD0E5606 /* Info.plist */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.plist.xml; name = Info.plist; path = TopShelfExtension/Info.plist; sourceTree = "<group>"; };
 		D7F92D3C38870E339A9AF7A9 /* Pods-Aerio_tvOS.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Aerio_tvOS.debug.xcconfig"; path = "Target Support Files/Pods-Aerio_tvOS/Pods-Aerio_tvOS.debug.xcconfig"; sourceTree = "<group>"; };
 		D833EF1D35443BFAEE1480B5 /* TVShowsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVShowsView.swift; sourceTree = "<group>"; };
@@ -436,6 +458,8 @@
 		TEMP_93A8788A-B3FC-4682-A311-70E1AC4EB5A0 /* Aerio.xcworkspace */ = {isa = PBXFileReference; lastKnownFileType = wrapper.workspace; path = Aerio.xcworkspace; sourceTree = "<group>"; };
 		TEMP_EAAD0E1C-0C7B-498B-B3D7-2FBDAAD805A1 /* Podfile.lock */ = {isa = PBXFileReference; lastKnownFileType = text; path = Podfile.lock; sourceTree = "<group>"; };
 		TSR0000000000000000000001 /* TSHLSRemuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TSHLSRemuxer.swift; sourceTree = "<group>"; };
+		LIVEFMP4000000000000000A1 /* LiveFMP4Remuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveFMP4Remuxer.swift; sourceTree = "<group>"; };
+		MKVFMP40000000000000000B1 /* MKVFMP4Remuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MKVFMP4Remuxer.swift; sourceTree = "<group>"; };
 		CASTHLSPROXY0000000000F1 /* CastFMP4Remuxer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastFMP4Remuxer.swift; sourceTree = "<group>"; };
 		CASTHLSPROXY0000000000F2 /* CastAudioTranscoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastAudioTranscoder.swift; sourceTree = "<group>"; };
 		CASTHLSPROXY0000000000F3 /* CastHLSSegmentStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CastHLSSegmentStore.swift; sourceTree = "<group>"; };
@@ -806,6 +830,7 @@
 				0F8881E8167215B8659F5BB1 /* DVRSettingsView.swift */,
 				0F8881E8167215B8659F5BC1 /* SyncCategoriesSettingsView.swift */,
 				D60A8F073408CAFD075C499C /* MyRecordingsView.swift */,
+				C5B3F5A632594CCFBF0752AA /* OpenSourceLicensesView.swift */,
 				A1BB2C3D4E5F60789ABCDEF1 /* MultiviewSettingsView.swift */,
 				FBD7CF084FC76AA3221F862B /* AppBehaviorsSettingsView.swift */,
 				F4EDC8A716508CF4B4F1D2DA /* RemoteControlSettingsView.swift */,
@@ -886,6 +911,8 @@
 				CARPLAYSCENE000000000001 /* CarPlaySceneDelegate.swift */,
 				MPV0000000000000000000001 /* MPVPlayerView.swift */,
 				TSR0000000000000000000001 /* TSHLSRemuxer.swift */,
+				LIVEFMP4000000000000000A1 /* LiveFMP4Remuxer.swift */,
+				MKVFMP40000000000000000B1 /* MKVFMP4Remuxer.swift */,
 				08B4D4146C07D85405524861 /* AerioApp.swift */,
 				880CEF808ABBA8AD9BC13BEC /* AerioSplash.mp4 */,
 				CE7BE368EE5FEB9A71732DC5 /* PlayerView.swift */,
@@ -911,6 +938,11 @@
 				B1124AFB90B57F17E01204AA /* LocalRecordingSession.swift */,
 				EDDCE00B1213614CFF8EFF4D /* RecordingCoordinator.swift */,
 				A1B2C3D4E5F67890CAFE0003 /* TVPressGesture.swift */,
+				A1B2C3D4E5F67890C10C0003 /* ClockFormat.swift */,
+				A1B2C3D4E5F67890E7A70003 /* EventTimeParser.swift */,
+				A1B2C3D4E5F67890C0A90003 /* CompanionNowPlaying.swift */,
+				A1B2C3D4E5F67890C4A10003 /* ChannelNumberEntry.swift */,
+				A1B2C3D4E5F67890E9600030 /* EPGText.swift */,
 				B1C2D3E4F5A67890ACE00003 /* AudioSessionRefCount.swift */,
 				B1C2D3E4F5A67890ACE00006 /* IdleTimerRefCount.swift */,
 				B1C2D3E4F5A67890ACE00009 /* PlayerSession.swift */,
@@ -1199,6 +1231,8 @@
 				CARPLAYSCENE000000000002 /* CarPlaySceneDelegate.swift in Sources */,
 				MPV0000000000000000000002 /* MPVPlayerView.swift in Sources */,
 				TSR0000000000000000000002 /* TSHLSRemuxer.swift in Sources */,
+				LIVEFMP4000000000000000A2 /* LiveFMP4Remuxer.swift in Sources */,
+				MKVFMP40000000000000000B2 /* MKVFMP4Remuxer.swift in Sources */,
 				CASTHLSPROXY0000000000A1 /* CastFMP4Remuxer.swift in Sources */,
 				CASTHLSPROXY0000000000A2 /* CastAudioTranscoder.swift in Sources */,
 				CASTHLSPROXY0000000000A3 /* CastHLSSegmentStore.swift in Sources */,
@@ -1252,6 +1286,11 @@
 				29753AC438E1C47769F2874E /* LocalRecordingSession.swift in Sources */,
 				27D98B92D7EF236E6D5C868D /* RecordingCoordinator.swift in Sources */,
 				A1B2C3D4E5F67890CAFE0001 /* TVPressGesture.swift in Sources */,
+				A1B2C3D4E5F67890C10C0001 /* ClockFormat.swift in Sources */,
+				A1B2C3D4E5F67890E7A70001 /* EventTimeParser.swift in Sources */,
+				A1B2C3D4E5F67890C0A90001 /* CompanionNowPlaying.swift in Sources */,
+				A1B2C3D4E5F67890C4A10001 /* ChannelNumberEntry.swift in Sources */,
+				A1B2C3D4E5F67890E9600010 /* EPGText.swift in Sources */,
 				B1C2D3E4F5A67890ACE00001 /* AudioSessionRefCount.swift in Sources */,
 				B1C2D3E4F5A67890ACE0A002 /* RemoteInputLogger.swift in Sources */,
 				B1C2D3E4F5A67890ACE00004 /* IdleTimerRefCount.swift in Sources */,
@@ -1276,6 +1315,7 @@
 				2B56157F30BF5B5840F399C1 /* SyncCategoriesSettingsView.swift in Sources */,
 				B1AABBCC2DD3EE4FF5006001 /* MultiviewSettingsView.swift in Sources */,
 				A54DA5DC88870F51A2B370F7 /* MyRecordingsView.swift in Sources */,
+				DEA6C277657F4CC08322169F /* OpenSourceLicensesView.swift in Sources */,
 				07E14C8EB5000227467B6BA9 /* RecordProgramSheet.swift in Sources */,
 				F11A12EB07CB46158E23B73E /* ProgramInfoView.swift in Sources */,
 				6308BAE1E16965A379092AE8 /* OnDemandView.swift in Sources */,
@@ -1313,6 +1353,8 @@
 				CARPLAYSCENE000000000003 /* CarPlaySceneDelegate.swift in Sources */,
 				MPV0000000000000000000003 /* MPVPlayerView.swift in Sources */,
 				TSR0000000000000000000003 /* TSHLSRemuxer.swift in Sources */,
+				LIVEFMP4000000000000000A3 /* LiveFMP4Remuxer.swift in Sources */,
+				MKVFMP40000000000000000B3 /* MKVFMP4Remuxer.swift in Sources */,
 				CASTHLSPROXY0000000000B1 /* CastFMP4Remuxer.swift in Sources */,
 				CASTHLSPROXY0000000000B2 /* CastAudioTranscoder.swift in Sources */,
 				CASTHLSPROXY0000000000B3 /* CastHLSSegmentStore.swift in Sources */,
@@ -1366,6 +1408,11 @@
 				D50E5DFBD9787AC5568AD17A /* LocalRecordingSession.swift in Sources */,
 				8B904D93666027F576A836E1 /* RecordingCoordinator.swift in Sources */,
 				A1B2C3D4E5F67890CAFE0002 /* TVPressGesture.swift in Sources */,
+				A1B2C3D4E5F67890C10C0002 /* ClockFormat.swift in Sources */,
+				A1B2C3D4E5F67890E7A70002 /* EventTimeParser.swift in Sources */,
+				A1B2C3D4E5F67890C0A90002 /* CompanionNowPlaying.swift in Sources */,
+				A1B2C3D4E5F67890C4A10002 /* ChannelNumberEntry.swift in Sources */,
+				A1B2C3D4E5F67890E9600020 /* EPGText.swift in Sources */,
 				B1C2D3E4F5A67890ACE00002 /* AudioSessionRefCount.swift in Sources */,
 				B1C2D3E4F5A67890ACE0A003 /* RemoteInputLogger.swift in Sources */,
 				B1C2D3E4F5A67890ACE00005 /* IdleTimerRefCount.swift in Sources */,
@@ -1390,6 +1437,7 @@
 				38A0E8B8ABBD862D5012AC52 /* SyncCategoriesSettingsView.swift in Sources */,
 				B1AABBCC2DD3EE4FF5006002 /* MultiviewSettingsView.swift in Sources */,
 				84338D2727DB3CF6EF963AD3 /* MyRecordingsView.swift in Sources */,
+				C3E892D1A5B2461D966BE39C /* OpenSourceLicensesView.swift in Sources */,
 				115F4DEA73DE0C5C49817C04 /* RecordProgramSheet.swift in Sources */,
 				B997EA931623455C8A931F29 /* ProgramInfoView.swift in Sources */,
 				C9E919E28B95CE15179BBCBD /* OnDemandView.swift in Sources */,
@@ -1457,7 +1505,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.8.20;
+				MARKETING_VERSION = 1.8.27;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio.TopShelf";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1511,7 +1559,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.8.20;
+				MARKETING_VERSION = 1.8.27;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio";
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1537,7 +1585,7 @@
 					"@executable_path/Frameworks",
 					"@executable_path/../../Frameworks",
 				);
-				MARKETING_VERSION = 1.8.20;
+				MARKETING_VERSION = 1.8.27;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio.TopShelf";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = appletvos;
@@ -1607,7 +1655,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.8.20;
+				MARKETING_VERSION = 1.8.27;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1639,7 +1687,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.8.20;
+				MARKETING_VERSION = 1.8.27;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_ID_PREFIX).aerio";
 				PRODUCT_NAME = Aerio;
 				SDKROOT = iphoneos;
@@ -1710,7 +1758,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
-				MARKETING_VERSION = 1.8.20;
+				MARKETING_VERSION = 1.8.27;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

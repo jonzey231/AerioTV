@@ -251,8 +251,30 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var vodServerID: String?    // Server UUID (for Continue Watching auth headers)
     var vodType: String = "movie"  // "movie" or "episode" — determines which Continue Watching section
     var explicitResumeMs: Int32?  // Pre-loaded resume position (bypasses DB lookup)
+    /// True for an in-progress server recording played over its live-style
+    /// HLS playlist (no ENDLIST, nothing rolls off). The AVPlayer driver
+    /// then grows `durationMs` from `seekableTimeRanges` every tick so the
+    /// chrome renders a growing scrubber instead of the scrubber-less live
+    /// layout, and periodic WatchProgress saves never mark it finished
+    /// (position rides the live edge, which would trip the >90% rule).
+    var isDVRWindow: Bool = false
     /// Closure set by the Coordinator; call with a target position in ms to seek.
     var seekAction: ((Int32) -> Void)?
+    /// Jump to the live edge (AVPlayer driver only; nil on mpv). Used by
+    /// the multiview tile Playback submenu's "Return to Live".
+    var seekToLiveAction: (() -> Void)?
+    /// Seek RELATIVE to the current player position (delta ms, clamped
+    /// to the seekable range). The tile Playback submenu uses this for
+    /// every kind - live tiles never pump currentMs, so absolute
+    /// currentMs math seeked to nonsense there (field find 2026-08-28).
+    var relativeSeekAction: ((Int32) -> Void)?
+    /// True while a LIVE stream's playhead sits well behind its seekable
+    /// edge. STABLE by construction: set on pause, cleared only by
+    /// Return to Live (seekToLiveAction) or a fresh item. The old
+    /// tick-derived version flapped - the edge distance sawtooths a few
+    /// seconds per arriving segment, and a threshold inside that
+    /// oscillation made the menu item blink (field 2026-08-28).
+    @Published var behindLiveEdge = false
     /// Closure set by the Coordinator; replays the current VOD file from
     /// the start. Distinct from `seekAction` because a VOD that has hit
     /// EOF has `playbackEnded` latched, which the normal seek guard
@@ -275,6 +297,13 @@ final class PlayerProgressStore: ObservableObject, @unchecked Sendable {
     var setAudioTrackAction: ((Int) -> Void)?
     /// Closure set by the Coordinator; sets subtitle track (0 = off).
     var setSubtitleTrackAction: ((Int) -> Void)?
+    /// True while something OTHER than the AVPlayer driver owns the
+    /// store's subtitle fields (the MKV tile's harvested-cue overlay).
+    /// AVPlayerProgressDriver.populateTracks must then leave
+    /// subtitleTracks / currentSubtitleTrackID / setSubtitleTrackAction
+    /// alone - the legible group is empty on that path and would wipe
+    /// the picker. Cleared by the tile's stop().
+    var externalSubtitleControl = false
     /// v1.8.17 VOD version switching (Dispatcharr Direct Connect): the
     /// pre-built provider-copy URLs for the playing item (empty = row
     /// hidden), which copy is currently playing, and the Coordinator's
@@ -801,6 +830,29 @@ private struct PlayerRootView: View {
     }
 
     var body: some View {
+        // GH #71: digit-key channel entry on the legacy live player,
+        // tuning through the same `tuneDirect` path the overlays use.
+        playerBody
+            .channelNumberEntry(
+                scope: .player,
+                isActive: numberEntryActive,
+                channels: { ChannelStore.shared.channels },
+                onResolve: { item in NowPlayingManager.shared.tuneDirect(item) }
+            )
+    }
+
+    /// Live and full-screen. The observed `nowPlayingManager` is tvOS
+    /// only; the legacy iOS player has no mini-player state to gate on.
+    private var numberEntryActive: Bool {
+        #if os(tvOS)
+        return isLive && !nowPlayingManager.isMinimized
+        #else
+        return isLive
+        #endif
+    }
+
+    @ViewBuilder
+    private var playerBody: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
@@ -1330,6 +1382,8 @@ private struct PlayerRootView: View {
     ///   Chrome visible      → minimize (or dismiss).
     ///   Chrome hidden       → reveal chrome.
     private func handleBackPress(source: String) {
+        // GH #71: Menu while digits are buffered only clears the entry.
+        if ChannelNumberEntry.shared.cancel() { return }
         debugLog("🎮 [PV-BACK] handleBackPress source=\(source) | showTVOptions=\(showTVOptions) showControls=\(showControls) isMinimized=\(nowPlayingManager.isMinimized) tvFocus=\(String(describing: tvFocus))")
         if showTVOptions {
             debugLog("🎮 [PV-BACK]   → branch: panel-open → close panel")
@@ -3886,6 +3940,22 @@ final class AVPlayerProgressDriver {
     private let player: AVPlayer
     private let store: PlayerProgressStore
     private let isLive: Bool
+    /// Live Rewind (AVPlayer container): true when the tile's remuxer is
+    /// spilling a rewind window and the playlist advertises all of it.
+    /// The time observer then pumps currentMs in the chrome's tail-
+    /// relative domain and mirrors the window into LiveRewindEngine's
+    /// external-window state; seekAction remaps tail-domain targets onto
+    /// the playlist timeline. Set by the tile right after driver init.
+    var liveRewindWindowActive = false
+    /// Catch-up mode: non-nil = the programme-relative ms offset of the
+    /// CURRENT archive window (each re-tune restarts the item clock at
+    /// ~0, mpv parity). currentMs = base + player position, and the
+    /// duration observer never overwrites the pinned EPG duration.
+    var catchupBaseMs: Int32?
+    /// Natural live-edge distance (seconds, EMA) while NOT timeshifting:
+    /// the AVPlayer live cushion self-builds (measured up to ~36s on a
+    /// starved feed), so "behind live" can only be declared beyond it.
+    private var naturalEdgeOffset: Double = 4
     /// Host-provided sink for aspect changes (the overlay has no handle
     /// to the AVPlayerLayer; the host owns it and applies the gravity).
     private let applyGravity: (AVLayerVideoGravity) -> Void
@@ -3904,6 +3974,12 @@ final class AVPlayerProgressDriver {
     private var legibleGroup: AVMediaSelectionGroup?
     private var audioOptionByID: [Int: AVMediaSelectionOption] = [:]
     private var subtitleOptionByID: [Int: AVMediaSelectionOption] = [:]
+    /// One-shot per item: subtitles start OFF (mpv parity). Without the
+    /// explicit deselect, the device's system caption preference
+    /// auto-enables a legible rendition (field find 2026-08-26,
+    /// "subtitles seem to be enabled by default"). The flag keeps a
+    /// re-fired ready callback from clobbering a user's later pick.
+    private var appliedDefaultSubtitleOff = false
 
     // MARK: instrumentation ([AVP-STREAM]/[AVP-PERF], mpv-path parity)
     /// Wall clock at construction; time-to-first-frame is measured from
@@ -3920,6 +3996,13 @@ final class AVPlayerProgressDriver {
     /// mpv vo_drops/dec_drops deltas.
     private var lastStallCount = 0
     private var lastDroppedFrames = 0
+    /// Throttle for the periodic VOD WatchProgress save (10s cadence,
+    /// matching the mpv coordinator's saver).
+    private var lastProgressSaveAt = Date.distantPast
+    /// Presentation-freeze detector state (see the 1s sampler below).
+    private var freezeLastMediaTime = CMTime.invalid
+    private var freezeConsecutiveTicks = 0
+    private var freezeTimer: Timer?
     /// Escalation sink for a fatal/persistent stream error the errorLog
     /// surfaces (e.g. a rejected playlist or a failed blocking reload that
     /// never throws to `status`). The host wires this to its engine fallback.
@@ -3928,8 +4011,12 @@ final class AVPlayerProgressDriver {
     private var firedUnrecoverable = false
     /// Consecutive non-fatal fetch errors (segment/part 404, playlist not
     /// received); escalated only after a few strikes so a single transient
-    /// blip does not bounce the engine.
+    /// blip does not bounce the engine. Reset whenever the clock advances.
     private var softErrorCount = 0
+    /// First moment the live playlist went stale (-12888 "unchanged")
+    /// with no recovery since. Cleared on any clock advance; a 60s hold
+    /// = the feed is genuinely dead and a re-tune is warranted.
+    private var playlistStaleSince: Date?
 
     init(player: AVPlayer,
          store: PlayerProgressStore,
@@ -3956,9 +4043,47 @@ final class AVPlayerProgressDriver {
         let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
         timeObserver = player.addPeriodicTimeObserver(
             forInterval: interval, queue: .main) { [weak self] time in
-            guard let self, !self.isLive else { return }
+            guard let self else { return }
+            if self.isLive {
+                self.pumpLiveRewindWindow(time)
+                return
+            }
             let secs = time.seconds
-            if secs.isFinite { self.store.currentMs = Int32(secs * 1000) }
+            if secs.isFinite {
+                if let base = self.catchupBaseMs {
+                    self.store.currentMs = base + Int32(secs * 1000)
+                } else {
+                    self.store.currentMs = Int32(secs * 1000)
+                }
+            }
+            // DVR window: the playlist is live-shaped (no ENDLIST) so the
+            // duration observer below never fires. The seekable range end
+            // IS the recorded-so-far duration; monotonic max() so playlist
+            // reload jitter can't shrink the timeline under the scrubber.
+            if self.store.isDVRWindow,
+               let range = self.player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
+                let endSecs = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                if endSecs.isFinite, endSecs > 0 {
+                    self.store.durationMs = max(self.store.durationMs, Int32(endSecs * 1000))
+                }
+            }
+            // Periodic WatchProgress save, mpv-coordinator parity: the
+            // container AVPlayer path previously never persisted VOD
+            // position at all - Continue Watching only advanced when the
+            // legacy cover or a version switch happened to write it
+            // (found 2026-08-26 wiring the Back-exits-VOD behavior).
+            if let vodID = self.store.vodID, !vodID.isEmpty,
+               self.store.durationMs > 0, self.store.currentMs > 2_000,
+               Date().timeIntervalSince(self.lastProgressSaveAt) >= 10 {
+                self.lastProgressSaveAt = Date()
+                let s = self.store
+                WatchProgressManager.save(
+                    vodID: vodID, title: s.vodTitle ?? "",
+                    positionMs: s.currentMs, durationMs: s.durationMs,
+                    posterURL: s.vodPosterURL, vodType: s.vodType,
+                    isFinished: !s.isDVRWindow && s.currentMs > Int32(Double(s.durationMs) * 0.9),
+                    streamURL: s.vodStreamURL, serverID: s.vodServerID)
+            }
         }
 
         // Play/pause. timeControlStatus is authoritative (covers the
@@ -3969,6 +4094,14 @@ final class AVPlayerProgressDriver {
             Task { @MainActor in
                 guard let self else { return }
                 self.store.isPaused = (p.timeControlStatus == .paused)
+                // A paused live stream is behind its edge by definition,
+                // and the periodic observer stops ticking while paused -
+                // without this the Playback submenu's Return to Live
+                // vanished the moment ticks stopped (field 2026-08-28).
+                if self.isLive, p.timeControlStatus == .paused,
+                   !self.store.behindLiveEdge {
+                    self.store.behindLiveEdge = true
+                }
                 switch p.timeControlStatus {
                 case .playing:
                     if !self.firstPlayLogged {
@@ -4007,15 +4140,19 @@ final class AVPlayerProgressDriver {
         itemObservations.forEach { $0.invalidate() }
         itemObservations.removeAll()
         // New item gets a fresh error-escalation budget.
+        if isLive { store.behindLiveEdge = false }
         softErrorCount = 0
+        playlistStaleSince = nil
         firedUnrecoverable = false
+        appliedDefaultSubtitleOff = false
         guard let item else { return }
         // Duration (VOD / seekable). Live HLS reports indefinite, which
         // we leave as durationMs == 0.
         itemObservations.append(item.observe(\.duration, options: [.initial, .new]) {
             [weak self] i, _ in
             let d = i.duration
-            guard let self, !self.isLive, d.isNumeric, d.seconds.isFinite, d.seconds > 0 else { return }
+            guard let self, !self.isLive, self.catchupBaseMs == nil,
+                  d.isNumeric, d.seconds.isFinite, d.seconds > 0 else { return }
             Task { @MainActor in self.store.durationMs = Int32(d.seconds * 1000) }
         })
         // Ready -> populate tracks + stream info once metadata exists.
@@ -4098,10 +4235,34 @@ final class AVPlayerProgressDriver {
                     self.onUnrecoverable?(reason)
                     return
                 }
+                // "Playlist File unchanged for longer than 1.5 * target
+                // duration" is AVPlayer's ADVISORY during a feed gap - the
+                // upstream starves 7-14s routinely (Sky), the playlist is
+                // legitimately static, and AVPlayer resumes by itself when
+                // the next segment lands. Counting three of these as fatal
+                // is what caused the 15-minute blackout-and-retune cycle
+                // (2026-08-26, Logan: "unacceptable in a production app") -
+                // the escalation KILLED sessions that would have healed in
+                // seconds. Only a playlist frozen for a full 60s means the
+                // feed is truly dead, and THAT is when a re-tune helps.
+                if code == -12888, (event.errorComment ?? "").contains("unchanged") {
+                    let since = self.playlistStaleSince ?? Date()
+                    self.playlistStaleSince = since
+                    let stale = Date().timeIntervalSince(since)
+                    if stale > 60 {
+                        self.firedUnrecoverable = true
+                        let reason = "live feed stalled (playlist unchanged \(Int(stale))s)"
+                        debugLog("[AVP-STREAM] \(reason); escalating to engine fallback")
+                        self.onUnrecoverable?(reason)
+                    }
+                    return
+                }
                 // Persistent (not one-off) fetch failures: playlist not received
                 // (-12888) or segment/part 404 out of the window (-12938).
                 // Escalate only after 3 strikes so a single transient blip does
-                // not bounce the engine.
+                // not bounce the engine. (The counter resets whenever the
+                // clock advances - see freezeTick - so sporadic singles
+                // can never accumulate to a kill across a long session.)
                 if code == -12888 || code == -12938 {
                     self.softErrorCount += 1
                     if self.softErrorCount >= 3 {
@@ -4129,15 +4290,106 @@ final class AVPlayerProgressDriver {
         perfTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.logPerfSummary() }
         }
+        // Presentation-freeze detector (2026-08-25 UHD soak): the user saw
+        // freezing while the access log swore stalls=0 and dropped=0 for
+        // the whole session. A held frame with the playback clock still
+        // advancing is invisible to every counter above; a held CLOCK
+        // while timeControlStatus stays .playing is invisible too, because
+        // numberOfStalls only counts re-buffer events AVPlayer itself
+        // declares. Sample currentTime once a second and call out any
+        // second where it moved less than a quarter of the way while the
+        // player claims to be playing.
+        freezeTimer?.invalidate()
+        freezeTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.freezeTick() }
+        }
+    }
+
+    private func freezeTick() {
+        guard let item = player.currentItem else {
+            freezeLastMediaTime = .invalid
+            freezeConsecutiveTicks = 0
+            return
+        }
+        // 14:26 field freeze (2026-08-25): AVPlayer sat in
+        // .waitingToPlayAtSpecifiedRate at the live edge - not a stall to
+        // the access log, no PlaybackStalled notification, and the first
+        // version of this guard MUTED the detector on exactly that state.
+        // A waiting player IS the freeze; log it with the system's reason.
+        if player.timeControlStatus != .playing {
+            if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+                freezeConsecutiveTicks += 1
+                let reason = player.reasonForWaitingToPlay?.rawValue ?? "unknown"
+                debugLog(String(format:
+                    "[AVP-FREEZE] waiting (%@) tick %d, pos %.1fs",
+                    reason, freezeConsecutiveTicks, item.currentTime().seconds))
+            } else {
+                freezeConsecutiveTicks = 0 // paused deliberately
+            }
+            freezeLastMediaTime = .invalid
+            return
+        }
+        let now = item.currentTime()
+        defer { freezeLastMediaTime = now }
+        guard freezeLastMediaTime.isValid else {
+            if freezeConsecutiveTicks > 0 {
+                debugLog(String(format:
+                    "[AVP-FREEZE] recovered after ~%ds frozen (pos %.1fs)",
+                    freezeConsecutiveTicks, now.seconds))
+                freezeConsecutiveTicks = 0
+            }
+            return
+        }
+        let advanced = (now - freezeLastMediaTime).seconds
+        if advanced < 0.25 {
+            freezeConsecutiveTicks += 1
+            debugLog(String(format:
+                "[AVP-FREEZE] clock advanced %.3fs in the last 1.0s wall (tick %d, pos %.1fs, status playing)",
+                advanced, freezeConsecutiveTicks, now.seconds))
+        } else {
+            // Healthy playback resets the escalation ledgers: a stale
+            // playlist that recovered, or sporadic fetch blips hours
+            // apart, must never accumulate into an engine bounce.
+            playlistStaleSince = nil
+            softErrorCount = 0
+            if freezeConsecutiveTicks > 0 {
+                debugLog(String(format:
+                    "[AVP-FREEZE] recovered after ~%ds frozen (pos %.1fs)",
+                    freezeConsecutiveTicks, now.seconds))
+                freezeConsecutiveTicks = 0
+            }
+        }
     }
 
     private func logPerfSummary() {
         guard let event = player.currentItem?.accessLog()?.events.last else { return }
+        // Live-edge cushion: seekable end minus playhead. The number that
+        // sizes the anti-freeze cushion; freezes should correlate with
+        // this hitting ~0.
+        var edge = -1.0
+        if let item = player.currentItem,
+           let range = item.seekableTimeRanges.last?.timeRangeValue {
+            edge = (range.end - item.currentTime()).seconds
+        }
         let stalls = event.numberOfStalls
         let dropped = event.numberOfDroppedVideoFrames
         let dStalls = max(0, stalls - lastStallCount)
         let dDropped = max(0, dropped - lastDroppedFrames)
         lastStallCount = stalls
+        // Adaptive hold-back (Xtream soak, 2026-09-03): the remux serves 2 s
+        // segments and AVPlayer's default hold-back parks playback ~5 s from
+        // the edge, which a bursty source runs dry about every 90 s. Each
+        // NEW stall on a live stream moves the target 3 s further back
+        // (6 -> 9 -> ... -> 18); a steady stream never pays the latency.
+        if isLive, dStalls > 0, let item = player.currentItem {
+            let current = item.configuredTimeOffsetFromLive.seconds
+            let base = current.isFinite && current > 0 ? current : 6
+            let next = min(18.0, base + 3)
+            if next > base + 0.5 {
+                item.configuredTimeOffsetFromLive = CMTime(seconds: next, preferredTimescale: 600)
+                debugLog(String(format: "[AVP-HOLDBACK] stall #%d: live edge offset %.0fs -> %.0fs", stalls, base, next))
+            }
+        }
         lastDroppedFrames = dropped
         // rss rides this tick deliberately. Apple #74 was an ingest buffer
         // growing at exactly the stream bitrate for the whole session, and
@@ -4145,11 +4397,16 @@ final class AVPlayerProgressDriver {
         // logged per tune and on an OS memory warning, by which point the
         // jetsam kill is minutes away. A periodic sample turns that class of
         // leak into a visible slope in any ordinary debug log.
+        // "fp" = phys_footprint, the number jetsam actually judges
+        // (ProcessMetrics returns it despite the legacy "rss" name).
+        // Labeled honestly since the 2026-08-26 kill analysis compared
+        // this line against the JetsamEvent pages and needed the
+        // distinction.
         debugLog(String(format:
-            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d rss=%.1f MB",
+            "[AVP-PERF] stalls:+%d(%d) dropped:+%d(%d) observed=%.0fkbps switches=%d edge=%.1fs fp=%.1f MB",
             dStalls, stalls, dDropped, dropped,
             event.observedBitrate / 1000,
-            event.numberOfMediaRequests,
+            event.numberOfMediaRequests, edge,
             Double(ProcessMetrics.residentSetSizeBytes()) / 1_048_576.0))
     }
 
@@ -4194,18 +4451,31 @@ final class AVPlayerProgressDriver {
         }
 
         store.audioTracks = audioTracks
-        store.subtitleTracks = subtitleTracks
-        // Reflect the current selection back as the highlighted id.
-        let selection = item.currentMediaSelection
-        if let audioGroup, let selected = selection.selectedMediaOption(in: audioGroup),
+        debugLog("[AVP-TRACKS] audible=\(audioTracks.count) [\(audioTracks.map(\.title).joined(separator: ", "))] legible=\(subtitleTracks.count) externalSubs=\(store.externalSubtitleControl)")
+        if !store.externalSubtitleControl {
+            store.subtitleTracks = subtitleTracks
+            // Subtitles start OFF, once per item: the system caption
+            // preference otherwise auto-selects a legible rendition.
+            if let subGroup, !appliedDefaultSubtitleOff {
+                appliedDefaultSubtitleOff = true
+                if item.currentMediaSelection.selectedMediaOption(in: subGroup) != nil {
+                    item.select(nil, in: subGroup)
+                    debugLog("[AVP-TRACKS] deselected auto-enabled subtitles (default off)")
+                }
+            }
+            if let subGroup,
+               let selected = item.currentMediaSelection.selectedMediaOption(in: subGroup),
+               let id = subtitleOptionByID.first(where: { $0.value == selected })?.key {
+                store.currentSubtitleTrackID = id
+            } else {
+                store.currentSubtitleTrackID = 0
+            }
+        }
+        // Reflect the current audio selection back as the highlighted id.
+        if let audioGroup,
+           let selected = item.currentMediaSelection.selectedMediaOption(in: audioGroup),
            let id = audioOptionByID.first(where: { $0.value == selected })?.key {
             store.currentAudioTrackID = id
-        }
-        if let subGroup, let selected = selection.selectedMediaOption(in: subGroup),
-           let id = subtitleOptionByID.first(where: { $0.value == selected })?.key {
-            store.currentSubtitleTrackID = id
-        } else {
-            store.currentSubtitleTrackID = 0
         }
     }
 
@@ -4286,15 +4556,103 @@ final class AVPlayerProgressDriver {
     }
 
     /// Intents OUT: store command closures -> AVPlayer.
+    /// Live Rewind window pump (0.5s, main queue): currentMs = playhead
+    /// offset from the seekable start (the chrome domain), engine
+    /// window = wall-clock mapping of the seekable range, timeshifting
+    /// derived from edge distance vs the learned natural cushion.
+    private func pumpLiveRewindWindow(_ time: CMTime) {
+        guard liveRewindWindowActive,
+              let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
+        let start = CMTimeGetSeconds(range.start)
+        let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+        let cur = time.seconds
+        guard start.isFinite, end.isFinite, cur.isFinite, end > start else { return }
+        store.currentMs = Int32(max(0, (cur - start) * 1000))
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        let windowMs = Int64((end - start) * 1000)
+        let engine = LiveRewindEngine.shared
+        Task { @MainActor in
+            engine.updateExternalWindow(tailWallMs: now - windowMs, headWallMs: now)
+        }
+        // Edge accounting. While at the edge and actually playing, learn
+        // the natural cushion; flip to timeshifting only when the
+        // playhead falls well beyond it (a pause, or a seek the action
+        // below already flagged). Rejoining within cushion+5s flips back.
+        let behind = end - cur
+        if engine.timeshifting {
+            if behind < naturalEdgeOffset + 5 { engine.noteTimeshifting(false) }
+        } else if player.timeControlStatus == .playing {
+            if behind < naturalEdgeOffset + 10 {
+                naturalEdgeOffset = naturalEdgeOffset * 0.95 + behind * 0.05
+            } else if behind > naturalEdgeOffset + 20 {
+                engine.noteTimeshifting(true)
+            }
+        }
+    }
+
     private func wireCommands(_ player: AVPlayer) {
         store.togglePauseAction = { [weak player] in
             guard let player else { return }
             if player.timeControlStatus == .paused { player.play() } else { player.pause() }
         }
-        store.seekAction = { [weak player] ms in
+        store.seekAction = { [weak self, weak player] ms in
             guard let player else { return }
+            // Live Rewind: incoming targets are ms from the window tail
+            // (the chrome domain). Map onto the playlist timeline;
+            // within 5s of the head = rejoin live.
+            if let self, self.isLive, self.liveRewindWindowActive {
+                guard let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
+                let start = CMTimeGetSeconds(range.start)
+                let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                guard start.isFinite, end.isFinite, end > start else { return }
+                let window = end - start
+                let target = min(max(0, Double(ms) / 1000.0), window)
+                if target >= window - 5 {
+                    LiveRewindEngine.shared.noteTimeshifting(false)
+                    debugLog("[AVP-REWIND] seek -> live edge")
+                    player.seek(to: CMTime(seconds: max(start, end - 1), preferredTimescale: 600))
+                } else {
+                    LiveRewindEngine.shared.noteTimeshifting(true)
+                    debugLog("[AVP-REWIND] seek -> \(Int(target))s into \(Int(window))s window")
+                    player.seek(to: CMTime(seconds: start + target, preferredTimescale: 600),
+                                toleranceBefore: .zero, toleranceAfter: .zero)
+                }
+                self.store.currentMs = Int32(target * 1000)
+                if player.timeControlStatus == .paused { player.play() }
+                return
+            }
             let target = CMTime(value: CMTimeValue(ms), timescale: 1000)
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        store.relativeSeekAction = { [weak self, weak player] deltaMs in
+            guard let player else { return }
+            // Solo-player parity: a deliberate backward seek on live
+            // latches behind-the-edge (their timeshifting flag does the
+            // same on aeriots re-tunes); Return to Live clears it.
+            if let self, self.isLive, deltaMs < 0 {
+                self.store.behindLiveEdge = true
+            }
+            let cur = player.currentTime().seconds
+            guard cur.isFinite else { return }
+            var target = cur + Double(deltaMs) / 1000.0
+            if let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue {
+                let start = CMTimeGetSeconds(range.start)
+                let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+                if start.isFinite, end.isFinite {
+                    target = min(max(target, start), max(start, end - 1))
+                }
+            }
+            player.seek(to: CMTime(seconds: target, preferredTimescale: 600),
+                        toleranceBefore: .zero, toleranceAfter: .zero)
+        }
+        store.seekToLiveAction = { [weak self, weak player] in
+            guard let player,
+                  let range = player.currentItem?.seekableTimeRanges.last?.timeRangeValue else { return }
+            self?.store.behindLiveEdge = false
+            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+            guard end.isFinite else { return }
+            player.seek(to: CMTime(seconds: max(0, end - 1), preferredTimescale: 600))
+            if player.timeControlStatus == .paused { player.play() }
         }
         store.replayFromStartAction = { [weak player] in
             guard let player else { return }
@@ -4330,12 +4688,16 @@ final class AVPlayerProgressDriver {
         itemNotificationTokens.removeAll()
         perfTimer?.invalidate()
         perfTimer = nil
+        freezeTimer?.invalidate()
+        freezeTimer = nil
         aspectCancellable?.cancel()
         aspectCancellable = nil
         onUnrecoverable = nil
         // Drop the closures so a torn-down driver can't drive a dead player.
         store.togglePauseAction = nil
         store.seekAction = nil
+        store.relativeSeekAction = nil
+        store.seekToLiveAction = nil
         store.replayFromStartAction = nil
         store.setSpeedAction = nil
         store.setAudioTrackAction = nil
@@ -4727,7 +5089,8 @@ struct NativeHLSPlayerScreen: View {
                 // could only chase Apple's fade from outside).
                 AVPlayerLayerView(
                     player: player,
-                    videoGravity: progressStore.aspectMode.videoGravity
+                    videoGravity: progressStore.aspectMode.videoGravity,
+                    pipStore: progressStore
                 )
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
