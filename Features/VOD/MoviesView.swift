@@ -155,15 +155,6 @@ struct MoviesView: View {
     @State private var selectedGenre: String? = nil
     /// Library grid's top edge in scroll-view coordinates. The alphabet
     /// rail rides with it, then sticks once it reaches the top inset.
-    /// Grid top edge reaches the rail through a layout preference (not
-    /// @State): a state write per scroll frame re-evaluated this whole
-    /// body, 5k grid rows included (Logan 2026-09-03: still not smooth).
-    private struct GridTopKey: PreferenceKey {
-        nonisolated(unsafe) static var defaultValue: CGFloat? = nil
-        static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
-            if let v = nextValue() { value = v }
-        }
-    }
     #if os(tvOS)
     /// tvOS: the tab bar hides once the library scrolls past the top so
     /// the grid gets the whole screen; it returns near the top.
@@ -889,11 +880,6 @@ struct MoviesView: View {
                                 .padding(.leading, railWidth)
                             posterGrid(libraryMovies)
                                 .padding(.leading, railWidth)
-                                .background(GeometryReader { g in
-                                    Color.clear.preference(
-                                        key: GridTopKey.self,
-                                        value: g.frame(in: .named("moviesScroll")).minY.rounded())
-                                })
                         }
                     }
 
@@ -904,11 +890,10 @@ struct MoviesView: View {
                 // Alphabet rail: pinned to the leading edge, jumps the
                 // library grid to the first title for a letter.
                 .coordinateSpace(name: "moviesScroll")
-                .overlayPreferenceValue(GridTopKey.self) { gridTopY in
-                    // Only this overlay re-evaluates as the grid moves.
-                    // nil until the first measurement so the rail cannot
-                    // flash at the top for a frame on tab switch.
-                    if searchText.isEmpty, let gridTopY {
+                // Parked (Logan 2026-09-03): a fixed spot on screen, never
+                // riding with the grid.
+                .overlay(alignment: .topLeading) {
+                    if searchText.isEmpty {
                         AlphabetRail(available: railLetters) { letter in
                             if let id = firstGridID(for: letter) {
                                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -917,8 +902,7 @@ struct MoviesView: View {
                             }
                         }
                         .frame(width: railWidth)
-                        .padding(.top, max(railStickyTop, gridTopY + railGridOffset))
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                        .padding(.top, railStickyTop)
                     }
                 }
                 #if os(tvOS)
@@ -971,22 +955,13 @@ struct MoviesView: View {
         }
     }
 
-    /// Where the rail parks once the grid has scrolled under it.
+    /// Where the rail is parked: level with the first poster row once the
+    /// library has scrolled to the top (tab bar hidden), and left there.
     private var railStickyTop: CGFloat {
         #if os(tvOS)
-        return 40
+        return 330
         #else
-        return 8
-        #endif
-    }
-
-    /// Grid padding (16) plus the card style's own inset so the first
-    /// letter lines up with the first poster's top edge.
-    private var railGridOffset: CGFloat {
-        #if os(tvOS)
-        return 24
-        #else
-        return 16
+        return 120
         #endif
     }
 
