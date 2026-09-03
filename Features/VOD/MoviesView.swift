@@ -103,6 +103,7 @@ struct MoviesView: View {
     #if os(tvOS)
     @State private var showSearchField = false
     @State private var showSortMenu = false
+    @State private var showFilterMenu = false
     #endif
     @State private var resumePlayingURL: IdentifiableURL?
     @State private var resumePlayingTitle = ""
@@ -951,12 +952,31 @@ struct MoviesView: View {
             TVNavActionCircle(systemImage: "line.3.horizontal.decrease",
                               label: "Manage Groups",
                               isSelected: !hiddenGroups.isEmpty) {
-                showManageGroups = true
+                showFilterMenu = true
             }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 8)
         .focusSection()
+        // Filter: same native action list as Sort. Each group toggles
+        // between shown (check) and hidden; the list closes on each pick.
+        .confirmationDialog("Show Groups", isPresented: $showFilterMenu, titleVisibility: .visible) {
+            if !hiddenGroups.isEmpty {
+                Button("Show All Groups") {
+                    hiddenGroups.removeAll()
+                    HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
+                }
+            }
+            ForEach(vodStore.movieCategories.map(\.name), id: \.self) { name in
+                let visible = !hiddenGroups.contains(name)
+                Button(visible ? "\(name)  \u{2713}" : name) {
+                    if visible { hiddenGroups.insert(name) } else { hiddenGroups.remove(name) }
+                    HiddenGroupsStore.save(hiddenGroups, forKey: hiddenGroupsKey)
+                    if visible, selectedGenre == name { selectedGenre = nil }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
         // Native tvOS action list, same surface as the multiview tile menus.
         .confirmationDialog("Sort Movies", isPresented: $showSortMenu, titleVisibility: .visible) {
             ForEach(MoviesSortOrder.allCases, id: \.self) { order in
