@@ -732,6 +732,7 @@ struct MoviesView: View {
             } else {
                 ScrollViewReader { proxy in
                 ScrollView {
+                    Color.clear.frame(height: 0).id("movies-top")
                     if !searchText.isEmpty {
                         // Search: results grid only, no hero or shelves.
                         posterGrid(filteredMovies)
@@ -800,6 +801,16 @@ struct MoviesView: View {
                     }
                 }
                 #if os(tvOS)
+                // Menu while the tab bar is hidden: back to the top and
+                // bring the bar back, instead of the TabView's default
+                // handling (which landed on the default tab). With the bar
+                // showing, Menu is left alone so it focuses the bar as usual.
+                .onExitCommand(perform: tvTabBarHidden ? {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        proxy.scrollTo("movies-top", anchor: .top)
+                        tvTabBarHidden = false
+                    }
+                } : nil)
                 .onScrollGeometryChange(for: CGFloat.self) { geo in
                     geo.contentOffset.y
                 } action: { _, y in
@@ -1020,7 +1031,12 @@ struct MoviesView: View {
     @ViewBuilder
     private func genrePill(_ label: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
         #if os(tvOS)
-        TVCategoryPill(label: label, isSelected: isSelected, action: action)
+        // Same capsule + focus treatment as the guide's group pills (the
+        // shared TVCategoryPill draws the squared ring on focus).
+        Button(action: action) {
+            Text(label).font(.system(size: 22, weight: .medium))
+        }
+        .buttonStyle(TVGroupPillButtonStyle(isSelected: isSelected))
         #else
         DVRSegmentPill(label: label, isSelected: isSelected, action: action)
         #endif
@@ -1303,6 +1319,25 @@ struct MoviesHero: View {
     #endif
 
     var body: some View {
+        #if os(tvOS)
+        // Full bleed on TV: the art fades into the page background on the
+        // left and bottom, so there is no card edge to see (Logan
+        // 2026-09-03: a clipped card showed a faint boundary).
+        ZStack(alignment: .leading) {
+            artwork
+            gradient
+            LinearGradient(
+                stops: [
+                    .init(color: Color.appBackground.opacity(0), location: 0.55),
+                    .init(color: Color.appBackground, location: 1)
+                ],
+                startPoint: .top, endPoint: .bottom)
+            copy
+        }
+        .frame(height: heroHeight)
+        .frame(maxWidth: .infinity)
+        .clipped()
+        #else
         ZStack(alignment: .leading) {
             artwork
             gradient
@@ -1312,6 +1347,7 @@ struct MoviesHero: View {
         .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
         .padding(.horizontal, 16)
+        #endif
     }
 
     @ViewBuilder
@@ -1323,7 +1359,7 @@ struct MoviesHero: View {
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
             } else {
-                Rectangle().fill(Color.cardBackground)
+                Rectangle().fill(Color.appBackground)
             }
         }
     }
