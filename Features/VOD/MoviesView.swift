@@ -27,6 +27,10 @@ struct AuthPosterImage: View {
     /// Painted until the image arrives. The Movies hero passes .clear so
     /// nothing shows through its fade while the backdrop loads.
     var placeholder: Color = .cardBackground
+    /// Longest side, in pixels, the decoded bitmap is downsampled to. Grid
+    /// posters draw at a few hundred points; decoding a 2000px file for
+    /// each on the main thread was a scroll stutter (Logan 2026-09-03).
+    var maxPixel: CGFloat = 1024
 
     @State private var uiImage: UIImage? = nil
 
@@ -69,9 +73,23 @@ struct AuthPosterImage: View {
                 // that says exactly why credentials were withheld.
                 debugLog("🖼️ AuthPosterImage: headers WITHHELD host=\(url.host?.lowercased() ?? "nil") trusted=\(allowedHosts.sorted().joined(separator: ","))")
             }
-            guard let (data, _) = try? await URLSession.shared.data(for: req),
-                  // GH #61: decode accepts SVG artwork in addition to bitmaps.
-                  let img = AerioImageDecoding.decode(data) else { return }
+            guard let (data, _) = try? await URLSession.shared.data(for: req) else { return }
+            let limit = maxPixel
+            // Decode, downsample, and force-decompress OFF the main thread:
+            // UIImage(data:) is lazy and would otherwise decode on first
+            // draw, mid-scroll. GH #61: SVG artwork still decodes here.
+            let prepared: UIImage? = await Task.detached(priority: .userInitiated) {
+                guard let raw = AerioImageDecoding.decode(data) else { return nil }
+                let longest = max(raw.size.width, raw.size.height) * raw.scale
+                if longest > limit {
+                    let f = limit / longest
+                    let target = CGSize(width: raw.size.width * raw.scale * f,
+                                        height: raw.size.height * raw.scale * f)
+                    if let thumb = await raw.byPreparingThumbnail(ofSize: target) { return thumb }
+                }
+                return await raw.byPreparingForDisplay() ?? raw
+            }.value
+            guard let img = prepared else { return }
             AuthImageCache.shared.store(img, for: key)
             guard !Task.isCancelled else { return }
             uiImage = img
@@ -137,9 +155,15 @@ struct MoviesView: View {
     @State private var selectedGenre: String? = nil
     /// Library grid's top edge in scroll-view coordinates. The alphabet
     /// rail rides with it, then sticks once it reaches the top inset.
-    /// nil until the first measurement: the rail stays hidden until then so
-    /// it cannot flash at the top of the tab for a frame on tab switch.
-    @State private var gridTopY: CGFloat? = nil
+    /// Grid top edge reaches the rail through a layout preference (not
+    /// @State): a state write per scroll frame re-evaluated this whole
+    /// body, 5k grid rows included (Logan 2026-09-03: still not smooth).
+    private struct GridTopKey: PreferenceKey {
+        nonisolated(unsafe) static var defaultValue: CGFloat? = nil
+        static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+            if let v = nextValue() { value = v }
+        }
+    }
     #if os(tvOS)
     /// tvOS: the tab bar hides once the library scrolls past the top so
     /// the grid gets the whole screen; it returns near the top.
@@ -865,12 +889,11 @@ struct MoviesView: View {
                                 .padding(.leading, railWidth)
                             posterGrid(libraryMovies)
                                 .padding(.leading, railWidth)
-                                .onGeometryChange(for: CGFloat.self) { proxy in
-                                    proxy.frame(in: .named("moviesScroll")).minY
-                                } action: { y in
-                                    let rounded = y.rounded()
-                                    if gridTopY != rounded { gridTopY = rounded }
-                                }
+                                .background(GeometryReader { g in
+                                    Color.clear.preference(
+                                        key: GridTopKey.self,
+                                        value: g.frame(in: .named("moviesScroll")).minY.rounded())
+                                })
                         }
                     }
 
@@ -881,7 +904,10 @@ struct MoviesView: View {
                 // Alphabet rail: pinned to the leading edge, jumps the
                 // library grid to the first title for a letter.
                 .coordinateSpace(name: "moviesScroll")
-                .overlay(alignment: .topLeading) {
+                .overlayPreferenceValue(GridTopKey.self) { gridTopY in
+                    // Only this overlay re-evaluates as the grid moves.
+                    // nil until the first measurement so the rail cannot
+                    // flash at the top for a frame on tab switch.
                     if searchText.isEmpty, let gridTopY {
                         AlphabetRail(available: railLetters) { letter in
                             if let id = firstGridID(for: letter) {
@@ -892,6 +918,7 @@ struct MoviesView: View {
                         }
                         .frame(width: railWidth)
                         .padding(.top, max(railStickyTop, gridTopY + railGridOffset))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     }
                 }
                 #if os(tvOS)
@@ -1619,7 +1646,7 @@ struct MoviesHero: View {
     private var artwork: some View {
         GeometryReader { geo in
             if let url = artworkURL {
-                AuthPosterImage(url: url, headers: headers, placeholder: .clear)
+                AuthPosterImage(url: url, headers: headers, placeholder: .clear, maxPixel: 1920)
                     .aspectRatio(contentMode: .fill)
                     .frame(width: geo.size.width, height: geo.size.height)
                     .clipped()
