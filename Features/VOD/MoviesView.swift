@@ -1901,7 +1901,7 @@ struct AlphabetRail: View {
             ForEach(Self.letters, id: \.self) { letter in
                 let enabled = available.contains(letter)
                 Button {
-                    onSelect(letter)
+                    if let target = nearestAvailable(to: letter) { onSelect(target) }
                 } label: {
                     Text(letter)
                         .font(.system(size: fontSize, weight: .semibold, design: .rounded))
@@ -1917,7 +1917,10 @@ struct AlphabetRail: View {
                         #endif
                 }
                 .buttonStyle(.plain)
-                .disabled(!enabled)
+                // Every letter stays focusable (Logan 2026-09-03: on a panel
+                // where most titles start with a digit, only # was enabled
+                // and the rail could not take focus). Unavailable letters
+                // are dimmed and resolve to the nearest one with titles.
                 #if os(tvOS)
                 .focused($focused, equals: letter)
                 #endif
@@ -1927,9 +1930,18 @@ struct AlphabetRail: View {
         #if os(tvOS)
         .focusSection()
         .onChange(of: focused) { _, letter in
-            if let letter, available.contains(letter) { onSelect(letter) }
+            if let letter, let target = nearestAvailable(to: letter) { onSelect(target) }
         }
         #endif
+    }
+
+    /// The letter itself when it has titles, else the closest one after
+    /// it, else the closest one before it.
+    private func nearestAvailable(to letter: String) -> String? {
+        if available.contains(letter) { return letter }
+        guard let idx = Self.letters.firstIndex(of: letter) else { return nil }
+        if let after = Self.letters[idx...].first(where: { available.contains($0) }) { return after }
+        return Self.letters[..<idx].last(where: { available.contains($0) })
     }
 
     private func letterColor(_ letter: String, enabled: Bool) -> Color {
