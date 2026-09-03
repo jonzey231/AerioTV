@@ -939,11 +939,19 @@ struct MoviesView: View {
                                 #endif
                             }
                         ) { letter in
-                            if let id = firstGridID(for: letter) {
-                                withAnimation(.easeInOut(duration: 0.25)) {
-                                    proxy.scrollTo(id, anchor: .top)
-                                }
+                            guard let id = firstGridID(for: letter) else { return }
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                proxy.scrollTo(id, anchor: .top)
                             }
+                            #if os(tvOS)
+                            // Once the row is on screen, put focus on that
+                            // title so the click lands the user in the grid.
+                            let itemID = String(id.dropFirst("grid-".count))
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                railHadFocus = false
+                                gridFocus = itemID
+                            }
+                            #endif
                         }
                         .frame(width: railWidth)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -998,9 +1006,9 @@ struct MoviesView: View {
                         railHadFocus = false
                         gridFocus = lastGridFocus ?? libraryMovies.first?.id
                     } else {
-                        let item = libraryMovies.first { $0.id == lastGridFocus }
-                        let firstAvailable = AlphabetRail.letters.first { railLetters.contains($0) } ?? "#"
-                        railFocusRequest = item.map { AlphabetRail.bucket(for: $0.name) } ?? firstAvailable
+                        // Land on # (Logan 2026-09-03); the grid does not
+                        // move until a letter is clicked.
+                        railFocusRequest = "#"
                     }
                 }
                 .onDisappear { TVTabBarScrollState.shared.isHidden = false }
@@ -2020,7 +2028,13 @@ struct AlphabetRail: View {
                         )
                         #endif
                 }
+                // App-owned focus visual (the circle above); the system
+                // platter .plain draws on tvOS is the big white pill.
+                #if os(tvOS)
+                .buttonStyle(TVNoHighlightButtonStyle(drawsFocusRing: false))
+                #else
                 .buttonStyle(.plain)
+                #endif
                 // Every letter stays focusable (Logan 2026-09-03: on a panel
                 // where most titles start with a digit, only # was enabled
                 // and the rail could not take focus). Unavailable letters
@@ -2035,7 +2049,8 @@ struct AlphabetRail: View {
         .focusSection()
         .onChange(of: focused) { _, letter in
             onFocusChange?(letter != nil)
-            if let letter, let target = nearestAvailable(to: letter) { onSelect(target) }
+            // Focus alone never moves the grid (Logan 2026-09-03); only a
+            // click does.
         }
         .onChange(of: focusRequest.wrappedValue) { _, letter in
             guard let letter else { return }
