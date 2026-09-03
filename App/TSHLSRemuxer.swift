@@ -267,7 +267,13 @@ final class TSHLSRemuxer: NSObject, @unchecked Sendable {
 
     private func startIngest() {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 15
+        // First-bytes patience (Freyguy, 2026-09-03): a Dispatcharr behind a
+        // slow provider can take 20-30 s to deliver the first TS bytes; at
+        // 15 s the ingest timed out three times in a row and the user saw
+        // "Preparing" then an error while Dispatcharr Stats showed the
+        // stream. Honour the Network Timeout setting with a 30 s floor.
+        let userTimeout = UserDefaults.standard.double(forKey: "networkTimeout")
+        config.timeoutIntervalForRequest = max(30, userTimeout > 0 ? userTimeout : 15)
         // A live stream never "completes"; rely on data flow.
         config.timeoutIntervalForResource = .infinity
         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
