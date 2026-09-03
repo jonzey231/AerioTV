@@ -4485,7 +4485,12 @@ struct MainTabView: View {
                     // circle adds its 60pt + 16pt spacing so the row grows
                     // LEFT instead of overlapping the tab bar (screenshot,
                     // 2026-08-27).
-                    .padding(.leading, max(16, barLeading - 152 - (retention.entries.isEmpty ? 0 : 76)))
+                    // 76pt per circle (60 + 16 spacing) so the row hugs the
+                    // bar however many circles are showing; Search only
+                    // shows on Live TV.
+                    .padding(.leading, max(16, barLeading - 76
+                        - (selectedTab == .liveTV ? 76 : 0)
+                        - (retention.entries.isEmpty ? 0 : 76)))
                     // Mirror-measured against the system tab bar: at .top 2 the
                     // circle centers sat ~12pt below the capsule's center line
                     // (Logan: "not centered vertically with the nav bar").
